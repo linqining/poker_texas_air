@@ -1,0 +1,13 @@
+[package]
+name = "poker-protocol-bg"
+version = "0.1.0"
+edition = "2021"
+description = "Curve-generic Bayer-Groth shuffle argument"
+
+[features]
+borsh = ["dep:borsh", "poker-protocol-core/borsh"]
+
+[dependencies]
+poker-protocol-core = { path = "../poker-protocol-core" }
+rand_core = "0.6.4"
+borsh = { version = "1.5", optional = true }

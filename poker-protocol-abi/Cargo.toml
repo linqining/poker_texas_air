@@ -1,0 +1,7 @@
+[package]
+name = "poker-protocol-abi"
+version = "0.1.0"
+edition = "2021"
+description = "Stable byte ABI for poker proof precompiles and circuit adapters"
+
+[dependencies]

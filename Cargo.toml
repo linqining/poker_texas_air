@@ -1,0 +1,99 @@
+[package]
+name = "poker_texas_air"
+version = "0.1.0"
+edition = "2024"
+description = "Texas Poker method AIR and custom-circuit proving primitives"
+license = "MIT OR Apache-2.0"
+
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "poker_l1",
+    "vm-common",
+    "poker_protocol",
+    "poker-protocol-core",
+    "poker-protocol-proofs",
+    "poker-protocol-abi",
+    "poker-protocol-bg",
+]
+
+[workspace.dependencies]
+poker_protocol = { path = "poker_protocol", features = ["borsh"] }
+vm-common = { path = "vm-common" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bcs = "0.1.6"
+borsh = { version = "1.7", features = ["derive"] }
+sha2 = "0.10.8"
+sha3 = "0.10.8"
+blake2 = "0.10.6"
+hex = "0.4.3"
+thiserror = "1.0.61"
+rand = "0.8.5"
+secp256k1 = { version = "0.29", features = ["recovery", "rand", "global-context"] }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+subtle = "2.5"
+rocksdb = { version = "0.22", default-features = false }
+solana_rbpf = "0.8"
+blstrs = "0.7"
+ff = "0.13"
+group = "0.13"
+pairing = "0.23"
+chacha20poly1305 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tracing = "0.1"
+rayon = "1"
+proptest = "1"
+stwo = { version = "2.3", features = ["parallel", "prover"] }
+stwo-air-utils = "2.3"
+stwo-air-utils-derive = "2.3"
+stwo-constraint-framework = { version = "2.3", features = ["prover"] }
+starknet-ff = { version = "0.3", features = ["serde"] }
+starknet-crypto = { version = "0.6", default-features = false, features = ["alloc"] }
+bincode = "1"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# 保留 Aggregator PoC 配置；生产 prove/verify 默认拒绝 descriptor-only 聚合
+aggregator = []
+# 测试辅助：暴露不可信负向测试工具；lib.rs 禁止其进入 release 构建
+test-helpers = []
+
+[dependencies]
+# ===== 工作区内复用 =====
+poker_l1 = { path = "poker_l1" }
+poker_protocol = { workspace = true }
+vm-common = { path = "vm-common" }
+# ===== Stwo 证明后端 =====
+stwo = { workspace = true }
+stwo-air-utils = { workspace = true }
+stwo-air-utils-derive = { workspace = true }
+stwo-constraint-framework = { workspace = true }
+# Poseidon252 哈希（state_root 用）— 必须与 Stwo 同版本（0.6.x），
+# 否则 starknet_crypto::poseidon_hash_many 的 Felt 类型与
+# starknet_ff::FieldElement 不兼容。
+starknet-ff = { workspace = true }
+starknet-crypto = { workspace = true }
+# ===== 通用依赖 =====
+borsh = { workspace = true }
+bincode = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+blake2 = { workspace = true }
+tracing = { workspace = true }
+rayon = { workspace = true }
+# BLS12-381（密码学方法 AIR 用）
+blstrs = { workspace = true }
+ff = { workspace = true }
+group = { workspace = true }
+pairing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rand = { workspace = true }
+secp256k1 = { workspace = true }
+poker_texas_air = { path = ".", features = ["test-helpers"] }

@@ -1,0 +1,18 @@
+[package]
+name = "vm-common"
+version = "0.1.0"
+edition = "2024"
+description = "Shared cross-cutting concerns for poker_l1 vm and poker_zkvm (gas/syscall_id/precompile/crypto/gas_strategy)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# 严格限制：vm-common 不依赖 solana_rbpf 也不依赖 arkworks
+# 仅依赖基础工具库，避免成为 god-crate
+thiserror = { workspace = true }
+# borsh 用于 prove_task 的 MethodInput 序列化（poker_l1 与 poker_texas_air 共享）
+borsh = { workspace = true }
+
+[features]
+default = []
