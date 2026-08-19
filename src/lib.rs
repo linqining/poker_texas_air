@@ -73,6 +73,39 @@ pub mod aggregator_air;
 pub mod aggregator_prover;
 pub mod aggregator_verifier;
 pub mod authorization_binding;
+/// Lookup-backed Blake2b compression scheduler and fixed-value SMT path proof.
+pub mod blake2b_lookup_compression;
+/// Lookup-backed Blake2b G component for the host-zero compression path.
+pub mod blake2b_lookup_g;
+/// Stwo 2.3 LogUp byte-XOR foundation for the lookup-optimized Blake2b port.
+pub mod blake2b_lookup_xor;
+/// Sequential in-AIR Blake2b-256 compression for the fixed SMT ABI.
+pub mod blake2b_smt_air;
+/// Fixed-width Blake2b SMT compression witness ABI for the host-zero route.
+pub mod blake2b_smt_witness;
+/// Lookup-backed authentication of canonical state-image byte preimages.
+pub mod canonical_state_hash;
+/// Public-proof composition that binds canonical Texas transitions to L1
+/// fixed-width Blake2b state-object openings.
+pub mod canonical_state_opening;
+#[cfg(test)]
+mod ristretto_degree_util;
+/// Composed host-zero extended-Edwards point-addition proofs.
+pub mod ristretto_edwards_add_air;
+/// Canonical Ristretto255 modular-addition AIR.
+pub mod ristretto_fp_add_air;
+/// Canonical Ristretto255 field-element limb AIR.
+pub mod ristretto_fp_air;
+/// Composed Ristretto255 multiplicative-inverse proofs.
+pub mod ristretto_fp_inv_air;
+/// Canonical Ristretto255 modular-multiplication AIR.
+pub mod ristretto_fp_mul_air;
+/// Composed Ristretto255 `sqrt_ratio_i` proofs.
+pub mod ristretto_fp_sqrt_ratio_air;
+/// Composed Ristretto255 modular-subtraction proofs.
+pub mod ristretto_fp_sub_air;
+/// Composed host-zero Ristretto255 point-decode proofs.
+pub mod ristretto_point_decode_air;
 
 /// Canonical tagged-seat fixture operations, available only to tests and debug test helpers.
 #[cfg(any(test, feature = "test-helpers"))]

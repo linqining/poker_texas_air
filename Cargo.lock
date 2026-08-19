@@ -1958,6 +1958,8 @@ dependencies = [
  "borsh",
  "ff 0.13.1",
  "group 0.13.0",
+ "num-bigint",
+ "num-traits",
  "pairing",
  "poker_l1",
  "poker_protocol",

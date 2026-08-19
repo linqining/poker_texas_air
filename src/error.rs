@@ -54,6 +54,12 @@ pub enum TexasAirError {
     #[error("未实现: {0}")]
     NotImplemented(String),
 
+    /// A verifier composition exists, but accepting it in production would
+    /// still rely on an unproven host relation.  Keep the admission boundary
+    /// fail-closed until every listed relation is constrained in AIR.
+    #[error("host-zero admission unavailable: {0}")]
+    HostZeroAdmissionIncomplete(String),
+
     /// 共识来源锚定失败（P05-H-source）：cert 校验、SMT 包含证明或单桌 snapshot
     /// 绑定未通过。
     #[error("consensus anchor: {0}")]

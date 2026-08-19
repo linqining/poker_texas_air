@@ -86,6 +86,8 @@ thiserror = { workspace = true }
 blake2 = { workspace = true }
 tracing = { workspace = true }
 rayon = { workspace = true }
+num-bigint = "0.4.8"
+num-traits = "0.2"
 # BLS12-381（密码学方法 AIR 用）
 blstrs = { workspace = true }
 ff = { workspace = true }

@@ -9,9 +9,20 @@ use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
 
-pub const CANONICAL_ABI_VERSION: u16 = 1;
+pub const CANONICAL_ABI_VERSION: u16 = 3;
 pub const MAX_CANONICAL_SEATS: usize = 9;
+/// The flop under run-it-twice is the largest board reveal batch: three cards
+/// on each of two runouts.  Keeping this array fixed is essential for the
+/// tagged AIR's one-proof-per-table trace layout.
+pub const MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS: usize = 6;
 pub const NO_CANONICAL_SEAT: u8 = 0x0f;
+/// Default betting timeout from `poker_l1::texas_poker::TimeoutConfig`.
+///
+/// The current fixed canonical state image does not yet expose the complete
+/// timeout configuration.  Until that ABI is extended, the direct
+/// `AdvanceDeadline` relation is intentionally limited to this deployment
+/// default rather than accepting a prover-supplied timeout.
+pub const CANONICAL_BETTING_TIMEOUT_MS: u32 = 30_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
@@ -95,6 +106,12 @@ impl CanonicalSeat {
                     return Err("departed seat has an invalid retained custody image".into());
                 }
             }
+            CanonicalSeatStatus::Active if self.stack == 0 => {
+                return Err("active seat has zero stack; it must be all-in".into());
+            }
+            CanonicalSeatStatus::AllIn if self.stack != 0 => {
+                return Err("all-in seat retains a non-zero stack".into());
+            }
             _ => {
                 if self.identity_commitment == [0; 32] || self.key_commitment == [0; 32] {
                     return Err("occupied seat is missing identity/key commitment".into());
@@ -120,6 +137,9 @@ pub struct CanonicalStateImage {
     pub deadline_ms: u64,
     pub current_bet: u64,
     pub min_raise: u64,
+    /// Exact TableVault custody balance.  It is not derivable from a selected
+    /// seat projection, so it must be part of the canonical state opening.
+    pub chip_pool: u64,
     pub pot: u64,
     pub button: u8,
     pub max_players: u8,
@@ -217,17 +237,33 @@ impl CanonicalStateImage {
             {
                 return Err("current turn does not point at an active seat".into());
             }
-            if matches!(seat.status, CanonicalSeatStatus::Folded | CanonicalSeatStatus::AllIn)
-                && !seat.acted
+            if matches!(
+                seat.status,
+                CanonicalSeatStatus::Folded | CanonicalSeatStatus::AllIn
+            ) && !seat.acted
             {
                 return Err("folded/all-in seat must be marked acted".into());
             }
+        }
+        // This is the same custody identity enforced by
+        // `poker_l1::...::reconcile_table_vault`: `total_bet` is an accounting
+        // view, while value lives exactly once in stack, pending addon, current
+        // round bet, or collected pot.  Keeping it in the ABI is necessary for
+        // a no-replay funding proof.
+        let accounted = self.seats.iter().try_fold(self.pot, |total, seat| {
+            total
+                .checked_add(seat.stack)
+                .and_then(|value| value.checked_add(seat.pending_addon))
+                .and_then(|value| value.checked_add(seat.bet))
+        });
+        if accounted != Some(self.chip_pool) {
+            return Err("TableVault chip_pool does not match canonical custody buckets".into());
         }
         Ok(())
     }
 
     pub fn commitment(&self) -> [u8; 32] {
-        digest(b"zchain.texas.canonical-state.v1", self)
+        digest(b"zchain.texas.canonical-state.v2", self)
     }
 }
 
@@ -255,13 +291,20 @@ pub enum CanonicalTransitionKind {
     Rebuy = 16,
     SetLeaveAfterHand = 17,
     FoldWithProof = 18,
+    /// Internal VM micro-step emitted immediately after the final action of a
+    /// betting round.  It collects every per-seat wager into the pot before
+    /// entering the next reveal/showdown phase.  It has no public dispatcher
+    /// selector: an authenticated tagged batch may contain it only as the
+    /// canonical continuation of a completed betting state.
+    AdvanceRound = 19,
 }
 
 impl CanonicalTransitionKind {
     pub const fn requires_seat(self) -> bool {
         matches!(
             self,
-            Self::JoinTable
+            Self::AdvanceDeadline
+                | Self::JoinTable
                 | Self::LeaveTable
                 | Self::ForceFold
                 | Self::KickPlayer
@@ -281,7 +324,7 @@ impl CanonicalTransitionKind {
     }
 
     pub const fn permissionless(self) -> bool {
-        matches!(self, Self::AdvanceDeadline)
+        matches!(self, Self::AdvanceDeadline | Self::AdvanceRound)
     }
 }
 
@@ -294,6 +337,82 @@ pub struct CanonicalActionPayload {
     pub proof_commitment: [u8; 32],
 }
 
+/// One fixed-width pending board-reveal assignment.  The encrypted-card index
+/// is public protocol routing data; the ciphertext and individual reveal
+/// tokens remain committed and are verified by the subsequent crypto AIR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct CanonicalBoardRevealAssignment {
+    /// Whether this entry is occupied.  Unused entries must be all zero.
+    pub present: bool,
+    /// Position in the current encrypted deck, always below 52.
+    pub encrypted_card_index: u8,
+    /// First board (`0`) or the run-it-twice second board (`1`).
+    pub runout_index: u8,
+    /// Destination index in the complete target board, always below 5.
+    pub board_position: u8,
+    /// Players that must submit a token for this card.
+    pub pending_mask: u16,
+    /// Tokens already submitted at transition construction.  A newly opened
+    /// board reveal must have no submissions.
+    pub submitted_mask: u16,
+}
+
+impl CanonicalBoardRevealAssignment {
+    /// Canonical padding entry.
+    pub const EMPTY: Self = Self {
+        present: false,
+        encrypted_card_index: 0,
+        runout_index: 0,
+        board_position: 0,
+        pending_mask: 0,
+        submitted_mask: 0,
+    };
+}
+
+/// Fixed-width public opening for the board-reveal schedule created by the
+/// VM's `start_community_reveal_phase`.  It is present only on the internal
+/// [`CanonicalTransitionKind::AdvanceRound`] micro-step.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct CanonicalRoundAdvanceOpening {
+    /// Deck cursor before assignments are allocated.
+    pub pre_cards_dealt: u8,
+    /// Deck cursor after all assignments are allocated.
+    pub post_cards_dealt: u8,
+    /// Materialized first-board length before/after opening the reveal phase.
+    /// It does not change until reveal tokens resolve.
+    pub pre_board_len: u8,
+    pub post_board_len: u8,
+    /// Materialized second-board length for run-it-twice.
+    pub pre_second_board_len: u8,
+    pub post_second_board_len: u8,
+    /// Whether the VM run-it-twice schedule is active.
+    pub run_it_twice: bool,
+    /// Fixed `RevealPurpose::Board` tag (`2`) while active, otherwise zero.
+    pub reveal_purpose: u8,
+    /// Number of occupied entries in `assignments`.
+    pub assignment_count: u8,
+    /// Canonically ordered assignments; padding is [`CanonicalBoardRevealAssignment::EMPTY`].
+    pub assignments: [CanonicalBoardRevealAssignment; MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS],
+}
+
+impl Default for CanonicalRoundAdvanceOpening {
+    fn default() -> Self {
+        Self {
+            pre_cards_dealt: 0,
+            post_cards_dealt: 0,
+            pre_board_len: 0,
+            post_board_len: 0,
+            pre_second_board_len: 0,
+            post_second_board_len: 0,
+            run_it_twice: false,
+            reveal_purpose: 0,
+            assignment_count: 0,
+            assignments: [CanonicalBoardRevealAssignment::EMPTY;
+                MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CanonicalTransitionWitness {
     pub pre: CanonicalStateImage,
@@ -301,6 +420,9 @@ pub struct CanonicalTransitionWitness {
     pub kind: CanonicalTransitionKind,
     pub actor: [u8; 32],
     pub action: CanonicalActionPayload,
+    /// Fixed-width schedule opening for a completed betting round.  It is
+    /// canonical-zero for every other transition kind.
+    pub round_advance: CanonicalRoundAdvanceOpening,
     pub transition_commitment: [u8; 32],
     pub nullifier: [u8; 32],
     pub deadline_height: u64,
@@ -363,7 +485,7 @@ impl CanonicalTransitionWitness {
     }
 
     pub fn commitment(&self) -> [u8; 32] {
-        digest(b"zchain.texas.canonical-transition.v1", self)
+        digest(b"zchain.texas.canonical-transition.v2", self)
     }
 
     /// Commitment over the complete transition payload excluding the two derived
@@ -373,7 +495,7 @@ impl CanonicalTransitionWitness {
         let mut payload = self.clone();
         payload.transition_commitment = [0; 32];
         payload.nullifier = [0; 32];
-        digest(b"zchain.texas.canonical-transition-content.v1", &payload)
+        digest(b"zchain.texas.canonical-transition-content.v2", &payload)
     }
 }
 
@@ -401,7 +523,9 @@ pub fn validate_batch(witnesses: &[CanonicalTransitionWitness]) -> Result<(), St
             return Err("canonical transition batch changes table scope".into());
         }
         if witness.pre.hand_id != hand_id {
-            return Err("canonical transition batch changes hand without a contiguous start_hand".into());
+            return Err(
+                "canonical transition batch changes hand without a contiguous start_hand".into(),
+            );
         }
         if witness.kind == CanonicalTransitionKind::StartHand {
             hand_id = witness.post.hand_id;
@@ -412,7 +536,7 @@ pub fn validate_batch(witnesses: &[CanonicalTransitionWitness]) -> Result<(), St
 
 pub fn transition_nullifier(witness: &CanonicalTransitionWitness) -> [u8; 32] {
     let mut bytes = Vec::with_capacity(32 * 3 + 8);
-    bytes.extend_from_slice(b"zchain.texas.nullifier.v1");
+    bytes.extend_from_slice(b"zchain.texas.nullifier.v2");
     bytes.extend_from_slice(&witness.transition_commitment);
     bytes.extend_from_slice(&witness.actor);
     bytes.extend_from_slice(&witness.pre.state_root);
@@ -452,22 +576,181 @@ fn same_except(
     Ok(())
 }
 
+/// Enforce a closed set of mutable fields for a transition family.
+///
+/// Unlike the historical `same_except` predicate, this helper copies only fields explicitly
+/// named by the family into the comparison image.  A true predicate is not allowed to bless an
+/// unrelated state mutation.
+fn only_allowed_changes(
+    pre: &CanonicalStateImage,
+    post: &CanonicalStateImage,
+    changed_seat: Option<usize>,
+    allow: impl Fn(&mut CanonicalStateImage, &CanonicalStateImage),
+) -> Result<(), String> {
+    let mut expected = pre.clone();
+    expected.state_root = [0; 32];
+    expected.lifecycle_root = [0; 32];
+    expected.overlay_root = [0; 32];
+    let mut actual = post.clone();
+    actual.state_root = [0; 32];
+    actual.lifecycle_root = [0; 32];
+    actual.overlay_root = [0; 32];
+    if let Some(index) = changed_seat {
+        expected.seats[index] = CanonicalSeat::EMPTY;
+    }
+    allow(&mut expected, post);
+    if let Some(index) = changed_seat {
+        expected.seats[index] = post.seats[index];
+    }
+    if expected != actual {
+        return Err("transition changed a field outside its canonical relation".into());
+    }
+    Ok(())
+}
+
+fn active_reveal_mask(seats: &[CanonicalSeat; MAX_CANONICAL_SEATS]) -> u16 {
+    seats.iter().enumerate().fold(0u16, |mask, (index, seat)| {
+        if matches!(
+            seat.status,
+            CanonicalSeatStatus::Active | CanonicalSeatStatus::Folded | CanonicalSeatStatus::AllIn
+        ) {
+            mask | (1u16 << index)
+        } else {
+            mask
+        }
+    })
+}
+
+fn validate_board_reveal_opening(
+    pre: &CanonicalStateImage,
+    _post: &CanonicalStateImage,
+    opening: &CanonicalRoundAdvanceOpening,
+) -> Result<(), String> {
+    // Canonical street values intentionally use the compact direct-ABI domain
+    // 1=preflop, 2=flop, 3=turn, 4=river.  River->showdown needs the
+    // owner-readable-hole-card opening and is fail-closed until that distinct
+    // fixed-width ledger component is in the AIR.
+    let (cards_per_runout, expected_board_len) = match pre.street {
+        1 => (3u8, 0u8),
+        2 => (1u8, 3u8),
+        3 => (1u8, 4u8),
+        _ => {
+            return Err(
+                "advance_round showdown requires the owner-hole-card opening, which is not enabled"
+                    .into(),
+            );
+        }
+    };
+    if opening.pre_cards_dealt > 52
+        || opening.post_cards_dealt > 52
+        || opening.pre_board_len > 5
+        || opening.post_board_len > 5
+        || opening.pre_second_board_len > 5
+        || opening.post_second_board_len > 5
+        || opening.pre_board_len != expected_board_len
+        || opening.post_board_len != opening.pre_board_len
+        || opening.post_second_board_len != opening.pre_second_board_len
+        || (opening.run_it_twice && opening.pre_second_board_len != opening.pre_board_len)
+        || opening.reveal_purpose != 2
+    {
+        return Err("advance_round board opening has invalid deck/board metadata".into());
+    }
+    let runout_count = if opening.run_it_twice { 2 } else { 1 };
+    let expected_assignments = cards_per_runout
+        .checked_mul(runout_count)
+        .ok_or("advance_round assignment count overflow")?;
+    if opening.assignment_count != expected_assignments
+        || usize::from(opening.assignment_count) > MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS
+        || opening.post_cards_dealt
+            != opening
+                .pre_cards_dealt
+                .checked_add(expected_assignments)
+                .ok_or("advance_round deck cursor overflow")?
+    {
+        return Err("advance_round board opening has an invalid assignment count".into());
+    }
+    let pending_mask = active_reveal_mask(&pre.seats);
+    if pending_mask == 0 {
+        return Err("advance_round board opening has no reveal participants".into());
+    }
+    for index in 0..MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS {
+        let assignment = opening.assignments[index];
+        if index >= usize::from(expected_assignments) {
+            if assignment != CanonicalBoardRevealAssignment::EMPTY {
+                return Err("advance_round board opening has non-zero assignment padding".into());
+            }
+            continue;
+        }
+        let runout_index = (index / usize::from(cards_per_runout)) as u8;
+        let offset = (index % usize::from(cards_per_runout)) as u8;
+        let board_len = if runout_index == 0 {
+            opening.pre_board_len
+        } else {
+            opening.pre_second_board_len
+        };
+        if !assignment.present
+            || assignment.encrypted_card_index
+                != opening
+                    .pre_cards_dealt
+                    .checked_add(index as u8)
+                    .ok_or("advance_round encrypted card index overflow")?
+            || assignment.runout_index != runout_index
+            || assignment.board_position
+                != board_len
+                    .checked_add(offset)
+                    .ok_or("advance_round board position overflow")?
+            || assignment.board_position >= 5
+            || assignment.pending_mask != pending_mask
+            || assignment.submitted_mask != 0
+        {
+            return Err("advance_round board assignment is not the canonical VM schedule".into());
+        }
+    }
+    Ok(())
+}
+
 fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), String> {
     let pre = &w.pre;
     let post = &w.post;
+    // None of the table actions is a rules, governance, or settlement
+    // configuration update.  Keep these domains immutable even while the
+    // broader canonical relation is still host-validated.
+    if pre.rules_commitment != post.rules_commitment
+        || pre.governance_commitment != post.governance_commitment
+        || pre.settlement_commitment != post.settlement_commitment
+    {
+        return Err("transition changed an immutable protocol commitment".into());
+    }
     let seat = usize::from(w.action.seat);
     let seat_index = (seat < MAX_CANONICAL_SEATS).then_some(seat);
-    let before = seat_index.map(|index| pre.seats[index]).unwrap_or(CanonicalSeat::EMPTY);
-    let after = seat_index.map(|index| post.seats[index]).unwrap_or(CanonicalSeat::EMPTY);
+    let before = seat_index
+        .map(|index| pre.seats[index])
+        .unwrap_or(CanonicalSeat::EMPTY);
+    let after = seat_index
+        .map(|index| post.seats[index])
+        .unwrap_or(CanonicalSeat::EMPTY);
     let bit = seat_index.map_or(0, |index| 1u16 << index);
+    if w.kind != CanonicalTransitionKind::AdvanceRound
+        && w.round_advance != CanonicalRoundAdvanceOpening::default()
+    {
+        return Err("only advance_round may carry a board-reveal opening".into());
+    }
     match w.kind {
         CanonicalTransitionKind::CreateTable => {
             if pre.phase != CanonicalPhase::Waiting || post.phase != CanonicalPhase::Waiting {
                 return Err("create_table must start and end in waiting phase".into());
             }
-            if pre.table_id != post.table_id || post.seats.iter().any(|s| s.status != CanonicalSeatStatus::Empty) {
+            if pre.table_id != post.table_id
+                || post
+                    .seats
+                    .iter()
+                    .any(|s| s.status != CanonicalSeatStatus::Empty)
+            {
                 return Err("create_table has an invalid empty-table boundary".into());
             }
+            only_allowed_changes(pre, post, None, |expected, actual| {
+                expected.call_seq = actual.call_seq;
+            })?;
             same_except(pre, post, None, |a, b| {
                 a.call_seq.checked_add(1) == Some(b.call_seq)
             })?;
@@ -476,20 +759,76 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             if pre.phase != CanonicalPhase::Waiting || before.status != CanonicalSeatStatus::Empty {
                 return Err("join_table requires an empty seat in waiting phase".into());
             }
-            if after.status != CanonicalSeatStatus::Waiting || w.action.amount == 0 {
-                return Err("join_table must create a funded waiting seat".into());
+            if after.status != CanonicalSeatStatus::Active || w.action.amount == 0 {
+                return Err("join_table must create a funded participating seat".into());
             }
+            if pre.seats[..seat]
+                .iter()
+                .any(|seat| seat.status == CanonicalSeatStatus::Empty)
+            {
+                return Err("join_table must occupy the first empty seat".into());
+            }
+            if after.stack != w.action.amount
+                || after.bet != 0
+                || after.total_bet != 0
+                || after.pending_addon != 0
+                || after.acted
+                || post.leave_after_hand_mask & bit != 0
+                || post.chip_pool
+                    != pre
+                        .chip_pool
+                        .checked_add(w.action.amount)
+                        .ok_or("join chip_pool overflow")?
+            {
+                return Err("join_table custody transition is invalid".into());
+            }
+            only_allowed_changes(pre, post, seat_index, |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.acted_mask = actual.acted_mask;
+                expected.leave_after_hand_mask = actual.leave_after_hand_mask;
+                expected.custody_commitment = actual.custody_commitment;
+                expected.chip_pool = actual.chip_pool;
+            })?;
             same_except(pre, post, seat_index, |a, b| {
                 a.acted_mask == b.acted_mask && a.leave_after_hand_mask == b.leave_after_hand_mask
             })?;
         }
         CanonicalTransitionKind::LeaveTable => {
             if pre.phase != CanonicalPhase::Waiting
-                || !matches!(before.status, CanonicalSeatStatus::Waiting | CanonicalSeatStatus::Out)
-                || !matches!(after.status, CanonicalSeatStatus::Empty | CanonicalSeatStatus::Out)
+                || !matches!(
+                    before.status,
+                    CanonicalSeatStatus::Waiting | CanonicalSeatStatus::Out
+                )
+                || !matches!(
+                    after.status,
+                    CanonicalSeatStatus::Empty | CanonicalSeatStatus::Out
+                )
             {
                 return Err("leave_table is only valid for a waiting/out seat".into());
             }
+            let refund = before
+                .stack
+                .checked_add(before.pending_addon)
+                .ok_or("leave refund overflow")?;
+            if before.status != CanonicalSeatStatus::Waiting
+                || after.status != CanonicalSeatStatus::Empty
+                || w.action.amount != refund
+                || post.chip_pool
+                    != pre
+                        .chip_pool
+                        .checked_sub(refund)
+                        .ok_or("leave chip_pool underflow")?
+                || after != CanonicalSeat::EMPTY
+            {
+                return Err("leave_table custody/lifecycle transition is invalid".into());
+            }
+            only_allowed_changes(pre, post, seat_index, |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.acted_mask = actual.acted_mask;
+                expected.leave_after_hand_mask = actual.leave_after_hand_mask;
+                expected.custody_commitment = actual.custody_commitment;
+                expected.chip_pool = actual.chip_pool;
+            })?;
             same_except(pre, post, seat_index, |_, _| true)?;
         }
         CanonicalTransitionKind::StartHand => {
@@ -499,19 +838,150 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             if post.deadline_ms == 0 || post.current_turn != NO_CANONICAL_SEAT {
                 return Err("start_hand must arm the shuffle deadline".into());
             }
-            same_except(pre, post, None, |a, b| {
-                a.hand_id + 1 == b.hand_id && b.call_seq == 0
+            let active_count = pre
+                .seats
+                .iter()
+                .filter(|seat| {
+                    matches!(
+                        seat.status,
+                        CanonicalSeatStatus::Active
+                            | CanonicalSeatStatus::Folded
+                            | CanonicalSeatStatus::AllIn
+                    )
+                })
+                .count();
+            if active_count < 2 {
+                return Err("start_hand requires at least two participating seats".into());
+            }
+            let mut button = None;
+            for offset in 1..=usize::from(pre.max_players) {
+                let index = (usize::from(pre.button) + offset) % usize::from(pre.max_players);
+                if !matches!(
+                    pre.seats[index].status,
+                    CanonicalSeatStatus::Empty | CanonicalSeatStatus::Out
+                ) {
+                    button = Some(index as u8);
+                    break;
+                }
+            }
+            if post.button != button.unwrap_or(pre.button)
+                || post.phase_subtag != 1
+                || post.street != 0
+                || post.acted_mask != 0
+            {
+                return Err("start_hand header/button initialization is invalid".into());
+            }
+            only_allowed_changes(pre, post, None, |expected, actual| {
+                expected.hand_id = actual.hand_id;
+                expected.button = actual.button;
+                expected.phase = actual.phase;
+                expected.phase_subtag = actual.phase_subtag;
+                expected.deadline_ms = actual.deadline_ms;
+                expected.call_seq = actual.call_seq;
             })?;
         }
         CanonicalTransitionKind::AdvanceDeadline => {
-            if pre.phase == CanonicalPhase::Waiting || w.deadline_height == 0 {
-                return Err("advance_deadline requires an active expiring phase".into());
+            if pre.phase != CanonicalPhase::Betting
+                || pre.current_turn == NO_CANONICAL_SEAT
+                || w.deadline_height == 0
+            {
+                return Err(
+                    "advance_deadline currently supports betting timeout extension only".into(),
+                );
             }
             if w.deadline_height < pre.deadline_ms {
                 return Err("advance_deadline is before the committed deadline".into());
             }
-            same_except(pre, post, None, |a, b| {
-                a.deadline_ms <= b.deadline_ms || b.phase != a.phase
+            let seat = usize::from(w.action.seat);
+            if w.action.seat != pre.current_turn
+                || seat >= MAX_CANONICAL_SEATS
+                || pre.seats[seat].status != CanonicalSeatStatus::Active
+                || w.action.auxiliary != 1
+                || w.action.flag
+            {
+                return Err("advance_deadline has an invalid betting extension selector".into());
+            }
+            let consume = u64::from(pre.seats[seat].time_bank_ms)
+                .min(u64::from(CANONICAL_BETTING_TIMEOUT_MS));
+            if consume == 0
+                || w.action.amount != consume
+                || post.deadline_ms != pre.deadline_ms.saturating_add(consume)
+                || post.seats[seat].time_bank_ms != pre.seats[seat].time_bank_ms - consume as u32
+            {
+                return Err("advance_deadline has an invalid time-bank extension".into());
+            }
+            only_allowed_changes(pre, post, Some(seat), |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.deadline_ms = actual.deadline_ms;
+                expected.seats[seat] = actual.seats[seat];
+            })?;
+        }
+        CanonicalTransitionKind::AdvanceRound => {
+            // `advance_turn` invokes this VM micro-step only after the final
+            // actor has left no further actionable seat.  Keeping this as a
+            // distinct fixed-width transition lets the AIR prove the exact
+            // all-seat collection relation rather than treating a changed pot
+            // or reveal commitment as a host-side side effect.
+            if pre.phase != CanonicalPhase::Betting
+                || pre.current_turn != NO_CANONICAL_SEAT
+                || post.phase != CanonicalPhase::Revealing
+                || post.current_turn != NO_CANONICAL_SEAT
+                || post.street != pre.street.saturating_add(1)
+            {
+                return Err("advance_round has an invalid betting/reveal boundary".into());
+            }
+            if pre.seats.iter().any(|seat| {
+                seat.status == CanonicalSeatStatus::Active
+                    && (!seat.acted || seat.bet != pre.current_bet)
+            }) {
+                return Err(
+                    "advance_round requires every actionable seat to have matched and acted".into(),
+                );
+            }
+            validate_board_reveal_opening(pre, post, &w.round_advance)?;
+            let collected = pre.seats.iter().try_fold(0u64, |sum, seat| {
+                sum.checked_add(seat.bet)
+                    .ok_or("advance_round seat-bet sum overflow")
+            })?;
+            if pre.pot.checked_add(collected) != Some(post.pot) {
+                return Err("advance_round did not collect every seat bet into the pot".into());
+            }
+            if post.current_bet != 0 || post.min_raise != 0 {
+                return Err("advance_round must clear the completed betting round".into());
+            }
+            for (before, after) in pre.seats.iter().zip(post.seats.iter()) {
+                if before.status != after.status
+                    || before.acted != after.acted
+                    || before.stack != after.stack
+                    || before.total_bet != after.total_bet
+                    || before.pending_addon != after.pending_addon
+                    || before.time_bank_ms != after.time_bank_ms
+                    || before.identity_commitment != after.identity_commitment
+                    || before.key_commitment != after.key_commitment
+                    || before.hole_cards_commitment != after.hole_cards_commitment
+                    || after.bet != 0
+                {
+                    return Err("advance_round changed a seat outside wager collection".into());
+                }
+            }
+            only_allowed_changes(pre, post, None, |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.phase = actual.phase;
+                expected.phase_subtag = actual.phase_subtag;
+                expected.street = actual.street;
+                expected.current_turn = actual.current_turn;
+                expected.deadline_ms = actual.deadline_ms;
+                expected.current_bet = actual.current_bet;
+                expected.min_raise = actual.min_raise;
+                expected.pot = actual.pot;
+                expected.deck_commitment = actual.deck_commitment;
+                expected.reveal_commitment = actual.reveal_commitment;
+                expected.reconstruction_commitment = actual.reconstruction_commitment;
+                expected.run_it_twice_commitment = actual.run_it_twice_commitment;
+                expected.custody_commitment = actual.custody_commitment;
+                for seat in &mut expected.seats {
+                    seat.bet = 0;
+                }
             })?;
         }
         CanonicalTransitionKind::Fold
@@ -529,8 +999,16 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                 if after.status != CanonicalSeatStatus::Folded || !after.acted {
                     return Err("fold must mark the selected seat folded and acted".into());
                 }
-            } else if after.status != CanonicalSeatStatus::Active || !after.acted {
-                return Err("betting action must mark the selected seat acted".into());
+            } else if !after.acted
+                || match after.stack {
+                    0 => after.status != CanonicalSeatStatus::AllIn,
+                    _ => after.status != CanonicalSeatStatus::Active,
+                }
+            {
+                return Err(
+                    "betting action must mark the selected seat acted and preserve its active/all-in lifecycle"
+                        .into(),
+                );
             }
             if post.current_turn == w.action.seat {
                 return Err("betting action did not advance the turn".into());
@@ -538,11 +1016,48 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             if w.kind == CanonicalTransitionKind::Check && before.bet != pre.current_bet {
                 return Err("check requires a matched current bet".into());
             }
-            if matches!(w.kind, CanonicalTransitionKind::Raise | CanonicalTransitionKind::Bet)
-                && after.bet < pre.current_bet
+            if matches!(
+                w.kind,
+                CanonicalTransitionKind::Raise | CanonicalTransitionKind::Bet
+            ) && after.bet < pre.current_bet
             {
                 return Err("raise/bet did not reach the current bet".into());
             }
+            // `acted` is the per-seat projection of `acted_mask`.  A normal
+            // action changes only its own bit; a Raise reopens action by
+            // clearing every other actionable (Active) seat, while preserving
+            // flags on folded/all-in/waiting seats exactly as the VM does.
+            for index in 0..MAX_CANONICAL_SEATS {
+                let expected_acted = if index == seat {
+                    true
+                } else if w.kind == CanonicalTransitionKind::Raise
+                    && pre.seats[index].status == CanonicalSeatStatus::Active
+                {
+                    false
+                } else {
+                    pre.seats[index].acted
+                };
+                if post.seats[index].acted != expected_acted {
+                    return Err("betting action has an invalid acted-seat projection".into());
+                }
+            }
+            only_allowed_changes(pre, post, Some(seat), |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.current_turn = actual.current_turn;
+                expected.acted_mask = actual.acted_mask;
+                expected.current_bet = actual.current_bet;
+                expected.min_raise = actual.min_raise;
+                expected.pot = actual.pot;
+                expected.deadline_ms = actual.deadline_ms;
+                expected.custody_commitment = actual.custody_commitment;
+                for (index, (expected_seat, actual_seat)) in
+                    expected.seats.iter_mut().zip(actual.seats).enumerate()
+                {
+                    if index != seat {
+                        expected_seat.acted = actual_seat.acted;
+                    }
+                }
+            })?;
             same_except(pre, post, Some(seat), |a, b| {
                 a.acted_mask ^ b.acted_mask == bit || a.current_turn != b.current_turn
             })?;
@@ -554,50 +1069,236 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             if w.action.amount == 0 || after.status != before.status {
                 return Err("funding transition has an invalid amount or lifecycle".into());
             }
+            if pre.chip_pool.checked_add(w.action.amount) != Some(post.chip_pool) {
+                return Err(
+                    "funding must credit TableVault chip_pool by exactly the action amount".into(),
+                );
+            }
             if w.kind == CanonicalTransitionKind::Addon {
-                if after.pending_addon < before.pending_addon || after.stack != before.stack {
+                if before.pending_addon.checked_add(w.action.amount) != Some(after.pending_addon)
+                    || after.stack != before.stack
+                {
                     return Err("addon must only increase pending_addon".into());
                 }
-            } else if after.stack < before.stack || after.pending_addon != before.pending_addon {
+            } else if before.stack.checked_add(w.action.amount) != Some(after.stack)
+                || after.pending_addon != before.pending_addon
+            {
                 return Err("rebuy must only increase stack".into());
             }
+            only_allowed_changes(pre, post, seat_index, |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.pot = actual.pot;
+                expected.chip_pool = actual.chip_pool;
+                expected.custody_commitment = actual.custody_commitment;
+            })?;
             same_except(pre, post, seat_index, |_, _| true)?;
         }
         CanonicalTransitionKind::SetLeaveAfterHand => {
             if before.status == CanonicalSeatStatus::Empty
                 || ((pre.leave_after_hand_mask & bit != 0) == w.action.flag)
                 || post.leave_after_hand_mask
-                    != if w.action.flag { pre.leave_after_hand_mask | bit } else { pre.leave_after_hand_mask & !bit }
+                    != if w.action.flag {
+                        pre.leave_after_hand_mask | bit
+                    } else {
+                        pre.leave_after_hand_mask & !bit
+                    }
             {
                 return Err("leave-after-hand transition is not a single bit flip".into());
             }
+            only_allowed_changes(pre, post, None, |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.leave_after_hand_mask = actual.leave_after_hand_mask;
+            })?;
             same_except(pre, post, None, |_, _| true)?;
         }
-        CanonicalTransitionKind::ForceFold | CanonicalTransitionKind::KickPlayer => {
-            if !matches!(before.status, CanonicalSeatStatus::Active | CanonicalSeatStatus::Waiting)
-                || !matches!(after.status, CanonicalSeatStatus::Folded | CanonicalSeatStatus::Out | CanonicalSeatStatus::Empty)
+        CanonicalTransitionKind::ForceFold => {
+            if pre.phase != CanonicalPhase::Betting
+                || pre.current_turn != w.action.seat
+                || before.status != CanonicalSeatStatus::Active
+                || after.status != CanonicalSeatStatus::Folded
+                || !after.acted
+                || after.stack != before.stack
+                || after.bet != before.bet
+                || after.total_bet != before.total_bet
+                || after.pending_addon != before.pending_addon
+                || after.time_bank_ms != before.time_bank_ms
+                || after.identity_commitment != before.identity_commitment
+                || after.key_commitment != before.key_commitment
+                || after.hole_cards_commitment != before.hole_cards_commitment
             {
-                return Err("force-fold/kick has an invalid lifecycle transition".into());
+                return Err("force-fold lifecycle transition is invalid".into());
             }
+            for (index, source_seat) in pre.seats.iter().enumerate() {
+                let bit = 1u16 << index;
+                let expected = if index == seat {
+                    true
+                } else {
+                    source_seat.acted
+                };
+                if post.seats[index].acted != expected
+                    || (post.leave_after_hand_mask & bit != 0)
+                        != (pre.leave_after_hand_mask & bit != 0)
+                {
+                    return Err("force-fold mask transition is invalid".into());
+                }
+            }
+            only_allowed_changes(pre, post, seat_index, |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.acted_mask = actual.acted_mask;
+                expected.leave_after_hand_mask = actual.leave_after_hand_mask;
+                expected.current_turn = actual.current_turn;
+                expected.pot = actual.pot;
+                expected.custody_commitment = actual.custody_commitment;
+            })?;
+            same_except(pre, post, seat_index, |_, _| true)?;
+        }
+        CanonicalTransitionKind::KickPlayer => {
+            let refund = before
+                .stack
+                .checked_add(before.pending_addon)
+                .ok_or("kick refund overflows")?;
+            let post_pot = pre.pot.checked_add(before.bet).ok_or("kick pot overflow")?;
+            let post_chip_pool = pre
+                .chip_pool
+                .checked_sub(refund)
+                .ok_or("kick chip_pool underflow")?;
+            if !matches!(
+                before.status,
+                CanonicalSeatStatus::Active | CanonicalSeatStatus::Waiting
+            ) || after.status != CanonicalSeatStatus::Out
+                || w.action.amount != refund
+                || post.pot != post_pot
+                || post.chip_pool != post_chip_pool
+                || after.stack != 0
+                || after.pending_addon != 0
+                || after.bet != 0
+                || after.total_bet != before.total_bet
+                || after.time_bank_ms != before.time_bank_ms
+                || after.identity_commitment != before.identity_commitment
+                || after.key_commitment != [0; 32]
+                || after.hole_cards_commitment != [0; 32]
+            {
+                return Err("kick player custody/lifecycle transition is invalid".into());
+            }
+            only_allowed_changes(pre, post, seat_index, |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.acted_mask = actual.acted_mask;
+                expected.leave_after_hand_mask = actual.leave_after_hand_mask;
+                expected.current_turn = actual.current_turn;
+                expected.pot = actual.pot;
+                expected.chip_pool = actual.chip_pool;
+                expected.custody_commitment = actual.custody_commitment;
+            })?;
             same_except(pre, post, seat_index, |_, _| true)?;
         }
         CanonicalTransitionKind::SubmitShuffle
         | CanonicalTransitionKind::SubmitReveal
-        | CanonicalTransitionKind::SubmitReconstruct
-        | CanonicalTransitionKind::FoldWithProof => {
+        | CanonicalTransitionKind::SubmitReconstruct => {
             if w.action.proof_commitment == [0; 32] {
                 return Err("crypto transition is missing its proof commitment".into());
             }
-            if pre.phase == CanonicalPhase::Waiting || pre.phase == CanonicalPhase::Betting {
+            let expected_phase = match w.kind {
+                CanonicalTransitionKind::SubmitShuffle => CanonicalPhase::Shuffling,
+                CanonicalTransitionKind::SubmitReveal => CanonicalPhase::Revealing,
+                CanonicalTransitionKind::SubmitReconstruct => CanonicalPhase::Reconstructing,
+                _ => unreachable!("only the three protocol submit tags reach this branch"),
+            };
+            if pre.phase != expected_phase {
                 return Err("crypto transition is outside its protocol phase".into());
             }
-            if pre.deck_commitment == post.deck_commitment
-                && pre.reveal_commitment == post.reveal_commitment
-                && pre.reconstruction_commitment == post.reconstruction_commitment
-            {
-                return Err("crypto transition did not advance a protocol commitment".into());
+            if before.status == CanonicalSeatStatus::Empty {
+                return Err("crypto transition requires an occupied submitting seat".into());
             }
-            same_except(pre, post, seat_index, |_, _| true)?;
+            // The protocol-state commitments are expanded by their dedicated
+            // Ristretto AIRs.  Until those relations land, keep the canonical
+            // admission closed: each submit family may only replace its own
+            // protocol commitment (plus the deck when reconstruction
+            // completes), while seats and custody buckets remain immutable.
+            only_allowed_changes(pre, post, None, |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.phase = actual.phase;
+                expected.phase_subtag = actual.phase_subtag;
+                expected.deadline_ms = actual.deadline_ms;
+                match w.kind {
+                    CanonicalTransitionKind::SubmitShuffle => {
+                        expected.deck_commitment = actual.deck_commitment;
+                    }
+                    CanonicalTransitionKind::SubmitReveal => {
+                        expected.reveal_commitment = actual.reveal_commitment;
+                    }
+                    CanonicalTransitionKind::SubmitReconstruct => {
+                        expected.deck_commitment = actual.deck_commitment;
+                        expected.reconstruction_commitment = actual.reconstruction_commitment;
+                    }
+                    _ => unreachable!("only the three crypto submit tags reach this branch"),
+                }
+            })?;
+        }
+        CanonicalTransitionKind::FoldWithProof => {
+            if w.action.proof_commitment == [0; 32] {
+                return Err("fold_with_proof is missing its leave DLEQ commitment".into());
+            }
+            if pre.phase != CanonicalPhase::Betting
+                || post.phase != CanonicalPhase::Betting
+                || pre.current_turn != w.action.seat
+                || before.status != CanonicalSeatStatus::Active
+            {
+                return Err("fold_with_proof must be an active betting-turn transition".into());
+            }
+            if post.phase_subtag != pre.phase_subtag || post.street != pre.street {
+                return Err("fold_with_proof may not change the betting-round identity".into());
+            }
+            if after.status != CanonicalSeatStatus::Folded || !after.acted {
+                return Err("fold_with_proof must mark the selected seat folded and acted".into());
+            }
+            if post.current_turn == w.action.seat {
+                return Err("fold_with_proof did not advance the betting turn".into());
+            }
+            if pre.deck_commitment == post.deck_commitment {
+                return Err("fold_with_proof must replace the encrypted deck commitment".into());
+            }
+            if pre.board_cards_commitment != post.board_cards_commitment
+                || pre.reveal_commitment != post.reveal_commitment
+                || pre.reconstruction_commitment != post.reconstruction_commitment
+                || pre.run_it_twice_commitment != post.run_it_twice_commitment
+            {
+                return Err("fold_with_proof changed an unrelated protocol commitment".into());
+            }
+            if after.stack != before.stack
+                || after.bet != before.bet
+                || after.total_bet != before.total_bet
+                || after.pending_addon != before.pending_addon
+                || after.time_bank_ms != before.time_bank_ms
+                || after.identity_commitment != before.identity_commitment
+                || after.key_commitment != before.key_commitment
+                || after.hole_cards_commitment != before.hole_cards_commitment
+            {
+                return Err(
+                    "fold_with_proof changed selected-seat funds or identity material".into(),
+                );
+            }
+            for index in 0..MAX_CANONICAL_SEATS {
+                let expected_acted = if index == seat {
+                    true
+                } else {
+                    pre.seats[index].acted
+                };
+                if post.seats[index].acted != expected_acted {
+                    return Err("fold_with_proof has an invalid acted-seat projection".into());
+                }
+            }
+            // VM terminal settlement/round advancement performs additional
+            // collection and normalization.  It remains fail-closed here and
+            // must be represented by the dedicated typed micro-steps rather
+            // than accepted as an unconstrained side effect of the DLEQ row.
+            only_allowed_changes(pre, post, seat_index, |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.current_turn = actual.current_turn;
+                expected.acted_mask = actual.acted_mask;
+                expected.deadline_ms = actual.deadline_ms;
+                expected.deck_commitment = actual.deck_commitment;
+                expected.custody_commitment = actual.custody_commitment;
+            })?;
         }
     }
     Ok(())
@@ -630,6 +1331,7 @@ mod tests {
             deadline_ms: 0,
             current_bet: 0,
             min_raise: 0,
+            chip_pool: 0,
             pot: 0,
             button: 0,
             max_players: 2,
@@ -678,6 +1380,7 @@ mod tests {
                 flag: false,
                 proof_commitment: [13; 32],
             },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 2,
@@ -686,5 +1389,62 @@ mod tests {
         witness.nullifier = transition_nullifier(&witness);
         assert!(witness.validate_shape().is_ok());
         assert_ne!(witness.commitment(), [0; 32]);
+    }
+
+    #[test]
+    fn canonical_all_in_action_requires_all_in_lifecycle() {
+        let mut pre = image();
+        pre.phase = CanonicalPhase::Betting;
+        pre.phase_subtag = 1;
+        pre.street = 1;
+        pre.deadline_ms = 10;
+        pre.current_turn = 0;
+        pre.current_bet = 100;
+        pre.min_raise = 100;
+        pre.chip_pool = 50;
+        pre.seats[0] = CanonicalSeat {
+            status: CanonicalSeatStatus::Active,
+            acted: false,
+            stack: 50,
+            bet: 0,
+            total_bet: 0,
+            pending_addon: 0,
+            time_bank_ms: 0,
+            identity_commitment: [21; 32],
+            key_commitment: [22; 32],
+            hole_cards_commitment: [23; 32],
+        };
+        let mut post = pre.clone();
+        post.call_seq = 1;
+        post.current_turn = NO_CANONICAL_SEAT;
+        post.acted_mask = 1;
+        post.seats[0].status = CanonicalSeatStatus::AllIn;
+        post.seats[0].acted = true;
+        post.seats[0].stack = 0;
+        post.seats[0].bet = 50;
+        post.seats[0].total_bet = 50;
+        let mut witness = CanonicalTransitionWitness {
+            pre,
+            post,
+            kind: CanonicalTransitionKind::Call,
+            actor: [31; 32],
+            action: CanonicalActionPayload {
+                seat: 0,
+                amount: 50,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [32; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 0,
+        };
+        witness.seal();
+        assert!(witness.validate_shape().is_ok());
+
+        witness.post.seats[0].status = CanonicalSeatStatus::Active;
+        witness.seal();
+        assert!(witness.validate_shape().is_err());
     }
 }

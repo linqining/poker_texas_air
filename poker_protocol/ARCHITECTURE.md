@@ -68,6 +68,13 @@ already reserves `CurveId::Bls12377G1`; adding the BLS12-377 backend belongs in
 the precompile host/backend layer and does not require changing the STWO-facing
 request layout.
 
+This is a legacy compatibility boundary, not a host-zero cryptographic
+verifier: a STWO proof that only commits a native verifier receipt still trusts
+the party that issued that receipt. The Ristretto255 host-zero migration uses
+a new versioned request/state domain and proves the cryptographic relations in
+AIR; it must not reinterpret the BLS12-381 bytes in an existing table. See
+`../HOST_ZERO_RISTRETTO_AIR.md` for the required circuit and admission gates.
+
 ## Wire compatibility
 
 - Shuffle proof system id `2` means Bayer-Groth V2.

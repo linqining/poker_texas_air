@@ -13,7 +13,7 @@
 //! - Reconstruct 多方重构
 //! - Reveal Token 揭示
 //!
-//! 四条 crypto route 都采用同一 precompile 调用绑定：verifier 从 canonical dispatch 重建
+//! 四条 crypto route 都采用同一 legacy precompile 调用绑定：verifier 从 canonical dispatch 重建
 //! request，执行一次 host-native 密码学验证并签发不可伪造 binding，再将完整
 //! request/receipt digest 和 replay scope 绑定进 AIR statement。AIR verifier 会检查该
 //! binding 的 canonical bytes、ABI/backend/digest，但不会重复同一昂贵 BLS 验证。
@@ -25,6 +25,13 @@
 //! `zk_skip_*` 绕过，所以该 host replay 会执行真实密码学验证。
 //! 阶段 4 的 [`crate::outer_precompile`] 会把这些 dual-proof child、完整 VM task 和
 //! 共识 anchor 包装为可转移的最终 digest AIR，但验证仍是 O(N)，不属于 succinct recursion。
+//!
+//! This module is explicitly **not** the Ristretto255 host-zero route. A
+//! request/receipt digest only authenticates that a native host emitted a
+//! receipt; it does not place Bayer--Groth, DLEQ or Chaum--Pedersen equations
+//! in the STARK. The replacement must use versioned Ristretto crypto AIR
+//! components with state-opening/public-statement binding, as specified in
+//! `HOST_ZERO_RISTRETTO_AIR.md`.
 //!
 //! ## AIR 列布局
 //!

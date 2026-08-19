@@ -1,39 +1,76 @@
 # Texas Tagged Transition AIR
 
-`src/texas_tagged.rs` is the canonical no-replay proving path for the independent
-`poker_texas_air` workspace. It accepts a fixed-width `TexasTransitionWitness`
+The independent `poker_texas_air` workspace has two direct, transaction-free paths:
+
+- `src/texas_tagged.rs` is the mature, deliberately narrow projected AIR. It accepts a fixed-width `TexasTransitionWitness`
 (`pre` state image, one `TexasAction`, and `post` state image), validates the
 transition relation, and places all witnesses in one Stwo heterogeneous trace.
 The witness-bearing compatibility verifier reconstructs the same trace and
 checks its commitment. `verify_tagged_texas_proof` verifies the archived proof
 from its public scope alone, without a `ProveTask`, transaction payload, or VM
 replay.
+- `src/texas_canonical_air.rs` consumes the full fixed-width
+  `CanonicalTransitionWitness` ABI for all 20 selectors. It has no dependency on
+  `ProveTask`, dispatch, or native VM replay. Its current AIR proves trace shape,
+  active-prefix padding, one-hot selectors, table scope, hand/sequence progression,
+  adjacent state-image commitment linkage, and the encoded permissionless actor
+  rule. It additionally proves canonical 16-bit-limb arithmetic for `Call`
+  (including the short-all-in branch) and unopened-round `Bet`. `validate_shape`
+  still supplies the remaining host relation checks before trace construction.
 
 ## Covered transition
 
 The direct canonical-witness relation deliberately supports a small, explicit
 subset of the VM:
 
-- `Fold`, `Check`, `Call`, `Raise`, and `Bet`;
+- `Fold` and `Check` monetary immutability, plus full selected-seat chip
+  conservation for `Call` and unopened-round `Bet`;
 - acting seat equals `pre.current_turn` and was not already acted/folded/all-in;
 - call sequence increments by one and table/hand scope remains fixed;
-- seat `stack`, `bet`, and `total_bet` conservation;
-- action-specific current-bet/min-raise and folded/all-in/acted updates;
-- canonical next actionable seat and contiguous batches.
-- `Addon` and `Rebuy` for an occupied in-capacity seat, with non-zero checked
-  amounts, checked `pending_addon`/`stack` and `chip_pool` updates, and
-  `chip_pool <= MAX_TOTAL_BET`;
+- 16-bit canonical-limb range checks and ripple-carry arithmetic for the
+  selected `stack`, `bet`, `total_bet`, pot, and action amount in those Call/Bet
+  branches;
+- Call's `min(current_bet - seat_bet, stack)` selection, including short all-in;
+- Bet's unopened-round `current_bet`/`min_raise` updates;
+- full fixed-width opening of every seat's lifecycle and mutable betting
+  buckets during a betting action; the selected-seat fields are derived from
+  that opening and non-acting seat images are immutable;
+- Raise resets exactly the other `Active` seats' acted flags, while preserving
+  inactive-seat flags;
+- canonical circular next-active-seat scan, including a proof that no Active
+  seat was skipped between actor and successor, and contiguous batches.
+- `Addon` and `Rebuy` range-check the four 16-bit TableVault limbs and prove
+  the exact non-zero `chip_pool` increment, plus the matching selected-seat
+  `pending_addon`/`stack` increment.  Seat occupancy/capacity and the full
+  custody identity remain part of `validate_shape` on the legacy
+  `texas_tagged` route; the separate canonical AIR now opens every fixed-width
+  seat image, but does not yet prove every VM transition family;
+- `AdvanceRound` opens every seat's wager, range-checks each 16-bit limb, and
+  proves `post_pot = pre_pot + sum(pre_seat.bet)` with a checked carry chain;
+  it clears every `seat.bet` while preserving stack, total bet, pending funds,
+  lifecycle, and acted mask.  It can run only after every remaining `Active`
+  seat has acted and matched `current_bet`.
 - `SetLeaveAfterHand`, with an occupied in-capacity seat and exactly one
   canonical mask-bit transition. The VM's idempotent no-op is rejected because
   it cannot be represented as a `call_seq`-incrementing witness.
+- `CreateTable`/`StartHand` preserve all opened mutable seat buckets; StartHand
+  additionally proves its post-state deadline is non-zero;
+- `AdvanceDeadline` proves a canonical 64-bit comparison
+  `action.height >= pre.deadline` with limb range checks and checked carries,
+  and preserves all opened mutable seat buckets;
+  `JoinTable`/`LeaveTable`/`ForceFold`/`KickPlayer` preserve every non-target
+  opened seat, and ForceFold/KickPlayer enforce their selected-seat lifecycle
+  domain (`Active|Waiting` to `Folded|Out|Empty`). Rules and governance
+  commitments are also constrained to remain immutable on every active row.
 
-Action tags use eight one-hot columns. The tagged AIR carries the mid-round
-betting selectors directly. Funding rows additionally carry range-checked
-pending/stack/vault limbs, ripple carries, and the `MAX_TOTAL_BET` difference;
-leave rows carry a complete u16 mask decomposition, a one-hot seat selector, and
-the selected-bit flip relation. The canonical state image is still checked by
-the host before trace construction, because the trace does not yet open every
-seat and root field. The proof API is:
+The narrow tagged AIR uses eight one-hot action tags.  The canonical AIR uses
+20 tags and carries the mid-round betting selectors directly. Funding rows
+additionally carry range-checked pending/stack/vault limbs and ripple carries;
+leave rows carry a complete canonical nine-bit mask decomposition, a one-hot seat selector,
+and the selected-bit flip relation. The legacy `texas_tagged` trace still relies
+on host validation for the canonical state image; the newer canonical AIR
+authenticates every fixed-width endpoint field but does not recompute the root
+fields or prove every VM relation. The proof API is:
 
 ```rust
 prove_tagged_texas_batch(&[TexasTransitionWitness])
@@ -43,7 +80,7 @@ verify_tagged_texas_proof(&ArchivedTaggedTexasProof)
 
 The migration target is the fixed-width `texas_canonical` ABI. It has explicit fields for the
 phase union, lifecycle/status, acted mask, board/deck/reveal/reconstruction commitments,
-deadlines, run-it-twice, governance/rules, custody, settlement, and roots, plus all 19 dispatch
+deadlines, run-it-twice, governance/rules, custody, settlement, and roots, plus all 20 dispatch
 transition kinds. Its `validate_shape` and commitment are useful structural checks before the AIR
 families are complete; they do not claim that an opaque commitment was recomputed inside Stwo.
 
@@ -55,16 +92,32 @@ is met, and the receipt value commits the complete circuit/manifest/effect/
 authority/nullifier statement. This path does not inspect transaction bytes or
 call VM dispatch.
 
-Both APIs are independent of `ProveTask`, `MethodBatchV2`, VM dispatch, and
+Both direct APIs are independent of `ProveTask`, `MethodBatchV2`, VM dispatch, and
 transaction replay. The legacy `tagged_method` and composite paths remain
 available for downstream compatibility and retain their existing semantics.
 
 ## Explicit non-goals
 
-This AIR does not yet model round advancement, pot collection, timeout
+`texas_tagged` does not model round advancement, pot collection, timeout
 normalization, showdown/deck/reveal, side-pot settlement, or hand-rank
 evaluation. Such inputs return `UnsupportedBettingTransition`; they must not be
-encoded as a mid-round row.
+encoded as a projected mid-round row.
+
+`texas_canonical_air` carries those selector families through a common ABI, but
+does not yet constrain their complete semantics in Stwo. It must not be described
+as a proof of a complete Texas VM transition. Its batch digest and archive metadata
+are transcript-bound and tamper-evident after proving; they are not a substitute for
+an in-AIR hash of every witness row or a finalized receipt binding.
+
+The direct canonical route does tighten the crypto-tagged state-machine shape:
+shuffle/reveal/reconstruct rows must use their matching pre phase, address an
+occupied seat, and carry a 16-bit range-bound non-zero proof commitment.
+`FoldWithProof` is a Betting/current-turn action whose nonterminal row changes
+the selected seat only from Active to Folded+acted, keeps funds and identity
+commitments fixed, and may replace only the deck commitment. This does not
+prove the Ristretto DLEQ, Bayer--Groth shuffle, reveal-token, or reconstruction
+equations, nor final round/terminal normalization; those remain fail-closed
+until their dedicated AIRs are composed.
 
 The Blake2 state-image projections in the trace bind the witness to the proof,
 but they are not an in-AIR state-root computation. The witness-free verifier
@@ -74,12 +127,32 @@ opening) and an inclusion proof at the finalized consensus height. A
 prover-supplied state image without that authenticated anchor remains a
 host-attested input, not a trustless chain fact.
 
-The current trace contains only the acting seat's betting fields plus the
-funding/leave fields listed above. Full seat-image invariants, the scan for the
-next actionable seat, betting carry/range semantics, and authenticated state
-root computation are still outside this AIR. Consequently, the witness-free
-entry point must not be used as evidence of complete Texas VM execution until
-those relations and receipt inclusion are implemented.
+The current trace opens every seat's mutable betting image for mid-round
+actions, constrains Raise reset plus next-turn selection, and proves the
+separate completed-round wager collection micro-step. `AdvanceRound` also has
+a fixed-width board-reveal opening: one of the six VM schedules
+`(preflop|flop|turn) × (single|run-it-twice)` is selected in AIR, and it fixes
+the card cursor, runout, board position, pending participant mask, zero
+submitted mask, and all padding. Full seat-image commitments, inclusion of
+those assignments in the encrypted deck/reveal commitments, side pots, and
+authenticated state-root computation are still outside this AIR. Consequently,
+the witness-free entry point must not be used as evidence of complete Texas VM
+execution until those relations and receipt inclusion are implemented.
+
+The mid-round component permits a `NO_SEAT` successor only when all remaining
+`Active` seats have acted and matched the final bet. The following
+`AdvanceRound` row performs the exact `collect_bets_to_pot` relation and the
+VM's preflop/flop/turn board-assignment schedule (including run-it-twice).
+River-to-showdown remains fail-closed until a fixed-width owner-hole-card
+ledger opening is added. The board assignment is not yet proven to be a member
+of the encrypted deck or a committed reveal queue, so production admission
+must remain fail-closed at that cryptographic reveal boundary.
+
+The board schedule's pre/post `cards_dealt` cursors are separately decomposed
+inside the AIR and proven to lie in `0..=52`; the proof does not rely on the
+Rust witness validator for this deck-bound check. This prevents a field-valued
+trace from moving the assignment cursor beyond the physical deck while still
+satisfying the cursor-delta relation.
 
 The verifier reconstructs nine fixed preprocessed columns for every trace size:
 an active-row prefix plus the four 16-bit table limbs, two hand-id limbs, and

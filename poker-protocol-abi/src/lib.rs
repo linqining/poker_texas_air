@@ -20,12 +20,19 @@ pub const MAX_PROOF_SIZE: usize = 1 << 20;
 pub enum CurveId {
     Bls12381G1 = 1,
     Bls12377G1 = 2,
+    /// Prime-order Ristretto quotient group over Curve25519.
+    ///
+    /// This identifier is reserved for the versioned AIR-backed protocol. It
+    /// deliberately has a distinct 32-byte point encoding and must never be
+    /// decoded as a legacy BLS request.
+    Ristretto255 = 3,
 }
 
 impl CurveId {
     pub fn point_size(self) -> usize {
         match self {
             Self::Bls12381G1 | Self::Bls12377G1 => 48,
+            Self::Ristretto255 => 32,
         }
     }
 }
@@ -37,6 +44,7 @@ impl TryFrom<u8> for CurveId {
         match value {
             1 => Ok(Self::Bls12381G1),
             2 => Ok(Self::Bls12377G1),
+            3 => Ok(Self::Ristretto255),
             _ => Err(AbiError::UnsupportedCurve(value)),
         }
     }
@@ -47,6 +55,8 @@ impl TryFrom<u8> for CurveId {
 pub enum TranscriptId {
     Merlin = 1,
     FiatShamirSha3 = 2,
+    /// Poseidon252 transcript reserved for the Ristretto AIR protocol.
+    Poseidon252 = 3,
 }
 
 impl TryFrom<u8> for TranscriptId {
@@ -56,6 +66,7 @@ impl TryFrom<u8> for TranscriptId {
         match value {
             1 => Ok(Self::Merlin),
             2 => Ok(Self::FiatShamirSha3),
+            3 => Ok(Self::Poseidon252),
             _ => Err(AbiError::UnsupportedTranscript(value)),
         }
     }
@@ -65,6 +76,8 @@ impl TryFrom<u8> for TranscriptId {
 #[repr(u8)]
 pub enum ShuffleProofSystem {
     BayerGrothV2 = 2,
+    /// Ristretto255 AIR proof whose public statement is encoded by this ABI.
+    RistrettoAirV1 = 3,
 }
 
 impl TryFrom<u8> for ShuffleProofSystem {
@@ -73,6 +86,7 @@ impl TryFrom<u8> for ShuffleProofSystem {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             2 => Ok(Self::BayerGrothV2),
+            3 => Ok(Self::RistrettoAirV1),
             _ => Err(AbiError::UnsupportedProofSystem(value)),
         }
     }
@@ -84,6 +98,8 @@ pub enum ReconstructionProofSystem {
     BayerGrothOrderedV2 = 2,
     /// Bayer--Groth hidden permutation plus cross-key and per-slot OR proofs.
     BayerGrothSlotOrV3 = 3,
+    /// Ristretto255 AIR proof for the corresponding reconstruction relation.
+    RistrettoAirV1 = 4,
 }
 
 impl TryFrom<u8> for ReconstructionProofSystem {
@@ -93,6 +109,7 @@ impl TryFrom<u8> for ReconstructionProofSystem {
         match value {
             2 => Ok(Self::BayerGrothOrderedV2),
             3 => Ok(Self::BayerGrothSlotOrV3),
+            4 => Ok(Self::RistrettoAirV1),
             _ => Err(AbiError::UnsupportedProofSystem(value)),
         }
     }
@@ -123,6 +140,22 @@ impl ShuffleVerifyRequest {
     pub fn validate(&self) -> Result<(), AbiError> {
         let n = self.input.len();
         validate_common(self.curve, &self.context, &self.call_context, &self.proof)?;
+        match (self.curve, self.proof_system, self.transcript) {
+            (
+                CurveId::Bls12381G1 | CurveId::Bls12377G1,
+                ShuffleProofSystem::BayerGrothV2,
+                TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
+            )
+            | (
+                CurveId::Ristretto255,
+                ShuffleProofSystem::RistrettoAirV1,
+                TranscriptId::Poseidon252,
+            ) => {}
+            (CurveId::Ristretto255, _, _) => {
+                return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8))
+            }
+            _ => return Err(AbiError::UnsupportedTranscript(self.transcript as u8)),
+        }
         if n < 2 || n > MAX_DECK_SIZE || self.output.len() != n {
             return Err(AbiError::InvalidDeckSize);
         }
@@ -225,8 +258,21 @@ pub struct ReconstructionVerifyRequest {
 impl ReconstructionVerifyRequest {
     pub fn validate(&self) -> Result<(), AbiError> {
         validate_common(self.curve, &self.context, &self.call_context, &self.proof)?;
-        if self.proof_system != ReconstructionProofSystem::BayerGrothOrderedV2 {
-            return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8));
+        match (self.curve, self.proof_system, self.transcript) {
+            (
+                CurveId::Bls12381G1 | CurveId::Bls12377G1,
+                ReconstructionProofSystem::BayerGrothOrderedV2,
+                TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
+            )
+            | (
+                CurveId::Ristretto255,
+                ReconstructionProofSystem::RistrettoAirV1,
+                TranscriptId::Poseidon252,
+            ) => {}
+            (CurveId::Ristretto255, _, _) => {
+                return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8))
+            }
+            _ => return Err(AbiError::UnsupportedTranscript(self.transcript as u8)),
         }
         let n = self.cards.len();
         let k = self.swap_out_cards.len();
@@ -365,8 +411,21 @@ pub struct ReconstructionV3VerifyRequest {
 impl ReconstructionV3VerifyRequest {
     pub fn validate(&self) -> Result<(), AbiError> {
         validate_common(self.curve, &self.context, &self.call_context, &self.proof)?;
-        if self.proof_system != ReconstructionProofSystem::BayerGrothSlotOrV3 {
-            return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8));
+        match (self.curve, self.proof_system, self.transcript) {
+            (
+                CurveId::Bls12381G1 | CurveId::Bls12377G1,
+                ReconstructionProofSystem::BayerGrothSlotOrV3,
+                TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
+            )
+            | (
+                CurveId::Ristretto255,
+                ReconstructionProofSystem::RistrettoAirV1,
+                TranscriptId::Poseidon252,
+            ) => {}
+            (CurveId::Ristretto255, _, _) => {
+                return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8))
+            }
+            _ => return Err(AbiError::UnsupportedTranscript(self.transcript as u8)),
         }
         if self.statement_version != RECONSTRUCTION_V3_STATEMENT_VERSION {
             return Err(AbiError::UnsupportedVersion(self.statement_version));
@@ -703,6 +762,13 @@ mod tests {
         }
     }
 
+    fn ristretto_ciphertext(byte: u8) -> EncodedCiphertext {
+        EncodedCiphertext {
+            c1: vec![byte; 32],
+            c2: vec![byte.wrapping_add(1); 32],
+        }
+    }
+
     fn shuffle_request() -> ShuffleVerifyRequest {
         ShuffleVerifyRequest {
             curve: CurveId::Bls12377G1,
@@ -715,6 +781,26 @@ mod tests {
             output: vec![ciphertext(3), ciphertext(4)],
             proof: vec![9u8; 256],
         }
+    }
+
+    #[test]
+    fn ristretto_curve_id_has_its_own_canonical_width() {
+        assert_eq!(CurveId::Ristretto255.point_size(), 32);
+        assert_eq!(CurveId::try_from(3), Ok(CurveId::Ristretto255));
+
+        let request = ShuffleVerifyRequest {
+            curve: CurveId::Ristretto255,
+            proof_system: ShuffleProofSystem::RistrettoAirV1,
+            transcript: TranscriptId::Poseidon252,
+            context: b"ristretto-air-v2".to_vec(),
+            call_context: b"table=1/hand=2/call=3/epoch=2".to_vec(),
+            public_key: vec![7u8; 32],
+            input: vec![ristretto_ciphertext(1), ristretto_ciphertext(2)],
+            output: vec![ristretto_ciphertext(3), ristretto_ciphertext(4)],
+            proof: vec![9u8; 32],
+        };
+        let encoded = request.encode().expect("Ristretto request shape");
+        assert_eq!(ShuffleVerifyRequest::decode(&encoded), Ok(request));
     }
 
     fn reconstruction_request() -> ReconstructionVerifyRequest {

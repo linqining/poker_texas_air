@@ -16,23 +16,74 @@ state root，而不执行交易回放。旧 `ProveTask`/VM replay 路径仍保�
 
 ### `poker_texas_air` 直接路径的新增边界
 
-`texas_tagged::verify_tagged_texas_proof` 现在可以只使用归档中的公开 scope
-和 Stwo proof 完成验证，不再读取 `ProveTask`、交易 payload 或执行 native VM
-replay。这只消除了 verifier 的回放依赖；它没有把 prover 提供的
-`TexasStateImage` 变成链上事实。当前 AIR 仍只投影 acting seat、资金和
-leave-mask 字段，Blake2 state-image digest 也不是 AIR 内的 state-root 计算。
-archive 中的 table/hand/call-seq 也只是 Fiat-Shamir scope，尚未成为每一行
-的 AIR state-column 约束。
+`texas_tagged::verify_tagged_texas_proof` 和
+`texas_canonical_air::verify_canonical_tagged_proof` 现在可以只使用归档中的公开
+scope 和 Stwo proof 完成验证，不再读取 `ProveTask`、交易 payload 或执行 native VM
+replay。前者只证明 betting/funding/leave 的投影关系；后者证明 20-kind canonical
+trace 的形状、selector、序号、表作用域和相邻 state-image commitment 链接，并证明
+下注完成后所有 seat `bet` 被精确收集进 pot；但完整
+selector relation 仍在 `CanonicalTransitionWitness::validate_shape` 中 host 验证。
+这只消除了 verifier 的回放依赖；它没有把 prover 提供的
+`TexasStateImage` 变成链上事实。当前 AIR 已为 betting 与可寻址 lifecycle
+actions 打开全部九个 seat 的 mutable image（状态、stack、bet、total_bet、pending
+addon、time bank），并约束 Create/Start 的 seat 不变性、目标 lifecycle
+action 的非目标 seat 不变性、StartHand 的非零 deadline，以及
+`SetLeaveAfterHand` 的精确九位掩码写入。`AdvanceDeadline` 还以 64-bit limb/
+carry/range relation 证明 action height 不早于 pre deadline；但它
+还未为 identity/key/hole-card 与 crypto-state commitment 的所有可变 VM 分支建立
+专用关系，也未在同一 AIR 内重算 state image 的 Blake2b digest/state root。
 
-因此该入口的安全结论是“证明了当前投影关系”，而不是“证明了完整
+`FoldWithProof` 已不再被误分类为“非 Betting crypto 行”：其非终局分支在 AIR
+中遵循 current turn，要求目标 `Active -> Folded + acted`，保持所有 chip/seat
+identity material，不允许改动 board/reveal/reconstruct/run-it-twice commitments，并
+只允许 deck commitment 被 leave-DLEQ 层移除替换。三个 submit 标签也直接约束其
+pre phase（shuffle/reveal/reconstruct）、非空提交座位和非零、16-bit range-bound 的
+proof commitment；它们不能借由 protocol payload 改动筹码、座位、board 或普通
+状态字段。这些只是 transition shape/anti-null 边界，**不**验证 DLEQ、shuffle、
+reveal 或 reconstruction 的 Ristretto 方程。
+
+尤其 `zchain` 的 `advance_deadline_in_place` 不是一个单一的“过期后不变”
+转换：它先运行有限次 normalization，随后按 reconstruct、shuffle、reveal、betting
+或 showdown deadline 分支；betting 还要区分消耗 time bank / 延长 deadline 与
+自动 fold，其他分支会 kick、refund/reset、reconstruct 或结算。当前 canonical
+`AdvanceDeadline` 行没有这些选择器、完整输入状态或确定性输出约束。因此任何把
+它作为 finalized-head 更新的入口都必须 fail-closed，不能把
+`deadline_height >= pre.deadline` 当成完整 VM timeout 证明。
+
+canonical archive 中的 batch digest、state-image commitment，以及 state、lifecycle、
+overlay、settlement、custody 五个域的首尾根都已进入 Fiat--Shamir transcript、公开
+scope、trace 连续性约束和 canonical receipt binding，因此不能再把有效 proof 与另一组
+根/receipt 拼接。AIR 仍未重算这些 Blake2b 值，也不能单独作为 admission 的语义来源。
+
+因此当前入口的安全结论是“证明了当前编码的 AIR 关系”，而不是“证明了完整
 `TexasPokerTable` 的共识迁移”。只有 `authenticate_receipt` 成功产生
 `AuthenticatedTexasReceipt` 后，生产 admission 才能绑定该 archive；单独调用
 `verify_tagged_texas_proof` 仍必须 fail-closed，不能更新 confirmed head。
 
 当前 receipt ABI 还要求 mapping 中的 `receipt_value` 等于包含完整 statement 的规范 digest，
-并要求 statement 的 transition、pre/post state、lifecycle、overlay roots 分别等于 receipt
-字段；只有这些等式和历史 state-root path 同时成立，才允许构造不可伪造的 authenticated
-wrapper。
+并要求 statement 的 transition、pre/post state、lifecycle、overlay roots、固定宽度
+`state_object_key` 与 `state_opening_epoch` 分别等于 receipt 字段；只有这些等式和历史
+state-root path 同时成立，才允许构造不可伪造的 authenticated wrapper。新的
+`canonical_state_opening` 组合器再验证同一 object key 在 pre/post roots 下的两条 257-
+compression Blake2b AIR opening，并把 opening value 绑定到 canonical pre/post image
+commitment。它消除了 root-opening splice，但不宣称已经在 AIR 内重算完整
+`CanonicalStateImage::commitment()`；固定宽度 state-leaf epoch 仍必须由 L1 manifest/receipt
+注册。
+
+`canonical_state_hash` 现已能用同一套 lookup Blake2b proof 认证精确的
+`"zchain.texas.canonical-state.v2" || Borsh(CanonicalStateImage)` 预像；
+`prove_canonical_batch_with_state_image_openings` 将此 byte→commitment proof 与
+pre/post SMT opening 组合，得到 byte→commitment→root 链。canonical transition
+AIR 已将 ABI/header、table、phase、资金、五类 root、九个 seat 的完整公开 image
+（含 identity/key/hole-card commitment），以及 board/deck/reveal/reconstruction/
+run-it-twice 五个 commitment（共 841 个 endpoint limb）回绑到这些 Borsh bytes；
+对下注、funding、join/leave、force/kick、SetLeaveAfterHand 与 AdvanceRound，
+已知不变的 commitment 字段也被约束为不变。完整 bytes 也进入 Fiat--Shamir scope。
+Shuffle/reveal/reconstruct 的 phase/seat/proof-presence shape，以及非终局
+`FoldWithProof` 的 betting/state-preservation shape 已受约束；它们的密码学与
+完整 VM phase-completion/timeout/settlement 关系仍未受约束，故这个新组合仍不是
+host-zero admission 证据，
+`admit_canonical_proof_with_state_openings` 会明确 fail-closed。
 
 独立项目还提供 `authenticate_receipt_l1`。生产适配器必须使用
 `TexasL1ReceiptInclusionProof`，它直接调用
@@ -120,6 +171,22 @@ manifest digest + circuit id
 - terminal 的 side-pot、rake、odd-chip、winner payout 和 custody conservation；
 - deck/runout/hand-rank 的 transcript commitment；
 - pre/post state opening 和 state-root 计算（或者一个已审计的递归 state-transition SNARK）。
+
+对 `texas_canonical_air`，20 个 selector family relation 已有 canonical AIR
+dispatch；其中 `AdvanceRound` 还在 AIR 中选择固定的 preflop/flop/turn（含
+run-it-twice）board-reveal schedule，并约束 card cursor、board position、pending
+mask、submitted mask 和 padding。archive 已将 admission 所需的 pre/post state、
+lifecycle、overlay、settlement、custody root 公开绑定到 trace；下一步仍需将它们及
+board/deck/reveal assignment inclusion 同完整 state opening / Blake2b root relation
+绑定。否则恶意 prover 可以生成满足当前结构 AIR 的 trace，而经济或密码语义仍只能由
+host 断言。
+
+`AdvanceRound` 的 deck cursor 本身已在 AIR 中作 6-bit/`<=52` 约束；这只消除了
+field-range 伪造，**不**证明 cursor 或 assignment 是 L1 加密 deck 的成员。生产 L1
+当前将 poker table 分为一个可变长度 hot-state object 和 metadata/rules/governance
+三个 context objects；host-zero 的 Blake2b opening component 必须认证这些实际对象的
+key、value、leaf hash 和 256 层路径，或在新 table epoch 中部署等价的固定宽度 state
+object。仅将 host 计算的 object digest/root 写入 public input 不满足该要求。
 
 特别是 Poseidon state root 不能只在 host 端重算后塞进 public input。若暂时做不到，必须把
 该路径明确标为“host-attested”，不能宣称 no-replay trustless。
