@@ -83,6 +83,10 @@ following constraints:
    `src/ristretto_scalar_air.rs` provides the matching canonical limb/bit STARK
    for scalars strictly below the Ristretto group order `l`; its nonzero
    subtraction witness is likewise verified in AIR.
+   `src/ristretto_scalar_windows_air.rs` composes that strict canonical proof
+   with 64 range-checked 4-bit windows and verifies exact reconstruction of the
+   public scalar; this is the input ABI for fixed-window scalar multiplication
+   and MSM.
    `src/ristretto_fp_program_air.rs` is the first folded performance substrate:
    it places a public DAG of canonical Fp add/sub/mul operations, including all
    limb, strict-range, carry, quotient, and bit witnesses, in one Stwo proof
@@ -93,6 +97,44 @@ following constraints:
    statements share one program STARK and one set of canonical-value witnesses.
    On the current development machine, the focused one-proof test ran in 3.58s
    versus 7.93s for the composed implementation.
+   The second folded wrapper is canonical point decode.  Its focused test proves
+   both identity and basepoint decode in 15.40s, while the prior composed
+   implementation takes 63.04s for basepoint decode alone.
+   The folded encode wrapper proves identity and basepoint roundtrips in 42.94s;
+   the prior composed encode roundtrip takes 247.01s on the same machine.
+   The folded unified Edwards addition wrapper proves basepoint doubling in
+   28.50s, versus 112.61s for the prior composed addition implementation.
+   A general projective variant accepts either a decoded point or a prior
+   verified addition output, computes `D=2*Z1*Z2`, and therefore supports the
+   continuous accumulator chain required by scalar multiplication.  Its focused
+   one-addition test runs in 33.87s.
+   The `0P..15P` fixed-window table is derived by 14 continuous projective
+   additions in one program STARK and exposed as a shared point-table source.
+   Its current fixed layout has 376 canonical values and 226 operations.  The
+   program now derives add/sub outputs directly from their constrained modular
+   relations and derives each multiplication quotient from its strict output and
+   exact convolution equation; only 150 values retain the generic strict-range
+   witness block.  Add/Sub public selectors and reduction signs are constrained,
+   so those derivations do not trust the prover's native witness construction.
+   The focused proof fell from 188.63s to 154.88s.  Multiplication carry/range
+   witnesses remain the dominant cost and should move to shared lookup tables in
+   the next specialization.
+   The public 16-entry projective-point table selector uses deterministic
+   authenticated-table indexing rather than a selector STARK: each distinct table
+   entry is verified once, repeated identical entries are cached, and the public
+   selector/output are checked directly.  The focused test takes 39.41s,
+   dominated by constructing its two folded decode witnesses; selection itself
+   adds no STARK.  A private-selector variant will require a dedicated AIR and
+   must not reuse the rejected 2048-table-limb layout.
+   `prove_ristretto_fp_program_fixed_window_scalar_mul` defines the fixed-window
+   scalar-multiplication ABI and reconstructs the complete high-to-low Horner
+   DAG from the authenticated scalar windows and `0P..15P` table.  The generic
+   Fp program backend deliberately fails closed for this shape today: 64
+   windows require 320 projective additions, 5,760 field operations, and 9,222
+   committed values, while the generic program is capped at 512 of each.  This
+   keeps callers from mistaking an unbounded witness allocation for a production
+   proof.  A dedicated doubling/window AIR or lookup schedule must be added
+   before this ABI can produce a scalar-multiplication STARK.
 2. Remaining point-composition relations, including composing decoded points
    with scalar multiplication, Edwards addition, and prime-order quotient
    checks.
@@ -100,7 +142,10 @@ following constraints:
    Ristretto prime-order quotient semantics. AIR internals should retain
    extended coordinates; only request/state boundaries are compressed.
 4. Canonical scalar decoding and bit decomposition modulo the Ristretto group
-   order, plus fixed-window scalar multiplication / MSM selectors.
+   order are implemented.  The fixed-window scalar-multiplication ABI and DAG
+   shape are specified, but its generic backend currently fails closed on the
+   5,760-operation shape.  The remaining production work is a dedicated
+   doubling/window AIR, private selectors where needed, and MSM batching.
 5. A circuit hash transcript. Native Merlin or SHA3 output supplied as a
    witness is not acceptable: Fiat--Shamir challenges must be recomputed in
    the AIR. Prefer a versioned Poseidon transcript for the v2 protocol so the

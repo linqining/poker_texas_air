@@ -38,7 +38,7 @@ const NUM_COLUMNS: usize = INVERSE_OFFSET + LIMBS + 1;
 const PREPROCESSED_COLUMNS: usize = LIMBS;
 
 /// Little-endian bytes of the Ristretto255 group order.
-const GROUP_ORDER_BYTES: [u8; LIMBS] = [
+pub(crate) const GROUP_ORDER_BYTES: [u8; LIMBS] = [
     0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
 ];
@@ -107,7 +107,7 @@ fn m31_inverse(value: u8) -> M31 {
 }
 
 fn trace_columns(value: &[u8; LIMBS]) -> TexasAirResult<MethodTrace> {
-    let (difference, borrows) = order_minus_value(value)?;
+    let (difference, _borrows) = order_minus_value(value)?;
     let mut row = Vec::with_capacity(NUM_COLUMNS);
     for limb in value {
         append_limb(&mut row, *limb);
@@ -115,10 +115,15 @@ fn trace_columns(value: &[u8; LIMBS]) -> TexasAirResult<MethodTrace> {
     for limb in difference {
         append_limb(&mut row, limb);
     }
-    // Addition carry into limb i is subtraction borrow out of limb i-1.
-    row.push(M31::from(0u32));
-    for borrow in borrows[..LIMBS - 1].iter() {
-        row.push(M31::from(u32::from(*borrow)));
+    let mut addition_carries = [0u8; LIMBS];
+    let mut addition_carry = 0u16;
+    for index in 0..LIMBS {
+        let sum = u16::from(value[index]) + u16::from(difference[index]) + addition_carry;
+        addition_carries[index] = u8::from(sum >= BASE as u16);
+        addition_carry = sum >> 8;
+    }
+    for carry in addition_carries {
+        row.push(M31::from(u32::from(carry)));
     }
     let mut nonzero_count = 0u32;
     for limb in difference {
@@ -199,16 +204,21 @@ impl FrameworkEval for CanonicalScalarAir {
             eval.add_constraint(carry.clone() * (carry.clone() - one.clone()));
             carries.push(carry);
         }
-        eval.add_constraint(carries[0].clone());
+        eval.add_constraint(carries[LIMBS - 1].clone());
         let mut nonzero_count: E::F = M31::from(0u32).into();
         for index in 0..LIMBS {
+            let carry_in = if index == 0 {
+                M31::from(0u32).into()
+            } else {
+                carries[index - 1].clone()
+            };
             let carry_out = if index + 1 == LIMBS {
                 M31::from(0u32).into()
             } else {
-                carries[index + 1].clone()
+                carries[index].clone()
             };
             eval.add_constraint(
-                value[index].clone() + difference[index].clone() + carries[index].clone()
+                value[index].clone() + difference[index].clone() + carry_in
                     - E::F::from(M31::from(u32::from(GROUP_ORDER_BYTES[index])))
                     - base.clone() * carry_out,
             );

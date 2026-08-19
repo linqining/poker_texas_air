@@ -13,10 +13,17 @@ replay.
   `CanonicalTransitionWitness` ABI for all 20 selectors. It has no dependency on
   `ProveTask`, dispatch, or native VM replay. Its current AIR proves trace shape,
   active-prefix padding, one-hot selectors, table scope, hand/sequence progression,
-  adjacent state-image commitment linkage, and the encoded permissionless actor
-  rule. It additionally proves canonical 16-bit-limb arithmetic for `Call`
+  adjacent state-image commitment linkage, both sides of the actor authority rule
+  (permissionless rows use zero actor; actor rows prove a non-zero actor), immutable
+  settlement commitment, and non-zero transition/nullifier identifiers. It additionally
+  proves canonical 16-bit-limb arithmetic for `Call`
   (including the short-all-in branch) and unopened-round `Bet`. `validate_shape`
-  still supplies the remaining host relation checks before trace construction.
+  remains an optional structural helper; the direct trace builder does not use
+  `validate_batch` as a replay/admission prefilter. It applies only fixed-width
+  ABI guards (for example, crypto commitment presence and canonical
+  `AdvanceRound` padding) before advice generation. Any selector semantics not
+  listed as AIR relations below remain outside this component and must stay
+  fail-closed at production admission.
 
 ## Covered transition
 
@@ -153,6 +160,14 @@ inside the AIR and proven to lie in `0..=52`; the proof does not rely on the
 Rust witness validator for this deck-bound check. This prevents a field-valued
 trace from moving the assignment cursor beyond the physical deck while still
 satisfying the cursor-delta relation.
+
+The direct builder also rejects malformed fixed-width envelopes before constructing
+the trace: crypto rows require a non-zero proof commitment; `AdvanceRound` requires
+an opening street in `1..=3`, contiguous present assignments, a pending mask equal
+to the pre-state active/folded/all-in seats, zero submitted masks, and zero padding;
+other transition kinds cannot carry a board opening. These checks protect the fixed
+ABI and avoid host-side indexing ambiguity; they are not a substitute for the
+unimplemented shuffle, reveal, settlement, or timeout equations.
 
 The verifier reconstructs nine fixed preprocessed columns for every trace size:
 an active-row prefix plus the four 16-bit table limbs, two hand-id limbs, and

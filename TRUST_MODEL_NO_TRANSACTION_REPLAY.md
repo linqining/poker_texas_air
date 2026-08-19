@@ -21,8 +21,12 @@ state root，而不执行交易回放。旧 `ProveTask`/VM replay 路径仍保�
 scope 和 Stwo proof 完成验证，不再读取 `ProveTask`、交易 payload 或执行 native VM
 replay。前者只证明 betting/funding/leave 的投影关系；后者证明 20-kind canonical
 trace 的形状、selector、序号、表作用域和相邻 state-image commitment 链接，并证明
-下注完成后所有 seat `bet` 被精确收集进 pot；但完整
-selector relation 仍在 `CanonicalTransitionWitness::validate_shape` 中 host 验证。
+下注完成后所有 seat `bet` 被精确收集进 pot；它还在 AIR 内约束 permissionless/actor
+authority、settlement commitment 不变，以及 transition/nullifier 非零。canonical
+trace builder 不再把 `validate_batch` 当作 admission prefilter，只保留固定宽度 ABI
+guards（例如 crypto commitment、AdvanceRound opening/padding）；
+`CanonicalTransitionWitness::validate_shape` 仍是可选结构检查，不应被当作完整
+VM 语义证明。未列入 AIR 的 selector relation 仍必须在生产 admission 中 fail-closed。
 这只消除了 verifier 的回放依赖；它没有把 prover 提供的
 `TexasStateImage` 变成链上事实。当前 AIR 已为 betting 与可寻址 lifecycle
 actions 打开全部九个 seat 的 mutable image（状态、stack、bet、total_bet、pending

@@ -504,6 +504,31 @@ mod tests {
     }
 
     #[test]
+    fn witness_rows_satisfy_the_sqrt_ratio_inverse_four_multiplication() {
+        let mut a = [0xffu8; LIMBS];
+        a[0] = 0xf2;
+        a[31] = 0x5f;
+        let mut b = [0u8; LIMBS];
+        b[0] = 4;
+        let (trace, c, q) = trace_columns(&a, &b).unwrap();
+        assert_eq!(c, small(1));
+        assert_eq!(q, small(3));
+        let scope = scope_columns(&a, &b, &c, &q);
+        let evals = stwo::core::pcs::TreeVec::new(vec![
+            scope.cols.iter().collect(),
+            trace.cols.iter().collect(),
+        ]);
+        stwo_constraint_framework::assert_constraints_on_trace(
+            &evals,
+            LOG_SIZE,
+            |eval| {
+                FpMulAir { log_size: LOG_SIZE }.evaluate(eval);
+            },
+            SecureField::from(0u32),
+        );
+    }
+
+    #[test]
     fn fp_mul_declares_the_maximum_expression_degree() {
         let mut evaluator = crate::ristretto_degree_util::DegreeEvaluator { max: 0 };
         evaluator = FpMulAir { log_size: LOG_SIZE }.evaluate(evaluator);

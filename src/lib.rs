@@ -112,6 +112,8 @@ pub mod ristretto_point_decode_air;
 pub mod ristretto_point_encode_air;
 /// Canonical Ristretto255 group-scalar limb AIR.
 pub mod ristretto_scalar_air;
+/// Canonical Ristretto255 scalar 4-bit window AIR.
+pub mod ristretto_scalar_windows_air;
 
 /// Canonical tagged-seat fixture operations, available only to tests and debug test helpers.
 #[cfg(any(test, feature = "test-helpers"))]

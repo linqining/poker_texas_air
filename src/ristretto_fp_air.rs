@@ -113,7 +113,7 @@ fn m31_inverse(value: u8) -> M31 {
 }
 
 fn trace_columns(value: &[u8; LIMBS]) -> TexasAirResult<MethodTrace> {
-    let (difference, subtraction_borrows) = canonical_subtraction(value)?;
+    let (difference, _subtraction_borrows) = canonical_subtraction(value)?;
     let mut row = Vec::with_capacity(NUM_COLUMNS);
     for limb in value {
         append_limb_witness(&mut row, *limb);
@@ -121,12 +121,15 @@ fn trace_columns(value: &[u8; LIMBS]) -> TexasAirResult<MethodTrace> {
     for limb in difference {
         append_limb_witness(&mut row, limb);
     }
-    // The final carry array stores addition carries, which are the reverse
-    // view of the subtraction borrows: carry_in(i) = borrow_out(i - 1), and
-    // carry_in(0) is always zero.
-    row.push(M31::from(0u32));
-    for limb in subtraction_borrows[..31].iter() {
-        row.push(M31::from(u32::from(*limb)));
+    let mut addition_carries = [0u8; LIMBS];
+    let mut addition_carry = 0u16;
+    for index in 0..LIMBS {
+        let sum = u16::from(value[index]) + u16::from(difference[index]) + addition_carry;
+        addition_carries[index] = u8::from(sum >= BASE as u16);
+        addition_carry = sum >> 8;
+    }
+    for carry in addition_carries {
+        row.push(M31::from(u32::from(carry)));
     }
     let mut nonzero_count = 0u32;
     for limb in difference {
@@ -216,16 +219,21 @@ impl FrameworkEval for CanonicalFpAir {
             eval.add_constraint(carry.clone() * (carry.clone() - one.clone()));
             carries.push(carry);
         }
-        eval.add_constraint(carries[0].clone());
+        eval.add_constraint(carries[LIMBS - 1].clone());
         let mut nonzero_count: E::F = M31::from(0u32).into();
         for index in 0..LIMBS {
+            let carry_in = if index == 0 {
+                M31::from(0u32).into()
+            } else {
+                carries[index - 1].clone()
+            };
             let carry_out = if index + 1 == LIMBS {
                 M31::from(0u32).into()
             } else {
-                carries[index + 1].clone()
+                carries[index].clone()
             };
             eval.add_constraint(
-                value[index].clone() + difference[index].clone() + carries[index].clone()
+                value[index].clone() + difference[index].clone() + carry_in
                     - E::F::from(M31::from(u32::from(P_BYTES[index])))
                     - base.clone() * carry_out,
             );
@@ -369,11 +377,21 @@ mod tests {
     fn prove_and_verify_accept_boundary_field_elements() {
         let mut prime_minus_one = P_BYTES;
         prime_minus_one[0] -= 1;
-        for value in [prime_minus_one, {
-            let mut value = prime_minus_one;
-            value[0] -= 1;
-            value
-        }] {
+        let mut small = [0u8; LIMBS];
+        small[0] = 3;
+        let mut inverse_four_squared = [0xffu8; LIMBS];
+        inverse_four_squared[0] = 0xf2;
+        inverse_four_squared[31] = 0x5f;
+        for value in [
+            prime_minus_one,
+            {
+                let mut value = prime_minus_one;
+                value[0] -= 1;
+                value
+            },
+            small,
+            inverse_four_squared,
+        ] {
             let archive = prove_ristretto_fp_canonical(&value)
                 .expect("canonical Ristretto field element proof");
             verify_ristretto_fp_canonical(&archive).expect("canonical verification");
@@ -387,20 +405,25 @@ mod tests {
             value[0] -= 1;
             value
         };
-        let trace = trace_columns(&value).unwrap();
-        let scope = scope_columns(&value);
-        let evals = stwo::core::pcs::TreeVec::new(vec![
-            scope.cols.iter().collect(),
-            trace.cols.iter().collect(),
-        ]);
-        stwo_constraint_framework::assert_constraints_on_trace(
-            &evals,
-            LOG_SIZE,
-            |eval| {
-                CanonicalFpAir { log_size: LOG_SIZE }.evaluate(eval);
-            },
-            SecureField::from(0u32),
-        );
+        let mut inverse_four_squared = [0xffu8; LIMBS];
+        inverse_four_squared[0] = 0xf2;
+        inverse_four_squared[31] = 0x5f;
+        for value in [value, inverse_four_squared] {
+            let trace = trace_columns(&value).unwrap();
+            let scope = scope_columns(&value);
+            let evals = stwo::core::pcs::TreeVec::new(vec![
+                scope.cols.iter().collect(),
+                trace.cols.iter().collect(),
+            ]);
+            stwo_constraint_framework::assert_constraints_on_trace(
+                &evals,
+                LOG_SIZE,
+                |eval| {
+                    CanonicalFpAir { log_size: LOG_SIZE }.evaluate(eval);
+                },
+                SecureField::from(0u32),
+            );
+        }
     }
 
     #[test]

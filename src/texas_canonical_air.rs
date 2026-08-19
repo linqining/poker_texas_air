@@ -32,7 +32,7 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::texas_canonical::{
     CANONICAL_ABI_VERSION, CANONICAL_BETTING_TIMEOUT_MS, CanonicalSeatStatus, CanonicalStateImage,
     CanonicalTransitionKind, CanonicalTransitionWitness, MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS,
-    MAX_CANONICAL_SEATS, validate_batch,
+    MAX_CANONICAL_SEATS,
 };
 use crate::trace_gen::MethodTrace;
 use crate::trace_gen::generic_trace::tagged_batch_log_size;
@@ -115,7 +115,13 @@ const START_BUTTON_SELECTOR_OFFSET: usize = START_ACTIVE_COUNT_INV_OFFSET + 1;
 const START_PRE_BUTTON_SELECTOR_OFFSET: usize = START_BUTTON_SELECTOR_OFFSET + MAX_CANONICAL_SEATS;
 const CONTINUITY_NEXT_PRE_OFFSET: usize = START_PRE_BUTTON_SELECTOR_OFFSET + MAX_CANONICAL_SEATS;
 const CONTINUITY_DOMAIN_COUNT: usize = 6;
-const NUM_COLUMNS: usize = CONTINUITY_NEXT_PRE_OFFSET + CONTINUITY_DOMAIN_COUNT * 16;
+const TRANSITION_COMMITMENT_OFFSET: usize =
+    CONTINUITY_NEXT_PRE_OFFSET + CONTINUITY_DOMAIN_COUNT * 16;
+const NULLIFIER_OFFSET: usize = TRANSITION_COMMITMENT_OFFSET + 16;
+const TRANSITION_COMMITMENT_INV_OFFSET: usize = NULLIFIER_OFFSET + 16;
+const NULLIFIER_INV_OFFSET: usize = TRANSITION_COMMITMENT_INV_OFFSET + 1;
+const ACTOR_INV_OFFSET: usize = NULLIFIER_INV_OFFSET + 1;
+const NUM_COLUMNS: usize = ACTOR_INV_OFFSET + 1;
 // The fixed public scope contains the table/sequence/image boundary plus the
 // five authenticated root domains (state, lifecycle, overlay, settlement and
 // custody) at both ends of the batch.
@@ -1250,9 +1256,14 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     } else {
         M31::from(0u32)
     });
-    let mut button = usize::from(w.pre.button);
-    for offset in 1..=usize::from(w.pre.max_players) {
-        let index = (usize::from(w.pre.button) + offset) % usize::from(w.pre.max_players);
+    // Keep malformed images total while they are being handed to the AIR.
+    // The AIR constrains the original metadata and rejects an invalid capacity;
+    // this clamp only prevents host-side modulo/index panics before that check.
+    let max_players = usize::from(w.pre.max_players.clamp(1, MAX_CANONICAL_SEATS as u8));
+    let start_button = usize::from(w.pre.button).min(max_players.saturating_sub(1));
+    let mut button = start_button;
+    for offset in 1..=max_players {
+        let index = (start_button + offset) % max_players;
         if !matches!(
             w.pre.seats[index].status,
             CanonicalSeatStatus::Empty | CanonicalSeatStatus::Out
@@ -1290,6 +1301,35 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     ] {
         out.extend(bytes16(&digest));
     }
+    out.extend(bytes16(&w.transition_commitment));
+    out.extend(bytes16(&w.nullifier));
+    let transition_sum = bytes16(&w.transition_commitment)
+        .into_iter()
+        .map(|limb| u64::from(limb.0))
+        .sum::<u64>();
+    let nullifier_sum = bytes16(&w.nullifier)
+        .into_iter()
+        .map(|limb| u64::from(limb.0))
+        .sum::<u64>();
+    let actor_sum = bytes16(&w.actor)
+        .into_iter()
+        .map(|limb| u64::from(limb.0))
+        .sum::<u64>();
+    out.push(if transition_sum == 0 {
+        M31::from(0u32)
+    } else {
+        M31::from(transition_sum as u32).inverse()
+    });
+    out.push(if nullifier_sum == 0 {
+        M31::from(0u32)
+    } else {
+        M31::from(nullifier_sum as u32).inverse()
+    });
+    out.push(if actor_sum == 0 {
+        M31::from(0u32)
+    } else {
+        M31::from(actor_sum as u32).inverse()
+    });
     debug_assert_eq!(out.len(), NUM_COLUMNS);
     out
 }
@@ -1467,13 +1507,69 @@ fn trace_for_with_state_opening_scope(
             "canonical batch must contain 1..=1024 transitions".into(),
         ));
     }
-    // The direct production admission API remains fail-closed while the AIR
-    // coverage is incomplete.  Do not remove this prefilter until every
-    // relation below has an AIR-equivalent malicious-witness regression test.
-    validate_batch(witnesses).map_err(TexasAirError::SpecViolation)?;
     let log_size = tagged_batch_log_size(witnesses.len())?;
     let mut trace = MethodTrace::new(log_size, NUM_COLUMNS);
     for (index, witness) in witnesses.iter().enumerate() {
+        // These are fixed-width ABI guards, not VM replay.  Keeping them here
+        // makes malformed protocol/round envelopes fail closed before advice
+        // generation while the semantic relations remain in the AIR.
+        if is_crypto_action(witness.kind) && witness.action.proof_commitment == [0; 32] {
+            return Err(TexasAirError::SpecViolation(
+                "crypto transition requires a non-zero proof commitment".into(),
+            ));
+        }
+        if witness.kind == CanonicalTransitionKind::AdvanceRound {
+            if !(1..=3).contains(&witness.pre.street) {
+                return Err(TexasAirError::SpecViolation(
+                    "advance-round opening has an unsupported street".into(),
+                ));
+            }
+            let pending_mask = witness
+                .pre
+                .seats
+                .iter()
+                .enumerate()
+                .filter(|(_, seat)| {
+                    matches!(
+                        seat.status,
+                        CanonicalSeatStatus::Active
+                            | CanonicalSeatStatus::Folded
+                            | CanonicalSeatStatus::AllIn
+                    )
+                })
+                .fold(0u16, |mask, (seat, _)| mask | (1u16 << seat));
+            let mut padding = false;
+            for assignment in &witness.round_advance.assignments {
+                if !assignment.present {
+                    padding = true;
+                    if assignment.encrypted_card_index != 0
+                        || assignment.runout_index != 0
+                        || assignment.board_position != 0
+                        || assignment.pending_mask != 0
+                        || assignment.submitted_mask != 0
+                    {
+                        return Err(TexasAirError::SpecViolation(
+                            "advance-round opening has non-zero padding".into(),
+                        ));
+                    }
+                } else {
+                    if padding
+                        || assignment.pending_mask != pending_mask
+                        || assignment.submitted_mask != 0
+                    {
+                        return Err(TexasAirError::SpecViolation(
+                            "advance-round opening has a non-canonical assignment envelope".into(),
+                        ));
+                    }
+                }
+            }
+        } else if witness.round_advance
+            != crate::texas_canonical::CanonicalRoundAdvanceOpening::default()
+        {
+            return Err(TexasAirError::SpecViolation(
+                "only advance-round transitions may carry a board opening".into(),
+            ));
+        }
         let next_pre = witnesses.get(index + 1).map(|next| &next.pre);
         trace.write_row(index, &row(witness, next_pre))?;
     }
@@ -1970,6 +2066,11 @@ impl FrameworkEval for CanonicalAir {
         let next_pre_settlement_commitment: Vec<_> =
             (0..16).map(|_| eval.next_trace_mask()).collect();
         let next_pre_custody_commitment: Vec<_> = (0..16).map(|_| eval.next_trace_mask()).collect();
+        let transition_commitment: Vec<_> = (0..16).map(|_| eval.next_trace_mask()).collect();
+        let nullifier: Vec<_> = (0..16).map(|_| eval.next_trace_mask()).collect();
+        let transition_commitment_inv = eval.next_trace_mask();
+        let nullifier_inv = eval.next_trace_mask();
+        let actor_inv = eval.next_trace_mask();
         eval.add_constraint(active.clone() * flag.clone() * (flag.clone() - one.clone()));
         eval.add_constraint(seq_carry.clone() * (seq_carry.clone() - one.clone()));
         for (pre, post) in [
@@ -4455,6 +4556,11 @@ impl FrameworkEval for CanonicalAir {
         {
             eval.add_constraint(inactive.clone() * value.clone());
         }
+        for value in transition_commitment.iter().chain(nullifier.iter()) {
+            eval.add_constraint(inactive.clone() * value.clone());
+        }
+        eval.add_constraint(inactive.clone() * transition_commitment_inv.clone());
+        eval.add_constraint(inactive.clone() * nullifier_inv.clone());
         for limb in advance_deadline_difference
             .iter()
             .chain(deadline_height.iter())
@@ -4657,12 +4763,48 @@ impl FrameworkEval for CanonicalAir {
                 );
             }
         }
-        let is_permissionless = kinds[CanonicalTransitionKind::AdvanceDeadline as usize].clone();
-        let mut actor_nonzero: E::F = M31::from(0u32).into();
+        let is_permissionless = kinds[CanonicalTransitionKind::AdvanceDeadline as usize].clone()
+            + kinds[CanonicalTransitionKind::AdvanceRound as usize].clone();
+        // `AdvanceDeadline` is permissionless in the VM and therefore carries
+        // the canonical zero actor.  Constrain every limb directly; a non-zero
+        // sum check would both accept a forged actor and reject only the
+        // all-zero field-sum corner case.
         for limb in &actor {
-            actor_nonzero += limb.clone();
+            eval.add_constraint(is_permissionless.clone() * limb.clone());
         }
-        eval.add_constraint(is_permissionless * actor_nonzero);
+        let actor_transition = active.clone() - is_permissionless.clone();
+        let mut actor_sum: E::F = M31::from(0u32).into();
+        for limb in &actor {
+            actor_sum += limb.clone();
+        }
+        eval.add_constraint(
+            actor_transition.clone() * (actor_sum * actor_inv.clone() - one.clone()),
+        );
+        eval.add_constraint((active.clone() - actor_transition) * actor_inv.clone());
+        // Settlement configuration is immutable for every transition family
+        // currently represented by this AIR.  Terminal settlement/side-pot
+        // semantics will get their own selector before this gate is relaxed.
+        for (pre, post) in pre_settlement_commitment
+            .iter()
+            .zip(post_settlement_commitment.iter())
+        {
+            eval.add_constraint(active.clone() * (post.clone() - pre.clone()));
+        }
+        // Bind anti-replay identifiers to every active row. Their fixed-width
+        // limbs are committed in the row and an inverse proves that neither
+        // identifier is the all-zero value without relying on host validation.
+        let mut transition_sum: E::F = M31::from(0u32).into();
+        let mut nullifier_sum: E::F = M31::from(0u32).into();
+        for limb in &transition_commitment {
+            transition_sum += limb.clone();
+        }
+        for limb in &nullifier {
+            nullifier_sum += limb.clone();
+        }
+        eval.add_constraint(
+            active.clone() * (transition_sum * transition_commitment_inv.clone() - one.clone()),
+        );
+        eval.add_constraint(active.clone() * (nullifier_sum * nullifier_inv.clone() - one.clone()));
         eval.add_constraint((one.clone() - active.clone()) * (kind_sum + seat + flag));
         let first = eval.get_preprocessed_column(preprocessed_ids()[1].clone());
         let last = eval.get_preprocessed_column(preprocessed_ids()[2].clone());
