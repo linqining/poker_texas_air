@@ -40,6 +40,8 @@ following constraints:
    `src/ristretto_fp_air.rs` now provides the first independently verified
    canonical-limb/range STARK; decode/encode and curve arithmetic still have to
    compose it rather than reusing the arithmetic-only benchmark.
+   The subtraction witness is augmented with per-limb nonzero flags and field
+   inverses, so equality with `p` is rejected in AIR as well as by the prover.
    `src/ristretto_fp_add_air.rs` composes three such range proofs with a
    limbwise `a + b = c mod p` relation and a one-bit prime-reduction witness.
    Its limb carries are signed values in `{-1, 0, 1}`; each relation consumes
@@ -67,9 +69,33 @@ following constraints:
    every intermediate value.  Like `sqrt_ratio_i`, it is a semantic
    host-zero bridge rather than the final performance layout; its component
    STARKs must later be folded into one point codec.
-2. Canonical Ristretto encode and the remaining point-membership/composition
-   relations, including composing decoded points with scalar multiplication,
-   Edwards addition, and prime-order quotient checks.
+   `src/ristretto_edwards_add_air.rs` composes two decoded canonical points
+   with the complete unified extended-Edwards addition formula and authenticates
+   every intermediate field value through the verified Fp operations.  It is
+   likewise a semantic group-operation bridge, not the eventual single-AIR
+   scalar-multiplication/MSM layout.
+   `src/ristretto_point_encode_air.rs` composes the exact dalek compression
+   equations and both authenticated sign branches, including the identity's
+   zero inverse-sqrt edge case, to return a canonical nonnegative 32-byte
+   encoding.  Decode, encode, and Edwards addition now form a semantic
+   host-zero roundtrip bridge, but still need to be folded into the final
+   single point-arith/codec AIR.
+   `src/ristretto_scalar_air.rs` provides the matching canonical limb/bit STARK
+   for scalars strictly below the Ristretto group order `l`; its nonzero
+   subtraction witness is likewise verified in AIR.
+   `src/ristretto_fp_program_air.rs` is the first folded performance substrate:
+   it places a public DAG of canonical Fp add/sub/mul operations, including all
+   limb, strict-range, carry, quotient, and bit witnesses, in one Stwo proof
+   instead of composing one STARK per arithmetic operation.  The point codec,
+   Edwards arithmetic, scalar multiplication, and MSM components should migrate
+   onto this layout before production deployment.
+   Its first folded semantic wrapper is `sqrt_ratio_i`: the three multiplication
+   statements share one program STARK and one set of canonical-value witnesses.
+   On the current development machine, the focused one-proof test ran in 3.58s
+   versus 7.93s for the composed implementation.
+2. Remaining point-composition relations, including composing decoded points
+   with scalar multiplication, Edwards addition, and prime-order quotient
+   checks.
 3. Extended-Edwards complete addition/doubling formulas, curve membership and
    Ristretto prime-order quotient semantics. AIR internals should retain
    extended coordinates; only request/state boundaries are compressed.

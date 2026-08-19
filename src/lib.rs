@@ -100,12 +100,18 @@ pub mod ristretto_fp_air;
 pub mod ristretto_fp_inv_air;
 /// Canonical Ristretto255 modular-multiplication AIR.
 pub mod ristretto_fp_mul_air;
+/// Single-STARK canonical Ristretto255 field-program AIR.
+pub mod ristretto_fp_program_air;
 /// Composed Ristretto255 `sqrt_ratio_i` proofs.
 pub mod ristretto_fp_sqrt_ratio_air;
 /// Composed Ristretto255 modular-subtraction proofs.
 pub mod ristretto_fp_sub_air;
 /// Composed host-zero Ristretto255 point-decode proofs.
 pub mod ristretto_point_decode_air;
+/// Composed host-zero Ristretto255 point-encode proofs.
+pub mod ristretto_point_encode_air;
+/// Canonical Ristretto255 group-scalar limb AIR.
+pub mod ristretto_scalar_air;
 
 /// Canonical tagged-seat fixture operations, available only to tests and debug test helpers.
 #[cfg(any(test, feature = "test-helpers"))]

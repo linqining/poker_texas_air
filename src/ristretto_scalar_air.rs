@@ -1,10 +1,8 @@
-//! Canonical Ristretto255 field-element limb AIR.
+//! Canonical Ristretto255 group-scalar limb AIR.
 //!
-//! This is the first production-oriented primitive for the Ristretto migration:
-//! a public 32-byte value is constrained to use canonical 8-bit limbs and lie
-//! strictly below `2^255 - 19`.  The subtraction witness is committed, so the
-//! inequality is an AIR relation rather than a host comparison.  Later decode,
-//! encode, DLEQ, and MSM components will compose this limb representation.
+//! A public 32-byte scalar is constrained to canonical 8-bit limbs and to be
+//! strictly below the prime-order group order `l`.  The bound is checked by an
+//! AIR subtraction witness, not by a native host comparison.
 
 use bincode::Options;
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -39,20 +37,18 @@ const INVERSE_OFFSET: usize = NONZERO_OFFSET + LIMBS;
 const NUM_COLUMNS: usize = INVERSE_OFFSET + LIMBS + 1;
 const PREPROCESSED_COLUMNS: usize = LIMBS;
 
-/// Little-endian bytes of the Ristretto255 prime `2^255 - 19`.
-const P_BYTES: [u8; LIMBS] = {
-    let mut bytes = [0xffu8; LIMBS];
-    bytes[0] = 0xed;
-    bytes[31] = 0x7f;
-    bytes
-};
+/// Little-endian bytes of the Ristretto255 group order.
+const GROUP_ORDER_BYTES: [u8; LIMBS] = [
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+];
 
+/// A public Ristretto255 scalar and its canonical-range STARK.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-/// A public Ristretto255 field element and its canonical-limb STARK.
-pub struct ArchivedRistrettoFpCanonicalProof {
-    /// Little-endian public field-element bytes.
+pub struct ArchivedRistrettoScalarCanonicalProof {
+    /// Little-endian public scalar bytes.
     pub value: [u8; LIMBS],
-    /// Serialized Stwo proof binding the bytes to the canonical range relation.
+    /// Serialized proof binding the scalar to the canonical range relation.
     pub stark_proof_bytes: Vec<u8>,
 }
 
@@ -62,42 +58,41 @@ fn options() -> impl Options {
         .with_limit(16 * 1024 * 1024)
 }
 
-fn canonical_subtraction(value: &[u8; LIMBS]) -> TexasAirResult<([u8; LIMBS], [u8; LIMBS])> {
+fn order_minus_value(value: &[u8; LIMBS]) -> TexasAirResult<([u8; LIMBS], [u8; LIMBS])> {
     let mut difference = [0u8; LIMBS];
-    let mut carries = [0u8; LIMBS];
+    let mut borrows = [0u8; LIMBS];
     let mut borrow = false;
     for index in 0..LIMBS {
-        let prime_limb = u16::from(P_BYTES[index]);
-        let value_limb = u16::from(value[index]);
-        let mut left = prime_limb;
+        let mut order_limb = u16::from(GROUP_ORDER_BYTES[index]);
         if borrow {
-            left = left.saturating_sub(1);
+            order_limb = order_limb.saturating_sub(1);
         }
-        if left >= value_limb {
-            difference[index] =
-                u8::try_from(left - value_limb).expect("canonical limb subtraction fits in u8");
+        let value_limb = u16::from(value[index]);
+        if order_limb >= value_limb {
+            difference[index] = u8::try_from(order_limb - value_limb)
+                .expect("canonical scalar subtraction fits in a byte");
             borrow = false;
         } else {
-            difference[index] = u8::try_from(left + 256u16 - value_limb)
-                .expect("canonical limb subtraction fits in u8");
+            difference[index] = u8::try_from(order_limb + 256u16 - value_limb)
+                .expect("canonical scalar subtraction fits in a byte");
             borrow = true;
         }
-        carries[index] = u8::from(borrow);
+        borrows[index] = u8::from(borrow);
     }
     if borrow {
         return Err(TexasAirError::SpecViolation(
-            "Ristretto255 field element is not below the prime".into(),
+            "Ristretto scalar is not below the group order".into(),
         ));
     }
     if difference == [0u8; LIMBS] {
         return Err(TexasAirError::SpecViolation(
-            "Ristretto255 field element must be strictly below the prime".into(),
+            "Ristretto scalar must be strictly below the group order".into(),
         ));
     }
-    Ok((difference, carries))
+    Ok((difference, borrows))
 }
 
-fn append_limb_witness(row: &mut Vec<M31>, limb: u8) {
+fn append_limb(row: &mut Vec<M31>, limb: u8) {
     row.push(M31::from(u32::from(limb)));
     for bit in 0..8 {
         row.push(M31::from(u32::from((limb >> bit) & 1)));
@@ -106,27 +101,24 @@ fn append_limb_witness(row: &mut Vec<M31>, limb: u8) {
 
 fn m31_inverse(value: u8) -> M31 {
     if value == 0 {
-        M31::from(0u32)
-    } else {
-        M31::from(u32::from(value)).inverse()
+        return M31::from(0u32);
     }
+    M31::from(u32::from(value)).inverse()
 }
 
 fn trace_columns(value: &[u8; LIMBS]) -> TexasAirResult<MethodTrace> {
-    let (difference, subtraction_borrows) = canonical_subtraction(value)?;
+    let (difference, borrows) = order_minus_value(value)?;
     let mut row = Vec::with_capacity(NUM_COLUMNS);
     for limb in value {
-        append_limb_witness(&mut row, *limb);
+        append_limb(&mut row, *limb);
     }
     for limb in difference {
-        append_limb_witness(&mut row, limb);
+        append_limb(&mut row, limb);
     }
-    // The final carry array stores addition carries, which are the reverse
-    // view of the subtraction borrows: carry_in(i) = borrow_out(i - 1), and
-    // carry_in(0) is always zero.
+    // Addition carry into limb i is subtraction borrow out of limb i-1.
     row.push(M31::from(0u32));
-    for limb in subtraction_borrows[..31].iter() {
-        row.push(M31::from(u32::from(*limb)));
+    for borrow in borrows[..LIMBS - 1].iter() {
+        row.push(M31::from(u32::from(*borrow)));
     }
     let mut nonzero_count = 0u32;
     for limb in difference {
@@ -148,25 +140,25 @@ fn scope_columns(value: &[u8; LIMBS]) -> MethodTrace {
         .iter()
         .map(|limb| M31::from(u32::from(*limb)))
         .collect::<Vec<_>>();
-    trace.write_row(0, &row).expect("fixed scope width");
-    trace.write_row(1, &row).expect("fixed scope width");
+    trace.write_row(0, &row).expect("fixed scalar scope width");
+    trace.write_row(1, &row).expect("fixed scalar scope width");
     trace
 }
 
 fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
     (0..LIMBS)
         .map(|limb| PreProcessedColumnId {
-            id: format!("ristretto.fp.value.v1.{limb}").into(),
+            id: format!("ristretto.scalar.canonical.v1.{limb}").into(),
         })
         .collect()
 }
 
 #[derive(Clone, Copy)]
-struct CanonicalFpAir {
+struct CanonicalScalarAir {
     log_size: u32,
 }
 
-impl FrameworkEval for CanonicalFpAir {
+impl FrameworkEval for CanonicalScalarAir {
     fn log_size(&self) -> u32 {
         self.log_size
     }
@@ -182,7 +174,7 @@ impl FrameworkEval for CanonicalFpAir {
 
         let mut value = Vec::with_capacity(LIMBS);
         let mut difference = Vec::with_capacity(LIMBS);
-        for _ in 0..LIMBS {
+        for _ in 0..(2 * LIMBS) {
             let limb = eval.next_trace_mask();
             let mut bits = Vec::with_capacity(8);
             for _ in 0..8 {
@@ -194,22 +186,13 @@ impl FrameworkEval for CanonicalFpAir {
                 reconstructed += bit.clone() * E::F::from(M31::from(1u32 << bit_index));
             }
             eval.add_constraint(limb.clone() - reconstructed);
-            value.push(limb);
-        }
-        for _ in 0..LIMBS {
-            let limb = eval.next_trace_mask();
-            let mut bits = Vec::with_capacity(8);
-            for _ in 0..8 {
-                bits.push(eval.next_trace_mask());
+            if value.len() < LIMBS {
+                value.push(limb);
+            } else {
+                difference.push(limb);
             }
-            let mut reconstructed: E::F = M31::from(0u32).into();
-            for (bit_index, bit) in bits.iter().enumerate() {
-                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
-                reconstructed += bit.clone() * E::F::from(M31::from(1u32 << bit_index));
-            }
-            eval.add_constraint(limb.clone() - reconstructed);
-            difference.push(limb);
         }
+
         let mut carries = Vec::with_capacity(LIMBS);
         for _ in 0..LIMBS {
             let carry = eval.next_trace_mask();
@@ -226,10 +209,11 @@ impl FrameworkEval for CanonicalFpAir {
             };
             eval.add_constraint(
                 value[index].clone() + difference[index].clone() + carries[index].clone()
-                    - E::F::from(M31::from(u32::from(P_BYTES[index])))
+                    - E::F::from(M31::from(u32::from(GROUP_ORDER_BYTES[index])))
                     - base.clone() * carry_out,
             );
         }
+
         for index in 0..LIMBS {
             let nonzero = eval.next_trace_mask();
             let inverse = eval.next_trace_mask();
@@ -248,13 +232,10 @@ impl FrameworkEval for CanonicalFpAir {
     }
 }
 
-/// Prove that a public little-endian Ristretto255 field element is canonical.
-///
-/// The host constructs witness columns but does not provide a trusted comparison result.
-/// Verification reconstructs only public scope and invokes STARK verification.
-pub fn prove_ristretto_fp_canonical(
+/// Prove that a public little-endian Ristretto scalar is canonical.
+pub fn prove_ristretto_scalar_canonical(
     value: &[u8; LIMBS],
-) -> TexasAirResult<ArchivedRistrettoFpCanonicalProof> {
+) -> TexasAirResult<ArchivedRistrettoScalarCanonicalProof> {
     let trace = trace_columns(value)?;
     let scope = scope_columns(value);
     let config = crate::prover_context::protocol_pcs_config();
@@ -287,7 +268,7 @@ pub fn prove_ristretto_fp_canonical(
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
         &mut allocator,
-        CanonicalFpAir { log_size: LOG_SIZE },
+        CanonicalScalarAir { log_size: LOG_SIZE },
         SecureField::from(0u32),
     );
     let proof = prove(&[&component], &mut channel, scheme)
@@ -295,15 +276,15 @@ pub fn prove_ristretto_fp_canonical(
     let stark_proof_bytes = options()
         .serialize(&proof)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
-    Ok(ArchivedRistrettoFpCanonicalProof {
+    Ok(ArchivedRistrettoScalarCanonicalProof {
         value: *value,
         stark_proof_bytes,
     })
 }
 
-/// Verify the AIR canonical-range statement without a native big-integer comparison.
-pub fn verify_ristretto_fp_canonical(
-    archive: &ArchivedRistrettoFpCanonicalProof,
+/// Verify the scalar canonical-range statement without a host comparison.
+pub fn verify_ristretto_scalar_canonical(
+    archive: &ArchivedRistrettoScalarCanonicalProof,
 ) -> TexasAirResult<()> {
     type Proof = StarkProof<Poseidon252MerkleHasher>;
     let proof: Proof = options()
@@ -327,9 +308,10 @@ pub fn verify_ristretto_fp_canonical(
     }
     if proof.commitments.first().copied() != trusted.roots().first().copied() {
         return Err(TexasAirError::ConstraintUnsatisfied(
-            "Ristretto Fp public scope commitment mismatch".into(),
+            "Ristretto scalar public scope commitment mismatch".into(),
         ));
     }
+
     let mut channel = stwo::core::channel::Poseidon252Channel::default();
     channel.mix_u32s(
         &archive
@@ -354,7 +336,7 @@ pub fn verify_ristretto_fp_canonical(
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
         &mut allocator,
-        CanonicalFpAir { log_size: LOG_SIZE },
+        CanonicalScalarAir { log_size: LOG_SIZE },
         SecureField::from(0u32),
     );
     stwo::core::verifier::verify(&[&component], &mut channel, &mut scheme, proof)
@@ -366,24 +348,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prove_and_verify_accept_boundary_field_elements() {
-        let mut prime_minus_one = P_BYTES;
-        prime_minus_one[0] -= 1;
-        for value in [prime_minus_one, {
-            let mut value = prime_minus_one;
+    fn prove_and_verify_accept_boundary_scalars() {
+        let mut order_minus_one = GROUP_ORDER_BYTES;
+        order_minus_one[0] -= 1;
+        for value in [order_minus_one, {
+            let mut value = order_minus_one;
             value[0] -= 1;
             value
         }] {
-            let archive = prove_ristretto_fp_canonical(&value)
-                .expect("canonical Ristretto field element proof");
-            verify_ristretto_fp_canonical(&archive).expect("canonical verification");
+            let archive = prove_ristretto_scalar_canonical(&value).unwrap();
+            verify_ristretto_scalar_canonical(&archive).unwrap();
         }
     }
 
     #[test]
-    fn witness_rows_satisfy_the_direct_fp_constraints() {
+    fn witness_rows_satisfy_the_direct_scalar_constraints() {
         let value = {
-            let mut value = P_BYTES;
+            let mut value = GROUP_ORDER_BYTES;
             value[0] -= 1;
             value
         };
@@ -397,31 +378,29 @@ mod tests {
             &evals,
             LOG_SIZE,
             |eval| {
-                CanonicalFpAir { log_size: LOG_SIZE }.evaluate(eval);
+                CanonicalScalarAir { log_size: LOG_SIZE }.evaluate(eval);
             },
             SecureField::from(0u32),
         );
     }
 
     #[test]
-    fn noncanonical_field_element_rejects_before_proving() {
-        assert!(prove_ristretto_fp_canonical(&P_BYTES).is_err());
+    fn noncanonical_scalar_rejects_before_proving() {
+        assert!(prove_ristretto_scalar_canonical(&GROUP_ORDER_BYTES).is_err());
 
-        let mut value = P_BYTES;
+        let mut value = GROUP_ORDER_BYTES;
         value[0] += 1;
-        assert!(prove_ristretto_fp_canonical(&value).is_err());
+        assert!(prove_ristretto_scalar_canonical(&value).is_err());
     }
 
     #[test]
-    fn direct_constraints_reject_a_forged_noncanonical_limb() {
+    fn direct_constraints_reject_a_forged_noncanonical_scalar_limb() {
         let value = {
-            let mut value = P_BYTES;
+            let mut value = GROUP_ORDER_BYTES;
             value[0] -= 1;
             value
         };
         let mut trace = trace_columns(&value).unwrap();
-        // Bypass the prover-side canonical check and modify only the low limb.
-        // The committed prime-subtraction equation must reject p + 1.
         trace.cols[VALUE_OFFSET][0] += M31::from(1u32);
         let scope = scope_columns(&value);
         let evals = stwo::core::pcs::TreeVec::new(vec![
@@ -434,7 +413,7 @@ mod tests {
                     &evals,
                     LOG_SIZE,
                     |eval| {
-                        CanonicalFpAir { log_size: LOG_SIZE }.evaluate(eval);
+                        CanonicalScalarAir { log_size: LOG_SIZE }.evaluate(eval);
                     },
                     SecureField::from(0u32),
                 );
@@ -445,11 +424,11 @@ mod tests {
 
     #[test]
     fn verifier_rejects_public_scope_splice() {
-        let mut canonical = P_BYTES;
+        let mut canonical = GROUP_ORDER_BYTES;
         canonical[0] -= 1;
-        let archive = prove_ristretto_fp_canonical(&canonical).unwrap();
+        let archive = prove_ristretto_scalar_canonical(&canonical).unwrap();
         let mut forged = archive;
         forged.value[0] ^= 1;
-        assert!(verify_ristretto_fp_canonical(&forged).is_err());
+        assert!(verify_ristretto_scalar_canonical(&forged).is_err());
     }
 }
