@@ -46,7 +46,7 @@ const KIND_COUNT: usize = 21;
 // The first 271 columns are the fixed canonical ABI.  The projection suffix carries the
 // phase/round scalars and selected-seat image needed by the betting family.  Keeping it in
 // the same row preserves the tagged batch's one-proof-per-table performance profile.
-const BASE_NUM_COLUMNS: usize = 1564;
+const BASE_NUM_COLUMNS: usize = 1566;
 const FULL_BETTING_SEAT_WIDTH: usize = SEAT_STATUS_COUNT + 4 * 4 + 2;
 const FULL_BETTING_SEATS_OFFSET: usize = BASE_NUM_COLUMNS;
 const FULL_POST_BETTING_SEATS_OFFSET: usize =
@@ -84,8 +84,12 @@ const ADVANCE_DEADLINE_RANGE_BITS_OFFSET: usize = ADVANCE_DEADLINE_CARRIES_OFFSE
 const ADVANCE_DEADLINE_PRE_INV_OFFSET: usize = ADVANCE_DEADLINE_RANGE_BITS_OFFSET + 3 * 4 * 16;
 const ADVANCE_DEADLINE_PHASE_INV_OFFSET: usize = ADVANCE_DEADLINE_PRE_INV_OFFSET + 1;
 const LEAVE_AFTER_HAND_MASK_BITS_OFFSET: usize = ADVANCE_DEADLINE_PHASE_INV_OFFSET + 1;
-const TRANSITION_SEAT_SELECTOR_OFFSET: usize =
+const PROTOCOL_PENDING_MASK_BITS_OFFSET: usize =
     LEAVE_AFTER_HAND_MASK_BITS_OFFSET + 2 * MAX_CANONICAL_SEATS;
+const PROTOCOL_PENDING_POST_INV_OFFSET: usize =
+    PROTOCOL_PENDING_MASK_BITS_OFFSET + 2 * MAX_CANONICAL_SEATS;
+const TRANSITION_SEAT_SELECTOR_OFFSET: usize =
+    PROTOCOL_PENDING_POST_INV_OFFSET + 1;
 const OPAQUE_COMMITMENTS_OFFSET: usize = TRANSITION_SEAT_SELECTOR_OFFSET + MAX_CANONICAL_SEATS;
 const OPAQUE_COMMITMENT_COUNT: usize = 5;
 const STATE_IMAGE_METADATA_LIMBS: usize = 3;
@@ -132,12 +136,12 @@ const ROOT_DOMAIN_COUNT: usize = 5;
 const STATE_IMAGE_SCOPE_OFFSET: usize = ROOT_SCOPE_OFFSET + 16 * ROOT_DOMAIN_COUNT * 2;
 
 // `CanonicalStateImage` is deliberately a fixed Borsh ABI.  These constants
-// are byte positions in its 1,658-byte v3 encoding, not host projections.
+// are byte positions in its 1,660-byte v4 encoding, not host projections.
 // The endpoint scope below materializes every byte of that fixed image: u8
 // fields stay separate, while the remaining bytes use 16-bit little-endian
 // limbs.  Remaining host-zero gaps concern transition semantics, not an
 // unbound endpoint field.
-const CANONICAL_STATE_IMAGE_BORSH_BYTES: usize = 1_658;
+const CANONICAL_STATE_IMAGE_BORSH_BYTES: usize = 1_660;
 const STATE_IMAGE_TABLE_OFFSET: usize = 2;
 const STATE_IMAGE_HAND_OFFSET: usize = 10;
 const STATE_IMAGE_CALL_SEQ_OFFSET: usize = 14;
@@ -152,19 +156,20 @@ const STATE_IMAGE_CHIP_POOL_OFFSET: usize = 46;
 const STATE_IMAGE_POT_OFFSET: usize = 54;
 const STATE_IMAGE_ACTED_MASK_OFFSET: usize = 64;
 const STATE_IMAGE_LEAVE_MASK_OFFSET: usize = 66;
-const STATE_IMAGE_BOARD_CARDS_COMMITMENT_OFFSET: usize = 68;
-const STATE_IMAGE_DECK_COMMITMENT_OFFSET: usize = 100;
-const STATE_IMAGE_REVEAL_COMMITMENT_OFFSET: usize = 132;
-const STATE_IMAGE_RECONSTRUCTION_COMMITMENT_OFFSET: usize = 164;
-const STATE_IMAGE_RUN_IT_TWICE_COMMITMENT_OFFSET: usize = 196;
-const STATE_IMAGE_RULES_OFFSET: usize = 228;
-const STATE_IMAGE_GOVERNANCE_OFFSET: usize = 260;
-const STATE_IMAGE_SETTLEMENT_OFFSET: usize = 292;
-const STATE_IMAGE_CUSTODY_OFFSET: usize = 324;
-const STATE_IMAGE_LIFECYCLE_OFFSET: usize = 356;
-const STATE_IMAGE_OVERLAY_OFFSET: usize = 388;
-const STATE_IMAGE_ROOT_OFFSET: usize = 420;
-const STATE_IMAGE_SEATS_OFFSET: usize = 452;
+const STATE_IMAGE_PROTOCOL_PENDING_MASK_OFFSET: usize = 68;
+const STATE_IMAGE_BOARD_CARDS_COMMITMENT_OFFSET: usize = 70;
+const STATE_IMAGE_DECK_COMMITMENT_OFFSET: usize = 102;
+const STATE_IMAGE_REVEAL_COMMITMENT_OFFSET: usize = 134;
+const STATE_IMAGE_RECONSTRUCTION_COMMITMENT_OFFSET: usize = 166;
+const STATE_IMAGE_RUN_IT_TWICE_COMMITMENT_OFFSET: usize = 198;
+const STATE_IMAGE_RULES_OFFSET: usize = 230;
+const STATE_IMAGE_GOVERNANCE_OFFSET: usize = 262;
+const STATE_IMAGE_SETTLEMENT_OFFSET: usize = 294;
+const STATE_IMAGE_CUSTODY_OFFSET: usize = 326;
+const STATE_IMAGE_LIFECYCLE_OFFSET: usize = 358;
+const STATE_IMAGE_OVERLAY_OFFSET: usize = 390;
+const STATE_IMAGE_ROOT_OFFSET: usize = 422;
+const STATE_IMAGE_SEATS_OFFSET: usize = 454;
 const STATE_IMAGE_SEAT_BYTES: usize = 134;
 const STATE_IMAGE_SEAT_STATUS_OFFSET: usize = 0;
 const STATE_IMAGE_SEAT_ACTED_OFFSET: usize = 1;
@@ -176,7 +181,7 @@ const STATE_IMAGE_SEAT_TIME_BANK_OFFSET: usize = 34;
 const STATE_IMAGE_SEAT_IDENTITY_COMMITMENT_OFFSET: usize = 38;
 const STATE_IMAGE_SEAT_KEY_COMMITMENT_OFFSET: usize = 70;
 const STATE_IMAGE_SEAT_HOLE_CARDS_COMMITMENT_OFFSET: usize = 102;
-const STATE_IMAGE_HEADER_PROJECTION_LIMBS: usize = 37;
+const STATE_IMAGE_HEADER_PROJECTION_LIMBS: usize = 38;
 const STATE_IMAGE_COMMITMENT_PROJECTION_LIMBS: usize = 16 * (7 + OPAQUE_COMMITMENT_COUNT);
 const STATE_IMAGE_SEAT_PROJECTION_LIMBS: usize = 20 + SEAT_COMMITMENT_LIMBS;
 const STATE_IMAGE_PROJECTION_LIMBS: usize = STATE_IMAGE_HEADER_PROJECTION_LIMBS
@@ -193,7 +198,7 @@ const PRE_PHASE_OFFSET: usize = 273;
 const POST_PHASE_OFFSET: usize = 274;
 const POST_TURN_OFFSET: usize = 280;
 const POST_LEAVE_MASK_OFFSET: usize = 308;
-const SELECTED_POST_STATUS_OFFSET: usize = 329;
+const SELECTED_POST_STATUS_OFFSET: usize = 331;
 const DEADLINE_HEIGHT_OFFSET: usize = 268;
 
 #[derive(Debug, Clone, Copy)]
@@ -356,6 +361,10 @@ fn state_image_projection(bytes: &[u8]) -> TexasAirResult<Vec<M31>> {
     append_state_image_u64_projection(&mut out, bytes, STATE_IMAGE_POT_OFFSET);
     out.push(state_image_limb(bytes, STATE_IMAGE_ACTED_MASK_OFFSET));
     out.push(state_image_limb(bytes, STATE_IMAGE_LEAVE_MASK_OFFSET));
+    out.push(state_image_limb(
+        bytes,
+        STATE_IMAGE_PROTOCOL_PENDING_MASK_OFFSET,
+    ));
     for offset in [
         STATE_IMAGE_RULES_OFFSET,
         STATE_IMAGE_GOVERNANCE_OFFSET,
@@ -567,6 +576,8 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     out.push(M31::from(u32::from(w.post.acted_mask)));
     out.push(M31::from(u32::from(w.pre.leave_after_hand_mask)));
     out.push(M31::from(u32::from(w.post.leave_after_hand_mask)));
+    out.push(M31::from(u32::from(w.pre.protocol_pending_mask)));
+    out.push(M31::from(u32::from(w.post.protocol_pending_mask)));
     let seat = usize::from(w.action.seat);
     let before = if seat < w.pre.seats.len() {
         Some(w.pre.seats[seat])
@@ -1108,6 +1119,21 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     // AIR rather than a host-side u16 operation.
     out.extend(mask_bits(w.pre.leave_after_hand_mask));
     out.extend(mask_bits(w.post.leave_after_hand_mask));
+    debug_assert_eq!(out.len(), PROTOCOL_PENDING_MASK_BITS_OFFSET);
+    out.extend(mask_bits(w.pre.protocol_pending_mask));
+    out.extend(mask_bits(w.post.protocol_pending_mask));
+    let protocol_submit = matches!(
+        w.kind,
+        CanonicalTransitionKind::SubmitShuffle
+            | CanonicalTransitionKind::SubmitReveal
+            | CanonicalTransitionKind::SubmitReconstruct
+    );
+    let post_pending_count = w.post.protocol_pending_mask.count_ones();
+    out.push(if protocol_submit && post_pending_count != 0 {
+        M31::from(post_pending_count).inverse()
+    } else {
+        M31::from(0u32)
+    });
     debug_assert_eq!(out.len(), TRANSITION_SEAT_SELECTOR_OFFSET);
     let requires_seat = w.kind.requires_seat();
     for index in 0..MAX_CANONICAL_SEATS {
@@ -1441,7 +1467,7 @@ fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
     for endpoint in ["pre-state-image", "post-state-image"] {
         for limb in 0..STATE_IMAGE_PROJECTION_LIMBS {
             ids.push(PreProcessedColumnId {
-                id: format!("texas.canonical.{endpoint}.v3.{limb}").into(),
+                id: format!("texas.canonical.{endpoint}.v4.{limb}").into(),
             });
         }
     }
@@ -1781,6 +1807,8 @@ impl FrameworkEval for CanonicalAir {
         let post_acted_mask = eval.next_trace_mask();
         let pre_leave_mask = eval.next_trace_mask();
         let post_leave_mask = eval.next_trace_mask();
+        let pre_protocol_pending_mask = eval.next_trace_mask();
+        let post_protocol_pending_mask = eval.next_trace_mask();
         let pre_status = eval.next_trace_mask();
         let pre_seat_acted = eval.next_trace_mask();
         let pre_stack = trace_limbs(&mut eval);
@@ -2014,6 +2042,11 @@ impl FrameworkEval for CanonicalAir {
             std::array::from_fn(|_| eval.next_trace_mask());
         let post_leave_mask_bits: [E::F; MAX_CANONICAL_SEATS] =
             std::array::from_fn(|_| eval.next_trace_mask());
+        let pre_protocol_pending_mask_bits: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let post_protocol_pending_mask_bits: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let protocol_pending_post_inv = eval.next_trace_mask();
         let transition_seat_selectors: [E::F; MAX_CANONICAL_SEATS] =
             std::array::from_fn(|_| eval.next_trace_mask());
         let pre_opaque_commitments: [[E::F; 16]; OPAQUE_COMMITMENT_COUNT] =
@@ -3018,6 +3051,71 @@ impl FrameworkEval for CanonicalAir {
         }
         eval.add_constraint(active.clone() * (pre_leave_mask_from_bits - pre_leave_mask.clone()));
         eval.add_constraint(active.clone() * (post_leave_mask_from_bits - post_leave_mask.clone()));
+        let mut pre_protocol_mask_from_bits: E::F = M31::from(0u32).into();
+        let mut post_protocol_mask_from_bits: E::F = M31::from(0u32).into();
+        let mut post_protocol_pending_count: E::F = M31::from(0u32).into();
+        let mut selected_protocol_pre_bit: E::F = M31::from(0u32).into();
+        let mut expected_protocol_participants: E::F = M31::from(0u32).into();
+        for index in 0..MAX_CANONICAL_SEATS {
+            let pre_bit = pre_protocol_pending_mask_bits[index].clone();
+            let post_bit = post_protocol_pending_mask_bits[index].clone();
+            let selector = transition_seat_selectors[index].clone();
+            let bit_weight: E::F = M31::from(1u32 << index).into();
+            for bit in [&pre_bit, &post_bit] {
+                eval.add_constraint(active.clone() * bit.clone() * (bit.clone() - one.clone()));
+            }
+            pre_protocol_mask_from_bits += pre_bit.clone() * bit_weight.clone();
+            post_protocol_mask_from_bits += post_bit.clone() * bit_weight.clone();
+            post_protocol_pending_count += post_bit.clone();
+            selected_protocol_pre_bit += selector.clone() * pre_bit.clone();
+            eval.add_constraint(
+                is_protocol_submit.clone()
+                    * (post_bit - pre_bit + selector),
+            );
+            let participating = full_post_status[index][CanonicalSeatStatus::Active as usize]
+                .clone()
+                + full_post_status[index][CanonicalSeatStatus::Folded as usize].clone()
+                + full_post_status[index][CanonicalSeatStatus::AllIn as usize].clone();
+            expected_protocol_participants += participating * bit_weight;
+        }
+        eval.add_constraint(
+            active.clone()
+                * (pre_protocol_mask_from_bits - pre_protocol_pending_mask.clone()),
+        );
+        eval.add_constraint(
+            active.clone()
+                * (post_protocol_mask_from_bits - post_protocol_pending_mask.clone()),
+        );
+        eval.add_constraint(selected_protocol_pre_bit - is_protocol_submit.clone());
+        eval.add_constraint(
+            post_protocol_pending_count * protocol_pending_post_inv
+                - is_protocol_submit.clone(),
+        );
+        // Until the phase-completion openings (new timeout, reveal schedule,
+        // blinds/antes, or reconstruct reshuffle) are in this AIR, a protocol
+        // submit is deliberately non-final and keeps the phase header fixed.
+        for (pre, post) in [
+            (&pre_phase, &post_phase),
+            (&pre_subtag, &post_subtag),
+            (&pre_street, &post_street),
+        ] {
+            eval.add_constraint(is_protocol_submit.clone() * (post.clone() - pre.clone()));
+        }
+        for (left, right) in pre_deadline_image.iter().zip(post_deadline_image.iter()) {
+            eval.add_constraint(is_protocol_submit.clone() * (right.clone() - left.clone()));
+        }
+        let ordinary_non_protocol = active.clone()
+            - is_protocol_submit.clone()
+            - is_start.clone()
+            - is_round_advance.clone();
+        eval.add_constraint(ordinary_non_protocol.clone() * pre_protocol_pending_mask.clone());
+        eval.add_constraint(ordinary_non_protocol * post_protocol_pending_mask.clone());
+        eval.add_constraint(is_start.clone() * pre_protocol_pending_mask.clone());
+        eval.add_constraint(is_round_advance.clone() * pre_protocol_pending_mask.clone());
+        eval.add_constraint(
+            (is_start.clone() + is_round_advance.clone())
+                * (post_protocol_pending_mask.clone() - expected_protocol_participants),
+        );
         // Open every seat that the VM consults while progressing a betting
         // round.  This makes the current selected-seat projection a derived
         // value and prevents the host from changing a non-acting stack/bet or
@@ -4413,6 +4511,8 @@ impl FrameworkEval for CanonicalAir {
             &post_acted_mask,
             &pre_leave_mask,
             &post_leave_mask,
+            &pre_protocol_pending_mask,
+            &post_protocol_pending_mask,
             &pre_status,
             &post_status,
             &pre_seat_acted,
@@ -4470,9 +4570,12 @@ impl FrameworkEval for CanonicalAir {
             .chain(acted_deltas.iter())
             .chain(pre_leave_mask_bits.iter())
             .chain(post_leave_mask_bits.iter())
+            .chain(pre_protocol_pending_mask_bits.iter())
+            .chain(post_protocol_pending_mask_bits.iter())
         {
             eval.add_constraint(inactive.clone() * value.clone());
         }
+        eval.add_constraint(inactive.clone() * protocol_pending_post_inv.clone());
         for carry in stack_carries
             .iter()
             .chain(bet_carries.iter())
@@ -4971,7 +5074,7 @@ impl FrameworkEval for CanonicalAir {
         // Bind the endpoint values already materialized by this AIR to the
         // corresponding fixed positions in the full Borsh state-image byte
         // statement.  The entire byte string is Fiat--Shamir-bound in
-        // `mix_scope`; this 841-limb projection is the bridge preventing the
+        // `mix_scope`; this fixed-width projection is the bridge preventing the
         // host from pairing a different table/seat/balance/root image with a
         // valid canonical trace.
         let mut pre_state_binding = Vec::with_capacity(STATE_IMAGE_PROJECTION_LIMBS);
@@ -5007,6 +5110,8 @@ impl FrameworkEval for CanonicalAir {
         post_state_binding.push(post_acted_mask.clone());
         pre_state_binding.push(pre_leave_mask.clone());
         post_state_binding.push(post_leave_mask.clone());
+        pre_state_binding.push(pre_protocol_pending_mask.clone());
+        post_state_binding.push(post_protocol_pending_mask.clone());
         for (pre, post) in [
             (&pre_rules_commitment, &post_rules_commitment),
             (&pre_governance_commitment, &post_governance_commitment),
@@ -5467,6 +5572,7 @@ mod tests {
             max_players: 2,
             acted_mask: 0,
             leave_after_hand_mask: 0,
+            protocol_pending_mask: 0,
             board_cards_commitment: [1; 32],
             deck_commitment: [2; 32],
             reveal_commitment: [3; 32],

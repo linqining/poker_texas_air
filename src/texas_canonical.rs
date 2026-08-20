@@ -9,7 +9,7 @@ use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
 
-pub const CANONICAL_ABI_VERSION: u16 = 3;
+pub const CANONICAL_ABI_VERSION: u16 = 4;
 pub const MAX_CANONICAL_SEATS: usize = 9;
 /// The flop under run-it-twice is the largest board reveal batch: three cards
 /// on each of two runouts.  Keeping this array fixed is essential for the
@@ -145,6 +145,11 @@ pub struct CanonicalStateImage {
     pub max_players: u8,
     pub acted_mask: u16,
     pub leave_after_hand_mask: u16,
+    /// Seats that still owe the active shuffle/reveal/reconstruct protocol a
+    /// submission.  Reveal uses the union of every assignment's pending mask;
+    /// the VM requires one submit call to cover every assignment owed by that
+    /// seat, so one bit is removed atomically per accepted protocol action.
+    pub protocol_pending_mask: u16,
     pub board_cards_commitment: [u8; 32],
     pub deck_commitment: [u8; 32],
     pub reveal_commitment: [u8; 32],
@@ -178,7 +183,10 @@ impl CanonicalStateImage {
         } else {
             (1u16 << self.max_players) - 1
         };
-        if self.acted_mask & !valid_mask != 0 || self.leave_after_hand_mask & !valid_mask != 0 {
+        if self.acted_mask & !valid_mask != 0
+            || self.leave_after_hand_mask & !valid_mask != 0
+            || self.protocol_pending_mask & !valid_mask != 0
+        {
             return Err("seat mask exceeds table capacity".into());
         }
         for (name, value) in [
@@ -195,7 +203,11 @@ impl CanonicalStateImage {
             }
         }
         if self.phase == CanonicalPhase::Waiting {
-            if self.phase_subtag != 0 || self.street != 0 || self.acted_mask != 0 {
+            if self.phase_subtag != 0
+                || self.street != 0
+                || self.acted_mask != 0
+                || self.protocol_pending_mask != 0
+            {
                 return Err("waiting phase carries active hand progress".into());
             }
         } else {
@@ -208,6 +220,18 @@ impl CanonicalStateImage {
         }
         if self.phase == CanonicalPhase::Betting && !(1..=4).contains(&self.street) {
             return Err("betting phase street is outside preflop..river".into());
+        }
+        if matches!(
+            self.phase,
+            CanonicalPhase::Shuffling
+                | CanonicalPhase::Revealing
+                | CanonicalPhase::Reconstructing
+        ) {
+            if self.protocol_pending_mask == 0 {
+                return Err("active protocol phase has no pending participant".into());
+            }
+        } else if self.protocol_pending_mask != 0 {
+            return Err("non-protocol phase carries a pending participant mask".into());
         }
         if self.phase == CanonicalPhase::Waiting {
             if self.current_turn != NO_CANONICAL_SEAT || self.deadline_ms != 0 {
@@ -873,10 +897,12 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                     break;
                 }
             }
+            let participant_mask = active_reveal_mask(&pre.seats);
             if post.button != button.unwrap_or(pre.button)
                 || post.phase_subtag != 1
                 || post.street != 0
                 || post.acted_mask != 0
+                || post.protocol_pending_mask != participant_mask
             {
                 return Err("start_hand header/button initialization is invalid".into());
             }
@@ -887,6 +913,7 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                 expected.phase_subtag = actual.phase_subtag;
                 expected.deadline_ms = actual.deadline_ms;
                 expected.call_seq = actual.call_seq;
+                expected.protocol_pending_mask = actual.protocol_pending_mask;
             })?;
         }
         CanonicalTransitionKind::AdvanceDeadline => {
@@ -1031,6 +1058,9 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                 );
             }
             validate_board_reveal_opening(pre, post, &w.round_advance)?;
+            if post.protocol_pending_mask != active_reveal_mask(&post.seats) {
+                return Err("advance_round did not open the canonical reveal participant mask".into());
+            }
             let collected = pre.seats.iter().try_fold(0u64, |sum, seat| {
                 sum.checked_add(seat.bet)
                     .ok_or("advance_round seat-bet sum overflow")
@@ -1071,6 +1101,7 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                 expected.reconstruction_commitment = actual.reconstruction_commitment;
                 expected.run_it_twice_commitment = actual.run_it_twice_commitment;
                 expected.custody_commitment = actual.custody_commitment;
+                expected.protocol_pending_mask = actual.protocol_pending_mask;
                 for seat in &mut expected.seats {
                     seat.bet = 0;
                 }
@@ -1301,6 +1332,27 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             if before.status == CanonicalSeatStatus::Empty {
                 return Err("crypto transition requires an occupied submitting seat".into());
             }
+            let seat_bit = 1u16 << w.action.seat;
+            if pre.protocol_pending_mask & seat_bit == 0 {
+                return Err("crypto transition seat is not pending".into());
+            }
+            let remaining = pre.protocol_pending_mask & !seat_bit;
+            // Completion changes the tagged phase in the VM and may also arm
+            // a new timeout or initialize betting economics.  Those final
+            // branches remain fail-closed until their complete fixed-width
+            // openings are constrained; non-final submissions no longer rely
+            // on native replay to authenticate protocol progress.
+            if remaining == 0 {
+                return Err("final protocol submission requires the phase-completion AIR".into());
+            }
+            if post.phase != pre.phase
+                || post.phase_subtag != pre.phase_subtag
+                || post.street != pre.street
+                || post.deadline_ms != pre.deadline_ms
+                || post.protocol_pending_mask != remaining
+            {
+                return Err("non-final protocol submission has an invalid progress transition".into());
+            }
             // The protocol-state commitments are expanded by their dedicated
             // Ristretto AIRs.  Until those relations land, keep the canonical
             // admission closed: each submit family may only replace its own
@@ -1308,9 +1360,7 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             // completes), while seats and custody buckets remain immutable.
             only_allowed_changes(pre, post, None, |expected, actual| {
                 expected.call_seq = actual.call_seq;
-                expected.phase = actual.phase;
-                expected.phase_subtag = actual.phase_subtag;
-                expected.deadline_ms = actual.deadline_ms;
+                expected.protocol_pending_mask = actual.protocol_pending_mask;
                 match w.kind {
                     CanonicalTransitionKind::SubmitShuffle => {
                         expected.deck_commitment = actual.deck_commitment;
@@ -1429,6 +1479,7 @@ mod tests {
             max_players: 2,
             acted_mask: 0,
             leave_after_hand_mask: 0,
+            protocol_pending_mask: 0,
             board_cards_commitment: [1; 32],
             deck_commitment: [2; 32],
             reveal_commitment: [3; 32],

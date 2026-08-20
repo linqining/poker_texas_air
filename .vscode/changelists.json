@@ -1,0 +1,14 @@
+{
+  "changelists": [
+    {
+      "name": "Default",
+      "files": [
+        "src/canonical_state_hash.rs",
+        "src/texas_canonical.rs",
+        "src/texas_canonical_air.rs",
+        "strk20.json"
+      ]
+    }
+  ],
+  "active": "Default"
+}

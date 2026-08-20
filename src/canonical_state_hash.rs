@@ -101,6 +101,7 @@ mod tests {
             max_players: 2,
             acted_mask: 0,
             leave_after_hand_mask: 0,
+            protocol_pending_mask: 0,
             board_cards_commitment: [1; 32],
             deck_commitment: [2; 32],
             reveal_commitment: [3; 32],
