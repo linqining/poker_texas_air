@@ -9,20 +9,13 @@ use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
 
-pub const CANONICAL_ABI_VERSION: u16 = 4;
+pub const CANONICAL_ABI_VERSION: u16 = 5;
 pub const MAX_CANONICAL_SEATS: usize = 9;
 /// The flop under run-it-twice is the largest board reveal batch: three cards
 /// on each of two runouts.  Keeping this array fixed is essential for the
 /// tagged AIR's one-proof-per-table trace layout.
 pub const MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS: usize = 6;
 pub const NO_CANONICAL_SEAT: u8 = 0x0f;
-/// Default betting timeout from `poker_l1::texas_poker::TimeoutConfig`.
-///
-/// The current fixed canonical state image does not yet expose the complete
-/// timeout configuration.  Until that ABI is extended, the direct
-/// `AdvanceDeadline` relation is intentionally limited to this deployment
-/// default rather than accepting a prover-supplied timeout.
-pub const CANONICAL_BETTING_TIMEOUT_MS: u32 = 30_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
@@ -135,6 +128,14 @@ pub struct CanonicalStateImage {
     pub street: u8,
     pub current_turn: u8,
     pub deadline_ms: u64,
+    /// Canonical VM timeout configuration.  These durations are immutable
+    /// table parameters and are opened directly so phase-completion deadlines
+    /// never depend on a prover-selected deployment default.
+    pub shuffle_timeout_ms: u32,
+    pub reveal_timeout_ms: u32,
+    pub betting_timeout_ms: u32,
+    pub reconstruct_timeout_ms: u32,
+    pub showdown_display_ms: u32,
     pub current_bet: u64,
     pub min_raise: u64,
     /// Exact TableVault custody balance.  It is not derivable from a selected
@@ -223,9 +224,7 @@ impl CanonicalStateImage {
         }
         if matches!(
             self.phase,
-            CanonicalPhase::Shuffling
-                | CanonicalPhase::Revealing
-                | CanonicalPhase::Reconstructing
+            CanonicalPhase::Shuffling | CanonicalPhase::Revealing | CanonicalPhase::Reconstructing
         ) {
             if self.protocol_pending_mask == 0 {
                 return Err("active protocol phase has no pending participant".into());
@@ -251,6 +250,16 @@ impl CanonicalStateImage {
                 return Err("seat bet exceeds current bet".into());
             }
             let bit = 1u16 << index;
+            if self.protocol_pending_mask & bit != 0
+                && !matches!(
+                    seat.status,
+                    CanonicalSeatStatus::Active
+                        | CanonicalSeatStatus::Folded
+                        | CanonicalSeatStatus::AllIn
+                )
+            {
+                return Err("protocol pending mask addresses an ineligible seat".into());
+            }
             if seat.acted != (self.acted_mask & bit != 0) {
                 return Err("acted mask is not the fixed-width seat projection".into());
             }
@@ -937,8 +946,8 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             {
                 return Err("advance_deadline has an invalid betting extension selector".into());
             }
-            let consume = u64::from(pre.seats[seat].time_bank_ms)
-                .min(u64::from(CANONICAL_BETTING_TIMEOUT_MS));
+            let consume =
+                u64::from(pre.seats[seat].time_bank_ms).min(u64::from(pre.betting_timeout_ms));
             if consume == 0
                 || w.action.amount != consume
                 || post.deadline_ms != pre.deadline_ms.saturating_add(consume)
@@ -971,7 +980,7 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                 || w.action.flag
                 || post.deadline_ms
                     != w.deadline_height
-                        .checked_add(u64::from(CANONICAL_BETTING_TIMEOUT_MS))
+                        .checked_add(u64::from(pre.betting_timeout_ms))
                         .ok_or("auto-fold deadline overflow")?
                 || after.status != CanonicalSeatStatus::Folded
                 || !after.acted
@@ -1059,7 +1068,9 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             }
             validate_board_reveal_opening(pre, post, &w.round_advance)?;
             if post.protocol_pending_mask != active_reveal_mask(&post.seats) {
-                return Err("advance_round did not open the canonical reveal participant mask".into());
+                return Err(
+                    "advance_round did not open the canonical reveal participant mask".into(),
+                );
             }
             let collected = pre.seats.iter().try_fold(0u64, |sum, seat| {
                 sum.checked_add(seat.bet)
@@ -1351,7 +1362,9 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                 || post.deadline_ms != pre.deadline_ms
                 || post.protocol_pending_mask != remaining
             {
-                return Err("non-final protocol submission has an invalid progress transition".into());
+                return Err(
+                    "non-final protocol submission has an invalid progress transition".into(),
+                );
             }
             // The protocol-state commitments are expanded by their dedicated
             // Ristretto AIRs.  Until those relations land, keep the canonical
@@ -1471,6 +1484,11 @@ mod tests {
             street: 0,
             current_turn: NO_CANONICAL_SEAT,
             deadline_ms: 0,
+            shuffle_timeout_ms: 10_000,
+            reveal_timeout_ms: 10_000,
+            betting_timeout_ms: 30_000,
+            reconstruct_timeout_ms: 10_000,
+            showdown_display_ms: 3_000,
             current_bet: 0,
             min_raise: 0,
             chip_pool: 0,
@@ -1504,6 +1522,31 @@ mod tests {
         let mut value = image();
         value.deadline_ms = 1;
         assert!(value.validate().is_err());
+
+        let mut value = image();
+        value.protocol_pending_mask = 1;
+        assert!(value.validate().is_err());
+
+        let mut value = image();
+        value.phase = CanonicalPhase::Shuffling;
+        value.phase_subtag = 1;
+        value.deadline_ms = u64::from(value.shuffle_timeout_ms);
+        assert!(value.validate().is_err());
+        value.protocol_pending_mask = 1;
+        value.chip_pool = 1;
+        value.seats[0] = CanonicalSeat {
+            status: CanonicalSeatStatus::Active,
+            acted: false,
+            stack: 1,
+            bet: 0,
+            total_bet: 0,
+            pending_addon: 0,
+            time_bank_ms: 0,
+            identity_commitment: [21; 32],
+            key_commitment: [22; 32],
+            hole_cards_commitment: [0; 32],
+        };
+        assert!(value.validate().is_ok());
     }
 
     #[test]

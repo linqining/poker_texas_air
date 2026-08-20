@@ -35,7 +35,15 @@ production table head.
 The complete-state migration starts at [`src/texas_canonical.rs`](src/texas_canonical.rs):
 it defines a fixed-width ABI for every VM phase, seat lifecycle, deck/reveal/reconstruction
 commitment, run-it-twice state, rules/governance, custody, settlement, and state-root field.
-It is currently a structural/commitment boundary; `texas_canonical_air` now binds its
+ABI v5 carries the fixed nine-seat protocol pending mask used by shuffle,
+reveal, and reconstruction, plus the VM's five immutable timeout durations.
+`texas_canonical_air` range-checks those timeout limbs and derives betting
+time-bank/auto-fold arithmetic from the opened `betting_timeout_ms` instead of
+a deployment constant. It proves each non-final protocol
+submit clears exactly the submitting seat's bit and cannot forge a final submit;
+the phase-completion branches remain fail-closed until their deadline/schedule/
+blind/reconstruction openings and crypto equations are composed. The ABI is still
+a structural/commitment boundary; `texas_canonical_air` now binds its
 fixed-width trace shape, but selector-specific semantic constraints still need to be
 implemented before it replaces the projected betting image.
 

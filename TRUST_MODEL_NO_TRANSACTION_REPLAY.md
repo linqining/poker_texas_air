@@ -19,12 +19,14 @@ state root，而不执行交易回放。旧 `ProveTask`/VM replay 路径仍保�
 `texas_tagged::verify_tagged_texas_proof` 和
 `texas_canonical_air::verify_canonical_tagged_proof` 现在可以只使用归档中的公开
 scope 和 Stwo proof 完成验证，不再读取 `ProveTask`、交易 payload 或执行 native VM
-replay。前者只证明 betting/funding/leave 的投影关系；后者证明 20-kind canonical
+replay。前者只证明 betting/funding/leave 的投影关系；后者证明 21-kind canonical
 trace 的形状、selector、序号、表作用域和相邻 state-image commitment 链接，并证明
 下注完成后所有 seat `bet` 被精确收集进 pot；它还在 AIR 内约束 permissionless/actor
 authority、settlement commitment 不变，以及 transition/nullifier 非零。canonical
-trace builder 不再把 `validate_batch` 当作 admission prefilter，只保留固定宽度 ABI
-guards（例如 crypto commitment、AdvanceRound opening/padding）；
+trace builder 仍调用 `validate_batch` 做 prover-side witness hygiene，但 verifier 不调用它，
+也不能把它当作 admission 语义；mutation tests 会在构造 trace 后绕过该检查，直接验证
+AIR 自身是否拒绝伪造。固定宽度 ABI guards（例如 crypto commitment、AdvanceRound
+opening/padding）同样只负责尽早报错；
 `CanonicalTransitionWitness::validate_shape` 仍是可选结构检查，不应被当作完整
 VM 语义证明。未列入 AIR 的 selector relation 仍必须在生产 admission 中 fail-closed。
 这只消除了 verifier 的回放依赖；它没有把 prover 提供的
@@ -42,9 +44,19 @@ carry/range relation 证明 action height 不早于 pre deadline；但它
 identity material，不允许改动 board/reveal/reconstruct/run-it-twice commitments，并
 只允许 deck commitment 被 leave-DLEQ 层移除替换。三个 submit 标签也直接约束其
 pre phase（shuffle/reveal/reconstruct）、非空提交座位和非零、16-bit range-bound 的
-proof commitment；当前 ABI 仍要求 protocol submit 保持 phase 不变，因此 zchain 最后一次
-提交触发的 `shuffle -> reveal`、`reveal -> betting`、`reconstruct -> shuffle` 跃迁继续
-fail-closed，直到固定宽度 pending/completed protocol mask 与对应密码学关系加入 AIR。它们不能借由 protocol payload 改动筹码、座位、board 或普通
+proof commitment。canonical ABI v5 已增加固定九位 `protocol_pending_mask`：shuffle /
+reconstruct 直接投影 VM pending mask，reveal 投影所有 assignment pending mask 的并集。
+AIR 将 pre/post mask 分解成 boolean bits，要求 action seat 的 pre bit 为一、每次只清除该
+seat bit，并用 inverse 证明 post mask 仍非空；`StartHand` 与 `AdvanceRound` 打开的新
+protocol mask 还从完整九 seat lifecycle image 推导。因此非最后一次协议提交的进度不再由
+host 决定。ABI v5 同时打开 shuffle/reveal/betting/reconstruct/showdown 五项 `u32`
+timeout 配置；AIR 对十个 16-bit limb 做 range decomposition，要求 transition 前后保持不变，
+并以打开的 `betting_timeout_ms` 推导 time-bank extension 与 `AutoFold` 新 deadline，不再信任
+固定部署默认值。当前 completion opening 尚未包含 authenticated completion timestamp、
+reveal schedule、blind/ante 或
+reconstruct reshuffle 的全部字段，所以最后一次提交触发的 `shuffle -> reveal`、
+`reveal -> betting`、`reconstruct -> shuffle` 跃迁仍明确 fail-closed，而不是信任 action
+flag 或 host 的“完成”判断。它们不能借由 protocol payload 改动筹码、座位、board 或普通
 状态字段。这些只是 transition shape/anti-null 边界，**不**验证 DLEQ、shuffle、
 reveal 或 reconstruction 的 Ristretto 方程。
 
@@ -82,7 +94,7 @@ commitment。它消除了 root-opening splice，但不宣称已经在 AIR 内重
 pre/post SMT opening 组合，得到 byte→commitment→root 链。canonical transition
 AIR 已将 ABI/header、table、phase、资金、五类 root、九个 seat 的完整公开 image
 （含 identity/key/hole-card commitment），以及 board/deck/reveal/reconstruction/
-run-it-twice 五个 commitment（共 841 个 endpoint limb）回绑到这些 Borsh bytes；
+run-it-twice 五个 commitment、protocol pending mask 和完整 timeout config（共 852 个 endpoint limb）回绑到这些 Borsh bytes；
 对下注、funding、join/leave、force/kick、SetLeaveAfterHand 与 AdvanceRound，
 已知不变的 commitment 字段也被约束为不变。完整 bytes 也进入 Fiat--Shamir scope。
 Shuffle/reveal/reconstruct 的 phase/seat/proof-presence shape，以及非终局

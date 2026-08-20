@@ -7,9 +7,13 @@
 直接 `texas_canonical_air` tagged receipt 路径混读。后者不依赖 `ProveTask` 或 host replay：
 `verify_canonical_proof` 只提供结构审计，`admit_canonical_proof` 及
 `admit_canonical_proof_with_state_openings` 当前明确 fail-closed。尤其是 direct AIR 的
-`AdvanceDeadline` 目前只证明固定 betting timeout 的 time-bank extension 及状态不变性；direct
+`AdvanceDeadline` 目前只证明由 ABI 打开的 `betting_timeout_ms` 所决定的 time-bank extension
+及状态不变性；direct
 AIR 另有受限的非级联 `AutoFold` timeout suffix，但尚未证明 VM 的 turn/round cascade、settlement
-或 reset；因此本文下述 legacy plan
+或 reset。direct canonical ABI v5 已把 shuffle/reveal/reconstruct 的九位 pending participant
+mask 和五项 timeout config 纳入 endpoint opening；非终局 submit 必须在 AIR 内精确清除 action seat bit，post mask
+必须非空。最后一次 submit 所需的新 deadline、reveal schedule、blind/ante 与 reconstruct
+reshuffle opening 尚未完成，所以 completion 仍 fail-closed；因此本文下述 legacy plan
 完成项不代表 direct canonical proof 已具备 host-zero admission 语义。
 
 ## P0-5：Host-native 验证、digest 绑定与聚合边界

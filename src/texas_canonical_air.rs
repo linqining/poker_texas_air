@@ -30,9 +30,8 @@ use stwo_constraint_framework::{
 
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::texas_canonical::{
-    CANONICAL_ABI_VERSION, CANONICAL_BETTING_TIMEOUT_MS, CanonicalSeatStatus, CanonicalStateImage,
-    CanonicalTransitionKind, CanonicalTransitionWitness, MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS,
-    MAX_CANONICAL_SEATS,
+    CANONICAL_ABI_VERSION, CanonicalSeatStatus, CanonicalStateImage, CanonicalTransitionKind,
+    CanonicalTransitionWitness, MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS, MAX_CANONICAL_SEATS,
 };
 use crate::trace_gen::MethodTrace;
 use crate::trace_gen::generic_trace::tagged_batch_log_size;
@@ -43,8 +42,8 @@ const KIND_COUNT: usize = 21;
 // active, kinds, table, hand(pre/post), seq(pre/post), image commitments(pre/post),
 // state roots(pre/post), lifecycle roots(pre/post), overlay roots(pre/post), settlement roots
 // (pre/post), custody roots(pre/post), actor, action, deadline, and the sequence carry.
-// The first 271 columns are the fixed canonical ABI.  The projection suffix carries the
-// phase/round scalars and selected-seat image needed by the betting family.  Keeping it in
+// The fixed prefix carries the canonical ABI.  The projection suffix carries the
+// phase/round scalars and selected-seat image needed by the betting family. Keeping it in
 // the same row preserves the tagged batch's one-proof-per-table performance profile.
 const BASE_NUM_COLUMNS: usize = 1566;
 const FULL_BETTING_SEAT_WIDTH: usize = SEAT_STATUS_COUNT + 4 * 4 + 2;
@@ -88,10 +87,12 @@ const PROTOCOL_PENDING_MASK_BITS_OFFSET: usize =
     LEAVE_AFTER_HAND_MASK_BITS_OFFSET + 2 * MAX_CANONICAL_SEATS;
 const PROTOCOL_PENDING_POST_INV_OFFSET: usize =
     PROTOCOL_PENDING_MASK_BITS_OFFSET + 2 * MAX_CANONICAL_SEATS;
-const TRANSITION_SEAT_SELECTOR_OFFSET: usize =
-    PROTOCOL_PENDING_POST_INV_OFFSET + 1;
+const TRANSITION_SEAT_SELECTOR_OFFSET: usize = PROTOCOL_PENDING_POST_INV_OFFSET + 1;
 const OPAQUE_COMMITMENTS_OFFSET: usize = TRANSITION_SEAT_SELECTOR_OFFSET + MAX_CANONICAL_SEATS;
 const OPAQUE_COMMITMENT_COUNT: usize = 5;
+const TIMEOUT_CONFIG_FIELD_COUNT: usize = 5;
+const TIMEOUT_CONFIG_LIMBS: usize = 2 * TIMEOUT_CONFIG_FIELD_COUNT;
+const BETTING_TIMEOUT_LIMB_OFFSET: usize = 2 * 2;
 const STATE_IMAGE_METADATA_LIMBS: usize = 3;
 const STATE_IMAGE_METADATA_OFFSET: usize =
     OPAQUE_COMMITMENTS_OFFSET + 2 * OPAQUE_COMMITMENT_COUNT * 16;
@@ -125,7 +126,9 @@ const NULLIFIER_OFFSET: usize = TRANSITION_COMMITMENT_OFFSET + 16;
 const TRANSITION_COMMITMENT_INV_OFFSET: usize = NULLIFIER_OFFSET + 16;
 const NULLIFIER_INV_OFFSET: usize = TRANSITION_COMMITMENT_INV_OFFSET + 1;
 const ACTOR_INV_OFFSET: usize = NULLIFIER_INV_OFFSET + 1;
-const NUM_COLUMNS: usize = ACTOR_INV_OFFSET + 1;
+const TIMEOUT_CONFIG_OFFSET: usize = ACTOR_INV_OFFSET + 1;
+const TIMEOUT_CONFIG_RANGE_BITS_OFFSET: usize = TIMEOUT_CONFIG_OFFSET + 2 * TIMEOUT_CONFIG_LIMBS;
+const NUM_COLUMNS: usize = TIMEOUT_CONFIG_RANGE_BITS_OFFSET + TIMEOUT_CONFIG_LIMBS * 16;
 // The fixed public scope contains the table/sequence/image boundary plus the
 // five authenticated root domains (state, lifecycle, overlay, settlement and
 // custody) at both ends of the batch.
@@ -136,12 +139,12 @@ const ROOT_DOMAIN_COUNT: usize = 5;
 const STATE_IMAGE_SCOPE_OFFSET: usize = ROOT_SCOPE_OFFSET + 16 * ROOT_DOMAIN_COUNT * 2;
 
 // `CanonicalStateImage` is deliberately a fixed Borsh ABI.  These constants
-// are byte positions in its 1,660-byte v4 encoding, not host projections.
+// are byte positions in its 1,680-byte v5 encoding, not host projections.
 // The endpoint scope below materializes every byte of that fixed image: u8
 // fields stay separate, while the remaining bytes use 16-bit little-endian
 // limbs.  Remaining host-zero gaps concern transition semantics, not an
 // unbound endpoint field.
-const CANONICAL_STATE_IMAGE_BORSH_BYTES: usize = 1_660;
+const CANONICAL_STATE_IMAGE_BORSH_BYTES: usize = 1_680;
 const STATE_IMAGE_TABLE_OFFSET: usize = 2;
 const STATE_IMAGE_HAND_OFFSET: usize = 10;
 const STATE_IMAGE_CALL_SEQ_OFFSET: usize = 14;
@@ -150,26 +153,33 @@ const STATE_IMAGE_PHASE_SUBTAG_OFFSET: usize = 19;
 const STATE_IMAGE_STREET_OFFSET: usize = 20;
 const STATE_IMAGE_TURN_OFFSET: usize = 21;
 const STATE_IMAGE_DEADLINE_OFFSET: usize = 22;
-const STATE_IMAGE_CURRENT_BET_OFFSET: usize = 30;
-const STATE_IMAGE_MIN_RAISE_OFFSET: usize = 38;
-const STATE_IMAGE_CHIP_POOL_OFFSET: usize = 46;
-const STATE_IMAGE_POT_OFFSET: usize = 54;
-const STATE_IMAGE_ACTED_MASK_OFFSET: usize = 64;
-const STATE_IMAGE_LEAVE_MASK_OFFSET: usize = 66;
-const STATE_IMAGE_PROTOCOL_PENDING_MASK_OFFSET: usize = 68;
-const STATE_IMAGE_BOARD_CARDS_COMMITMENT_OFFSET: usize = 70;
-const STATE_IMAGE_DECK_COMMITMENT_OFFSET: usize = 102;
-const STATE_IMAGE_REVEAL_COMMITMENT_OFFSET: usize = 134;
-const STATE_IMAGE_RECONSTRUCTION_COMMITMENT_OFFSET: usize = 166;
-const STATE_IMAGE_RUN_IT_TWICE_COMMITMENT_OFFSET: usize = 198;
-const STATE_IMAGE_RULES_OFFSET: usize = 230;
-const STATE_IMAGE_GOVERNANCE_OFFSET: usize = 262;
-const STATE_IMAGE_SETTLEMENT_OFFSET: usize = 294;
-const STATE_IMAGE_CUSTODY_OFFSET: usize = 326;
-const STATE_IMAGE_LIFECYCLE_OFFSET: usize = 358;
-const STATE_IMAGE_OVERLAY_OFFSET: usize = 390;
-const STATE_IMAGE_ROOT_OFFSET: usize = 422;
-const STATE_IMAGE_SEATS_OFFSET: usize = 454;
+const STATE_IMAGE_SHUFFLE_TIMEOUT_OFFSET: usize = 30;
+const STATE_IMAGE_REVEAL_TIMEOUT_OFFSET: usize = 34;
+const STATE_IMAGE_BETTING_TIMEOUT_OFFSET: usize = 38;
+const STATE_IMAGE_RECONSTRUCT_TIMEOUT_OFFSET: usize = 42;
+const STATE_IMAGE_SHOWDOWN_DISPLAY_OFFSET: usize = 46;
+const STATE_IMAGE_CURRENT_BET_OFFSET: usize = 50;
+const STATE_IMAGE_MIN_RAISE_OFFSET: usize = 58;
+const STATE_IMAGE_CHIP_POOL_OFFSET: usize = 66;
+const STATE_IMAGE_POT_OFFSET: usize = 74;
+const STATE_IMAGE_BUTTON_OFFSET: usize = 82;
+const STATE_IMAGE_MAX_PLAYERS_OFFSET: usize = 83;
+const STATE_IMAGE_ACTED_MASK_OFFSET: usize = 84;
+const STATE_IMAGE_LEAVE_MASK_OFFSET: usize = 86;
+const STATE_IMAGE_PROTOCOL_PENDING_MASK_OFFSET: usize = 88;
+const STATE_IMAGE_BOARD_CARDS_COMMITMENT_OFFSET: usize = 90;
+const STATE_IMAGE_DECK_COMMITMENT_OFFSET: usize = 122;
+const STATE_IMAGE_REVEAL_COMMITMENT_OFFSET: usize = 154;
+const STATE_IMAGE_RECONSTRUCTION_COMMITMENT_OFFSET: usize = 186;
+const STATE_IMAGE_RUN_IT_TWICE_COMMITMENT_OFFSET: usize = 218;
+const STATE_IMAGE_RULES_OFFSET: usize = 250;
+const STATE_IMAGE_GOVERNANCE_OFFSET: usize = 282;
+const STATE_IMAGE_SETTLEMENT_OFFSET: usize = 314;
+const STATE_IMAGE_CUSTODY_OFFSET: usize = 346;
+const STATE_IMAGE_LIFECYCLE_OFFSET: usize = 378;
+const STATE_IMAGE_OVERLAY_OFFSET: usize = 410;
+const STATE_IMAGE_ROOT_OFFSET: usize = 442;
+const STATE_IMAGE_SEATS_OFFSET: usize = 474;
 const STATE_IMAGE_SEAT_BYTES: usize = 134;
 const STATE_IMAGE_SEAT_STATUS_OFFSET: usize = 0;
 const STATE_IMAGE_SEAT_ACTED_OFFSET: usize = 1;
@@ -181,7 +191,7 @@ const STATE_IMAGE_SEAT_TIME_BANK_OFFSET: usize = 34;
 const STATE_IMAGE_SEAT_IDENTITY_COMMITMENT_OFFSET: usize = 38;
 const STATE_IMAGE_SEAT_KEY_COMMITMENT_OFFSET: usize = 70;
 const STATE_IMAGE_SEAT_HOLE_CARDS_COMMITMENT_OFFSET: usize = 102;
-const STATE_IMAGE_HEADER_PROJECTION_LIMBS: usize = 38;
+const STATE_IMAGE_HEADER_PROJECTION_LIMBS: usize = 48;
 const STATE_IMAGE_COMMITMENT_PROJECTION_LIMBS: usize = 16 * (7 + OPAQUE_COMMITMENT_COUNT);
 const STATE_IMAGE_SEAT_PROJECTION_LIMBS: usize = 20 + SEAT_COMMITMENT_LIMBS;
 const STATE_IMAGE_PROJECTION_LIMBS: usize = STATE_IMAGE_HEADER_PROJECTION_LIMBS
@@ -198,6 +208,8 @@ const PRE_PHASE_OFFSET: usize = 273;
 const POST_PHASE_OFFSET: usize = 274;
 const POST_TURN_OFFSET: usize = 280;
 const POST_LEAVE_MASK_OFFSET: usize = 308;
+const PRE_PROTOCOL_PENDING_MASK_OFFSET: usize = 309;
+const POST_PROTOCOL_PENDING_MASK_OFFSET: usize = 310;
 const SELECTED_POST_STATUS_OFFSET: usize = 331;
 const DEADLINE_HEIGHT_OFFSET: usize = 268;
 
@@ -331,7 +343,7 @@ fn append_state_image_commitment_projection(out: &mut Vec<M31>, bytes: &[u8], of
 
 /// Project the Borsh endpoint bytes onto values that the current canonical
 /// transition AIR already carries in its trace.  This keeps the expensive
-/// full byte statement in Fiat--Shamir while adding only 841 endpoint scope
+/// full byte statement in Fiat--Shamir while adding only 852 endpoint scope
 /// limbs, rather than thousands of public columns.
 fn state_image_projection(bytes: &[u8]) -> TexasAirResult<Vec<M31>> {
     if bytes.len() != CANONICAL_STATE_IMAGE_BORSH_BYTES {
@@ -341,8 +353,8 @@ fn state_image_projection(bytes: &[u8]) -> TexasAirResult<Vec<M31>> {
     }
     let mut out = Vec::with_capacity(STATE_IMAGE_PROJECTION_LIMBS);
     out.push(state_image_limb(bytes, 0));
-    out.push(M31::from(u32::from(bytes[62])));
-    out.push(M31::from(u32::from(bytes[63])));
+    out.push(M31::from(u32::from(bytes[STATE_IMAGE_BUTTON_OFFSET])));
+    out.push(M31::from(u32::from(bytes[STATE_IMAGE_MAX_PLAYERS_OFFSET])));
     append_state_image_u64_projection(&mut out, bytes, STATE_IMAGE_TABLE_OFFSET);
     append_state_image_u32_projection(&mut out, bytes, STATE_IMAGE_HAND_OFFSET);
     append_state_image_u32_projection(&mut out, bytes, STATE_IMAGE_CALL_SEQ_OFFSET);
@@ -355,6 +367,15 @@ fn state_image_projection(bytes: &[u8]) -> TexasAirResult<Vec<M31>> {
         out.push(M31::from(u32::from(bytes[offset])));
     }
     append_state_image_u64_projection(&mut out, bytes, STATE_IMAGE_DEADLINE_OFFSET);
+    for offset in [
+        STATE_IMAGE_SHUFFLE_TIMEOUT_OFFSET,
+        STATE_IMAGE_REVEAL_TIMEOUT_OFFSET,
+        STATE_IMAGE_BETTING_TIMEOUT_OFFSET,
+        STATE_IMAGE_RECONSTRUCT_TIMEOUT_OFFSET,
+        STATE_IMAGE_SHOWDOWN_DISPLAY_OFFSET,
+    ] {
+        append_state_image_u32_projection(&mut out, bytes, offset);
+    }
     append_state_image_u64_projection(&mut out, bytes, STATE_IMAGE_CURRENT_BET_OFFSET);
     append_state_image_u64_projection(&mut out, bytes, STATE_IMAGE_MIN_RAISE_OFFSET);
     append_state_image_u64_projection(&mut out, bytes, STATE_IMAGE_CHIP_POOL_OFFSET);
@@ -1196,7 +1217,7 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         }
     }
     let advance_deadline = w.kind == CanonicalTransitionKind::AdvanceDeadline;
-    let timeout = u64::from(CANONICAL_BETTING_TIMEOUT_MS);
+    let timeout = u64::from(w.pre.betting_timeout_ms);
     let selected_time_bank = if advance_deadline {
         w.pre
             .seats
@@ -1246,7 +1267,7 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     out.extend(if advance_deadline {
         add_carries(w.pre.deadline_ms, w.action.amount)
     } else if is_auto_fold {
-        add_carries(w.deadline_height, u64::from(CANONICAL_BETTING_TIMEOUT_MS))
+        add_carries(w.deadline_height, u64::from(w.pre.betting_timeout_ms))
     } else {
         [M31::from(0u32); 3]
     });
@@ -1353,6 +1374,30 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     } else {
         M31::from(actor_sum as u32).inverse()
     });
+    debug_assert_eq!(out.len(), TIMEOUT_CONFIG_OFFSET);
+    for state in [&w.pre, &w.post] {
+        for timeout in [
+            state.shuffle_timeout_ms,
+            state.reveal_timeout_ms,
+            state.betting_timeout_ms,
+            state.reconstruct_timeout_ms,
+            state.showdown_display_ms,
+        ] {
+            out.extend(u32_limbs(timeout));
+        }
+    }
+    debug_assert_eq!(out.len(), TIMEOUT_CONFIG_RANGE_BITS_OFFSET);
+    for timeout in [
+        w.pre.shuffle_timeout_ms,
+        w.pre.reveal_timeout_ms,
+        w.pre.betting_timeout_ms,
+        w.pre.reconstruct_timeout_ms,
+        w.pre.showdown_display_ms,
+    ] {
+        for limb in u32_limbs(timeout) {
+            out.extend(u16_bits(limb.0 as u16));
+        }
+    }
     debug_assert_eq!(out.len(), NUM_COLUMNS);
     out
 }
@@ -1467,7 +1512,7 @@ fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
     for endpoint in ["pre-state-image", "post-state-image"] {
         for limb in 0..STATE_IMAGE_PROJECTION_LIMBS {
             ids.push(PreProcessedColumnId {
-                id: format!("texas.canonical.{endpoint}.v4.{limb}").into(),
+                id: format!("texas.canonical.{endpoint}.v5.{limb}").into(),
             });
         }
     }
@@ -2102,6 +2147,12 @@ impl FrameworkEval for CanonicalAir {
         let transition_commitment_inv = eval.next_trace_mask();
         let nullifier_inv = eval.next_trace_mask();
         let actor_inv = eval.next_trace_mask();
+        let pre_timeout_config: [E::F; TIMEOUT_CONFIG_LIMBS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let post_timeout_config: [E::F; TIMEOUT_CONFIG_LIMBS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let pre_timeout_config_bits: [[E::F; 16]; TIMEOUT_CONFIG_LIMBS] =
+            std::array::from_fn(|_| trace_bits16(&mut eval));
         eval.add_constraint(active.clone() * flag.clone() * (flag.clone() - one.clone()));
         eval.add_constraint(seq_carry.clone() * (seq_carry.clone() - one.clone()));
         for (pre, post) in [
@@ -2349,6 +2400,21 @@ impl FrameworkEval for CanonicalAir {
         for metadata in [&pre_state_metadata, &post_state_metadata] {
             eval.add_constraint(
                 active.clone() * (metadata[0].clone() - canonical_abi_version.clone()),
+            );
+        }
+        for timeout_limb in 0..TIMEOUT_CONFIG_LIMBS {
+            let mut reconstructed: E::F = M31::from(0u32).into();
+            for (bit_index, bit) in pre_timeout_config_bits[timeout_limb].iter().enumerate() {
+                eval.add_constraint(active.clone() * bit.clone() * (bit.clone() - one.clone()));
+                reconstructed += bit.clone() * E::F::from(M31::from(1u32 << bit_index));
+            }
+            eval.add_constraint(
+                active.clone() * (pre_timeout_config[timeout_limb].clone() - reconstructed),
+            );
+            eval.add_constraint(
+                active.clone()
+                    * (post_timeout_config[timeout_limb].clone()
+                        - pre_timeout_config[timeout_limb].clone()),
             );
         }
         // Table capacity is a genesis parameter.  The button advances only at
@@ -2647,8 +2713,8 @@ impl FrameworkEval for CanonicalAir {
             &is_auto_fold,
             &deadline_height,
             &[
-                M31::from(CANONICAL_BETTING_TIMEOUT_MS).into(),
-                M31::from(0u32).into(),
+                pre_timeout_config[BETTING_TIMEOUT_LIMB_OFFSET].clone(),
+                pre_timeout_config[BETTING_TIMEOUT_LIMB_OFFSET + 1].clone(),
                 M31::from(0u32).into(),
                 M31::from(0u32).into(),
             ],
@@ -2657,8 +2723,8 @@ impl FrameworkEval for CanonicalAir {
         );
 
         let timeout_limbs: [E::F; 2] = [
-            M31::from(CANONICAL_BETTING_TIMEOUT_MS).into(),
-            M31::from(0u32).into(),
+            pre_timeout_config[BETTING_TIMEOUT_LIMB_OFFSET].clone(),
+            pre_timeout_config[BETTING_TIMEOUT_LIMB_OFFSET + 1].clone(),
         ];
         let consume_all = advance_deadline_time_bank_all.clone();
         // The selected transition time-bank projection is consumed by the
@@ -3069,26 +3135,31 @@ impl FrameworkEval for CanonicalAir {
             post_protocol_pending_count += post_bit.clone();
             selected_protocol_pre_bit += selector.clone() * pre_bit.clone();
             eval.add_constraint(
-                is_protocol_submit.clone()
-                    * (post_bit - pre_bit + selector),
+                is_protocol_submit.clone() * (post_bit.clone() - pre_bit.clone() + selector),
             );
-            let participating = full_post_status[index][CanonicalSeatStatus::Active as usize]
+            let pre_participating = full_pre_status[index][CanonicalSeatStatus::Active as usize]
+                .clone()
+                + full_pre_status[index][CanonicalSeatStatus::Folded as usize].clone()
+                + full_pre_status[index][CanonicalSeatStatus::AllIn as usize].clone();
+            let post_participating = full_post_status[index][CanonicalSeatStatus::Active as usize]
                 .clone()
                 + full_post_status[index][CanonicalSeatStatus::Folded as usize].clone()
                 + full_post_status[index][CanonicalSeatStatus::AllIn as usize].clone();
-            expected_protocol_participants += participating * bit_weight;
+            eval.add_constraint(active.clone() * pre_bit * (one.clone() - pre_participating));
+            eval.add_constraint(
+                active.clone() * post_bit * (one.clone() - post_participating.clone()),
+            );
+            expected_protocol_participants += post_participating * bit_weight;
         }
         eval.add_constraint(
-            active.clone()
-                * (pre_protocol_mask_from_bits - pre_protocol_pending_mask.clone()),
+            active.clone() * (pre_protocol_mask_from_bits - pre_protocol_pending_mask.clone()),
         );
         eval.add_constraint(
-            active.clone()
-                * (post_protocol_mask_from_bits - post_protocol_pending_mask.clone()),
+            active.clone() * (post_protocol_mask_from_bits - post_protocol_pending_mask.clone()),
         );
         eval.add_constraint(selected_protocol_pre_bit - is_protocol_submit.clone());
         eval.add_constraint(
-            post_protocol_pending_count * protocol_pending_post_inv
+            post_protocol_pending_count * protocol_pending_post_inv.clone()
                 - is_protocol_submit.clone(),
         );
         // Until the phase-completion openings (new timeout, reveal schedule,
@@ -4689,6 +4760,14 @@ impl FrameworkEval for CanonicalAir {
         for value in pre_state_metadata.iter().chain(post_state_metadata.iter()) {
             eval.add_constraint(inactive.clone() * value.clone());
         }
+        for value in pre_timeout_config.iter().chain(post_timeout_config.iter()) {
+            eval.add_constraint(inactive.clone() * value.clone());
+        }
+        for bits in &pre_timeout_config_bits {
+            for bit in bits {
+                eval.add_constraint(inactive.clone() * bit.clone());
+            }
+        }
         for commitment in pre_seat_commitments
             .iter()
             .chain(post_seat_commitments.iter())
@@ -5096,8 +5175,11 @@ impl FrameworkEval for CanonicalAir {
             pre_state_binding.push(pre.clone());
             post_state_binding.push(post.clone());
         }
+        pre_state_binding.extend(pre_deadline_image.iter().cloned());
+        post_state_binding.extend(post_deadline_image.iter().cloned());
+        pre_state_binding.extend(pre_timeout_config.iter().cloned());
+        post_state_binding.extend(post_timeout_config.iter().cloned());
         for (pre, post) in [
-            (&pre_deadline_image, &post_deadline_image),
             (&pre_current, &post_current),
             (&pre_min, &post_min),
             (&pre_chip_pool, &post_chip_pool),
@@ -5564,6 +5646,11 @@ mod tests {
             street: 0,
             current_turn: NO_CANONICAL_SEAT,
             deadline_ms: 0,
+            shuffle_timeout_ms: 10_000,
+            reveal_timeout_ms: 10_000,
+            betting_timeout_ms: 30_000,
+            reconstruct_timeout_ms: 10_000,
+            showdown_display_ms: 3_000,
             current_bet: 0,
             min_raise: 0,
             chip_pool: 0,
@@ -5594,6 +5681,28 @@ mod tests {
         let mut evaluator = DegreeEvaluator { max: 0 };
         evaluator = CanonicalAir { log_size: 10 }.evaluate(evaluator);
         assert_eq!(evaluator.max, 3);
+    }
+
+    #[test]
+    fn canonical_abi_v5_timeout_projection_is_fixed_width() {
+        let image = image();
+        let bytes = borsh::to_vec(&image).expect("canonical state image");
+        assert_eq!(bytes.len(), CANONICAL_STATE_IMAGE_BORSH_BYTES);
+        assert_eq!(
+            u32::from_le_bytes(
+                bytes[STATE_IMAGE_BETTING_TIMEOUT_OFFSET..STATE_IMAGE_BETTING_TIMEOUT_OFFSET + 4]
+                    .try_into()
+                    .expect("betting timeout bytes"),
+            ),
+            image.betting_timeout_ms,
+        );
+        assert_eq!(
+            state_image_projection(&bytes)
+                .expect("canonical endpoint projection")
+                .len(),
+            STATE_IMAGE_PROJECTION_LIMBS,
+        );
+        assert_eq!(STATE_IMAGE_PROJECTION_LIMBS, 852);
     }
 
     fn create_table() -> CanonicalTransitionWitness {
@@ -5729,6 +5838,7 @@ mod tests {
         post.phase = CanonicalPhase::Shuffling;
         post.phase_subtag = 1;
         post.deadline_ms = 100;
+        post.protocol_pending_mask = 0b11;
         let mut witness = CanonicalTransitionWitness {
             pre,
             post,
@@ -5947,7 +6057,7 @@ mod tests {
         pre.phase = CanonicalPhase::Shuffling;
         pre.phase_subtag = 1;
         pre.deadline_ms = 100;
-        pre.chip_pool = 100;
+        pre.chip_pool = 200;
         pre.seats[0] = CanonicalSeat {
             status: CanonicalSeatStatus::Active,
             acted: false,
@@ -5960,9 +6070,23 @@ mod tests {
             key_commitment: [52; 32],
             hole_cards_commitment: [0; 32],
         };
+        pre.seats[1] = CanonicalSeat {
+            status: CanonicalSeatStatus::Active,
+            acted: false,
+            stack: 100,
+            bet: 0,
+            total_bet: 0,
+            pending_addon: 0,
+            time_bank_ms: 30_000,
+            identity_commitment: [61; 32],
+            key_commitment: [62; 32],
+            hole_cards_commitment: [0; 32],
+        };
+        pre.protocol_pending_mask = 0b11;
         let mut post = pre.clone();
         post.call_seq = 1;
         post.deck_commitment = [54; 32];
+        post.protocol_pending_mask = 0b10;
         let mut witness = CanonicalTransitionWitness {
             pre,
             post,
@@ -6358,6 +6482,7 @@ mod tests {
         post.phase_subtag = 2;
         post.street = 3;
         post.deadline_ms = 200;
+        post.protocol_pending_mask = 0b11;
         post.current_bet = 0;
         post.min_raise = 0;
         post.pot = 250;
@@ -6714,6 +6839,7 @@ mod tests {
         post.phase = CanonicalPhase::Shuffling;
         post.phase_subtag = 1;
         post.deadline_ms = 100;
+        post.protocol_pending_mask = 0b11;
         post.call_seq = 0;
         let mut start = CanonicalTransitionWitness {
             pre: second.post.clone(),
@@ -6759,6 +6885,25 @@ mod tests {
             &archive,
             FULL_POST_BETTING_SEATS_OFFSET + FULL_SEAT_STACK_BLOCK_OFFSET,
         );
+        // The scalar mask, its selected pre bit, the exact cleared post bit,
+        // and the non-final inverse are all committed AIR relations.
+        assert_air_rejects_trace_mutation(&trace, &archive, PRE_PROTOCOL_PENDING_MASK_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, POST_PROTOCOL_PENDING_MASK_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, PROTOCOL_PENDING_MASK_BITS_OFFSET);
+        assert_air_rejects_trace_mutation(
+            &trace,
+            &archive,
+            PROTOCOL_PENDING_MASK_BITS_OFFSET + MAX_CANONICAL_SEATS,
+        );
+        assert_air_rejects_trace_mutation(&trace, &archive, PROTOCOL_PENDING_POST_INV_OFFSET);
+
+        let mut final_submit = submit_shuffle();
+        final_submit.pre.protocol_pending_mask = 0b01;
+        final_submit.post.phase = CanonicalPhase::Revealing;
+        final_submit.post.street = 1;
+        final_submit.post.protocol_pending_mask = 0b11;
+        final_submit.seal();
+        assert!(trace_for(&[final_submit]).is_err());
     }
 
     #[test]
@@ -6791,7 +6936,7 @@ mod tests {
         // is rejected by the tagged AIR itself.
         assert_air_rejects_trace_mutation(&trace, &archive, PRE_PHASE_OFFSET);
         assert_air_rejects_trace_mutation(&trace, &archive, SELECTED_POST_STATUS_OFFSET);
-        assert_air_rejects_trace_mutation(&trace, &archive, 331);
+        assert_air_rejects_trace_mutation(&trace, &archive, 333);
 
         // Zero every commitment limb, its 16-bit witness, and the reused
         // non-zero inverse.  The only remaining difference is the direct
@@ -6838,7 +6983,7 @@ mod tests {
         // The first bit of the selected pre-stack decomposition. Changing this
         // does not alter the business columns, so rejection demonstrates the
         // AIR's own range relation rather than `validate_shape`.
-        trace.cols[362][0] = M31::from(1u32);
+        trace.cols[364][0] = M31::from(1u32);
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 assert_trace_satisfies_air(&trace, &archive);
@@ -6995,7 +7140,7 @@ mod tests {
         assert_trace_satisfies_air(&trace, &archive);
         // The appended post-chip-pool low limb is bound by the exact funding
         // addition, not merely by the host-built canonical state image.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1_431);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_433);
     }
 
     #[test]
@@ -7036,7 +7181,7 @@ mod tests {
         // The post acted-bit suffix has one entry per seat.  Seat 1 is active
         // but not the raiser, so setting it back to one violates the exact VM
         // reset, independently of the host transition validator.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1_401);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_403);
 
         // The full-seat suffix binds non-acting stacks to their pre-state
         // images.  Modifying opponent stack[0] cannot be hidden behind the
@@ -7086,10 +7231,10 @@ mod tests {
         // Keep all old mask relations consistent while making the selected
         // successor (seat 1) already acted. Before the new successor rule,
         // this was a structurally valid but VM-impossible stale betting row.
-        trace.cols[304][0] = M31::from(2u32);
-        trace.cols[305][0] = M31::from(3u32);
-        trace.cols[1_392][0] = M31::from(1u32);
-        trace.cols[1_401][0] = M31::from(1u32);
+        trace.cols[305][0] = M31::from(2u32);
+        trace.cols[306][0] = M31::from(3u32);
+        trace.cols[1_394][0] = M31::from(1u32);
+        trace.cols[1_403][0] = M31::from(1u32);
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 assert_trace_satisfies_air(&trace, &archive);
@@ -7106,13 +7251,13 @@ mod tests {
 
         // Projection fields: selected post-seat bet, post pot, and post stack.
         // These locations are in the stable canonical projection prefix.
-        for column in [334, 300, 330] {
+        for column in [336, 300, 332] {
             assert_air_rejects_trace_mutation(&trace, &archive, column);
         }
-        // Raise-only advice starts at 1086: needed limbs, then carries at
-        // 1107 and the 16-bit decomposition at 1122.  None of these checks
+        // Raise-only advice starts at 1088: needed limbs, then carries at
+        // 1109 and the 16-bit decomposition at 1124.  None of these checks
         // calls `validate_batch`; rejection is solely the AIR relation.
-        for column in [1086, 1107, 1122] {
+        for column in [1088, 1109, 1124] {
             assert_air_rejects_trace_mutation(&trace, &archive, column);
         }
     }
@@ -7125,7 +7270,7 @@ mod tests {
         // all Raise relations were selector-gated.  The canonical-zero
         // constraints above make the same malicious advice invalid without
         // relying on host validation.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1085);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1087);
     }
 
     #[test]
@@ -7134,14 +7279,14 @@ mod tests {
         let (trace, archive) = trace_for(&[witness]).expect("call trace");
         assert_trace_satisfies_air(&trace, &archive);
 
-        // 305 is the canonical post acted-mask projection.  It is now linked
+        // 306 is the canonical post acted-mask projection.  It is now linked
         // to nine boolean mask bits and to the selected seat's `acted` flag,
         // rather than being accepted as a host-provided scalar.
-        assert_air_rejects_trace_mutation(&trace, &archive, 305);
+        assert_air_rejects_trace_mutation(&trace, &archive, 306);
         // The appended selected-seat/mask advice begins at the former trace
         // width 1381: selector[0], then pre bits, then post bits.  Tampering
         // with post bit 0 must fail independently of the raw mask field.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1_400);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_402);
     }
 
     #[test]
@@ -7195,6 +7340,39 @@ mod tests {
         let (trace, archive) = trace_for(std::slice::from_ref(&witness)).expect("deadline trace");
         assert_trace_satisfies_air(&trace, &archive);
         prove_canonical_tagged_batch(&[witness]).expect("deadline proof");
+    }
+
+    #[test]
+    fn canonical_direct_air_uses_opened_nondefault_betting_timeout() {
+        let mut extension = advance_deadline();
+        extension.pre.betting_timeout_ms = 25;
+        extension.post.betting_timeout_ms = 25;
+        extension.action.amount = 25;
+        extension.post.deadline_ms = extension.pre.deadline_ms + 25;
+        extension.post.seats[0].time_bank_ms = 15;
+        extension.seal();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&extension)).expect("custom timeout extension trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        assert_air_rejects_trace_mutation(
+            &trace,
+            &archive,
+            TIMEOUT_CONFIG_OFFSET + BETTING_TIMEOUT_LIMB_OFFSET,
+        );
+        assert_air_rejects_trace_mutation(
+            &trace,
+            &archive,
+            TIMEOUT_CONFIG_RANGE_BITS_OFFSET + BETTING_TIMEOUT_LIMB_OFFSET * 16,
+        );
+
+        let mut auto = auto_fold();
+        auto.pre.betting_timeout_ms = 5_000;
+        auto.post.betting_timeout_ms = 5_000;
+        auto.post.deadline_ms = auto.deadline_height + 5_000;
+        auto.seal();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&auto)).expect("custom timeout auto-fold trace");
+        assert_trace_satisfies_air(&trace, &archive);
     }
 
     #[test]
@@ -7280,8 +7458,8 @@ mod tests {
         let (trace, archive) = trace_for(std::slice::from_ref(&witness)).expect("deadline trace");
         // The endpoint acted-mask projection and the fixed seat bit opening
         // are both independently constrained by the AdvanceDeadline gate.
-        assert_air_rejects_trace_mutation(&trace, &archive, 305);
-        assert_air_rejects_trace_mutation(&trace, &archive, 1_400);
+        assert_air_rejects_trace_mutation(&trace, &archive, 306);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_402);
     }
 
     #[test]

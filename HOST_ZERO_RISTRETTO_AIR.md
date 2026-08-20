@@ -250,14 +250,21 @@ without a native Blake2b call in verification.  It is deliberately not yet an
 admission component: the canonical transition AIR binds all fixed-width
 endpoint fields but does not yet constrain all VM relations between those
 byte images.  The canonical
-AIR now binds an 841-limb endpoint projection (the ABI/header,
+AIR now binds an 852-limb endpoint projection (the ABI/header and five
+range-checked immutable timeout durations,
 table/phase/balances/roots, all nine complete seat images including
 identity/key/hole-card commitments, and the five board/deck/reveal/
-reconstruction/run-it-twice commitments) and Fiat--Shamir-binds the complete
+reconstruction/run-it-twice commitments plus the protocol pending mask) and Fiat--Shamir-binds the complete
 Borsh bytes. Fields known to be unchanged are constrained as such for
 ordinary betting, funding, lifecycle and `AdvanceRound` actions. The direct
 canonical AIR now also constrains shuffle/reveal/reconstruct pre-phase,
 occupied submitter, and a range-bound non-zero proof commitment; its
+ABI-v5 pending-mask relation proves a non-final submit clears exactly the
+submitting seat and leaves at least one pending participant. Final submit
+phase changes remain fail-closed until their complete timeout/schedule/
+betting-initialization openings are present; no host-provided completion flag
+is accepted. Betting time-bank and `AutoFold` deadline arithmetic now consume
+the opened `betting_timeout_ms`, rather than a hard-coded deployment default. Its
 nonterminal `FoldWithProof` row follows the betting turn, preserves funds and
 identity commitments, and permits only the deck commitment to change. Those
 are state-machine shape checks, not verification of crypto-bearing
