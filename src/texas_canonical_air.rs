@@ -38,7 +38,7 @@ use crate::trace_gen::MethodTrace;
 use crate::trace_gen::generic_trace::tagged_batch_log_size;
 
 const MAX_ROWS: usize = 1 << 10;
-const KIND_COUNT: usize = 20;
+const KIND_COUNT: usize = 21;
 
 // active, kinds, table, hand(pre/post), seq(pre/post), image commitments(pre/post),
 // state roots(pre/post), lifecycle roots(pre/post), overlay roots(pre/post), settlement roots
@@ -46,7 +46,7 @@ const KIND_COUNT: usize = 20;
 // The first 271 columns are the fixed canonical ABI.  The projection suffix carries the
 // phase/round scalars and selected-seat image needed by the betting family.  Keeping it in
 // the same row preserves the tagged batch's one-proof-per-table performance profile.
-const BASE_NUM_COLUMNS: usize = 1563;
+const BASE_NUM_COLUMNS: usize = 1564;
 const FULL_BETTING_SEAT_WIDTH: usize = SEAT_STATUS_COUNT + 4 * 4 + 2;
 const FULL_BETTING_SEATS_OFFSET: usize = BASE_NUM_COLUMNS;
 const FULL_POST_BETTING_SEATS_OFFSET: usize =
@@ -186,15 +186,15 @@ const STATE_IMAGE_PROJECTION_LIMBS: usize = STATE_IMAGE_HEADER_PROJECTION_LIMBS
 // Stable positions in the fixed canonical ABI prefix.  Keep mutation tests
 // named rather than coupling them to incidental trace growth in the advice
 // suffix below.
-const ACTION_AMOUNT_OFFSET: usize = 258;
+const ACTION_AMOUNT_OFFSET: usize = 259;
 const PROOF_COMMITMENT_OFFSET: usize = ACTION_AMOUNT_OFFSET - 17;
-const ACTION_AMOUNT_INVERSE_OFFSET: usize = 349;
-const PRE_PHASE_OFFSET: usize = 272;
-const POST_PHASE_OFFSET: usize = 273;
-const POST_TURN_OFFSET: usize = 279;
-const POST_LEAVE_MASK_OFFSET: usize = 307;
-const SELECTED_POST_STATUS_OFFSET: usize = 328;
-const DEADLINE_HEIGHT_OFFSET: usize = 267;
+const ACTION_AMOUNT_INVERSE_OFFSET: usize = 350;
+const PRE_PHASE_OFFSET: usize = 273;
+const POST_PHASE_OFFSET: usize = 274;
+const POST_TURN_OFFSET: usize = 280;
+const POST_LEAVE_MASK_OFFSET: usize = 308;
+const SELECTED_POST_STATUS_OFFSET: usize = 329;
+const DEADLINE_HEIGHT_OFFSET: usize = 268;
 
 #[derive(Debug, Clone, Copy)]
 struct CanonicalAir {
@@ -490,6 +490,7 @@ fn is_betting_action(kind: CanonicalTransitionKind) -> bool {
             | CanonicalTransitionKind::Raise
             | CanonicalTransitionKind::Bet
             | CanonicalTransitionKind::FoldWithProof
+            | CanonicalTransitionKind::AutoFold
     )
 }
 
@@ -1064,7 +1065,9 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         },
     );
     let is_advance_deadline = w.kind == CanonicalTransitionKind::AdvanceDeadline;
-    let advance_deadline_difference = if is_advance_deadline {
+    let is_auto_fold = w.kind == CanonicalTransitionKind::AutoFold;
+    let deadline_check = is_advance_deadline || is_auto_fold;
+    let advance_deadline_difference = if deadline_check {
         // A checked limb addition in the AIR proves `height >= deadline`.
         // Saturation is only an advice fallback for an invalid witness; it
         // cannot satisfy that addition when the deadline is early.
@@ -1073,22 +1076,14 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         0
     };
     out.extend(u64_limbs(advance_deadline_difference));
-    out.extend(if is_advance_deadline {
+    out.extend(if deadline_check {
         add_carries(w.pre.deadline_ms, advance_deadline_difference)
     } else {
         [M31::from(0u32); 3]
     });
     for value in [
-        if is_advance_deadline {
-            w.deadline_height
-        } else {
-            0
-        },
-        if is_advance_deadline {
-            w.pre.deadline_ms
-        } else {
-            0
-        },
+        if deadline_check { w.deadline_height } else { 0 },
+        if deadline_check { w.pre.deadline_ms } else { 0 },
         advance_deadline_difference,
     ] {
         append_u64_bits(&mut out, value);
@@ -1097,12 +1092,12 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         .into_iter()
         .map(|limb| u64::from(limb.0))
         .sum::<u64>();
-    out.push(if is_advance_deadline && pre_deadline_sum != 0 {
+    out.push(if deadline_check && pre_deadline_sum != 0 {
         M31::from(pre_deadline_sum as u32).inverse()
     } else {
         M31::from(0u32)
     });
-    out.push(if is_advance_deadline && w.pre.phase as u8 != 0 {
+    out.push(if deadline_check && w.pre.phase as u8 != 0 {
         M31::from(u32::from(w.pre.phase as u8)).inverse()
     } else {
         M31::from(0u32)
@@ -1224,6 +1219,8 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     });
     out.extend(if advance_deadline {
         add_carries(w.pre.deadline_ms, w.action.amount)
+    } else if is_auto_fold {
+        add_carries(w.deadline_height, u64::from(CANONICAL_BETTING_TIMEOUT_MS))
     } else {
         [M31::from(0u32); 3]
     });
@@ -1507,6 +1504,7 @@ fn trace_for_with_state_opening_scope(
             "canonical batch must contain 1..=1024 transitions".into(),
         ));
     }
+    crate::texas_canonical::validate_batch(witnesses).map_err(TexasAirError::SpecViolation)?;
     let log_size = tagged_batch_log_size(witnesses.len())?;
     let mut trace = MethodTrace::new(log_size, NUM_COLUMNS);
     for (index, witness) in witnesses.iter().enumerate() {
@@ -2138,7 +2136,8 @@ impl FrameworkEval for CanonicalAir {
             + kinds[CanonicalTransitionKind::Call as usize].clone()
             + kinds[CanonicalTransitionKind::Raise as usize].clone()
             + kinds[CanonicalTransitionKind::Bet as usize].clone()
-            + is_fold_with_proof.clone();
+            + is_fold_with_proof.clone()
+            + kinds[CanonicalTransitionKind::AutoFold as usize].clone();
         eval.add_constraint(is_betting.clone() * (pre_phase.clone() - M31::from(4u32).into()));
         eval.add_constraint(is_betting.clone() * (pre_turn.clone() - seat.clone()));
         eval.add_constraint(is_betting.clone() * (pre_status.clone() - M31::from(2u32).into()));
@@ -2154,7 +2153,8 @@ impl FrameworkEval for CanonicalAir {
             is_betting.clone() * (post_leave_mask.clone() - pre_leave_mask.clone()),
         );
         let is_fold = kinds[CanonicalTransitionKind::Fold as usize].clone();
-        let is_fold_like = is_fold.clone() + is_fold_with_proof.clone();
+        let is_auto_fold = kinds[CanonicalTransitionKind::AutoFold as usize].clone();
+        let is_fold_like = is_fold.clone() + is_fold_with_proof.clone() + is_auto_fold.clone();
         eval.add_constraint(is_fold_like.clone() * (post_status.clone() - M31::from(3u32).into()));
         let is_check = kinds[CanonicalTransitionKind::Check as usize].clone();
         let is_call = kinds[CanonicalTransitionKind::Call as usize].clone();
@@ -2164,6 +2164,7 @@ impl FrameworkEval for CanonicalAir {
         let is_rebuy = kinds[CanonicalTransitionKind::Rebuy as usize].clone();
         let is_funding = is_addon.clone() + is_rebuy.clone();
         let is_advance_deadline = kinds[CanonicalTransitionKind::AdvanceDeadline as usize].clone();
+        let deadline_check = is_advance_deadline.clone() + is_auto_fold.clone();
         let is_round_advance = kinds[CanonicalTransitionKind::AdvanceRound as usize].clone();
         let is_create = kinds[CanonicalTransitionKind::CreateTable as usize].clone();
         let is_start = kinds[CanonicalTransitionKind::StartHand as usize].clone();
@@ -2208,7 +2209,6 @@ impl FrameworkEval for CanonicalAir {
         for value in amount.iter().chain(auxiliary.iter()) {
             eval.add_constraint(is_crypto.clone() * value.clone());
         }
-        eval.add_constraint(is_crypto.clone() * flag.clone());
         eval.add_constraint(
             is_submit_shuffle.clone() * (pre_phase.clone() - M31::from(1u32).into()),
         );
@@ -2454,58 +2454,59 @@ impl FrameworkEval for CanonicalAir {
                     * (post_leave_mask_bits[index].clone() - pre_leave_mask_bits[index].clone()),
             );
         }
-        // `AdvanceDeadline` is permissionless, but its expiry predicate is
+        // Permissionless deadline transitions bind their expiry predicate to
+        // the committed pre-state deadline rather than trusting host advice.
         // not trusted to the host.  These canonical u64 limbs prove the
         // committed height is at least the active pre-state deadline, using a
         // checked subtraction witness (`height = deadline + difference`).
         for index in 0..4 {
             range16_constraints(
                 &mut eval,
-                &is_advance_deadline,
+                &deadline_check,
                 &deadline_height[index],
                 &advance_deadline_height_bits[index],
             );
             range16_constraints(
                 &mut eval,
-                &is_advance_deadline,
+                &deadline_check,
                 &pre_deadline_image[index],
                 &advance_deadline_pre_bits[index],
             );
             range16_constraints(
                 &mut eval,
-                &is_advance_deadline,
+                &deadline_check,
                 &advance_deadline_difference[index],
                 &advance_deadline_difference_bits[index],
             );
         }
         limb4_add_constraints(
             &mut eval,
-            &is_advance_deadline,
+            &deadline_check,
             &pre_deadline_image,
             &advance_deadline_difference,
             &deadline_height,
             &advance_deadline_carries,
         );
         for carry in &advance_deadline_carries {
-            eval.add_constraint((active.clone() - is_advance_deadline.clone()) * carry.clone());
+            eval.add_constraint((active.clone() - deadline_check.clone()) * carry.clone());
         }
         let mut advance_pre_deadline_sum: E::F = M31::from(0u32).into();
         for limb in &pre_deadline_image {
             advance_pre_deadline_sum += limb.clone();
         }
         eval.add_constraint(
-            is_advance_deadline.clone()
+            deadline_check.clone()
                 * (advance_pre_deadline_sum * advance_deadline_pre_inv.clone() - one.clone()),
         );
         eval.add_constraint(
-            is_advance_deadline.clone()
+            deadline_check.clone()
                 * (pre_phase.clone() * advance_deadline_phase_inv.clone() - one.clone()),
         );
         eval.add_constraint(
-            (active.clone() - is_advance_deadline.clone()) * advance_deadline_pre_inv.clone(),
+            (active.clone() - deadline_check.clone()) * advance_deadline_pre_inv.clone(),
         );
         eval.add_constraint(
-            (active.clone() - is_advance_deadline.clone()) * advance_deadline_phase_inv.clone(),
+            (active.clone() - deadline_check.clone()) * advance_deadline_phase_inv.clone(),
         );
 
         // `AdvanceDeadline` is a VM transition on the active betting seat.  A
@@ -2532,6 +2533,19 @@ impl FrameworkEval for CanonicalAir {
             (&pre_leave_mask, &post_leave_mask),
         ] {
             eval.add_constraint(is_advance_deadline.clone() * (right.clone() - left.clone()));
+        }
+        // A timeout extension only changes the selected seat's time bank and
+        // the betting deadline.  The VM has not accepted an action yet, so
+        // neither the full acted mask nor any seat's acted projection may
+        // change on this permissionless row.
+        eval.add_constraint(
+            is_advance_deadline.clone() * (post_acted_mask.clone() - pre_acted_mask.clone()),
+        );
+        for index in 0..MAX_CANONICAL_SEATS {
+            eval.add_constraint(
+                is_advance_deadline.clone()
+                    * (post_acted_bits[index].clone() - pre_acted_bits[index].clone()),
+            );
         }
         for (pre_value, post_value) in [
             (&pre_current, &post_current),
@@ -2560,6 +2574,51 @@ impl FrameworkEval for CanonicalAir {
             &is_advance_deadline,
             &pre_deadline_image,
             &amount,
+            &post_deadline_image,
+            &advance_deadline_extension_carries,
+        );
+        // AutoFold consumes the expired betting deadline, folds the selected
+        // actor through the shared betting relation, and arms the next
+        // actor's fixed deployment timeout from the committed height.
+        eval.add_constraint(is_auto_fold.clone() * (pre_phase.clone() - M31::from(4u32).into()));
+        eval.add_constraint(is_auto_fold.clone() * (post_phase.clone() - pre_phase.clone()));
+        eval.add_constraint(is_auto_fold.clone() * (pre_turn.clone() - seat.clone()));
+        eval.add_constraint(
+            is_auto_fold.clone()
+                * (pre_status.clone() - M31::from(CanonicalSeatStatus::Active as u32).into()),
+        );
+        eval.add_constraint(is_auto_fold.clone() * (post_status.clone() - M31::from(3u32).into()));
+        eval.add_constraint(is_auto_fold.clone() * flag.clone());
+        for value in amount.iter().chain(auxiliary.iter()) {
+            eval.add_constraint(is_auto_fold.clone() * value.clone());
+        }
+        for (pre_value, post_value) in [
+            (&pre_current, &post_current),
+            (&pre_min, &post_min),
+            (&pre_pot, &post_pot),
+            (&pre_chip_pool, &post_chip_pool),
+        ] {
+            for (left, right) in pre_value.iter().zip(post_value.iter()) {
+                eval.add_constraint(is_auto_fold.clone() * (right.clone() - left.clone()));
+            }
+        }
+        for (left, right) in [
+            (&pre_subtag, &post_subtag),
+            (&pre_street, &post_street),
+            (&pre_leave_mask, &post_leave_mask),
+        ] {
+            eval.add_constraint(is_auto_fold.clone() * (right.clone() - left.clone()));
+        }
+        limb4_add_constraints(
+            &mut eval,
+            &is_auto_fold,
+            &deadline_height,
+            &[
+                M31::from(CANONICAL_BETTING_TIMEOUT_MS).into(),
+                M31::from(0u32).into(),
+                M31::from(0u32).into(),
+                M31::from(0u32).into(),
+            ],
             &post_deadline_image,
             &advance_deadline_extension_carries,
         );
@@ -3844,7 +3903,9 @@ impl FrameworkEval for CanonicalAir {
         // Check and Fold do not move chips. A Call amount is a strictly positive
         // delta, proved with an inverse of the sum of its canonical limbs.
         for limb in &amount {
-            eval.add_constraint((is_check.clone() + is_fold.clone()) * limb.clone());
+            eval.add_constraint(
+                (is_check.clone() + is_fold.clone() + is_auto_fold.clone()) * limb.clone(),
+            );
         }
         let mut amount_sum: E::F = M31::from(0u32).into();
         for limb in &amount {
@@ -4601,7 +4662,7 @@ impl FrameworkEval for CanonicalAir {
         {
             eval.add_constraint(inactive.clone() * carry.clone());
         }
-        let non_advance_deadline = active.clone() * (one.clone() - is_advance_deadline.clone());
+        let non_advance_deadline = active.clone() * (one.clone() - deadline_check.clone());
         eval.add_constraint(non_advance_deadline.clone() * advance_deadline_time_bank_all.clone());
         for value in advance_deadline_time_bank_slack
             .iter()
@@ -4764,7 +4825,8 @@ impl FrameworkEval for CanonicalAir {
             }
         }
         let is_permissionless = kinds[CanonicalTransitionKind::AdvanceDeadline as usize].clone()
-            + kinds[CanonicalTransitionKind::AdvanceRound as usize].clone();
+            + kinds[CanonicalTransitionKind::AdvanceRound as usize].clone()
+            + kinds[CanonicalTransitionKind::AutoFold as usize].clone();
         // `AdvanceDeadline` is permissionless in the VM and therefore carries
         // the canonical zero actor.  Constrain every limb directly; a non-zero
         // sum check would both accept a forged actor and reject only the
@@ -5488,6 +5550,58 @@ mod tests {
                 auxiliary: 1,
                 flag: false,
                 proof_commitment: [13; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 1_000,
+        };
+        witness.seal();
+        witness
+    }
+
+    fn auto_fold() -> CanonicalTransitionWitness {
+        let mut pre = image();
+        pre.phase = CanonicalPhase::Betting;
+        pre.phase_subtag = 1;
+        pre.street = 1;
+        pre.current_turn = 0;
+        pre.deadline_ms = 1_000;
+        pre.current_bet = 100;
+        pre.min_raise = 100;
+        pre.chip_pool = 1_600;
+        pre.seats[0] = CanonicalSeat {
+            status: CanonicalSeatStatus::Active,
+            acted: false,
+            stack: 1_000,
+            bet: 0,
+            total_bet: 0,
+            pending_addon: 0,
+            time_bank_ms: 0,
+            identity_commitment: [21; 32],
+            key_commitment: [22; 32],
+            hole_cards_commitment: [23; 32],
+        };
+        pre.seats[1] = active_opponent(false, 100);
+
+        let mut post = pre.clone();
+        post.call_seq = 1;
+        post.current_turn = 1;
+        post.deadline_ms = 31_000;
+        post.acted_mask = 1;
+        post.seats[0].status = CanonicalSeatStatus::Folded;
+        post.seats[0].acted = true;
+        let mut witness = CanonicalTransitionWitness {
+            pre,
+            post,
+            kind: CanonicalTransitionKind::AutoFold,
+            actor: [0; 32],
+            action: CanonicalActionPayload {
+                seat: 0,
+                amount: 0,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             transition_commitment: [0; 32],
@@ -6571,7 +6685,7 @@ mod tests {
         // is rejected by the tagged AIR itself.
         assert_air_rejects_trace_mutation(&trace, &archive, PRE_PHASE_OFFSET);
         assert_air_rejects_trace_mutation(&trace, &archive, SELECTED_POST_STATUS_OFFSET);
-        assert_air_rejects_trace_mutation(&trace, &archive, 330);
+        assert_air_rejects_trace_mutation(&trace, &archive, 331);
 
         // Zero every commitment limb, its 16-bit witness, and the reused
         // non-zero inverse.  The only remaining difference is the direct
@@ -6618,7 +6732,7 @@ mod tests {
         // The first bit of the selected pre-stack decomposition. Changing this
         // does not alter the business columns, so rejection demonstrates the
         // AIR's own range relation rather than `validate_shape`.
-        trace.cols[361][0] = M31::from(1u32);
+        trace.cols[362][0] = M31::from(1u32);
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 assert_trace_satisfies_air(&trace, &archive);
@@ -6645,7 +6759,7 @@ mod tests {
         // failure specifically exercises the AIR's zero-stack lifecycle
         // relation rather than canonical host validation.
         let mut tampered = trace.clone();
-        tampered.cols[327][0] = M31::from(2u32);
+        tampered.cols[328][0] = M31::from(2u32);
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 assert_trace_satisfies_air(&tampered, &archive);
@@ -6775,7 +6889,7 @@ mod tests {
         assert_trace_satisfies_air(&trace, &archive);
         // The appended post-chip-pool low limb is bound by the exact funding
         // addition, not merely by the host-built canonical state image.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1_430);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_431);
     }
 
     #[test]
@@ -6816,7 +6930,7 @@ mod tests {
         // The post acted-bit suffix has one entry per seat.  Seat 1 is active
         // but not the raiser, so setting it back to one violates the exact VM
         // reset, independently of the host transition validator.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1_400);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_401);
 
         // The full-seat suffix binds non-acting stacks to their pre-state
         // images.  Modifying opponent stack[0] cannot be hidden behind the
@@ -6844,7 +6958,7 @@ mod tests {
         // Rebuild the next-turn advice consistently for 0 -> 2. Seat 1 is
         // Active and lies between them, so only the circular scan constraint
         // (not a stale one-hot or scalar mismatch) can reject the splice.
-        trace.cols[278][0] = M31::from(2u32);
+        trace.cols[280][0] = M31::from(2u32);
         trace.cols[NEXT_TURN_SELECTOR_OFFSET + 1][0] = M31::from(0u32);
         trace.cols[NEXT_TURN_SELECTOR_OFFSET + 2][0] = M31::from(1u32);
         trace.cols[NEXT_TURN_PAIR_OFFSET + 1][0] = M31::from(0u32);
@@ -6866,10 +6980,10 @@ mod tests {
         // Keep all old mask relations consistent while making the selected
         // successor (seat 1) already acted. Before the new successor rule,
         // this was a structurally valid but VM-impossible stale betting row.
-        trace.cols[303][0] = M31::from(2u32);
-        trace.cols[304][0] = M31::from(3u32);
-        trace.cols[1_391][0] = M31::from(1u32);
-        trace.cols[1_400][0] = M31::from(1u32);
+        trace.cols[304][0] = M31::from(2u32);
+        trace.cols[305][0] = M31::from(3u32);
+        trace.cols[1_392][0] = M31::from(1u32);
+        trace.cols[1_401][0] = M31::from(1u32);
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 assert_trace_satisfies_air(&trace, &archive);
@@ -6886,13 +7000,13 @@ mod tests {
 
         // Projection fields: selected post-seat bet, post pot, and post stack.
         // These locations are in the stable canonical projection prefix.
-        for column in [333, 299, 329] {
+        for column in [334, 300, 330] {
             assert_air_rejects_trace_mutation(&trace, &archive, column);
         }
-        // Raise-only advice starts at 1085: needed limbs, then carries at
-        // 1106 and the 16-bit decomposition at 1121.  None of these checks
+        // Raise-only advice starts at 1086: needed limbs, then carries at
+        // 1107 and the 16-bit decomposition at 1122.  None of these checks
         // calls `validate_batch`; rejection is solely the AIR relation.
-        for column in [1085, 1106, 1121] {
+        for column in [1086, 1107, 1122] {
             assert_air_rejects_trace_mutation(&trace, &archive, column);
         }
     }
@@ -6905,7 +7019,7 @@ mod tests {
         // all Raise relations were selector-gated.  The canonical-zero
         // constraints above make the same malicious advice invalid without
         // relying on host validation.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1084);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1085);
     }
 
     #[test]
@@ -6914,14 +7028,14 @@ mod tests {
         let (trace, archive) = trace_for(&[witness]).expect("call trace");
         assert_trace_satisfies_air(&trace, &archive);
 
-        // 304 is the canonical post acted-mask projection.  It is now linked
+        // 305 is the canonical post acted-mask projection.  It is now linked
         // to nine boolean mask bits and to the selected seat's `acted` flag,
         // rather than being accepted as a host-provided scalar.
-        assert_air_rejects_trace_mutation(&trace, &archive, 304);
+        assert_air_rejects_trace_mutation(&trace, &archive, 305);
         // The appended selected-seat/mask advice begins at the former trace
         // width 1381: selector[0], then pre bits, then post bits.  Tampering
         // with post bit 0 must fail independently of the raw mask field.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1_399);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_400);
     }
 
     #[test]
@@ -6978,6 +7092,56 @@ mod tests {
     }
 
     #[test]
+    fn canonical_direct_air_proves_auto_fold_timeout() {
+        let witness = auto_fold();
+        let (trace, archive) = trace_for(std::slice::from_ref(&witness)).expect("auto-fold trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        let archive = prove_canonical_tagged_batch(&[witness.clone()]).expect("auto-fold proof");
+        verify_canonical_tagged_batch(&[witness], &archive).expect("auto-fold verification");
+    }
+
+    #[test]
+    fn canonical_auto_fold_rejects_noncanonical_native_witnesses() {
+        let cases: Vec<fn(&mut CanonicalTransitionWitness)> = vec![
+            |w: &mut CanonicalTransitionWitness| w.deadline_height = 999,
+            |w: &mut CanonicalTransitionWitness| w.post.current_turn = 0,
+            |w: &mut CanonicalTransitionWitness| w.post.seats[1].acted = true,
+            |w: &mut CanonicalTransitionWitness| w.post.pot += 1,
+            |w: &mut CanonicalTransitionWitness| w.post.deadline_ms += 1,
+            |w: &mut CanonicalTransitionWitness| w.actor = [1; 32],
+            |w: &mut CanonicalTransitionWitness| {
+                w.post.seats[0].status = CanonicalSeatStatus::Active
+            },
+        ];
+        for (case_index, mutate) in cases.into_iter().enumerate() {
+            let mut witness = auto_fold();
+            mutate(&mut witness);
+            witness.seal();
+            assert!(trace_for(&[witness]).is_err(), "case {case_index} accepted");
+        }
+    }
+
+    #[test]
+    fn canonical_direct_air_rejects_auto_fold_advice_mutation() {
+        let witness = auto_fold();
+        let (trace, archive) = trace_for(std::slice::from_ref(&witness)).expect("auto-fold trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        for column in [
+            DEADLINE_HEIGHT_OFFSET,
+            ADVANCE_DEADLINE_DIFFERENCE_OFFSET,
+            ADVANCE_DEADLINE_CARRIES_OFFSET,
+            ADVANCE_DEADLINE_EXTENSION_CARRIES_OFFSET,
+            NEXT_TURN_SELECTOR_OFFSET + 1,
+            NEXT_TURN_PAIR_OFFSET + 1,
+            SELECTED_POST_STATUS_OFFSET,
+            ACTION_AMOUNT_OFFSET,
+            TRANSITION_SEAT_SELECTOR_OFFSET,
+        ] {
+            assert_air_rejects_trace_mutation(&trace, &archive, column);
+        }
+    }
+
+    #[test]
     fn canonical_direct_air_rejects_betting_time_bank_extension_tampering() {
         let witness = advance_deadline();
         let (trace, archive) = trace_for(std::slice::from_ref(&witness)).expect("deadline trace");
@@ -6996,6 +7160,22 @@ mod tests {
         ] {
             assert_air_rejects_trace_mutation(&trace, &archive, column);
         }
+    }
+
+    #[test]
+    fn canonical_direct_air_rejects_acted_mask_mutation_on_deadline_extension() {
+        let mut witness = advance_deadline();
+        witness.post.acted_mask = 1;
+        witness.post.seats[0].acted = true;
+        witness.seal();
+        assert!(prove_canonical_tagged_batch(&[witness]).is_err());
+
+        let witness = advance_deadline();
+        let (trace, archive) = trace_for(std::slice::from_ref(&witness)).expect("deadline trace");
+        // The endpoint acted-mask projection and the fixed seat bit opening
+        // are both independently constrained by the AdvanceDeadline gate.
+        assert_air_rejects_trace_mutation(&trace, &archive, 305);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_400);
     }
 
     #[test]

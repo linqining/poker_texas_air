@@ -301,11 +301,13 @@ state-image commitment preimage and variable-length hot-table object still
 require their own AIR before production can claim complete host-zero state
 semantics.
 
-Accordingly, `AuthenticatedCanonicalTexasReceipt::admit_canonical_proof_with_state_openings`
-is deliberately fail-closed in this revision. The lower-level canonical and
-opening verifiers remain usable for audit and regression work, but they cannot
-advance a production head until state-image byte/trace binding, complete VM
-relations, and the Ristretto relation are composed.
+Accordingly, `AuthenticatedCanonicalTexasReceipt::admit_canonical_proof` and
+`AuthenticatedCanonicalTexasReceipt::admit_canonical_proof_with_state_openings`
+are deliberately fail-closed in this revision. The lower-level
+`verify_canonical_proof` and opening verifiers remain usable for audit and
+regression work, but they cannot advance a production head until state-image
+byte/trace binding, complete VM relations, and the Ristretto relation are
+composed.
 
 Before the optimized port is admitted anywhere, the fixed ABI has to pass:
 

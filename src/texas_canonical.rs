@@ -297,6 +297,11 @@ pub enum CanonicalTransitionKind {
     /// selector: an authenticated tagged batch may contain it only as the
     /// canonical continuation of a completed betting state.
     AdvanceRound = 19,
+    /// Permissionless betting-timeout action.  This is the non-cascading VM
+    /// suffix: the timed-out actor folds and a fresh betting deadline is
+    /// armed for the first remaining active seat.  Terminal settlement and
+    /// round advancement remain separate canonical micro-steps.
+    AutoFold = 20,
 }
 
 impl CanonicalTransitionKind {
@@ -304,6 +309,7 @@ impl CanonicalTransitionKind {
         matches!(
             self,
             Self::AdvanceDeadline
+                | Self::AutoFold
                 | Self::JoinTable
                 | Self::LeaveTable
                 | Self::ForceFold
@@ -324,7 +330,10 @@ impl CanonicalTransitionKind {
     }
 
     pub const fn permissionless(self) -> bool {
-        matches!(self, Self::AdvanceDeadline | Self::AdvanceRound)
+        matches!(
+            self,
+            Self::AdvanceDeadline | Self::AdvanceRound | Self::AutoFold
+        )
     }
 }
 
@@ -907,12 +916,95 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                 || w.action.amount != consume
                 || post.deadline_ms != pre.deadline_ms.saturating_add(consume)
                 || post.seats[seat].time_bank_ms != pre.seats[seat].time_bank_ms - consume as u32
+                || post.acted_mask != pre.acted_mask
+                || post
+                    .seats
+                    .iter()
+                    .zip(pre.seats.iter())
+                    .any(|(after, before)| after.acted != before.acted)
             {
                 return Err("advance_deadline has an invalid time-bank extension".into());
             }
             only_allowed_changes(pre, post, Some(seat), |expected, actual| {
                 expected.call_seq = actual.call_seq;
                 expected.deadline_ms = actual.deadline_ms;
+                expected.seats[seat] = actual.seats[seat];
+            })?;
+        }
+        CanonicalTransitionKind::AutoFold => {
+            if pre.phase != CanonicalPhase::Betting
+                || pre.current_turn != w.action.seat
+                || before.status != CanonicalSeatStatus::Active
+                || post.phase != CanonicalPhase::Betting
+                || post.current_turn == NO_CANONICAL_SEAT
+                || post.current_turn == w.action.seat
+                || w.deadline_height < pre.deadline_ms
+                || w.action.amount != 0
+                || w.action.auxiliary != 0
+                || w.action.flag
+                || post.deadline_ms
+                    != w.deadline_height
+                        .checked_add(u64::from(CANONICAL_BETTING_TIMEOUT_MS))
+                        .ok_or("auto-fold deadline overflow")?
+                || after.status != CanonicalSeatStatus::Folded
+                || !after.acted
+                || after.stack != before.stack
+                || after.bet != before.bet
+                || after.total_bet != before.total_bet
+                || after.pending_addon != before.pending_addon
+                || after.time_bank_ms != before.time_bank_ms
+                || after.identity_commitment != before.identity_commitment
+                || after.key_commitment != before.key_commitment
+                || after.hole_cards_commitment != before.hole_cards_commitment
+            {
+                return Err("auto-fold timeout transition is invalid".into());
+            }
+            if post.phase_subtag != pre.phase_subtag
+                || post.street != pre.street
+                || post.current_bet != pre.current_bet
+                || post.min_raise != pre.min_raise
+                || post.pot != pre.pot
+                || post.chip_pool != pre.chip_pool
+                || post.leave_after_hand_mask != pre.leave_after_hand_mask
+                || post.board_cards_commitment != pre.board_cards_commitment
+                || post.deck_commitment != pre.deck_commitment
+                || post.reveal_commitment != pre.reveal_commitment
+                || post.reconstruction_commitment != pre.reconstruction_commitment
+                || post.run_it_twice_commitment != pre.run_it_twice_commitment
+            {
+                return Err("auto-fold changed unrelated betting state".into());
+            }
+            let successor = (1..=MAX_CANONICAL_SEATS)
+                .map(|offset| ((seat + offset) % usize::from(pre.max_players)) as u8)
+                .find(|&candidate| {
+                    post.seats[usize::from(candidate)].status == CanonicalSeatStatus::Active
+                })
+                .ok_or("auto-fold requires a remaining active successor")?;
+            if post.current_turn != successor {
+                return Err("auto-fold did not select the first active successor".into());
+            }
+            for (index, (source, target)) in pre.seats.iter().zip(post.seats.iter()).enumerate() {
+                let expected_acted = if index == seat { true } else { source.acted };
+                if target.acted != expected_acted
+                    || (index != seat
+                        && (source.status != target.status
+                            || source.stack != target.stack
+                            || source.bet != target.bet
+                            || source.total_bet != target.total_bet
+                            || source.pending_addon != target.pending_addon
+                            || source.time_bank_ms != target.time_bank_ms
+                            || source.identity_commitment != target.identity_commitment
+                            || source.key_commitment != target.key_commitment
+                            || source.hole_cards_commitment != target.hole_cards_commitment))
+                {
+                    return Err("auto-fold changed an unrelated seat image".into());
+                }
+            }
+            only_allowed_changes(pre, post, seat_index, |expected, actual| {
+                expected.call_seq = actual.call_seq;
+                expected.current_turn = actual.current_turn;
+                expected.deadline_ms = actual.deadline_ms;
+                expected.acted_mask = actual.acted_mask;
                 expected.seats[seat] = actual.seats[seat];
             })?;
         }

@@ -42,7 +42,9 @@ carry/range relation 证明 action height 不早于 pre deadline；但它
 identity material，不允许改动 board/reveal/reconstruct/run-it-twice commitments，并
 只允许 deck commitment 被 leave-DLEQ 层移除替换。三个 submit 标签也直接约束其
 pre phase（shuffle/reveal/reconstruct）、非空提交座位和非零、16-bit range-bound 的
-proof commitment；它们不能借由 protocol payload 改动筹码、座位、board 或普通
+proof commitment；当前 ABI 仍要求 protocol submit 保持 phase 不变，因此 zchain 最后一次
+提交触发的 `shuffle -> reveal`、`reveal -> betting`、`reconstruct -> shuffle` 跃迁继续
+fail-closed，直到固定宽度 pending/completed protocol mask 与对应密码学关系加入 AIR。它们不能借由 protocol payload 改动筹码、座位、board 或普通
 状态字段。这些只是 transition shape/anti-null 边界，**不**验证 DLEQ、shuffle、
 reveal 或 reconstruction 的 Ristretto 方程。
 
@@ -87,7 +89,8 @@ Shuffle/reveal/reconstruct 的 phase/seat/proof-presence shape，以及非终局
 `FoldWithProof` 的 betting/state-preservation shape 已受约束；它们的密码学与
 完整 VM phase-completion/timeout/settlement 关系仍未受约束，故这个新组合仍不是
 host-zero admission 证据，
-`admit_canonical_proof_with_state_openings` 会明确 fail-closed。
+`verify_canonical_proof` 仅供结构审计；`admit_canonical_proof` 与
+`admit_canonical_proof_with_state_openings` 都会明确 fail-closed。
 
 独立项目还提供 `authenticate_receipt_l1`。生产适配器必须使用
 `TexasL1ReceiptInclusionProof`，它直接调用

@@ -388,13 +388,33 @@ impl AuthenticatedCanonicalTexasReceipt {
         &self.inclusion
     }
 
-    /// Verify the canonical AIR and bind its complete public scope to the finalized receipt.
-    pub fn admit_canonical_proof(
+    /// Verify the canonical AIR and bind its public scope for audit tooling.
+    ///
+    /// This intentionally does not advance a production head: the canonical
+    /// AIR still leaves timeout cascades, settlement, and the Ristretto
+    /// protocol equations outside the circuit.
+    pub fn verify_canonical_proof(
         &self,
         archive: &ArchivedCanonicalTaggedProof,
     ) -> TexasAirResult<()> {
         crate::texas_canonical_air::verify_canonical_tagged_proof(archive)?;
         bind_canonical_proof_to_receipt(archive, &self.receipt)
+    }
+
+    /// Production admission for the canonical AIR.
+    ///
+    /// The structural verifier above remains useful for audit and regression
+    /// tests, but accepting it as a head-changing transition would turn the
+    /// unproven VM/crypto relations into host trust.  Keep this API explicitly
+    /// fail-closed until those relations are composed.
+    pub fn admit_canonical_proof(
+        &self,
+        archive: &ArchivedCanonicalTaggedProof,
+    ) -> TexasAirResult<()> {
+        self.verify_canonical_proof(archive)?;
+        Err(TexasAirError::HostZeroAdmissionIncomplete(
+            "canonical AIR does not yet prove complete Texas VM timeout, settlement, or Ristretto semantics".into(),
+        ))
     }
 
     /// Fail closed for production admission of the canonical/opening

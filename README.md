@@ -19,17 +19,18 @@ The direct state-transition proving paths are documented in
 
 - `texas_tagged` is the existing fail-closed projected AIR for mid-round betting,
   addon, rebuy, and leave-after-hand transitions.
-- `texas_canonical_air` accepts the fixed-width ABI for all 19 Texas transition
+- `texas_canonical_air` accepts the fixed-width ABI for all 21 Texas transition
   selectors, and proves batch ordering, state-image links, selector validity,
   table scope, sequence rules, active-prefix padding, and the limited actor policy
   encoded in the AIR.
 
 Neither API yet proves all Texas VM semantics. The canonical AIR now independently
-checks canonical-limb arithmetic for `Call` (including short all-in) and unopened-round
-`Bet`, but raise/funding/crypto/terminal families, mental-poker proofs, settlement, and
-state-root updates remain host-validated until their dedicated AIR components are
-implemented. A witness-free Stwo verification result alone must not advance a production
-table head.
+constrains the fixed relations for `Call` (including short all-in), `Raise`, `Bet`, funding,
+join/leave, force/kick, `SetLeaveAfterHand`, `AdvanceRound`, bounded betting time-bank extension,
+and the non-cascading `AutoFold` timeout suffix. Shuffle/reveal/reconstruct cryptography, full
+timeout/terminal cascades, mental-poker proofs, settlement, and state-root recomputation remain outside the AIR until their dedicated
+components are implemented. A witness-free Stwo verification result alone must not advance a
+production table head.
 
 The complete-state migration starts at [`src/texas_canonical.rs`](src/texas_canonical.rs):
 it defines a fixed-width ABI for every VM phase, seat lifecycle, deck/reveal/reconstruction
@@ -54,9 +55,11 @@ For the fixed-width state-opening audit path, use
 `canonical_state_opening::prove_canonical_batch_with_state_openings` and its
 verifier. The composition verifies its pre/post 257-compression Blake2b paths
 in one shared lookup batch and rejects key/value/root/epoch splices.
+`AuthenticatedCanonicalTexasReceipt::admit_canonical_proof` and
 `AuthenticatedCanonicalTexasReceipt::admit_canonical_proof_with_state_openings`
-intentionally fails closed today: canonical state-image byte binding, complete
+intentionally fail closed today: canonical state-image byte binding, complete
 VM semantics, and the Ristretto crypto relation have not yet been composed, so
-it must not advance a production host-zero head.
+neither method can advance a production host-zero head. Use
+`verify_canonical_proof` for structural audit and regression checks.
 
 Downstream migration notes are in [`MIGRATION.md`](MIGRATION.md).

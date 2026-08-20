@@ -3,6 +3,15 @@
 本文只描述 `poker_texas_air` 当前生产架构。`poker_zkvm` 不在 zchain workspace、依赖图或
 本轮交付范围内；这里不把旧 zkVM/递归实验当作可用能力或待修前置条件。
 
+本文的 P0-6 四段 plan 描述的是既有 host-native orchestrator/composition 路径，不能与
+直接 `texas_canonical_air` tagged receipt 路径混读。后者不依赖 `ProveTask` 或 host replay：
+`verify_canonical_proof` 只提供结构审计，`admit_canonical_proof` 及
+`admit_canonical_proof_with_state_openings` 当前明确 fail-closed。尤其是 direct AIR 的
+`AdvanceDeadline` 目前只证明固定 betting timeout 的 time-bank extension 及状态不变性；direct
+AIR 另有受限的非级联 `AutoFold` timeout suffix，但尚未证明 VM 的 turn/round cascade、settlement
+或 reset；因此本文下述 legacy plan
+完成项不代表 direct canonical proof 已具备 host-zero admission 语义。
+
 ## P0-5：Host-native 验证、digest 绑定与聚合边界
 
 ### 已完成
