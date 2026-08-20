@@ -108,17 +108,28 @@ following constraints:
    verified addition output, computes `D=2*Z1*Z2`, and therefore supports the
    continuous accumulator chain required by scalar multiplication.  Its focused
    one-addition test runs in 33.87s.
+   The matching projective encode wrapper consumes authenticated `X/Y/Z/T`
+   directly, runs the complete dalek compression equations without a host
+   affine normalization, and binds the canonical 32-byte output.  It verifies
+   basepoint doubling against the standard compressed `2B`, rejects
+   output/input/addition splices and noncanonical encodings, and handles a
+   scaled identity with `X=0`, `Y=Z`, `T=0`.  The focused
+   decode+addition+projective-encode test runs in 81.90s; the scaled-identity
+   path runs in 49.00s.
    The `0P..15P` fixed-window table is derived by 14 continuous projective
    additions in one program STARK and exposed as a shared point-table source.
    Its current fixed layout has 376 canonical values and 226 operations.  The
-   program now derives add/sub outputs directly from their constrained modular
-   relations and derives each multiplication quotient from its strict output and
-   exact convolution equation; only 150 values retain the generic strict-range
-   witness block.  Add/Sub public selectors and reduction signs are constrained,
-   so those derivations do not trust the prover's native witness construction.
-   The focused proof fell from 188.63s to 154.88s.  Multiplication carry/range
-   witnesses remain the dominant cost and should move to shared lookup tables in
-   the next specialization.
+   program derives each multiplication quotient from its strict output and exact
+   convolution equation; 236 values retain the generic strict-range witness
+   block.  Add/Sub outputs deliberately remain strict-witnessed because their
+   modular relations and reduction-sign domains alone do not force the reduced
+   representative.  Add/Sub public selectors and reduction signs are constrained,
+   so the arithmetic relation cannot be relabeled by prover witness bits.  The
+   discarded 154.88s measurement also derived add/sub outputs and is therefore
+   not a sound benchmark.  With those strict witnesses restored, the focused
+   proof takes 164.17s, down about 13.0% from the original 188.63s layout.
+   Multiplication carry/range witnesses remain the dominant cost and should move
+   to shared lookup tables in the next specialization.
    The public 16-entry projective-point table selector uses deterministic
    authenticated-table indexing rather than a selector STARK: each distinct table
    entry is verified once, repeated identical entries are cached, and the public
@@ -134,18 +145,116 @@ following constraints:
    committed values, while the generic program is capped at 512 of each.  This
    keeps callers from mistaking an unbounded witness allocation for a production
    proof.  A dedicated doubling/window AIR or lookup schedule must be added
-   before this ABI can produce a scalar-multiplication STARK.
-2. Remaining point-composition relations, including composing decoded points
-   with scalar multiplication, Edwards addition, and prime-order quotient
-   checks.
+   before this monolithic ABI can produce a scalar-multiplication STARK.
+   A proof-producing alternative now uses canonical compressed-point rows:
+   15 rows derive `1P..15P`, followed by 64 high-to-low Horner windows with
+   four doublings and one selected-table addition each, for 335 equal-shape
+   rows total.  `prove_ristretto_fp_program_compressed_fixed_window_scalar_mul`
+   places those rows in one batch STARK, while the multi-statement variant
+   concatenates several 335-row schedules into one shared batch so DLEQ/OR
+   composition need not allocate one STARK per scalar multiplication.  The
+   verifier rebuilds the complete row schedule from the authenticated scalar
+   windows and rejects base/scalar/output/row-slice/padding splices.  This is a
+   sound proof-producing bridge, but the generic compressed codec remains too
+   expensive for production until lookup specialization lands.
+   `src/ristretto_reconstruction_accumulator_air.rs` now uses one fixed-shape
+   field-program row for the complete compressed-point relation: canonical left
+   decode, canonical right decode, unified projective Edwards addition, and
+   projective Ristretto encode.  Its branch choices are represented by
+   constrained 0/1 selectors, so valid points with different sign branches
+   still share one operation/output layout.  The fixed 52-card archive places
+   all 104 equations in one dynamic-row STARK in the exact order
+   `card0.c1, card0.c2, ..., card51.c2`, rather than storing 104 independent
+   point-proof chains.  The transcript binds the effective row count even when
+   the power-of-two padding row equals the final public row.  Verification
+   rejects prior/contribution/post splices, c1/c2 swaps, card swaps,
+   noncanonical points, wrong arithmetic rows, and padding-count relabeling,
+   and can bind a non-initial accumulator to the lookup-authenticated canonical
+   pre-state opening plus the exact Reconstruction V3 contribution vector.  A
+   second reconstruction opening is included in the same Blake2b lookup batch:
+   it clears exactly the selected pending bit, preserves epoch/key/seat/readable
+   data, stores the proven post accumulator, and hashes to
+   `post.reconstruction_commitment`.  Non-final reconstruction also preserves
+   the encrypted deck commitment in both native canonical validation and the
+   direct canonical AIR, matching the VM update order.
+   A two-row `identity+B` / `B+B` focused proof runs in 27.58s.  The complete
+   104-row reconstruction fixture proves and checks all splice cases in
+   723.78s on the current development machine.  This is a major archive-count
+   reduction but remains a heavy generic Fp layout; multiplication witnesses
+   still need lookup-backed specialization for production latency.
+   The first contribution now uses one additional equal-shape 156-row batch:
+   rows `0..51` prove `1G..52G`, rows `52..103` prove `1PK..52PK`, and rows
+   `104..155` prove `card_i + (i+1)PK`.  The card vector is verifier-fixed to
+   the ordered Ristretto points `hash_to_curve("texas_poker/card/{i}")`.  An
+   absent pre-accumulator requires this archive and a zero opening deck; a
+   present pre-accumulator forbids it.  Structural splice tests pass, while a
+   full 156-row proof remains unbenchmarked on the generic Fp backend.
+   Final reconstruction still fails closed until the accumulated deck is bound
+   to the rebuilt encrypted deck commitment and the reconstruct-shuffle
+   transition.
+   The Ristretto V3 request no longer accepts an arbitrary non-empty proof byte
+   string at this boundary. Its `proof` field is a canonical `ZR3P/v1` envelope
+   with exactly one shuffle component, two cross-key components, and 52 slot-OR
+   components. The envelope authenticates a domain-separated digest of every
+   public request field (excluding the envelope itself), its component
+   count/order, and an independent component digest. Therefore a proof
+   component or whole envelope cannot be copied to a request with a different
+   key, epoch, readable ciphertext, contribution, card, or call scope. This is
+   a wire/statement binding only: it deliberately does **not** treat the
+   component payloads as valid until the Poseidon transcript, cross-key,
+   slot-OR, and Bayer--Groth AIR verifiers consume them.
+   `src/ristretto_reconstruction_relation_air.rs` now adds a request-bound
+   cross-key composition archive for exactly two readable cards. It derives
+   each equation statement from the validated request and `ZR3P` envelope,
+   verifies statement-digest/order/key/ciphertext/proof-field binding, and
+   then verifies its fixed-shape scalar-multiplication and point-addition AIR
+   batches. Its `RistrettoCrossKeyTranscriptChallenges` input is deliberately
+   only the typed output interface for a future Poseidon252 transcript AIR;
+   host-generated challenges remain insufficient for admission. The matching
+   `ristretto_scalar_add_air.rs` proves challenge-share addition modulo the
+   Ristretto group order, and `ristretto_reconstruction_slot_or_air.rs` now
+   composes each slot-OR relation with eight scalar multiplications and five
+   ordered point additions. Its 52-slot archive binds the complete slot/card/
+   contribution/proof order to `ZR3P`; its global challenge array remains only
+   a typed output from the future transcript AIR. Shuffle, transcript
+   recomputation, and final production composition are still incomplete and
+   fail closed.
+   `src/ristretto_reconstruction_transcript.rs` now fixes that future
+   component's protocol ABI: a distinct v1 domain absorbs every request byte
+   as labelled, length-prefixed 16-byte little-endian field chunks (not merely
+   the `ZR3P` Blake2b digest), then emits challenges in the fixed order
+   `cross_key[0..2)`, shuffle wire, and `slot_or[0..52)`.  Each cross-key
+   challenge absorbs its negative contribution and three Sigma commitments;
+   each slot challenge absorbs its canonical slot ordinal and four Sigma
+   commitments.  The module also reserves a per-challenge nonzero retry count.
+   It is a statement/schedule specification only: it performs no native
+   Poseidon calculation and is not an AIR wrapper or an admission credential.
+   It also emits a rate-two sponge operation schedule, fixing full-block
+   permutations and the `+1` finalization lane for every squeeze so the AIR
+   cannot choose a different padding boundary.
+   The typed challenge boundary now also rejects detached digests, zero or
+   non-canonical Ristretto scalars, and retry counters above the fixed bound
+   before any relation archive consumes it.  This remains a shape/range gate,
+   not transcript authentication; only a future Poseidon permutation AIR can
+   authenticate the challenge bytes.
+   `src/ristretto_reconstruction_composition.rs` now packages the available state binding,
+   accumulator, cross-key, and 52 slot-OR archives under one request/envelope/transcript scope,
+   rejecting component and slot-order splices before child AIR verification. This is an audit
+   composition only: its admission-shaped API verifies the available pieces and then returns
+   `HostZeroAdmissionIncomplete` until Poseidon permutation/retry and Bayer--Groth shuffle AIRs
+   are present.
+2. Remaining proof composition, especially Bayer--Groth shuffle equations,
+   Poseidon252 transcript recomputation for the now-composed cross-key and
+   slot-OR equations, and prime-order quotient checks.
 3. Extended-Edwards complete addition/doubling formulas, curve membership and
    Ristretto prime-order quotient semantics. AIR internals should retain
    extended coordinates; only request/state boundaries are compressed.
 4. Canonical scalar decoding and bit decomposition modulo the Ristretto group
-   order are implemented.  The fixed-window scalar-multiplication ABI and DAG
-   shape are specified, but its generic backend currently fails closed on the
-   5,760-operation shape.  The remaining production work is a dedicated
-   doubling/window AIR, private selectors where needed, and MSM batching.
+   order are implemented.  The old monolithic fixed-window backend continues
+   to fail closed on the 5,760-operation shape; the new compressed 335-row
+   single/batched backend is proof-producing and structurally tested.  The
+   remaining production work is lookup-specialized doubling/window arithmetic,
+   private selectors where needed, and DLEQ/MSM composition.
 5. A circuit hash transcript. Native Merlin or SHA3 output supplied as a
    witness is not acceptable: Fiat--Shamir challenges must be recomputed in
    the AIR. Prefer a versioned Poseidon transcript for the v2 protocol so the

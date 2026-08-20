@@ -83,6 +83,8 @@ pub mod blake2b_lookup_xor;
 pub mod blake2b_smt_air;
 /// Fixed-width Blake2b SMT compression witness ABI for the host-zero route.
 pub mod blake2b_smt_witness;
+/// No-replay scope binding for canonical Reconstruction V3 AIR requests.
+pub mod canonical_reconstruction_binding;
 /// Lookup-backed authentication of canonical state-image byte preimages.
 pub mod canonical_state_hash;
 /// Public-proof composition that binds canonical Texas transitions to L1
@@ -110,6 +112,20 @@ pub mod ristretto_fp_sub_air;
 pub mod ristretto_point_decode_air;
 /// Composed host-zero Ristretto255 point-encode proofs.
 pub mod ristretto_point_encode_air;
+/// Folded Ristretto group-addition binding for reconstruction accumulators.
+pub mod ristretto_reconstruction_accumulator_air;
+/// Partial request-scoped composition of implemented Reconstruction V3 relations.
+pub mod ristretto_reconstruction_composition;
+/// Versioned public wire envelope for Ristretto Reconstruction V3 proofs.
+pub mod ristretto_reconstruction_proof_wire;
+/// Ristretto Reconstruction V3 cross-key equation composition.
+pub mod ristretto_reconstruction_relation_air;
+/// Ristretto Reconstruction V3 slot-membership OR composition.
+pub mod ristretto_reconstruction_slot_or_air;
+/// Canonical Poseidon252 transcript absorption schedule for Reconstruction V3.
+pub mod ristretto_reconstruction_transcript;
+/// Canonical Ristretto255 scalar addition modulo the group order.
+pub mod ristretto_scalar_add_air;
 /// Canonical Ristretto255 group-scalar limb AIR.
 pub mod ristretto_scalar_air;
 /// Canonical Ristretto255 scalar 4-bit window AIR.

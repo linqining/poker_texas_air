@@ -30,14 +30,16 @@ use stwo_constraint_framework::{
 
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::texas_canonical::{
-    CANONICAL_ABI_VERSION, CanonicalSeatStatus, CanonicalStateImage, CanonicalTransitionKind,
-    CanonicalTransitionWitness, MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS, MAX_CANONICAL_SEATS,
+    CANONICAL_ABI_VERSION, CANONICAL_RECONSTRUCT_COLLECTING_SUBTAG,
+    CANONICAL_SHUFFLE_RECONSTRUCT_SUBTAG, CanonicalProtocolCompletionKind, CanonicalSeatStatus,
+    CanonicalStateImage, CanonicalTransitionKind, CanonicalTransitionWitness,
+    MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS, MAX_CANONICAL_SEATS, NO_CANONICAL_SEAT,
 };
 use crate::trace_gen::MethodTrace;
 use crate::trace_gen::generic_trace::tagged_batch_log_size;
 
 const MAX_ROWS: usize = 1 << 10;
-const KIND_COUNT: usize = 21;
+const KIND_COUNT: usize = 23;
 
 // active, kinds, table, hand(pre/post), seq(pre/post), image commitments(pre/post),
 // state roots(pre/post), lifecycle roots(pre/post), overlay roots(pre/post), settlement roots
@@ -45,7 +47,7 @@ const KIND_COUNT: usize = 21;
 // The fixed prefix carries the canonical ABI.  The projection suffix carries the
 // phase/round scalars and selected-seat image needed by the betting family. Keeping it in
 // the same row preserves the tagged batch's one-proof-per-table performance profile.
-const BASE_NUM_COLUMNS: usize = 1566;
+const BASE_NUM_COLUMNS: usize = 1568;
 const FULL_BETTING_SEAT_WIDTH: usize = SEAT_STATUS_COUNT + 4 * 4 + 2;
 const FULL_BETTING_SEATS_OFFSET: usize = BASE_NUM_COLUMNS;
 const FULL_POST_BETTING_SEATS_OFFSET: usize =
@@ -128,7 +130,20 @@ const NULLIFIER_INV_OFFSET: usize = TRANSITION_COMMITMENT_INV_OFFSET + 1;
 const ACTOR_INV_OFFSET: usize = NULLIFIER_INV_OFFSET + 1;
 const TIMEOUT_CONFIG_OFFSET: usize = ACTOR_INV_OFFSET + 1;
 const TIMEOUT_CONFIG_RANGE_BITS_OFFSET: usize = TIMEOUT_CONFIG_OFFSET + 2 * TIMEOUT_CONFIG_LIMBS;
-const NUM_COLUMNS: usize = TIMEOUT_CONFIG_RANGE_BITS_OFFSET + TIMEOUT_CONFIG_LIMBS * 16;
+const PROTOCOL_COMPLETION_OPENING_OFFSET: usize =
+    TIMEOUT_CONFIG_RANGE_BITS_OFFSET + TIMEOUT_CONFIG_LIMBS * 16;
+const PROTOCOL_COMPLETION_COMMITMENT_COUNT: usize = 5;
+const PROTOCOL_COMPLETION_OPENING_WIDTH: usize =
+    1 + 4 + 2 + 2 + PROTOCOL_COMPLETION_COMMITMENT_COUNT * 16;
+const PROTOCOL_COMPLETION_TIMESTAMP_BITS_OFFSET: usize =
+    PROTOCOL_COMPLETION_OPENING_OFFSET + PROTOCOL_COMPLETION_OPENING_WIDTH;
+const PROTOCOL_COMPLETION_TIMESTAMP_INV_OFFSET: usize =
+    PROTOCOL_COMPLETION_TIMESTAMP_BITS_OFFSET + 4 * 16;
+const PROTOCOL_COMPLETION_DEADLINE_CARRIES_OFFSET: usize =
+    PROTOCOL_COMPLETION_TIMESTAMP_INV_OFFSET + 1;
+const PROTOCOL_COMPLETION_CURSOR_RANGE_OFFSET: usize =
+    PROTOCOL_COMPLETION_DEADLINE_CARRIES_OFFSET + 3;
+const NUM_COLUMNS: usize = PROTOCOL_COMPLETION_CURSOR_RANGE_OFFSET + 3 * 6;
 // The fixed public scope contains the table/sequence/image boundary plus the
 // five authenticated root domains (state, lifecycle, overlay, settlement and
 // custody) at both ends of the batch.
@@ -977,12 +992,15 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     }
     debug_assert_eq!(out.len(), ROUND_COLLECT_CARRIES_OFFSET);
     let is_round_advance = w.kind == CanonicalTransitionKind::AdvanceRound;
-    out.extend(if is_round_advance {
+    let is_end_without_showdown = w.kind == CanonicalTransitionKind::EndWithoutShowdown;
+    let is_reset_only = w.kind == CanonicalTransitionKind::ResetOnly;
+    let is_terminal_reset = is_end_without_showdown || is_reset_only;
+    out.extend(if is_round_advance || is_end_without_showdown {
         round_collect_carries(w.pre.pot, &w.pre.seats)
     } else {
         [M31::from(0u32); 3]
     });
-    for carry in if is_round_advance {
+    for carry in if is_round_advance || is_end_without_showdown {
         round_collect_carries(w.pre.pot, &w.pre.seats)
     } else {
         [M31::from(0u32); 3]
@@ -993,7 +1011,11 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     }
     debug_assert_eq!(out.len(), ROUND_COLLECT_BET_BITS_OFFSET);
     for seat in &w.pre.seats {
-        for limb in u64_limbs(if is_round_advance { seat.bet } else { 0 }) {
+        for limb in u64_limbs(if is_round_advance || is_end_without_showdown {
+            seat.bet
+        } else {
+            0
+        }) {
             out.extend(u16_bits(limb.0 as u16));
         }
     }
@@ -1150,11 +1172,15 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
             | CanonicalTransitionKind::SubmitReconstruct
     );
     let post_pending_count = w.post.protocol_pending_mask.count_ones();
-    out.push(if protocol_submit && post_pending_count != 0 {
-        M31::from(post_pending_count).inverse()
-    } else {
-        M31::from(0u32)
-    });
+    let reconstruct_completion =
+        w.protocol_completion.kind == CanonicalProtocolCompletionKind::Reconstruct;
+    out.push(
+        if protocol_submit && !reconstruct_completion && post_pending_count != 0 {
+            M31::from(post_pending_count).inverse()
+        } else {
+            M31::from(0u32)
+        },
+    );
     debug_assert_eq!(out.len(), TRANSITION_SEAT_SELECTOR_OFFSET);
     let requires_seat = w.kind.requires_seat();
     for index in 0..MAX_CANONICAL_SEATS {
@@ -1397,6 +1423,65 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         for limb in u32_limbs(timeout) {
             out.extend(u16_bits(limb.0 as u16));
         }
+    }
+    debug_assert_eq!(out.len(), PROTOCOL_COMPLETION_OPENING_OFFSET);
+    let completion = &w.protocol_completion;
+    out.push(M31::from(u32::from(completion.kind as u8)));
+    out.extend(u64_limbs(completion.completion_timestamp_ms));
+    out.push(M31::from(u32::from(completion.pre_cards_dealt)));
+    out.push(M31::from(u32::from(completion.post_cards_dealt)));
+    for commitment in [
+        completion.suspended_reveal_commitment,
+        completion.pre_deck_commitment,
+        completion.post_deck_commitment,
+        completion.pre_reconstruction_commitment,
+        completion.post_reconstruction_commitment,
+    ] {
+        out.extend(bytes16(&commitment));
+    }
+    out.push(M31::from(u32::from(completion.post_shuffle_pending_mask)));
+    out.push(M31::from(u32::from(completion.post_shuffle_completed_mask)));
+    debug_assert_eq!(out.len(), PROTOCOL_COMPLETION_TIMESTAMP_BITS_OFFSET);
+    append_u64_bits(&mut out, completion.completion_timestamp_ms);
+    let timestamp_sum = u64_limbs(completion.completion_timestamp_ms)
+        .into_iter()
+        .map(|limb| u64::from(limb.0))
+        .sum::<u64>();
+    let is_reconstruct_completion = completion.kind == CanonicalProtocolCompletionKind::Reconstruct;
+    out.push(if is_reconstruct_completion && timestamp_sum != 0 {
+        M31::from(timestamp_sum as u32).inverse()
+    } else {
+        M31::from(0u32)
+    });
+    out.extend(if is_reconstruct_completion {
+        add_carries(
+            completion.completion_timestamp_ms,
+            u64::from(w.pre.shuffle_timeout_ms),
+        )
+    } else {
+        [M31::from(0u32); 3]
+    });
+    let cursor = if is_reconstruct_completion {
+        completion.pre_cards_dealt
+    } else {
+        0
+    };
+    let remaining = if is_reconstruct_completion {
+        52u8.saturating_sub(cursor)
+    } else {
+        0
+    };
+    let mut carry = 0u8;
+    for bit in 0..6 {
+        out.push(M31::from(u32::from((cursor >> bit) & 1)));
+    }
+    for bit in 0..6 {
+        out.push(M31::from(u32::from((remaining >> bit) & 1)));
+    }
+    for bit in 0..6 {
+        let sum = ((cursor >> bit) & 1) + ((remaining >> bit) & 1) + carry;
+        carry = sum >> 1;
+        out.push(M31::from(u32::from(carry)));
     }
     debug_assert_eq!(out.len(), NUM_COLUMNS);
     out
@@ -2153,6 +2238,24 @@ impl FrameworkEval for CanonicalAir {
             std::array::from_fn(|_| eval.next_trace_mask());
         let pre_timeout_config_bits: [[E::F; 16]; TIMEOUT_CONFIG_LIMBS] =
             std::array::from_fn(|_| trace_bits16(&mut eval));
+        let protocol_completion_kind = eval.next_trace_mask();
+        let protocol_completion_timestamp = trace_limbs(&mut eval);
+        let protocol_completion_pre_cards_dealt = eval.next_trace_mask();
+        let protocol_completion_post_cards_dealt = eval.next_trace_mask();
+        let protocol_completion_commitments: [[E::F; 16]; PROTOCOL_COMPLETION_COMMITMENT_COUNT] =
+            std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
+        let protocol_completion_post_pending_mask = eval.next_trace_mask();
+        let protocol_completion_post_completed_mask = eval.next_trace_mask();
+        let protocol_completion_timestamp_bits: [[E::F; 16]; 4] =
+            std::array::from_fn(|_| trace_bits16(&mut eval));
+        let protocol_completion_timestamp_inv = eval.next_trace_mask();
+        let protocol_completion_deadline_carries = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let protocol_completion_cursor_range: [[E::F; 6]; 3] =
+            std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
         eval.add_constraint(active.clone() * flag.clone() * (flag.clone() - one.clone()));
         eval.add_constraint(seq_carry.clone() * (seq_carry.clone() - one.clone()));
         for (pre, post) in [
@@ -2249,7 +2352,14 @@ impl FrameworkEval for CanonicalAir {
         let is_funding = is_addon.clone() + is_rebuy.clone();
         let is_advance_deadline = kinds[CanonicalTransitionKind::AdvanceDeadline as usize].clone();
         let deadline_check = is_advance_deadline.clone() + is_auto_fold.clone();
+        for limb in &deadline_height {
+            eval.add_constraint((active.clone() - deadline_check.clone()) * limb.clone());
+        }
         let is_round_advance = kinds[CanonicalTransitionKind::AdvanceRound as usize].clone();
+        let is_end_without_showdown =
+            kinds[CanonicalTransitionKind::EndWithoutShowdown as usize].clone();
+        let is_reset_only = kinds[CanonicalTransitionKind::ResetOnly as usize].clone();
+        let is_terminal_reset = is_end_without_showdown.clone() + is_reset_only.clone();
         let is_create = kinds[CanonicalTransitionKind::CreateTable as usize].clone();
         let is_start = kinds[CanonicalTransitionKind::StartHand as usize].clone();
         let is_join = kinds[CanonicalTransitionKind::JoinTable as usize].clone();
@@ -2261,11 +2371,48 @@ impl FrameworkEval for CanonicalAir {
         let is_submit_reveal = kinds[CanonicalTransitionKind::SubmitReveal as usize].clone();
         let is_submit_reconstruct =
             kinds[CanonicalTransitionKind::SubmitReconstruct as usize].clone();
+        let is_reconstruct_completion = protocol_completion_kind.clone();
+        let is_nonfinal_reconstruct =
+            is_submit_reconstruct.clone() - is_reconstruct_completion.clone();
+        eval.add_constraint(
+            active.clone()
+                * is_reconstruct_completion.clone()
+                * (is_reconstruct_completion.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            is_reconstruct_completion.clone() * (one.clone() - is_submit_reconstruct.clone()),
+        );
         let is_set_leave = kinds[CanonicalTransitionKind::SetLeaveAfterHand as usize].clone();
+        for value in &auxiliary {
+            eval.add_constraint((active.clone() - is_advance_deadline.clone()) * value.clone());
+        }
+        eval.add_constraint((active.clone() - is_set_leave.clone()) * flag.clone());
+        let seatless =
+            is_create.clone() + is_start.clone() + is_round_advance.clone() + is_reset_only.clone();
+        eval.add_constraint(
+            seatless.clone() * (seat.clone() - M31::from(u32::from(NO_CANONICAL_SEAT)).into()),
+        );
+        let zero_amount = is_create.clone()
+            + is_start.clone()
+            + is_force_fold.clone()
+            + is_submit_shuffle.clone()
+            + is_submit_reveal.clone()
+            + is_submit_reconstruct.clone()
+            + is_fold.clone()
+            + is_check.clone()
+            + is_set_leave.clone()
+            + is_fold_with_proof.clone()
+            + is_round_advance.clone()
+            + is_auto_fold.clone()
+            + is_reset_only.clone();
+        for value in &amount {
+            eval.add_constraint(zero_amount.clone() * value.clone());
+        }
         let is_crypto = is_submit_shuffle.clone()
             + is_submit_reveal.clone()
             + is_submit_reconstruct.clone()
             + is_fold_with_proof.clone();
+        let proof_bound = is_crypto.clone();
         // A crypto tag carries a real, fixed-width proof commitment rather
         // than a host boolean.  Every limb is range-bound before the inverse
         // proves that at least one of the 32 commitment bytes is non-zero.
@@ -2275,17 +2422,20 @@ impl FrameworkEval for CanonicalAir {
         for limb in 0..16 {
             range16_constraints(
                 &mut eval,
-                &is_crypto,
+                &proof_bound,
                 &proof_commitment[limb],
                 &proof_commitment_bits[limb],
             );
             for bit in &proof_commitment_bits[limb] {
-                eval.add_constraint((active.clone() - is_crypto.clone()) * bit.clone());
+                eval.add_constraint((active.clone() - proof_bound.clone()) * bit.clone());
             }
             proof_commitment_sum += proof_commitment[limb].clone();
+            eval.add_constraint(
+                (active.clone() - proof_bound.clone()) * proof_commitment[limb].clone(),
+            );
         }
         eval.add_constraint(
-            is_crypto.clone() * (proof_commitment_sum * amount_inv.clone() - one.clone()),
+            proof_bound.clone() * (proof_commitment_sum * amount_inv.clone() - one.clone()),
         );
         // These direct canonical tags do not overload the betting/funding
         // action fields.  Keeping them zero removes an otherwise free advice
@@ -2301,6 +2451,11 @@ impl FrameworkEval for CanonicalAir {
         );
         eval.add_constraint(
             is_submit_reconstruct.clone() * (pre_phase.clone() - M31::from(3u32).into()),
+        );
+        eval.add_constraint(
+            is_submit_reconstruct.clone()
+                * (pre_subtag.clone()
+                    - M31::from(u32::from(CANONICAL_RECONSTRUCT_COLLECTING_SUBTAG)).into()),
         );
         let is_protocol_submit =
             is_submit_shuffle.clone() + is_submit_reveal.clone() + is_submit_reconstruct.clone();
@@ -2318,6 +2473,10 @@ impl FrameworkEval for CanonicalAir {
         ] {
             eval.add_constraint(is_protocol_submit.clone() * (post.clone() - pre.clone()));
         }
+        eval.add_constraint(
+            is_protocol_submit.clone()
+                * (pre_turn.clone() - M31::from(u32::from(NO_CANONICAL_SEAT)).into()),
+        );
         for (pre, post) in [
             (&pre_current, &post_current),
             (&pre_min, &post_min),
@@ -2359,6 +2518,13 @@ impl FrameworkEval for CanonicalAir {
         }
         for limb in 0..16 {
             eval.add_constraint(
+                is_nonfinal_reconstruct.clone()
+                    * (post_opaque_commitments[1][limb].clone()
+                        - pre_opaque_commitments[1][limb].clone()),
+            );
+        }
+        for limb in 0..16 {
+            eval.add_constraint(
                 is_protocol_submit.clone()
                     * (post_custody_commitment[limb].clone()
                         - pre_custody_commitment[limb].clone()),
@@ -2382,6 +2548,17 @@ impl FrameworkEval for CanonicalAir {
                         * (post_opaque_commitments[commitment][limb].clone()
                             - pre_opaque_commitments[commitment][limb].clone()),
                 );
+                eval.add_constraint(
+                    is_terminal_reset.clone()
+                        * (post_opaque_commitments[1][limb].clone()
+                            - proof_commitment[limb].clone()),
+                );
+                for commitment in [0usize, 2, 3, 4] {
+                    eval.add_constraint(
+                        is_terminal_reset.clone()
+                            * post_opaque_commitments[commitment][limb].clone(),
+                    );
+                }
             }
         }
         // `fold_with_proof` removes one ElGamal layer and may therefore only
@@ -2502,7 +2679,8 @@ impl FrameworkEval for CanonicalAir {
             + is_submit_reveal.clone()
             + is_submit_reconstruct.clone()
             + is_set_leave.clone()
-            + is_advance_deadline.clone();
+            + is_advance_deadline.clone()
+            + is_end_without_showdown.clone();
         // Lifecycle actions that do not depend on an opaque crypto commitment
         // are constrained directly from the fixed canonical image.  The
         // transition-seat selector below binds `pre_status`/`post_status` to
@@ -2819,7 +2997,7 @@ impl FrameworkEval for CanonicalAir {
             is_round_advance.clone() * (post_phase.clone() - M31::from(2u32).into()),
         );
         eval.add_constraint(is_round_advance.clone() * (pre_turn.clone() - no_seat.clone()));
-        eval.add_constraint(is_round_advance.clone() * (post_turn.clone() - no_seat));
+        eval.add_constraint(is_round_advance.clone() * (post_turn.clone() - no_seat.clone()));
         eval.add_constraint(
             is_round_advance.clone() * (post_street.clone() - pre_street.clone() - one.clone()),
         );
@@ -2839,7 +3017,7 @@ impl FrameworkEval for CanonicalAir {
             for limb in 0..4 {
                 range16_constraints(
                     &mut eval,
-                    &is_round_advance,
+                    &(is_round_advance.clone() + is_end_without_showdown.clone()),
                     &full_pre_bet[index][limb],
                     &round_collect_bet_bits[index][limb],
                 );
@@ -3037,12 +3215,20 @@ impl FrameworkEval for CanonicalAir {
             let mut reconstructed: E::F = M31::from(0u32).into();
             for (bit, weight) in bits.iter().zip([1u32, 2, 4, 8]) {
                 eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
-                eval.add_constraint((active.clone() - is_round_advance.clone()) * bit.clone());
+                eval.add_constraint(
+                    (active.clone()
+                        - is_round_advance.clone()
+                        - is_end_without_showdown.clone())
+                        * bit.clone(),
+                );
                 let weight: E::F = M31::from(weight).into();
                 reconstructed += bit.clone() * weight;
             }
             eval.add_constraint(carry.clone() - reconstructed);
-            eval.add_constraint((active.clone() - is_round_advance.clone()) * carry.clone());
+            eval.add_constraint(
+                (active.clone() - is_round_advance.clone() - is_end_without_showdown.clone())
+                    * carry.clone(),
+            );
         }
         let round_base: E::F = M31::from(65536u32).into();
         for limb in 0..4 {
@@ -3064,6 +3250,159 @@ impl FrameworkEval for CanonicalAir {
                 // No final carry is admitted: this is exactly the VM's
                 // checked `pot + sum(bets)` overflow rejection.
                 eval.add_constraint(is_round_advance.clone() * (sum - post_pot[limb].clone()));
+            }
+        }
+        // A terminal no-showdown row performs the same checked collection as
+        // AdvanceRound, but its result is paid directly to the selected
+        // winner and the endpoint is the next-hand waiting image.  The
+        // action amount is the sole award; auxiliary is the (narrowly
+        // disabled) rake field and is constrained to zero below.
+        for limb in 0..4 {
+            let mut sum = pre_pot[limb].clone();
+            for index in 0..MAX_CANONICAL_SEATS {
+                sum += full_pre_bet[index][limb].clone();
+            }
+            if limb > 0 {
+                sum += round_collect_carries[limb - 1].clone();
+            }
+            if limb < 3 {
+                eval.add_constraint(
+                    is_end_without_showdown.clone()
+                        * (sum
+                            - amount[limb].clone()
+                            - round_base.clone() * round_collect_carries[limb].clone()),
+                );
+            } else {
+                eval.add_constraint(
+                    is_end_without_showdown.clone() * (sum - amount[limb].clone()),
+                );
+            }
+        }
+        let terminal_amount_sum = amount
+            .iter()
+            .fold(M31::from(0u32).into(), |sum: E::F, limb| sum + limb.clone());
+        eval.add_constraint(
+            is_end_without_showdown.clone()
+                * (terminal_amount_sum * amount_inv.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            is_end_without_showdown.clone() * (pre_phase.clone() - M31::from(4u32).into()),
+        );
+        eval.add_constraint(
+            is_terminal_reset.clone() * (post_phase.clone()),
+        );
+        for value in [
+            &post_subtag,
+            &post_street,
+            &post_acted_mask,
+            &post_leave_mask,
+            &post_protocol_pending_mask,
+        ] {
+            eval.add_constraint(is_terminal_reset.clone() * value.clone());
+        }
+        for value in [&post_current, &post_min, &post_pot] {
+            for limb in value {
+                eval.add_constraint(is_terminal_reset.clone() * limb.clone());
+            }
+        }
+        for limb in &post_deadline_image {
+            eval.add_constraint(is_terminal_reset.clone() * limb.clone());
+        }
+        eval.add_constraint(is_terminal_reset.clone() * (post_turn.clone() - no_seat.clone()));
+        for (left, right) in pre_chip_pool.iter().zip(post_chip_pool.iter()) {
+            eval.add_constraint(is_terminal_reset.clone() * (right.clone() - left.clone()));
+        }
+        // ResetOnly carries no monetary delta.  EndWithoutShowdown uses the
+        // checked pot collection above and pays the winner from that exact
+        // amount, so post chip_pool is unchanged in this zero-rake branch.
+        for value in amount.iter().chain(auxiliary.iter()) {
+            eval.add_constraint(is_reset_only.clone() * value.clone());
+        }
+        for index in 0..MAX_CANONICAL_SEATS {
+            let selector = transition_seat_selectors[index].clone();
+            let time_bank_cap: E::F = M31::from(30_000u32).into();
+            let pre_empty = full_pre_status[index][CanonicalSeatStatus::Empty as usize].clone();
+            let pre_active = full_pre_status[index][CanonicalSeatStatus::Active as usize].clone();
+            let pre_folded = full_pre_status[index][CanonicalSeatStatus::Folded as usize].clone();
+            let post_empty = full_post_status[index][CanonicalSeatStatus::Empty as usize].clone();
+            let post_active = full_post_status[index][CanonicalSeatStatus::Active as usize].clone();
+            eval.add_constraint(
+                is_terminal_reset.clone()
+                    * (selector.clone() * (selector.clone() - one.clone())),
+            );
+            eval.add_constraint(
+                is_terminal_reset.clone()
+                    * ((pre_active.clone() + pre_folded.clone() + pre_empty.clone()) - one.clone()),
+            );
+            eval.add_constraint(
+                is_end_without_showdown.clone()
+                    * selector.clone()
+                    * (pre_active.clone() - one.clone()),
+            );
+            eval.add_constraint(
+                is_end_without_showdown.clone()
+                    * (one.clone() - selector.clone())
+                    * pre_active.clone(),
+            );
+            eval.add_constraint(
+                is_terminal_reset.clone()
+                    * (post_empty.clone() - pre_empty.clone()),
+            );
+            eval.add_constraint(
+                is_terminal_reset.clone()
+                    * (post_active.clone() - (one.clone() - pre_empty.clone())),
+            );
+            for limb in 0..4 {
+                eval.add_constraint(
+                    is_terminal_reset.clone() * full_post_bet[index][limb].clone(),
+                );
+                eval.add_constraint(
+                    is_terminal_reset.clone() * full_post_total[index][limb].clone(),
+                );
+                eval.add_constraint(
+                    is_terminal_reset.clone() * full_post_pending[index][limb].clone(),
+                );
+                eval.add_constraint(
+                    is_terminal_reset.clone()
+                        * (full_post_stack[index][limb].clone()
+                            - full_pre_stack[index][limb].clone()
+                            - selector.clone() * amount[limb].clone()),
+                );
+            }
+            for bit in [
+                &pre_acted_bits[index],
+                &post_acted_bits[index],
+                &pre_leave_mask_bits[index],
+                &post_leave_mask_bits[index],
+            ] {
+                eval.add_constraint(is_terminal_reset.clone() * bit.clone());
+            }
+            eval.add_constraint(
+                is_terminal_reset.clone()
+                    * (full_pre_time_bank[index][0].clone()
+                        - time_bank_cap.clone() * (one.clone() - pre_empty.clone())),
+            );
+            eval.add_constraint(is_terminal_reset.clone() * full_pre_time_bank[index][1].clone());
+            eval.add_constraint(
+                is_terminal_reset.clone()
+                    * (full_post_time_bank[index][0].clone()
+                        - time_bank_cap * (one.clone() - pre_empty.clone())),
+            );
+            eval.add_constraint(is_terminal_reset.clone() * full_post_time_bank[index][1].clone());
+            for limb in 0..16 {
+                eval.add_constraint(
+                    is_terminal_reset.clone()
+                        * (post_seat_commitments[index][0][limb].clone()
+                            - pre_seat_commitments[index][0][limb].clone()),
+                );
+                eval.add_constraint(
+                    is_terminal_reset.clone()
+                        * (post_seat_commitments[index][1][limb].clone()
+                            - pre_seat_commitments[index][1][limb].clone()),
+                );
+                eval.add_constraint(
+                    is_terminal_reset.clone() * post_seat_commitments[index][2][limb].clone(),
+                );
             }
         }
         let non_raise_betting = is_betting.clone() - is_raise.clone();
@@ -3134,9 +3473,12 @@ impl FrameworkEval for CanonicalAir {
             post_protocol_mask_from_bits += post_bit.clone() * bit_weight.clone();
             post_protocol_pending_count += post_bit.clone();
             selected_protocol_pre_bit += selector.clone() * pre_bit.clone();
+            let non_final_protocol_submit =
+                is_protocol_submit.clone() - is_reconstruct_completion.clone();
             eval.add_constraint(
-                is_protocol_submit.clone() * (post_bit.clone() - pre_bit.clone() + selector),
+                non_final_protocol_submit * (post_bit.clone() - pre_bit.clone() + selector.clone()),
             );
+            eval.add_constraint(is_reconstruct_completion.clone() * (pre_bit.clone() - selector));
             let pre_participating = full_pre_status[index][CanonicalSeatStatus::Active as usize]
                 .clone()
                 + full_pre_status[index][CanonicalSeatStatus::Folded as usize].clone()
@@ -3159,21 +3501,165 @@ impl FrameworkEval for CanonicalAir {
         );
         eval.add_constraint(selected_protocol_pre_bit - is_protocol_submit.clone());
         eval.add_constraint(
-            post_protocol_pending_count * protocol_pending_post_inv.clone()
-                - is_protocol_submit.clone(),
+            post_protocol_pending_count.clone() * protocol_pending_post_inv.clone()
+                - is_protocol_submit.clone()
+                + is_reconstruct_completion.clone(),
         );
-        // Until the phase-completion openings (new timeout, reveal schedule,
-        // blinds/antes, or reconstruct reshuffle) are in this AIR, a protocol
-        // submit is deliberately non-final and keeps the phase header fixed.
+        eval.add_constraint(is_reconstruct_completion.clone() * protocol_pending_post_inv.clone());
+        let non_final_protocol_submit =
+            is_protocol_submit.clone() - is_reconstruct_completion.clone();
+        // Shuffle/reveal completion remains fail-closed.  Non-final submits
+        // retain the active protocol header; only the explicit reconstruct
+        // completion opening below may normalize into reconstruct shuffling.
         for (pre, post) in [
             (&pre_phase, &post_phase),
             (&pre_subtag, &post_subtag),
             (&pre_street, &post_street),
         ] {
-            eval.add_constraint(is_protocol_submit.clone() * (post.clone() - pre.clone()));
+            eval.add_constraint(non_final_protocol_submit.clone() * (post.clone() - pre.clone()));
         }
         for (left, right) in pre_deadline_image.iter().zip(post_deadline_image.iter()) {
-            eval.add_constraint(is_protocol_submit.clone() * (right.clone() - left.clone()));
+            eval.add_constraint(non_final_protocol_submit.clone() * (right.clone() - left.clone()));
+        }
+        eval.add_constraint(
+            is_reconstruct_completion.clone() * (post_phase.clone() - M31::from(1u32).into()),
+        );
+        eval.add_constraint(
+            is_reconstruct_completion.clone()
+                * (post_subtag.clone()
+                    - M31::from(u32::from(CANONICAL_SHUFFLE_RECONSTRUCT_SUBTAG)).into()),
+        );
+        eval.add_constraint(
+            is_reconstruct_completion.clone()
+                * (post_protocol_pending_mask.clone() - expected_protocol_participants.clone()),
+        );
+        eval.add_constraint(
+            is_reconstruct_completion.clone()
+                * (protocol_completion_post_pending_mask.clone()
+                    - post_protocol_pending_mask.clone()),
+        );
+        eval.add_constraint(
+            is_reconstruct_completion.clone() * protocol_completion_post_completed_mask.clone(),
+        );
+        for limb in 0..16 {
+            for (opening, endpoint) in [
+                (
+                    &protocol_completion_commitments[0][limb],
+                    &pre_opaque_commitments[2][limb],
+                ),
+                (
+                    &protocol_completion_commitments[0][limb],
+                    &post_opaque_commitments[2][limb],
+                ),
+                (
+                    &protocol_completion_commitments[1][limb],
+                    &pre_opaque_commitments[1][limb],
+                ),
+                (
+                    &protocol_completion_commitments[2][limb],
+                    &post_opaque_commitments[1][limb],
+                ),
+                (
+                    &protocol_completion_commitments[3][limb],
+                    &pre_opaque_commitments[3][limb],
+                ),
+                (
+                    &protocol_completion_commitments[4][limb],
+                    &post_opaque_commitments[3][limb],
+                ),
+            ] {
+                eval.add_constraint(
+                    is_reconstruct_completion.clone() * (opening.clone() - endpoint.clone()),
+                );
+            }
+        }
+        let mut completion_timestamp_sum: E::F = M31::from(0u32).into();
+        for limb in 0..4 {
+            range16_constraints(
+                &mut eval,
+                &is_reconstruct_completion,
+                &protocol_completion_timestamp[limb],
+                &protocol_completion_timestamp_bits[limb],
+            );
+            completion_timestamp_sum += protocol_completion_timestamp[limb].clone();
+        }
+        eval.add_constraint(
+            is_reconstruct_completion.clone()
+                * (completion_timestamp_sum * protocol_completion_timestamp_inv.clone()
+                    - one.clone()),
+        );
+        let zero_limb: E::F = M31::from(0u32).into();
+        let shuffle_timeout = [
+            pre_timeout_config[0].clone(),
+            pre_timeout_config[1].clone(),
+            zero_limb.clone(),
+            zero_limb,
+        ];
+        limb4_add_constraints(
+            &mut eval,
+            &is_reconstruct_completion,
+            &protocol_completion_timestamp,
+            &shuffle_timeout,
+            &post_deadline_image,
+            &protocol_completion_deadline_carries,
+        );
+        eval.add_constraint(
+            is_reconstruct_completion.clone() * protocol_completion_post_cards_dealt.clone(),
+        );
+        let mut reconstructed_cursor: E::F = M31::from(0u32).into();
+        let mut cursor_carry_in: E::F = M31::from(0u32).into();
+        for bit_index in 0..6 {
+            let cursor_bit = protocol_completion_cursor_range[0][bit_index].clone();
+            let remaining_bit = protocol_completion_cursor_range[1][bit_index].clone();
+            let carry_out = protocol_completion_cursor_range[2][bit_index].clone();
+            let weight: E::F = M31::from(1u32 << bit_index).into();
+            let constant_bit: E::F = M31::from((52u32 >> bit_index) & 1).into();
+            let two: E::F = M31::from(2u32).into();
+            reconstructed_cursor += cursor_bit.clone() * weight;
+            eval.add_constraint(
+                is_reconstruct_completion.clone()
+                    * (cursor_bit + remaining_bit + cursor_carry_in
+                        - constant_bit
+                        - two * carry_out.clone()),
+            );
+            cursor_carry_in = carry_out;
+        }
+        eval.add_constraint(
+            is_reconstruct_completion.clone()
+                * (protocol_completion_pre_cards_dealt.clone() - reconstructed_cursor),
+        );
+        eval.add_constraint(is_reconstruct_completion.clone() * cursor_carry_in);
+        let non_reconstruct_completion = active.clone() - is_reconstruct_completion.clone();
+        for value in protocol_completion_timestamp
+            .iter()
+            .chain(std::iter::once(&protocol_completion_pre_cards_dealt))
+            .chain(std::iter::once(&protocol_completion_post_cards_dealt))
+            .chain(std::iter::once(&protocol_completion_post_pending_mask))
+            .chain(std::iter::once(&protocol_completion_post_completed_mask))
+        {
+            eval.add_constraint(non_reconstruct_completion.clone() * value.clone());
+        }
+        for commitment in &protocol_completion_commitments {
+            for limb in commitment {
+                eval.add_constraint(non_reconstruct_completion.clone() * limb.clone());
+            }
+        }
+        for bits in &protocol_completion_timestamp_bits {
+            for bit in bits {
+                eval.add_constraint(non_reconstruct_completion.clone() * bit.clone());
+            }
+        }
+        eval.add_constraint(
+            non_reconstruct_completion.clone() * protocol_completion_timestamp_inv.clone(),
+        );
+        for carry in &protocol_completion_deadline_carries {
+            eval.add_constraint(non_reconstruct_completion.clone() * carry.clone());
+        }
+        for bits in &protocol_completion_cursor_range {
+            for bit in bits {
+                eval.add_constraint(non_reconstruct_completion.clone() * bit.clone());
+                eval.add_constraint(active.clone() * bit.clone() * (bit.clone() - one.clone()));
+            }
         }
         let ordinary_non_protocol = active.clone()
             - is_protocol_submit.clone()
@@ -3603,6 +4089,15 @@ impl FrameworkEval for CanonicalAir {
                     * full_pre_status[index][CanonicalSeatStatus::Empty as usize].clone(),
             );
 
+            // `set_leave_after_hand` has exactly one VM argument: the desired
+            // boolean flag.  The canonical action ABI still reserves four amount
+            // limbs and four auxiliary limbs, so constrain every reserved limb to
+            // zero instead of letting a host choose an unconsumed payload that is
+            // absent from the VM transition relation.
+            for value in amount.iter().chain(auxiliary.iter()) {
+                eval.add_constraint(is_set_leave.clone() * value.clone());
+            }
+
             selected_full_pre_status += selector.clone() * pre_status_value.clone();
             selected_full_post_status += selector.clone() * post_status_value.clone();
             selected_funding_pre_status += funding_selector.clone() * pre_status_value.clone();
@@ -3867,10 +4362,12 @@ impl FrameworkEval for CanonicalAir {
         for (projected, full) in post_time_bank.iter().zip(selected_funding_post_time.iter()) {
             eval.add_constraint(is_funding.clone() * projected.clone() - full.clone());
         }
-        // `advance_turn` scans circularly from the acting seat.  Its choice is
+        // `advance_turn` scans circularly from the acting seat. Its choice is
         // no longer a host-selected `post.current_turn`: a one-hot successor
-        // and a 9x9 pair decomposition bind the first post-action Active seat.
-        // `no_next_turn` is permitted only when no Active seat remains.
+        // and a 9x9 pair decomposition bind the first post-action *actionable*
+        // seat (`Active && !acted`). Already-acted active players are skipped,
+        // exactly as the VM's circular turn scan does. `no_next_turn` is
+        // permitted only when no actionable seat remains.
         eval.add_constraint(no_next_turn.clone() * (no_next_turn.clone() - one.clone()));
         eval.add_constraint((active.clone() - is_betting.clone()) * no_next_turn.clone());
         let mut next_sum: E::F = M31::from(0u32).into();
@@ -3941,7 +4438,8 @@ impl FrameworkEval for CanonicalAir {
                     eval.add_constraint(
                         pair.clone()
                             * full_post_status[between][CanonicalSeatStatus::Active as usize]
-                                .clone(),
+                                .clone()
+                            * (one.clone() - post_acted_bits[between].clone()),
                     );
                 }
             }
@@ -4768,6 +5266,35 @@ impl FrameworkEval for CanonicalAir {
                 eval.add_constraint(inactive.clone() * bit.clone());
             }
         }
+        eval.add_constraint(inactive.clone() * protocol_completion_kind.clone());
+        for value in protocol_completion_timestamp
+            .iter()
+            .chain(std::iter::once(&protocol_completion_pre_cards_dealt))
+            .chain(std::iter::once(&protocol_completion_post_cards_dealt))
+            .chain(std::iter::once(&protocol_completion_post_pending_mask))
+            .chain(std::iter::once(&protocol_completion_post_completed_mask))
+        {
+            eval.add_constraint(inactive.clone() * value.clone());
+        }
+        for commitment in &protocol_completion_commitments {
+            for limb in commitment {
+                eval.add_constraint(inactive.clone() * limb.clone());
+            }
+        }
+        for bits in &protocol_completion_timestamp_bits {
+            for bit in bits {
+                eval.add_constraint(inactive.clone() * bit.clone());
+            }
+        }
+        eval.add_constraint(inactive.clone() * protocol_completion_timestamp_inv.clone());
+        for carry in &protocol_completion_deadline_carries {
+            eval.add_constraint(inactive.clone() * carry.clone());
+        }
+        for bits in &protocol_completion_cursor_range {
+            for bit in bits {
+                eval.add_constraint(inactive.clone() * bit.clone());
+            }
+        }
         for commitment in pre_seat_commitments
             .iter()
             .chain(post_seat_commitments.iter())
@@ -5008,7 +5535,8 @@ impl FrameworkEval for CanonicalAir {
         }
         let is_permissionless = kinds[CanonicalTransitionKind::AdvanceDeadline as usize].clone()
             + kinds[CanonicalTransitionKind::AdvanceRound as usize].clone()
-            + kinds[CanonicalTransitionKind::AutoFold as usize].clone();
+            + kinds[CanonicalTransitionKind::AutoFold as usize].clone()
+            + is_terminal_reset.clone();
         // `AdvanceDeadline` is permissionless in the VM and therefore carries
         // the canonical zero actor.  Constrain every limb directly; a non-zero
         // sum check would both accept a forged actor and reject only the
@@ -5719,12 +6247,13 @@ mod tests {
                 amount: 0,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [13; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
-            deadline_height: 2,
+            deadline_height: 0,
         };
         witness.seal();
         witness
@@ -5764,9 +6293,10 @@ mod tests {
                 amount: 40,
                 auxiliary: 1,
                 flag: false,
-                proof_commitment: [13; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -5819,6 +6349,7 @@ mod tests {
                 proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -5849,9 +6380,10 @@ mod tests {
                 amount: 0,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [13; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -5892,9 +6424,10 @@ mod tests {
                 amount: 1,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [13; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -5936,9 +6469,10 @@ mod tests {
                 amount: 10,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [13; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -5988,9 +6522,10 @@ mod tests {
                 amount: 0,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [13; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -6041,9 +6576,10 @@ mod tests {
                 amount: 530,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [13; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -6100,10 +6636,88 @@ mod tests {
                 proof_commitment: [53; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
         };
+        witness.seal();
+        witness
+    }
+
+    fn submit_reconstruct_completion() -> CanonicalTransitionWitness {
+        let mut pre = image();
+        pre.phase = CanonicalPhase::Reconstructing;
+        pre.phase_subtag = CANONICAL_RECONSTRUCT_COLLECTING_SUBTAG;
+        pre.street = 2;
+        pre.deadline_ms = 5_000;
+        pre.chip_pool = 200;
+        pre.protocol_pending_mask = 0b01;
+        for (index, seat) in pre.seats[..2].iter_mut().enumerate() {
+            *seat = CanonicalSeat {
+                status: CanonicalSeatStatus::Active,
+                acted: false,
+                stack: 100,
+                bet: 0,
+                total_bet: 0,
+                pending_addon: 0,
+                time_bank_ms: 0,
+                identity_commitment: [20 + index as u8; 32],
+                key_commitment: [30 + index as u8; 32],
+                hole_cards_commitment: [40 + index as u8; 32],
+            };
+        }
+        let timestamp = 8_000;
+        let mut post = pre.clone();
+        post.call_seq = 1;
+        post.phase = CanonicalPhase::Shuffling;
+        post.phase_subtag = CANONICAL_SHUFFLE_RECONSTRUCT_SUBTAG;
+        post.deadline_ms = timestamp + u64::from(pre.shuffle_timeout_ms);
+        post.protocol_pending_mask = 0b11;
+        post.deck_commitment = [50; 32];
+        post.reconstruction_commitment = [51; 32];
+        let mut witness = CanonicalTransitionWitness {
+            pre,
+            post,
+            kind: CanonicalTransitionKind::SubmitReconstruct,
+            actor: [60; 32],
+            action: CanonicalActionPayload {
+                seat: 0,
+                amount: 0,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [61; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: crate::texas_canonical::CanonicalProtocolCompletionOpening {
+                kind: CanonicalProtocolCompletionKind::Reconstruct,
+                completion_timestamp_ms: timestamp,
+                pre_cards_dealt: 7,
+                post_cards_dealt: 0,
+                suspended_reveal_commitment: [3; 32],
+                post_shuffle_pending_mask: 0b11,
+                post_shuffle_completed_mask: 0,
+                pre_deck_commitment: [2; 32],
+                post_deck_commitment: [50; 32],
+                pre_reconstruction_commitment: [4; 32],
+                post_reconstruction_commitment: [51; 32],
+            },
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 0,
+        };
+        witness.seal();
+        witness
+    }
+
+    fn submit_reconstruct_nonfinal() -> CanonicalTransitionWitness {
+        let mut witness = submit_reconstruct_completion();
+        witness.pre.protocol_pending_mask = 0b11;
+        witness.post = witness.pre.clone();
+        witness.post.call_seq = witness.pre.call_seq + 1;
+        witness.post.protocol_pending_mask = 0b10;
+        witness.post.reconstruction_commitment = [51; 32];
+        witness.protocol_completion = Default::default();
         witness.seal();
         witness
     }
@@ -6154,6 +6768,7 @@ mod tests {
                 proof_commitment: [0x77; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -6189,9 +6804,10 @@ mod tests {
                 amount: 0,
                 auxiliary: 0,
                 flag: true,
-                proof_commitment: [13; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -6241,9 +6857,10 @@ mod tests {
                 amount: 100,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [32; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -6308,9 +6925,10 @@ mod tests {
                 amount: 100,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [32; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: Default::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -6352,9 +6970,10 @@ mod tests {
                 amount: 50,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [32; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: Default::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -6408,9 +7027,10 @@ mod tests {
                 amount: 200,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [32; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: Default::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -6500,7 +7120,7 @@ mod tests {
                 amount: 0,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [32; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening {
                 // VM flop -> turn: seven encrypted cards have been consumed
@@ -6530,6 +7150,7 @@ mod tests {
                     CanonicalBoardRevealAssignment::EMPTY,
                 ],
             },
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -6851,9 +7472,10 @@ mod tests {
                 amount: 0,
                 auxiliary: 0,
                 flag: false,
-                proof_commitment: [13; 32],
+                proof_commitment: [0; 32],
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -6907,6 +7529,54 @@ mod tests {
     }
 
     #[test]
+    fn canonical_direct_air_proves_final_reconstruct_normalization() {
+        let witness = submit_reconstruct_completion();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("reconstruct completion trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        let archive =
+            prove_canonical_tagged_batch(&[witness.clone()]).expect("reconstruct completion proof");
+        verify_canonical_tagged_batch(&[witness], &archive)
+            .expect("reconstruct completion verification");
+
+        // The completion kind, timestamp/deadline addition, cursor reset and
+        // commitment statement are all AIR-bound rather than host metadata.
+        for column in [
+            PROTOCOL_COMPLETION_OPENING_OFFSET,
+            PROTOCOL_COMPLETION_OPENING_OFFSET + 1,
+            PROTOCOL_COMPLETION_OPENING_OFFSET + 5,
+            PROTOCOL_COMPLETION_OPENING_OFFSET + 7,
+            PROTOCOL_COMPLETION_TIMESTAMP_BITS_OFFSET,
+            PROTOCOL_COMPLETION_TIMESTAMP_INV_OFFSET,
+            PROTOCOL_COMPLETION_DEADLINE_CARRIES_OFFSET,
+            PROTOCOL_COMPLETION_CURSOR_RANGE_OFFSET,
+        ] {
+            assert_air_rejects_trace_mutation(&trace, &archive, column);
+        }
+
+        let ordinary = submit_shuffle();
+        let (ordinary_trace, ordinary_archive) =
+            trace_for(std::slice::from_ref(&ordinary)).expect("ordinary submit trace");
+        assert_air_rejects_trace_mutation(
+            &ordinary_trace,
+            &ordinary_archive,
+            PROTOCOL_COMPLETION_OPENING_OFFSET + 1,
+        );
+    }
+
+    #[test]
+    fn canonical_direct_air_preserves_nonfinal_reconstruct_deck() {
+        let witness = submit_reconstruct_nonfinal();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("non-final reconstruct trace");
+        assert_trace_satisfies_air(&trace, &archive);
+
+        // Five pre commitments precede the post commitment block; deck is
+        // commitment index one within that block.
+        assert_air_rejects_trace_mutation(&trace, &archive, OPAQUE_COMMITMENTS_OFFSET + 6 * 16);
+    }
+
+    #[test]
     fn canonical_direct_air_proves_nonterminal_force_fold_turn_advance() {
         let witness = force_fold();
         let (trace, archive) = trace_for(std::slice::from_ref(&witness)).expect("force-fold trace");
@@ -6919,6 +7589,53 @@ mod tests {
         assert_air_rejects_trace_mutation(&trace, &archive, POST_TURN_OFFSET);
         assert_air_rejects_trace_mutation(&trace, &archive, SELECTED_POST_STATUS_OFFSET);
         assert_air_rejects_trace_mutation(&trace, &archive, ACTION_AMOUNT_OFFSET);
+    }
+
+    #[test]
+    fn canonical_direct_air_rejects_set_leave_reserved_payload() {
+        let witness = set_leave_after_hand();
+        let (trace, archive) = trace_for(std::slice::from_ref(&witness)).expect("set-leave trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        assert_air_rejects_trace_mutation(&trace, &archive, ACTION_AMOUNT_OFFSET);
+        // The four auxiliary limbs immediately follow the four amount limbs.
+        assert_air_rejects_trace_mutation(&trace, &archive, ACTION_AMOUNT_OFFSET + 4);
+        assert_air_rejects_trace_mutation(&trace, &archive, ACTION_AMOUNT_OFFSET + 7);
+        assert_air_rejects_trace_mutation(&trace, &archive, PROOF_COMMITMENT_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, DEADLINE_HEIGHT_OFFSET);
+
+        let mut malformed = witness;
+        malformed.action.auxiliary = 1;
+        malformed.seal();
+        assert!(malformed.validate_shape().is_err());
+
+        let mut malformed = set_leave_after_hand();
+        malformed.action.proof_commitment = [1; 32];
+        malformed.seal();
+        assert!(malformed.validate_shape().is_err());
+
+        let mut malformed = set_leave_after_hand();
+        malformed.deadline_height = 1;
+        malformed.seal();
+        assert!(malformed.validate_shape().is_err());
+    }
+
+    #[test]
+    fn canonical_direct_air_rejects_seatless_reserved_action_payloads() {
+        let witness = create_table();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("create-table trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        assert_air_rejects_trace_mutation(&trace, &archive, ACTION_AMOUNT_OFFSET - 1);
+        assert_air_rejects_trace_mutation(&trace, &archive, ACTION_AMOUNT_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, ACTION_AMOUNT_OFFSET + 4);
+        assert_air_rejects_trace_mutation(&trace, &archive, ACTION_AMOUNT_OFFSET + 8);
+        assert_air_rejects_trace_mutation(&trace, &archive, PROOF_COMMITMENT_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, DEADLINE_HEIGHT_OFFSET);
+
+        let mut malformed = witness;
+        malformed.action.flag = true;
+        malformed.seal();
+        assert!(malformed.validate_shape().is_err());
     }
 
     #[test]
@@ -7382,6 +8099,38 @@ mod tests {
         assert_trace_satisfies_air(&trace, &archive);
         let archive = prove_canonical_tagged_batch(&[witness.clone()]).expect("auto-fold proof");
         verify_canonical_tagged_batch(&[witness], &archive).expect("auto-fold verification");
+    }
+
+    #[test]
+    fn canonical_direct_air_skips_an_already_acted_active_successor() {
+        // The VM's turn scan skips an Active seat that has already acted in
+        // this betting round. After seat zero times out, seat one is such a
+        // stale active seat and seat two is the first actionable successor.
+        let mut witness = auto_fold();
+        witness.pre.max_players = 3;
+        witness.post.max_players = 3;
+        witness.pre.seats[1] = active_opponent(true, 100);
+        witness.post.seats[1] = active_opponent(true, 100);
+        witness.pre.seats[2] = CanonicalSeat {
+            identity_commitment: [51; 32],
+            key_commitment: [52; 32],
+            hole_cards_commitment: [53; 32],
+            ..active_opponent(false, 100)
+        };
+        witness.post.seats[2] = witness.pre.seats[2];
+        witness.pre.acted_mask = 0b010;
+        witness.post.acted_mask = 0b011;
+        witness.pre.chip_pool = 2_200;
+        witness.post.chip_pool = 2_200;
+        witness.post.current_turn = 2;
+        witness.seal();
+
+        witness
+            .validate_shape()
+            .expect("native canonical auto-fold successor scan");
+        let (trace, archive) = trace_for(std::slice::from_ref(&witness))
+            .expect("auto-fold trace skipping stale successor");
+        assert_trace_satisfies_air(&trace, &archive);
     }
 
     #[test]

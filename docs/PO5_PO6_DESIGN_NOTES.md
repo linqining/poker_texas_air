@@ -12,9 +12,23 @@
 AIR 另有受限的非级联 `AutoFold` timeout suffix，但尚未证明 VM 的 turn/round cascade、settlement
 或 reset。direct canonical ABI v5 已把 shuffle/reveal/reconstruct 的九位 pending participant
 mask 和五项 timeout config 纳入 endpoint opening；非终局 submit 必须在 AIR 内精确清除 action seat bit，post mask
-必须非空。最后一次 submit 所需的新 deadline、reveal schedule、blind/ante 与 reconstruct
-reshuffle opening 尚未完成，所以 completion 仍 fail-closed；因此本文下述 legacy plan
-完成项不代表 direct canonical proof 已具备 host-zero admission 语义。
+必须非空。final `SubmitReconstruct` 已有专用 completion opening：完成条件由 pre pending mask
+精确等于 action seat bit 推导，不依赖 `action.flag`，并绑定 authenticated timestamp、checked
+shuffle deadline、deck cursor reset、active-seat shuffle mask 重建及 suspended reveal/deck/
+reconstruction commitments，从而约束 `Reconstructing/1 -> Shuffling/2` normalization。final
+shuffle/reveal 所需的 reveal schedule、blind/ante opening 仍未完成；reconstruction 的
+Ristretto 方程和 deck/reveal commitment 重算也尚未组合。因此 production admission 仍
+fail-closed，本文下述 legacy plan 完成项不代表 direct canonical proof 已具备 host-zero
+admission 语义。
+
+reconstruction 的下一层 no-replay ABI 已落地于 `canonical_reconstruction_binding`：request
+call-context 不直接包含最终 transition commitment，而是包含把 request digest、transition
+commitment、nullifier 清零后的 `canonical-crypto-scope.v1`，消除 fixed-point。table-wide
+fixed-width opening 认证 epoch、pending mask、aggregate/owner keys、每 seat 两张 readable hole
+card 与 optional 52-card accumulator；共享 lookup-backed Blake2b batch 将该 opening、canonical
+context/prior-state digest、encoded request、pre/post state image 和 crypto scope 一次性绑定。
+这一层尚未证明固定 52 card constants、Ristretto contribution equations、accumulator transition
+或 final deck/reveal commitment，所以仍只是下一组合层的 statement substrate。
 
 ## P0-5：Host-native 验证、digest 绑定与聚合边界
 

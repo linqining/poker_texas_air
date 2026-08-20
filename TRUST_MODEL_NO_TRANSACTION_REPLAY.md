@@ -52,13 +52,17 @@ protocol mask 还从完整九 seat lifecycle image 推导。因此非最后一�
 host 决定。ABI v5 同时打开 shuffle/reveal/betting/reconstruct/showdown 五项 `u32`
 timeout 配置；AIR 对十个 16-bit limb 做 range decomposition，要求 transition 前后保持不变，
 并以打开的 `betting_timeout_ms` 推导 time-bank extension 与 `AutoFold` 新 deadline，不再信任
-固定部署默认值。当前 completion opening 尚未包含 authenticated completion timestamp、
-reveal schedule、blind/ante 或
-reconstruct reshuffle 的全部字段，所以最后一次提交触发的 `shuffle -> reveal`、
-`reveal -> betting`、`reconstruct -> shuffle` 跃迁仍明确 fail-closed，而不是信任 action
-flag 或 host 的“完成”判断。它们不能借由 protocol payload 改动筹码、座位、board 或普通
-状态字段。这些只是 transition shape/anti-null 边界，**不**验证 DLEQ、shuffle、
-reveal 或 reconstruction 的 Ristretto 方程。
+固定部署默认值。final `SubmitReconstruct` 现已增加 canonical completion opening：AIR 从
+`pre.protocol_pending_mask == action seat bit` 推导完成条件，不信任 `action.flag`；opening
+绑定 authenticated consensus timestamp、`timestamp + shuffle_timeout_ms` 的 checked deadline、
+`0..=52` 的 pre deck cursor 与 post cursor reset、按完整 seat lifecycle 重建的 shuffle pending
+mask、清零 completed mask，以及 suspended reveal、pre/post deck 和 pre/post reconstruction
+commitment。该行精确约束 `Reconstructing/1 -> Shuffling/2` normalization，并保持筹码、座位、
+street、custody、rules/governance 等普通状态不变。最后一次 shuffle 与 reveal submit 所需的
+reveal schedule、blind/ante 等 opening 仍未完成，因此 `shuffle -> reveal` 和
+`reveal -> betting` 继续明确 fail-closed。上述 reconstruct completion 也仍只是
+transition/commitment statement：它**不**验证 DLEQ、shuffle、reveal 或 reconstruction 的
+Ristretto 方程，也不重算 deck/reveal commitment。
 
 尤其 `zchain` 的 `advance_deadline_in_place` 不是一个单一的“过期后不变”
 转换：它先运行有限次 normalization，随后按 reconstruct、shuffle、reveal、betting
@@ -67,6 +71,28 @@ reveal 或 reconstruction 的 Ristretto 方程。
 `AdvanceDeadline` 行没有这些选择器、完整输入状态或确定性输出约束。因此任何把
 它作为 finalized-head 更新的入口都必须 fail-closed，不能把
 `deadline_height >= pre.deadline` 当成完整 VM timeout 证明。
+
+### Deadline / terminal direct-AIR 覆盖矩阵
+
+下表是针对 `poker_l1::...::advance_deadline_in_place` 的逐分支审计，区分“当前能直接约束
+的独立微步骤”与“仍会把 VM 语义留给 host 的级联”。它是新增 selector/固定宽度 opening 的
+最低工作清单，不是把 native `normalize_until_blocked` 作为 verifier 依赖。
+
+| VM 分支 | VM 的原子结果 | 当前 direct AIR | 解除 fail-closed 所需的固定宽度关系 |
+| --- | --- | --- | --- |
+| deadline 前 / `NoDeadline` | 仅报告，不改变 table | 不应生成 head-changing row | 不需要证明；admission 必须拒绝把它编码为 state transition |
+| reconstruct timeout | kick 所有 reconstruct pending；按活跃数 reset、单人 award/reset，或以 accumulator 完成 reconstruct-shuffle | 未覆盖 | pending-seat kick schedule、active-count selector、refund/award/reset 或 completed-accumulator→shuffle continuation |
+| shuffle timeout | kick 当前 shuffler；按活跃数 reset/award，否则 rebuild deck 并继续 shuffle | 未覆盖 | current-shuffler opening、kick/refund cascade、52-card rebuild commitment 和新的 shuffle schedule |
+| reveal timeout | kick 全部 reveal pending；0/1 active 时 reset/award；preflop reset，其他 street start reconstruct | 未覆盖 | assignment pending-union、bounded multi-kick schedule、phase-specific reset/reconstruct opening |
+| betting, time bank > 0 | 消耗 `min(time_bank, betting_timeout)`，延长 deadline | `AdvanceDeadline` 已覆盖 | 已有，保持为单一非级联 row |
+| betting, time bank = 0 | auto fold，再由 normalization 收池、round advance、single-winner award/reset 或下一 reveal | 只覆盖非终局 `AutoFold` suffix | 将 fold 与后续 bounded normalization 分成显式 `Collect/Advance/Award/Reset` 微步骤；不得让 AutoFold 隐含它们 |
+| showdown display timeout | derive side pots/rake/runout/winners，award，reset | 未覆盖 | 9-seat/≤9-side-pot/≤2-runout settlement plan、hand-rank、odd-chip、rake、custody 和 reset 关系 |
+
+每个 deadline branch 都会先运行最多 `MAX_NORMALIZATION_STEPS` 次 pre-normalization；该循环可被
+展开为有界 selector batch，但每一个 `CompleteReconstruct`、`AdvanceShuffle`、
+`CompleteReveal`、`EndWithoutShowdown` 和 `AdvanceBettingRound` 都必须是单独约束的 state
+relation。特别是 `settlement_commitment` 目前被 canonical AIR 锁定为不变；在拥有完整
+settlement opening 和 award/reset AIR 前，绝不能仅放宽这个 gate。
 
 canonical archive 中的 batch digest、state-image commitment，以及 state、lifecycle、
 overlay、settlement、custody 五个域的首尾根都已进入 Fiat--Shamir transcript、公开
@@ -97,12 +123,92 @@ AIR 已将 ABI/header、table、phase、资金、五类 root、九个 seat 的�
 run-it-twice 五个 commitment、protocol pending mask 和完整 timeout config（共 852 个 endpoint limb）回绑到这些 Borsh bytes；
 对下注、funding、join/leave、force/kick、SetLeaveAfterHand 与 AdvanceRound，
 已知不变的 commitment 字段也被约束为不变。完整 bytes 也进入 Fiat--Shamir scope。
-Shuffle/reveal/reconstruct 的 phase/seat/proof-presence shape，以及非终局
-`FoldWithProof` 的 betting/state-preservation shape 已受约束；它们的密码学与
-完整 VM phase-completion/timeout/settlement 关系仍未受约束，故这个新组合仍不是
-host-zero admission 证据，
+Shuffle/reveal/reconstruct 的 phase/seat/proof-presence shape、final reconstruct 的
+`Reconstructing/1 -> Shuffling/2` normalization opening，以及非终局 `FoldWithProof` 的
+betting/state-preservation shape 已受约束；但 reconstruction 密码学、deck/reveal
+commitment 重算、final shuffle/reveal、完整 timeout/settlement 与其余 normalization 关系仍未
+组合，故这个新组合仍不是 host-zero admission 证据，
 `verify_canonical_proof` 仅供结构审计；`admit_canonical_proof` 与
 `admit_canonical_proof_with_state_openings` 都会明确 fail-closed。
+
+`canonical_reconstruction_binding` 进一步定义了 Ristretto-only、table-wide fixed-width
+reconstruction opening，而不是按 action seat 改变含义的 host projection。opening 固定包含
+epoch、pending mask、aggregate key、九个 seat 的 owner key/两张 owner-readable hole card，
+以及可选 52-card accumulator。一个共享 lookup-backed Blake2b batch 同时认证 pre
+`reconstruction_commitment`、canonical Ristretto context digest、selected-seat prior-state
+digest、完整 encoded request digest、pre/post state-image commitment 与 request-free crypto
+scope；call-context 由这些已经认证的 digest 重建，避免对这七条关系做原生 hash，并消除循环 commitment。
+当前它关闭 state-to-statement 的 hash/key/readable-card detachment，并把 request card vector
+固定为有序的 Ristretto `hash_to_curve("texas_poker/card/{i}")` 结果；这些是迁移协议常量，
+不是当前 48-byte BLS VM state 的原地等价编码。contribution 的 slot-OR/cross-key/shuffle
+关系、post/final deck commitment 仍须由 Ristretto program AIR 组合。新增的
+`ristretto_reconstruction_accumulator_air` 已将 canonical 32-byte
+left/right decode、projective Edwards addition 和 canonical projective encode 固定为一个
+equal-shape row；52 张牌的 `c1/c2` 共 104 条 `post = prior + contribution` 关系按
+`card0.c1, card0.c2, ..., card51.c2` 顺序进入一个 batch STARK。有效 row count 与顺序都受
+公开 statement/transcript 绑定，verifier 会拒绝 prior/contribution/post splice、c1/c2 或 card
+row swap、非 canonical point、错误 addition row 和 padding relabel。该 archive 还能把非首轮
+prior accumulator 绑定到上述 pre-state opening，把 52 个 contribution 精确绑定到 encoded
+request，并要求 proven post accumulator 等于 post opening 中的完整 deck。相同 Blake2b lookup
+batch 认证该 post opening 到 `post.reconstruction_commitment`；post pending mask 只能清除提交
+seat，epoch/key/seat/readable-card 数据必须与 pre opening 完全一致。当前 generic Fp batch 的完整
+fixture 仍需 723.78s，必须继续把乘法/范围 witness lookup 化才能达到 production 性能。首轮
+canonical base deck 现在由一个固定 156-row batch 证明：先以 compressed identity 为起点递推
+`1G..52G` 和 `1PK..52PK`，再逐槽证明 `card_i + (i+1)PK`，从而得到
+`c1_i=(i+1)G, c2_i=card_i+(i+1)PK`。初始 opening 必须为 absent/zero accumulator 并携带该
+base-deck archive；非初始 opening 则禁止携带，避免 optional proof 被跳过。156-row 真实 STARK
+尚未在当前 generic Fp backend 上完成性能基准。最终提交继续拒绝，直到 post accumulator 到
+encrypted deck commitment 及 reconstruct shuffle 的关系完成。
+因此这些 archive 仍不是 production admission 证据。
+
+为继续关闭 slot-OR/cross-key 所需的 DLEQ 关系，Ristretto backend 新增 compressed
+fixed-window scalar multiplication：15 行递推 `1P..15P`，再用 320 行完成 64 个四比特 Horner
+窗口，总计 335 个等形状 point-addition row。单 statement 和多 statement 版本都由一个 batch
+STARK 绑定完整行序；多 statement 版本把若干 335-row slice 拼入同一 proof，并拒绝
+scalar/base/output、slice 交换和 padding relabel。旧的 5,760-op monolithic generic program
+仍因资源上限 fail-closed。新 backend 已使标量乘法可证明。`ristretto_scalar_add_air`
+专门证明 challenge share 的 `mod l` 相加，避免将 Ristretto scalar 错当 `mod p`
+field element；`ristretto_reconstruction_slot_or_air` 已把每槽 OR 的两个分支方程
+组合成八个标量乘法、五个点加法和一条 share-sum AIR，并将 slot/card/contribution/proof
+顺序绑定到 `ZR3P` request envelope。它仍不能替代 transcript：global challenge 只能作为
+未来 Poseidon transcript AIR 的认证输出，最终 V3 archive 与 shuffle 仍不可用。
+
+Ristretto `ReconstructionV3VerifyRequest.proof` 已从任意非空字节串收紧为
+`ZR3P/v1` canonical envelope：固定 1 个 shuffle、2 个 cross-key、52 个 slot-OR
+component，并对完整（不含 proof 自身）请求 statement 和 component 序列分别做域分隔
+digest。这样 request/epoch/key/ciphertext/card/call-scope 或 component 交换都会在 archive
+进入 accumulator 前拒绝。该 digest 是防 splice 的公开 statement binding，**不是**
+Poseidon Fiat--Shamir transcript 或任何 native success receipt 的替代。两条 cross-key
+线性关系和每槽 slot-OR 方程现在都有 request/envelope-bound 的 AIR archive，但 challenge
+仍只能来自未来 Poseidon transcript AIR 的认证输出；在 transcript 与 shuffle AIR 全部合成前，
+production admission 仍保持 fail-closed。
+
+为避免未来 transcript AIR 在字段编码或 challenge 顺序上另起一套未认证的 host 规范，
+`ristretto_reconstruction_transcript` 已固定 Poseidon252/v1 的协议输入：domain、完整 request
+的每个字节字段（带 label/长度、每 16-byte little-endian chunk 一域元素）、cross-key 的
+负贡献与三项 commitment、shuffle wire，以及 52 个 slot-OR 的 slot 序号与四项 commitment。
+挑战输出顺序严格为两个 cross-key 后、shuffle wire 后的 52 个 slot-OR；每个输出还保留
+nonzero retry counter 作为将来 sponge AIR 的 witness。`ZR3P` Blake2b digest 仅作额外 splice
+binding，不能替代完整 bytes 的吸收，也不是挑战。此模块尚未实现 Poseidon permutation、
+scalar reduction 或 retry AIR，故不可用 host 计算结果解除 fail-closed admission。
+该规范进一步导出 rate-two `absorb / permute / squeeze` 操作序列，并固定每次 squeeze 的
+Starknet `+1` padding lane，避免将来 AIR/prover 在 full-block 或 final-block 边界各自解释。
+在任何 relation archive 消费该 typed boundary 前，现有实现会拒绝 statement-digest splice、
+零或非 canonical 的 `mod l` challenge，以及超过固定上界的 retry counter；这些只是格式和
+范围约束，绝不将 host 给出的字节提升为 transcript 认证输出。
+
+`ristretto_reconstruction_composition` 现在把已实现的 state binding、52-card accumulator、
+两条 cross-key 和 52 条 slot-OR 归入一份固定的 request-scoped bundle，并在运行子 AIR 前
+拒绝 statement/envelope/transcript/slot-order splice。该 bundle 的 audit verifier 只表示
+这些已实现关系均成立；其 admission-shaped API 在验证后仍返回
+`HostZeroAdmissionIncomplete`，直到 Poseidon permutation/retry 与 Bayer--Groth shuffle AIR
+完成，不能据此推进生产 head。
+
+另外，canonical action ABI 的保留字段已按 VM 参数形状收口：普通 selector 不能携带伪造
+proof commitment，`auxiliary` 仅由 `AdvanceDeadline` 消费，`flag` 仅由
+`SetLeaveAfterHand` 消费，`deadline_height` 仅由 permissionless timeout 行消费，
+seatless `CreateTable/StartHand/AdvanceRound` 必须使用 no-seat sentinel。native shape 和
+direct AIR 同时约束这些字段，并有 trace mutation 攻击测试。
 
 独立项目还提供 `authenticate_receipt_l1`。生产适配器必须使用
 `TexasL1ReceiptInclusionProof`，它直接调用

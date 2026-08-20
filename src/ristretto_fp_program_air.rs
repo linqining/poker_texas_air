@@ -147,6 +147,16 @@ pub struct ArchivedRistrettoFpProgramProof {
     pub stark_proof_bytes: Vec<u8>,
 }
 
+/// Multiple equal-shape field programs proven as rows of one STARK.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedRistrettoFpProgramBatchProof {
+    /// Public programs in canonical row order. All operation/output layouts
+    /// are identical; only field values differ between rows.
+    pub programs: Vec<RistrettoFpProgram>,
+    /// Serialized Stwo proof for the complete batch.
+    pub stark_proof_bytes: Vec<u8>,
+}
+
 /// Public `sqrt_ratio_i` statement proven by one field-program STARK.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ArchivedRistrettoFpProgramSqrtRatioProof {
@@ -228,6 +238,17 @@ pub struct ArchivedRistrettoFpProgramProjectivePoint {
     pub source: ArchivedRistrettoFpProgramProjectivePointSource,
 }
 
+/// Public canonical encoding of an authenticated projective Ristretto point.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedRistrettoFpProgramProjectivePointEncodeProof {
+    /// Authenticated projective input point.
+    pub point: ArchivedRistrettoFpProgramProjectivePoint,
+    /// Canonical nonnegative output encoding.
+    pub encoding: [u8; LIMBS],
+    /// One-STARK projective encode program.
+    pub program: ArchivedRistrettoFpProgramProof,
+}
+
 /// Provenance of an authenticated projective point.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum ArchivedRistrettoFpProgramProjectivePointSource {
@@ -263,6 +284,23 @@ pub struct ArchivedRistrettoFpProgramProjectiveAdditionProof {
     pub t: [u8; LIMBS],
     /// One-STARK general addition program.
     pub program: ArchivedRistrettoFpProgramProof,
+}
+
+/// One fixed-shape projective addition row without provenance recursion.
+pub type RistrettoProjectiveCoordinates = [[u8; LIMBS]; 4];
+
+/// Batch proof for projective Edwards additions whose input/output coordinates
+/// are authenticated by the single equal-shape Fp-program batch.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedRistrettoFpProgramProjectiveAdditionBatchProof {
+    /// Public left projective coordinates in row order.
+    pub left: Vec<RistrettoProjectiveCoordinates>,
+    /// Public right projective coordinates in row order.
+    pub right: Vec<RistrettoProjectiveCoordinates>,
+    /// Public output projective coordinates in row order.
+    pub output: Vec<RistrettoProjectiveCoordinates>,
+    /// Equal-shape Fp-program batch proving every row.
+    pub additions: ArchivedRistrettoFpProgramBatchProof,
 }
 
 /// Public `0P..15P` table derived in one program STARK.
@@ -316,6 +354,45 @@ pub struct ArchivedRistrettoFpProgramFixedWindowScalarMulProof {
     pub t: [u8; LIMBS],
     /// One folded scalar-multiplication program.
     pub program: ArchivedRistrettoFpProgramProof,
+}
+
+/// Compressed-point fixed-window scalar multiplication in one equal-shape
+/// addition batch.
+///
+/// Fifteen rows derive `1P..15P` from the canonical compressed identity, then
+/// 320 rows perform 64 Horner windows with four doublings and one selected
+/// table addition per window.  This avoids the oversized 5,760-operation
+/// monolithic generic program while retaining one batch STARK.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulProof {
+    /// Canonical scalar and authenticated four-bit decomposition.
+    pub scalar_windows: ArchivedRistrettoScalarWindowsProof,
+    /// Canonical compressed base point, including the Ristretto identity.
+    pub base: [u8; LIMBS],
+    /// Canonical compressed scalar-multiplication output.
+    pub output: [u8; LIMBS],
+    /// Exactly 335 equal-shape compressed-point addition rows.
+    pub additions: ArchivedRistrettoFpProgramBatchProof,
+}
+
+/// One public compressed scalar-multiplication statement inside a shared batch.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct RistrettoCompressedFixedWindowScalarMulStatement {
+    /// Canonical scalar and authenticated four-bit decomposition.
+    pub scalar_windows: ArchivedRistrettoScalarWindowsProof,
+    /// Canonical compressed base point, including the Ristretto identity.
+    pub base: [u8; LIMBS],
+    /// Canonical compressed output point.
+    pub output: [u8; LIMBS],
+}
+
+/// Multiple compressed scalar multiplications sharing one point-addition STARK.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof {
+    /// Public statements in canonical caller-defined order.
+    pub statements: Vec<RistrettoCompressedFixedWindowScalarMulStatement>,
+    /// Concatenated 335-row schedules for all statements.
+    pub additions: ArchivedRistrettoFpProgramBatchProof,
 }
 
 /// Incremental host-side program builder.
@@ -497,58 +574,82 @@ fn prime_minus(value: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValueCanonicity {
-    /// A root/constant or multiplication result carrying its own strict witness.
+    /// A root/constant or arithmetic result carrying its own strict witness.
     Witnessed,
-    /// Canonicality follows from an add/sub output or multiplication quotient.
+    /// Canonicality follows from a multiplication quotient relation.
     Derived,
 }
 
 fn program_canonicity(program: &RistrettoFpProgram) -> TexasAirResult<Vec<ValueCanonicity>> {
-    let mut canonicity = vec![ValueCanonicity::Witnessed; program.values.len()];
+    let mut produced = vec![false; program.values.len()];
     for op in &program.ops {
-        let (operands, derived, multiplication_output) = match *op {
+        let (a, b, first_output, second_output) = match *op {
             RistrettoFpProgramOp::Add { a, b, out }
-            | RistrettoFpProgramOp::Subtract { a, b, out } => (&[a, b][..], out, false),
-            RistrettoFpProgramOp::Multiply { a, b, out: _, q } => (&[a, b][..], q, true),
+            | RistrettoFpProgramOp::Subtract { a, b, out } => (a, b, out, None),
+            RistrettoFpProgramOp::Multiply { a, b, out, q } => {
+                if q >= out {
+                    return Err(TexasAirError::SpecViolation(
+                        "Fp program multiplication values are not in quotient/output order".into(),
+                    ));
+                }
+                (a, b, q, Some(out))
+            }
         };
-        for index in operands.iter().chain(std::iter::once(&derived)) {
-            if usize::from(*index) >= program.values.len() {
+        for index in [a, b, first_output].into_iter().chain(second_output) {
+            if usize::from(index) >= program.values.len() {
                 return Err(TexasAirError::SpecViolation(
                     "Fp program operation index is out of bounds".into(),
                 ));
             }
         }
-        if usize::from(multiplication_output) >= program.values.len() {
+        if a >= first_output
+            || b >= first_output
+            || second_output.is_some_and(|output| a >= output || b >= output)
+        {
             return Err(TexasAirError::SpecViolation(
-                "Fp program multiplication output is out of bounds".into(),
+                "Fp program operation consumes a non-earlier value".into(),
             ));
         }
-        if operands.iter().any(|operand| *operand >= derived) {
-            return Err(TexasAirError::SpecViolation(
-                "Fp program operation consumes a later value".into(),
-            ));
-        }
-        if canonicity[usize::from(derived)] != ValueCanonicity::Witnessed {
-            return Err(TexasAirError::SpecViolation(
-                "Fp program defines a value more than once".into(),
-            ));
-        }
-        canonicity[usize::from(derived)] = ValueCanonicity::Derived;
-
-        if multiplication_output {
-            let out = match op {
-                RistrettoFpProgramOp::Multiply { out, .. } => *out,
-                _ => unreachable!("multiplication output is only set for Multiply"),
-            };
-            if canonicity[usize::from(out)] != ValueCanonicity::Witnessed {
+        for output in std::iter::once(first_output).chain(second_output) {
+            if std::mem::replace(&mut produced[usize::from(output)], true) {
                 return Err(TexasAirError::SpecViolation(
                     "Fp program defines a value more than once".into(),
                 ));
             }
-            // The multiplication output retains a direct `< p` witness.  Its
-            // quotient is canonical because a*b < p^2 and the exact convolution
-            // equation proves a*b = out + q*p.
-            canonicity[usize::from(out)] = ValueCanonicity::Witnessed;
+        }
+    }
+
+    let mut canonicity = vec![ValueCanonicity::Witnessed; program.values.len()];
+    let mut available = produced
+        .iter()
+        .map(|is_output| !is_output)
+        .collect::<Vec<_>>();
+    for op in &program.ops {
+        let (a, b) = match *op {
+            RistrettoFpProgramOp::Add { a, b, .. }
+            | RistrettoFpProgramOp::Subtract { a, b, .. }
+            | RistrettoFpProgramOp::Multiply { a, b, .. } => (a, b),
+        };
+        if !available[usize::from(a)] || !available[usize::from(b)] {
+            return Err(TexasAirError::SpecViolation(
+                "Fp program operation consumes a value produced by a later operation".into(),
+            ));
+        }
+        match *op {
+            RistrettoFpProgramOp::Add { out, .. } | RistrettoFpProgramOp::Subtract { out, .. } => {
+                // The modular relation alone does not determine whether the
+                // prover chose the reduced representative, so add/sub outputs
+                // retain their direct `< p` witness.
+                available[usize::from(out)] = true;
+            }
+            RistrettoFpProgramOp::Multiply { out, q, .. } => {
+                // The multiplication output retains a direct `< p` witness.
+                // Since a,b,out < p and a*b = out + q*p exactly, a*b < p^2
+                // implies q < p without a second strict witness.
+                canonicity[usize::from(q)] = ValueCanonicity::Derived;
+                available[usize::from(q)] = true;
+                available[usize::from(out)] = true;
+            }
         }
     }
     Ok(canonicity)
@@ -770,7 +871,7 @@ fn m31_inverse(value: u8) -> M31 {
     }
 }
 
-fn trace_columns(program: &RistrettoFpProgram) -> TexasAirResult<MethodTrace> {
+fn trace_row(program: &RistrettoFpProgram) -> TexasAirResult<Vec<M31>> {
     let witness = program_witness(program)?;
     let canonicity = program_canonicity(program)?;
     let mut row = Vec::new();
@@ -826,21 +927,95 @@ fn trace_columns(program: &RistrettoFpProgram) -> TexasAirResult<MethodTrace> {
         }
     }
 
+    Ok(row)
+}
+
+fn trace_columns(program: &RistrettoFpProgram) -> TexasAirResult<MethodTrace> {
+    let row = trace_row(program)?;
     let mut trace = MethodTrace::new(LOG_SIZE, row.len());
     trace.write_row(0, &row)?;
     trace.write_row(1, &row)?;
     Ok(trace)
 }
 
-fn scope_columns(program: &RistrettoFpProgram) -> MethodTrace {
-    let mut trace = MethodTrace::new(LOG_SIZE, program.values.len() * LIMBS);
+fn scope_row(program: &RistrettoFpProgram) -> Vec<M31> {
     let mut row = Vec::with_capacity(program.values.len() * LIMBS);
     for value in &program.values {
         row.extend(value.iter().map(|limb| M31::from(u32::from(*limb))));
     }
+    row
+}
+
+fn scope_columns(program: &RistrettoFpProgram) -> MethodTrace {
+    let row = scope_row(program);
+    let mut trace = MethodTrace::new(LOG_SIZE, row.len());
     trace.write_row(0, &row).expect("fixed program scope width");
     trace.write_row(1, &row).expect("fixed program scope width");
     trace
+}
+
+fn batch_log_size(program_count: usize) -> TexasAirResult<u32> {
+    if program_count == 0 {
+        return Err(TexasAirError::SpecViolation(
+            "Fp program batch must not be empty".into(),
+        ));
+    }
+    Ok(program_count.max(2).next_power_of_two().ilog2())
+}
+
+fn validate_program_batch_shape(programs: &[RistrettoFpProgram]) -> TexasAirResult<()> {
+    let template = programs
+        .first()
+        .ok_or_else(|| TexasAirError::SpecViolation("Fp program batch must not be empty".into()))?;
+    validate_indices(template.values.len(), template.ops.len(), &template.outputs)?;
+    for program in programs {
+        validate_indices(program.values.len(), program.ops.len(), &program.outputs)?;
+        if program.values.len() != template.values.len()
+            || program.ops != template.ops
+            || program.outputs != template.outputs
+        {
+            return Err(TexasAirError::SpecViolation(
+                "Fp program batch rows do not share one fixed shape".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn trace_columns_batch(programs: &[RistrettoFpProgram]) -> TexasAirResult<MethodTrace> {
+    validate_program_batch_shape(programs)?;
+    let log_size = batch_log_size(programs.len())?;
+    let rows = 1usize << log_size;
+    let program_rows = programs
+        .iter()
+        .map(trace_row)
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    let width = program_rows[0].len();
+    if program_rows.iter().any(|row| row.len() != width) {
+        return Err(TexasAirError::SpecViolation(
+            "Fp program batch witness widths disagree".into(),
+        ));
+    }
+    let mut trace = MethodTrace::new(log_size, width);
+    for row_index in 0..rows {
+        let source = row_index.min(program_rows.len() - 1);
+        trace.write_row(row_index, &program_rows[source])?;
+    }
+    Ok(trace)
+}
+
+fn scope_columns_batch(programs: &[RistrettoFpProgram]) -> TexasAirResult<MethodTrace> {
+    validate_program_batch_shape(programs)?;
+    let log_size = batch_log_size(programs.len())?;
+    let rows = 1usize << log_size;
+    let scope_rows = programs.iter().map(scope_row).collect::<Vec<_>>();
+    let width = scope_rows[0].len();
+    let mut trace = MethodTrace::new(log_size, width);
+    for row_index in 0..rows {
+        let source = row_index.min(scope_rows.len() - 1);
+        trace.write_row(row_index, &scope_rows[source])?;
+    }
+    Ok(trace)
 }
 
 fn preprocessed_ids(program: &RistrettoFpProgram) -> Vec<PreProcessedColumnId> {
@@ -1074,6 +1249,14 @@ fn mix_program(channel: &mut impl Channel, program: &RistrettoFpProgram) {
     }
 }
 
+fn mix_program_batch(channel: &mut impl Channel, programs: &[RistrettoFpProgram]) {
+    channel.mix_u64(0x7269_7374_6261_7463);
+    channel.mix_u64(programs.len() as u64);
+    for program in programs {
+        mix_program(channel, program);
+    }
+}
+
 /// Prove all canonical values and field operations in one STARK.
 pub fn prove_ristretto_fp_program(
     program: &RistrettoFpProgram,
@@ -1185,6 +1368,130 @@ pub fn verify_ristretto_fp_program(
         FpProgramAir {
             log_size: LOG_SIZE,
             program: archive.program.clone(),
+        },
+        SecureField::from(0u32),
+    );
+    stwo::core::verifier::verify(&[&component], &mut channel, &mut scheme, proof)
+        .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))
+}
+
+/// Prove equal-shape canonical field programs as rows of one STARK.
+pub fn prove_ristretto_fp_program_batch(
+    programs: &[RistrettoFpProgram],
+) -> TexasAirResult<ArchivedRistrettoFpProgramBatchProof> {
+    validate_program_batch_shape(programs)?;
+    let log_size = batch_log_size(programs.len())?;
+    let trace = trace_columns_batch(programs)?;
+    let scope = scope_columns_batch(programs)?;
+    let config = crate::prover_context::protocol_pcs_config();
+    let twiddles =
+        crate::prover_context::simd_twiddles(log_size + config.fri_config.log_blowup_factor);
+    let mut channel = stwo::core::channel::Poseidon252Channel::default();
+    mix_program_batch(&mut channel, programs);
+    let mut scheme =
+        CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::with_memory_pool(
+            config,
+            &twiddles,
+            crate::prover_context::simd_base_column_pool(),
+        );
+    {
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(scope.to_evaluations());
+        tree.commit(&mut channel);
+    }
+    {
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(trace.to_evaluations());
+        tree.commit(&mut channel);
+    }
+    let template = &programs[0];
+    let ids = preprocessed_ids(template);
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let component = FrameworkComponent::new(
+        &mut allocator,
+        FpProgramAir {
+            log_size,
+            program: template.clone(),
+        },
+        SecureField::from(0u32),
+    );
+    let proof = prove(&[&component], &mut channel, scheme)
+        .map_err(|error| TexasAirError::StwoProverError(error.to_string()))?;
+    let stark_proof_bytes = options()
+        .serialize(&proof)
+        .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+    Ok(ArchivedRistrettoFpProgramBatchProof {
+        programs: programs.to_vec(),
+        stark_proof_bytes,
+    })
+}
+
+/// Verify an equal-shape field-program batch.
+pub fn verify_ristretto_fp_program_batch(
+    archive: &ArchivedRistrettoFpProgramBatchProof,
+) -> TexasAirResult<()> {
+    type Proof = StarkProof<Poseidon252MerkleHasher>;
+    validate_program_batch_shape(&archive.programs)?;
+    let log_size = batch_log_size(archive.programs.len())?;
+    let proof: Proof = options()
+        .deserialize(&archive.stark_proof_bytes)
+        .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+    let trace = trace_columns_batch(&archive.programs)?;
+    let scope = scope_columns_batch(&archive.programs)?;
+    let config = crate::prover_context::protocol_pcs_config();
+    let twiddles =
+        crate::prover_context::simd_twiddles(log_size + config.fri_config.log_blowup_factor);
+    let mut trusted =
+        CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::with_memory_pool(
+            config,
+            &twiddles,
+            crate::prover_context::simd_base_column_pool(),
+        );
+    let mut scope_channel = stwo::core::channel::Poseidon252Channel::default();
+    {
+        let mut tree = trusted.tree_builder();
+        tree.extend_evals(scope.to_evaluations());
+        tree.commit(&mut scope_channel);
+    }
+    if proof.commitments.first().copied() != trusted.roots().first().copied() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "Fp program batch public scope commitment mismatch".into(),
+        ));
+    }
+    let mut trace_channel = stwo::core::channel::Poseidon252Channel::default();
+    {
+        let mut tree = trusted.tree_builder();
+        tree.extend_evals(trace.to_evaluations());
+        tree.commit(&mut trace_channel);
+    }
+    if proof.commitments.get(1).copied() != trusted.roots().get(1).copied() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "Fp program batch trace commitment mismatch".into(),
+        ));
+    }
+
+    let mut channel = stwo::core::channel::Poseidon252Channel::default();
+    mix_program_batch(&mut channel, &archive.programs);
+    let mut scheme =
+        stwo::core::pcs::CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
+    scheme.commit(
+        proof.commitments[0],
+        &vec![log_size; archive.programs[0].values.len() * LIMBS],
+        &mut channel,
+    );
+    scheme.commit(
+        proof.commitments[1],
+        &vec![log_size; trace.cols.len()],
+        &mut channel,
+    );
+    let template = &archive.programs[0];
+    let ids = preprocessed_ids(template);
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let component = FrameworkComponent::new(
+        &mut allocator,
+        FpProgramAir {
+            log_size,
+            program: template.clone(),
         },
         SecureField::from(0u32),
     );
@@ -1330,6 +1637,71 @@ fn negative_edwards_d() -> [u8; LIMBS] {
     limbs(&subtract_big(&modulus(), &big_uint(&EDWARDS_D_BYTES)))
 }
 
+fn canonical_decode_inverse_sqrt(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
+    let p = modulus();
+    let s = big_uint(encoding);
+    if s >= p {
+        return Err(TexasAirError::SpecViolation(
+            "Ristretto point encoding is noncanonical".into(),
+        ));
+    }
+    if (&s & BigUint::one()) == BigUint::one() {
+        return Err(TexasAirError::SpecViolation(
+            "Ristretto point encoding is negative".into(),
+        ));
+    }
+
+    let one = BigUint::one();
+    let ss = multiply_big(&s, &s);
+    let u1 = subtract_big(&one, &ss);
+    let u2 = add_big(&one, &ss);
+    let u2sq = multiply_big(&u2, &u2);
+    let u1sq = multiply_big(&u1, &u1);
+    let negative_d = subtract_big(&p, &big_uint(&EDWARDS_D_BYTES));
+    let neg_d_u1sq = multiply_big(&negative_d, &u1sq);
+    let v = subtract_big(&neg_d_u1sq, &u2sq);
+    let target = multiply_big(&v, &u2sq);
+    let root = nonnegative_sqrt(&target).ok_or_else(|| {
+        TexasAirError::SpecViolation("Ristretto decode inverse square root does not exist".into())
+    })?;
+    let mut inverse_sqrt = root.modpow(&(&p - BigUint::from(2u32)), &p);
+    if (&inverse_sqrt & BigUint::one()) == BigUint::one() {
+        inverse_sqrt = &p - inverse_sqrt;
+    }
+    Ok(limbs(&inverse_sqrt))
+}
+
+fn projective_encode_inverse_sqrt(point: &[[u8; LIMBS]; 4]) -> TexasAirResult<[u8; LIMBS]> {
+    let x_value = big_uint(&point[0]);
+    let y_value = big_uint(&point[1]);
+    let z_value = big_uint(&point[2]);
+    let z_plus_y = add_big(&z_value, &y_value);
+    let z_minus_y = subtract_big(&z_value, &y_value);
+    let u1 = multiply_big(&z_plus_y, &z_minus_y);
+    let u2 = multiply_big(&x_value, &y_value);
+    let u2_squared = multiply_big(&u2, &u2);
+    let v = multiply_big(&u1, &u2_squared);
+    let mut inverse_sqrt = if v.is_zero() {
+        BigUint::from(0u32)
+    } else {
+        let root = nonnegative_sqrt(&v).ok_or_else(|| {
+            TexasAirError::SpecViolation(
+                "projective Ristretto encode square root does not exist".into(),
+            )
+        })?;
+        let inverse = root.modpow(&(modulus() - BigUint::from(2u32)), &modulus());
+        if (&inverse & BigUint::one()) == BigUint::one() {
+            modulus() - inverse
+        } else {
+            inverse
+        }
+    };
+    if (&inverse_sqrt & BigUint::one()) == BigUint::one() {
+        inverse_sqrt = modulus() - inverse_sqrt;
+    }
+    Ok(limbs(&inverse_sqrt))
+}
+
 fn expected_decode_ops(x_index: u16) -> Vec<RistrettoFpProgramOp> {
     vec![
         RistrettoFpProgramOp::Multiply {
@@ -1434,38 +1806,7 @@ fn expected_decode_ops(x_index: u16) -> Vec<RistrettoFpProgramOp> {
 pub fn prove_ristretto_fp_program_point_decode(
     encoding: &[u8; LIMBS],
 ) -> TexasAirResult<ArchivedRistrettoFpProgramPointDecodeProof> {
-    let p = modulus();
-    let s = big_uint(encoding);
-    if s >= p {
-        return Err(TexasAirError::SpecViolation(
-            "Ristretto point encoding is noncanonical".into(),
-        ));
-    }
-    if (s.clone() & BigUint::one()) == BigUint::one() {
-        return Err(TexasAirError::SpecViolation(
-            "Ristretto point encoding is negative".into(),
-        ));
-    }
-
-    let one = BigUint::one();
-    let ss = multiply_big(&s, &s);
-    let u1 = subtract_big(&one, &ss);
-    let u2 = add_big(&one, &ss);
-    let u2sq = multiply_big(&u2, &u2);
-    let u1sq = multiply_big(&u1, &u1);
-    let negative_d = subtract_big(&p, &big_uint(&EDWARDS_D_BYTES));
-    let neg_d_u1sq = multiply_big(&negative_d, &u1sq);
-    let v = subtract_big(&neg_d_u1sq, &u2sq);
-    let target = multiply_big(&v, &u2sq);
-    let root = nonnegative_sqrt(&target).ok_or_else(|| {
-        TexasAirError::SpecViolation("Ristretto decode inverse square root does not exist".into())
-    })?;
-    let mut inverse_sqrt = root.modpow(&(&p - BigUint::from(2u32)), &p);
-    if (&inverse_sqrt & BigUint::one()) == BigUint::one() {
-        inverse_sqrt = &p - inverse_sqrt;
-    }
-
-    let inverse_sqrt_bytes = limbs(&inverse_sqrt);
+    let inverse_sqrt_bytes = canonical_decode_inverse_sqrt(encoding)?;
     let mut builder = RistrettoFpProgramBuilder::new(&[*encoding, inverse_sqrt_bytes]);
     builder.constant(&ONE_BYTES)?;
     builder.constant(&negative_edwards_d())?;
@@ -2224,6 +2565,261 @@ pub fn verify_ristretto_fp_program_projective_point(
     }
 }
 
+fn expected_projective_encode_ops(
+    selected_x: u16,
+    selected_y: u16,
+    selected_denominator: u16,
+    final_y: u16,
+) -> Vec<RistrettoFpProgramOp> {
+    vec![
+        RistrettoFpProgramOp::Add { a: 2, b: 1, out: 8 },
+        RistrettoFpProgramOp::Subtract { a: 2, b: 1, out: 9 },
+        RistrettoFpProgramOp::Multiply {
+            a: 8,
+            b: 9,
+            out: 11,
+            q: 10,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 0,
+            b: 1,
+            out: 13,
+            q: 12,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 13,
+            b: 13,
+            out: 15,
+            q: 14,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 11,
+            b: 15,
+            out: 17,
+            q: 16,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 4,
+            b: 4,
+            out: 19,
+            q: 18,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 19,
+            b: 17,
+            out: 21,
+            q: 20,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 4,
+            b: 11,
+            out: 23,
+            q: 22,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 4,
+            b: 13,
+            out: 25,
+            q: 24,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 25,
+            b: 3,
+            out: 27,
+            q: 26,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 23,
+            b: 27,
+            out: 29,
+            q: 28,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 3,
+            b: 29,
+            out: 31,
+            q: 30,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 0,
+            b: 6,
+            out: 33,
+            q: 32,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 1,
+            b: 6,
+            out: 35,
+            q: 34,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: 23,
+            b: 7,
+            out: 37,
+            q: 36,
+        },
+        RistrettoFpProgramOp::Subtract {
+            a: 38,
+            b: selected_y,
+            out: 39,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: selected_x,
+            b: 29,
+            out: 41,
+            q: 40,
+        },
+        RistrettoFpProgramOp::Subtract {
+            a: 2,
+            b: final_y,
+            out: 42,
+        },
+        RistrettoFpProgramOp::Multiply {
+            a: selected_denominator,
+            b: 42,
+            out: 44,
+            q: 43,
+        },
+        RistrettoFpProgramOp::Subtract {
+            a: 38,
+            b: 44,
+            out: 45,
+        },
+    ]
+}
+
+/// Prove canonical Ristretto encoding of an authenticated projective point.
+pub fn prove_ristretto_fp_program_projective_point_encode(
+    point: ArchivedRistrettoFpProgramProjectivePoint,
+) -> TexasAirResult<ArchivedRistrettoFpProgramProjectivePointEncodeProof> {
+    verify_ristretto_fp_program_projective_point(&point)?;
+    let inverse_sqrt = projective_encode_inverse_sqrt(&[point.x, point.y, point.z, point.t])?;
+
+    let mut builder =
+        RistrettoFpProgramBuilder::new(&[point.x, point.y, point.z, point.t, inverse_sqrt]);
+    builder.constant(&ONE_BYTES)?;
+    builder.constant(&SQRT_M1_BYTES)?;
+    builder.constant(&INVSQRT_A_MINUS_D_BYTES)?;
+    let z_plus_y_index = builder.add(2, 1)?;
+    let z_minus_y_index = builder.subtract(2, 1)?;
+    let u1_index = builder.multiply(z_plus_y_index, z_minus_y_index)?;
+    let u2_index = builder.multiply(0, 1)?;
+    let u2_squared_index = builder.multiply(u2_index, u2_index)?;
+    let v_index = builder.multiply(u1_index, u2_squared_index)?;
+    let inverse_sqrt_squared = builder.multiply(4, 4)?;
+    let inverse_check = builder.multiply(inverse_sqrt_squared, v_index)?;
+    let i1 = builder.multiply(4, u1_index)?;
+    let i2 = builder.multiply(4, u2_index)?;
+    let i2_times_t = builder.multiply(i2, 3)?;
+    let z_inverse = builder.multiply(i1, i2_times_t)?;
+    let t_times_z_inverse = builder.multiply(3, z_inverse)?;
+    let i_x = builder.multiply(0, 6)?;
+    let i_y = builder.multiply(1, 6)?;
+    let enchanted_denominator = builder.multiply(i1, 7)?;
+    builder.constant(&ZERO_BYTES)?;
+
+    let rotate = builder_values(&builder, t_times_z_inverse)?[0] & 1 == 1;
+    let selected_x_index = if rotate { i_y } else { 0 };
+    let selected_y_index = if rotate { i_x } else { 1 };
+    let selected_denominator = if rotate { enchanted_denominator } else { i2 };
+    let negative_selected_y = builder.subtract(38, selected_y_index)?;
+    let x_times_z_inverse = builder.multiply(selected_x_index, z_inverse)?;
+    let negate_y = builder_values(&builder, x_times_z_inverse)?[0] & 1 == 1;
+    let final_y_index = if negate_y {
+        negative_selected_y
+    } else {
+        selected_y_index
+    };
+    let z_minus_final_y = builder.subtract(2, final_y_index)?;
+    let s_raw = builder.multiply(selected_denominator, z_minus_final_y)?;
+    let negative_s_raw = builder.subtract(38, s_raw)?;
+    let encoding_index = if builder_values(&builder, s_raw)?[0] & 1 == 1 {
+        negative_s_raw
+    } else {
+        s_raw
+    };
+    let encoding = builder_values(&builder, encoding_index)?;
+    let identity = point.x == ZERO_BYTES && point.y == point.z && point.t == ZERO_BYTES;
+    let expected_inverse_check = if identity { ZERO_BYTES } else { ONE_BYTES };
+    if builder_values(&builder, inverse_check)? != expected_inverse_check {
+        return Err(TexasAirError::SpecViolation(
+            "projective Ristretto encode inverse-root relation is invalid".into(),
+        ));
+    }
+    if encoding[0] & 1 == 1 {
+        return Err(TexasAirError::SpecViolation(
+            "projective Ristretto encode output is negative".into(),
+        ));
+    }
+
+    let program = builder.finish(&[inverse_check, encoding_index])?;
+    let proof = prove_ristretto_fp_program(&program)?;
+    Ok(ArchivedRistrettoFpProgramProjectivePointEncodeProof {
+        point,
+        encoding,
+        program: proof,
+    })
+}
+
+/// Verify the fixed projective Ristretto encode program and its sign branches.
+pub fn verify_ristretto_fp_program_projective_point_encode(
+    archive: &ArchivedRistrettoFpProgramProjectivePointEncodeProof,
+) -> TexasAirResult<()> {
+    verify_ristretto_fp_program_projective_point(&archive.point)?;
+    let program = &archive.program.program;
+    if program.values.len() != 46 {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "projective Ristretto encode program value count is invalid".into(),
+        ));
+    }
+    let rotate = program.values[31][0] & 1 == 1;
+    let selected_x = if rotate { 35 } else { 0 };
+    let selected_y = if rotate { 33 } else { 1 };
+    let selected_denominator = if rotate { 37 } else { 25 };
+    let negate_y = program.values[41][0] & 1 == 1;
+    let final_y = if negate_y { 39 } else { selected_y };
+    let expected_ops =
+        expected_projective_encode_ops(selected_x, selected_y, selected_denominator, final_y);
+    let encoding_index = if program.values[44][0] & 1 == 1 {
+        45
+    } else {
+        44
+    };
+    let fixed_shape = program.ops.len() == 21
+        && program.outputs == [21, encoding_index]
+        && program.ops == expected_ops
+        && program.values[0] == archive.point.x
+        && program.values[1] == archive.point.y
+        && program.values[2] == archive.point.z
+        && program.values[3] == archive.point.t
+        && program.values[5] == ONE_BYTES
+        && program.values[6] == SQRT_M1_BYTES
+        && program.values[7] == INVSQRT_A_MINUS_D_BYTES
+        && program.values[38] == ZERO_BYTES
+        && program.values[usize::from(encoding_index)] == archive.encoding;
+    if !fixed_shape {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "projective Ristretto encode program shape is detached".into(),
+        ));
+    }
+    verify_ristretto_fp_program(&archive.program)?;
+
+    let identity = archive.point.x == ZERO_BYTES
+        && archive.point.y == archive.point.z
+        && archive.point.t == ZERO_BYTES;
+    let expected_inverse_check = if identity { ZERO_BYTES } else { ONE_BYTES };
+    if program.values[21] != expected_inverse_check
+        || program.values[4][0] & 1 == 1
+        || archive.encoding[0] & 1 == 1
+        || (identity && archive.encoding != ZERO_BYTES)
+    {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "projective Ristretto encode inverse-root or output branch is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Prove general projective extended-Edwards addition in one program STARK.
 pub fn prove_ristretto_fp_program_projective_addition(
     left: ArchivedRistrettoFpProgramProjectivePoint,
@@ -2310,6 +2906,104 @@ pub fn verify_ristretto_fp_program_projective_addition(
         ));
     }
     verify_ristretto_fp_program(&archive.program)
+}
+
+fn build_projective_addition_program_from_coordinates(
+    left: RistrettoProjectiveCoordinates,
+    right: RistrettoProjectiveCoordinates,
+) -> TexasAirResult<(RistrettoFpProgram, RistrettoProjectiveCoordinates)> {
+    let mut builder = RistrettoFpProgramBuilder::new(&[
+        left[0], left[1], left[2], left[3], right[0], right[1], right[2], right[3],
+    ]);
+    let two = builder.constant(&TWO_BYTES)?;
+    let two_d = builder.constant(&EDWARDS_TWO_D_BYTES)?;
+    let output = append_projective_addition(&mut builder, [0, 1, 2, 3], [4, 5, 6, 7], two, two_d)?;
+    let output_values = output
+        .map(|index| builder_values(&builder, index))
+        .into_iter()
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    let output: RistrettoProjectiveCoordinates = output_values
+        .try_into()
+        .expect("projective addition has exactly four coordinates");
+    if output[2] == ZERO_BYTES {
+        return Err(TexasAirError::SpecViolation(
+            "projective Edwards addition produced Z = 0".into(),
+        ));
+    }
+    let program = builder.finish(&[31, 33, 35, 37])?;
+    if program.values.len() != 38
+        || program.ops.len() != 18
+        || program.ops != expected_projective_edwards_addition_ops()
+    {
+        return Err(TexasAirError::SpecViolation(
+            "projective addition batch row shape diverged".into(),
+        ));
+    }
+    Ok((program, output))
+}
+
+/// Prove fixed-shape projective additions as rows of one Fp-program batch.
+pub fn prove_ristretto_fp_program_projective_addition_batch(
+    left: &[RistrettoProjectiveCoordinates],
+    right: &[RistrettoProjectiveCoordinates],
+    output: &[RistrettoProjectiveCoordinates],
+) -> TexasAirResult<ArchivedRistrettoFpProgramProjectiveAdditionBatchProof> {
+    if left.is_empty() || left.len() != right.len() || left.len() != output.len() {
+        return Err(TexasAirError::SpecViolation(
+            "projective addition batch coordinate lengths disagree".into(),
+        ));
+    }
+    let mut programs = Vec::with_capacity(left.len());
+    for ((left, right), expected_output) in left.iter().zip(right).zip(output) {
+        let (program, actual_output) =
+            build_projective_addition_program_from_coordinates(*left, *right)?;
+        if actual_output != *expected_output {
+            return Err(TexasAirError::SpecViolation(
+                "projective addition batch output is detached from its arithmetic row".into(),
+            ));
+        }
+        programs.push(program);
+    }
+    let additions = prove_ristretto_fp_program_batch(&programs)?;
+    let archive = ArchivedRistrettoFpProgramProjectiveAdditionBatchProof {
+        left: left.to_vec(),
+        right: right.to_vec(),
+        output: output.to_vec(),
+        additions,
+    };
+    verify_ristretto_fp_program_projective_addition_batch(&archive)?;
+    Ok(archive)
+}
+
+/// Verify a fixed-shape projective addition batch and every public row.
+pub fn verify_ristretto_fp_program_projective_addition_batch(
+    archive: &ArchivedRistrettoFpProgramProjectiveAdditionBatchProof,
+) -> TexasAirResult<()> {
+    if archive.left.is_empty()
+        || archive.left.len() != archive.right.len()
+        || archive.left.len() != archive.output.len()
+        || archive.additions.programs.len() != archive.left.len()
+    {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "projective addition batch row counts disagree".into(),
+        ));
+    }
+    verify_ristretto_fp_program_batch(&archive.additions)?;
+    for index in 0..archive.left.len() {
+        let (expected_program, expected_output) =
+            build_projective_addition_program_from_coordinates(
+                archive.left[index],
+                archive.right[index],
+            )?;
+        if archive.additions.programs[index] != expected_program
+            || archive.output[index] != expected_output
+        {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "projective addition batch row is detached from its public coordinates".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn expected_point_table_layout() -> (Vec<RistrettoFpProgramOp>, Vec<u16>, usize) {
@@ -2668,7 +3362,7 @@ fn append_projective_addition(
     left: [u16; 4],
     right: [u16; 4],
     two: u16,
-    curve_d: u16,
+    two_d: u16,
 ) -> TexasAirResult<[u16; 4]> {
     let left_y_minus_x = builder.subtract(left[1], left[0])?;
     let right_y_minus_x = builder.subtract(right[1], right[0])?;
@@ -2676,8 +3370,8 @@ fn append_projective_addition(
     let right_y_plus_x = builder.add(right[1], right[0])?;
     let a = builder.multiply(left_y_minus_x, right_y_minus_x)?;
     let b = builder.multiply(left_y_plus_x, right_y_plus_x)?;
-    let two_d_left_t = builder.multiply(two, left[3])?;
-    let c = builder.multiply(two_d_left_t, curve_d)?;
+    let two_d_left_t = builder.multiply(two_d, left[3])?;
+    let c = builder.multiply(two_d_left_t, right[3])?;
     let two_left_z = builder.multiply(two, left[2])?;
     let d = builder.multiply(two_left_z, right[2])?;
     let e = builder.subtract(b, a)?;
@@ -2689,6 +3383,428 @@ fn append_projective_addition(
     let z = builder.multiply(f, g)?;
     let t = builder.multiply(e, h)?;
     Ok([x, y, z, t])
+}
+
+#[derive(Clone, Copy)]
+struct AppendedCanonicalPointDecode {
+    coordinates: [u16; 4],
+    inverse_check: u16,
+}
+
+#[derive(Clone, Copy)]
+struct AppendedProjectivePointEncode {
+    encoding: u16,
+    inverse_check: u16,
+}
+
+fn parity_selector(value: &[u8; LIMBS]) -> [u8; LIMBS] {
+    if value[0] & 1 == 1 {
+        ONE_BYTES
+    } else {
+        ZERO_BYTES
+    }
+}
+
+fn append_fixed_select(
+    builder: &mut RistrettoFpProgramBuilder,
+    when_false: u16,
+    when_true: u16,
+    selector: u16,
+) -> TexasAirResult<u16> {
+    let delta = builder.subtract(when_true, when_false)?;
+    let selected_delta = builder.multiply(selector, delta)?;
+    builder.add(when_false, selected_delta)
+}
+
+fn append_fixed_canonical_point_decode(
+    builder: &mut RistrettoFpProgramBuilder,
+    encoding: u16,
+    inverse_sqrt: u16,
+    one: u16,
+    negative_d: u16,
+    zero: u16,
+) -> TexasAirResult<AppendedCanonicalPointDecode> {
+    let squared_encoding = builder.multiply(encoding, encoding)?;
+    let u1 = builder.subtract(one, squared_encoding)?;
+    let u2 = builder.add(one, squared_encoding)?;
+    let u2_squared = builder.multiply(u2, u2)?;
+    let u1_squared = builder.multiply(u1, u1)?;
+    let negative_d_u1_squared = builder.multiply(negative_d, u1_squared)?;
+    let v = builder.subtract(negative_d_u1_squared, u2_squared)?;
+    let target = builder.multiply(v, u2_squared)?;
+    let inverse_sqrt_squared = builder.multiply(inverse_sqrt, inverse_sqrt)?;
+    let inverse_check = builder.multiply(inverse_sqrt_squared, target)?;
+    let dx = builder.multiply(inverse_sqrt, u2)?;
+    let dx_v = builder.multiply(dx, v)?;
+    let dy = builder.multiply(inverse_sqrt, dx_v)?;
+    let two_s = builder.add(encoding, encoding)?;
+    let x_raw = builder.multiply(two_s, dx)?;
+    let negative_x = builder.subtract(zero, x_raw)?;
+    let x_selector_value = parity_selector(&builder_values(builder, x_raw)?);
+    let x_selector = builder.constant(&x_selector_value)?;
+    let x = append_fixed_select(builder, x_raw, negative_x, x_selector)?;
+    let y = builder.multiply(u1, dy)?;
+    let t = builder.multiply(x, y)?;
+
+    let x_value = builder_values(builder, x)?;
+    let y_value = builder_values(builder, y)?;
+    let t_value = builder_values(builder, t)?;
+    if builder_values(builder, inverse_check)? != ONE_BYTES
+        || x_value[0] & 1 == 1
+        || y_value == ZERO_BYTES
+        || t_value[0] & 1 == 1
+    {
+        return Err(TexasAirError::SpecViolation(
+            "fixed-shape Ristretto decode branch is invalid".into(),
+        ));
+    }
+    Ok(AppendedCanonicalPointDecode {
+        coordinates: [x, y, one, t],
+        inverse_check,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_fixed_projective_point_encode(
+    builder: &mut RistrettoFpProgramBuilder,
+    point: [u16; 4],
+    inverse_sqrt: u16,
+    zero: u16,
+    sqrt_m1: u16,
+    invsqrt_a_minus_d: u16,
+) -> TexasAirResult<AppendedProjectivePointEncode> {
+    let z_plus_y = builder.add(point[2], point[1])?;
+    let z_minus_y = builder.subtract(point[2], point[1])?;
+    let u1 = builder.multiply(z_plus_y, z_minus_y)?;
+    let u2 = builder.multiply(point[0], point[1])?;
+    let u2_squared = builder.multiply(u2, u2)?;
+    let v = builder.multiply(u1, u2_squared)?;
+    let inverse_sqrt_squared = builder.multiply(inverse_sqrt, inverse_sqrt)?;
+    let inverse_check = builder.multiply(inverse_sqrt_squared, v)?;
+    let i1 = builder.multiply(inverse_sqrt, u1)?;
+    let i2 = builder.multiply(inverse_sqrt, u2)?;
+    let i2_times_t = builder.multiply(i2, point[3])?;
+    let z_inverse = builder.multiply(i1, i2_times_t)?;
+    let t_times_z_inverse = builder.multiply(point[3], z_inverse)?;
+    let i_x = builder.multiply(point[0], sqrt_m1)?;
+    let i_y = builder.multiply(point[1], sqrt_m1)?;
+    let enchanted_denominator = builder.multiply(i1, invsqrt_a_minus_d)?;
+
+    let rotate_value = parity_selector(&builder_values(builder, t_times_z_inverse)?);
+    let rotate = builder.constant(&rotate_value)?;
+    let selected_x = append_fixed_select(builder, point[0], i_y, rotate)?;
+    let selected_y = append_fixed_select(builder, point[1], i_x, rotate)?;
+    let selected_denominator = append_fixed_select(builder, i2, enchanted_denominator, rotate)?;
+
+    let negative_selected_y = builder.subtract(zero, selected_y)?;
+    let x_times_z_inverse = builder.multiply(selected_x, z_inverse)?;
+    let negate_y_value = parity_selector(&builder_values(builder, x_times_z_inverse)?);
+    let negate_y = builder.constant(&negate_y_value)?;
+    let final_y = append_fixed_select(builder, selected_y, negative_selected_y, negate_y)?;
+    let z_minus_final_y = builder.subtract(point[2], final_y)?;
+    let s_raw = builder.multiply(selected_denominator, z_minus_final_y)?;
+    let negative_s_raw = builder.subtract(zero, s_raw)?;
+    let negate_s_value = parity_selector(&builder_values(builder, s_raw)?);
+    let negate_s = builder.constant(&negate_s_value)?;
+    let encoding = append_fixed_select(builder, s_raw, negative_s_raw, negate_s)?;
+
+    let point_values = point
+        .map(|index| builder_values(builder, index))
+        .into_iter()
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    let identity = point_values[0] == ZERO_BYTES
+        && point_values[1] == point_values[2]
+        && point_values[3] == ZERO_BYTES;
+    let expected_inverse_check = if identity { ZERO_BYTES } else { ONE_BYTES };
+    let encoding_value = builder_values(builder, encoding)?;
+    if builder_values(builder, inverse_check)? != expected_inverse_check
+        || encoding_value[0] & 1 == 1
+        || (identity && encoding_value != ZERO_BYTES)
+    {
+        return Err(TexasAirError::SpecViolation(
+            "fixed-shape projective Ristretto encode branch is invalid".into(),
+        ));
+    }
+    Ok(AppendedProjectivePointEncode {
+        encoding,
+        inverse_check,
+    })
+}
+
+/// Build one fixed-shape field program for canonical compressed Ristretto
+/// addition.  Every valid input pair has identical operation and output-index
+/// layouts, so independent point relations can occupy rows of one batch STARK.
+pub fn build_ristretto_fp_program_compressed_point_addition(
+    left_encoding: &[u8; LIMBS],
+    right_encoding: &[u8; LIMBS],
+) -> TexasAirResult<(RistrettoFpProgram, [u8; LIMBS])> {
+    let left_inverse_sqrt = canonical_decode_inverse_sqrt(left_encoding)?;
+    let right_inverse_sqrt = canonical_decode_inverse_sqrt(right_encoding)?;
+    let mut builder = RistrettoFpProgramBuilder::new(&[*left_encoding, *right_encoding]);
+    let one = builder.constant(&ONE_BYTES)?;
+    let negative_d = builder.constant(&negative_edwards_d())?;
+    let zero = builder.constant(&ZERO_BYTES)?;
+    let two = builder.constant(&TWO_BYTES)?;
+    let two_d = builder.constant(&EDWARDS_TWO_D_BYTES)?;
+    let sqrt_m1 = builder.constant(&SQRT_M1_BYTES)?;
+    let invsqrt_a_minus_d = builder.constant(&INVSQRT_A_MINUS_D_BYTES)?;
+
+    let left_inverse_sqrt = builder.constant(&left_inverse_sqrt)?;
+    let left = append_fixed_canonical_point_decode(
+        &mut builder,
+        0,
+        left_inverse_sqrt,
+        one,
+        negative_d,
+        zero,
+    )?;
+    let right_inverse_sqrt = builder.constant(&right_inverse_sqrt)?;
+    let right = append_fixed_canonical_point_decode(
+        &mut builder,
+        1,
+        right_inverse_sqrt,
+        one,
+        negative_d,
+        zero,
+    )?;
+    let sum = append_projective_addition(
+        &mut builder,
+        left.coordinates,
+        right.coordinates,
+        two,
+        two_d,
+    )?;
+    let sum_values = sum
+        .map(|index| builder_values(&builder, index))
+        .into_iter()
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    if sum_values[2] == ZERO_BYTES {
+        return Err(TexasAirError::SpecViolation(
+            "fixed-shape compressed point addition produced Z = 0".into(),
+        ));
+    }
+    let sum_point: [[u8; LIMBS]; 4] = sum_values
+        .try_into()
+        .expect("projective addition has exactly four coordinates");
+    let encode_inverse_sqrt = builder.constant(&projective_encode_inverse_sqrt(&sum_point)?)?;
+    let encoded = append_fixed_projective_point_encode(
+        &mut builder,
+        sum,
+        encode_inverse_sqrt,
+        zero,
+        sqrt_m1,
+        invsqrt_a_minus_d,
+    )?;
+    let output_encoding = builder_values(&builder, encoded.encoding)?;
+    let program = builder.finish(&[
+        left.inverse_check,
+        right.inverse_check,
+        sum[0],
+        sum[1],
+        sum[2],
+        sum[3],
+        encoded.inverse_check,
+        encoded.encoding,
+    ])?;
+    Ok((program, output_encoding))
+}
+
+/// Verify that one public batch row is the exact fixed-shape compressed-point
+/// addition statement for `left + right = output`.
+pub fn verify_ristretto_fp_program_compressed_point_addition_row(
+    program: &RistrettoFpProgram,
+    left_encoding: &[u8; LIMBS],
+    right_encoding: &[u8; LIMBS],
+    output_encoding: &[u8; LIMBS],
+) -> TexasAirResult<()> {
+    let (expected_program, expected_output) =
+        build_ristretto_fp_program_compressed_point_addition(left_encoding, right_encoding)?;
+    if program != &expected_program || output_encoding != &expected_output {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "compressed point addition batch row is detached from its canonical statement".into(),
+        ));
+    }
+    Ok(())
+}
+
+const COMPRESSED_FIXED_WINDOW_TABLE_ROWS: usize = 15;
+const COMPRESSED_FIXED_WINDOW_HORNER_ROWS: usize =
+    FIXED_WINDOW_COUNT * PROJECTIVE_ADDITIONS_PER_WINDOW;
+const COMPRESSED_FIXED_WINDOW_ROWS: usize =
+    COMPRESSED_FIXED_WINDOW_TABLE_ROWS + COMPRESSED_FIXED_WINDOW_HORNER_ROWS;
+
+fn build_compressed_fixed_window_scalar_mul_rows(
+    windows: &[u8; FIXED_WINDOW_COUNT],
+    base: &[u8; LIMBS],
+) -> TexasAirResult<(Vec<RistrettoFpProgram>, [u8; LIMBS])> {
+    // The Ristretto identity is a legitimate public base for composed
+    // relations (for example a rare `c2 + card` slot-OR target).  The fixed
+    // table/Horner schedule remains sound: all table and accumulator rows are
+    // canonical identity additions and the output is the identity.
+    let mut programs = Vec::with_capacity(COMPRESSED_FIXED_WINDOW_ROWS);
+    let mut table = [[0u8; LIMBS]; 16];
+    table[0] = ZERO_BYTES;
+    for index in 1..16 {
+        let (program, output) =
+            build_ristretto_fp_program_compressed_point_addition(&table[index - 1], base)?;
+        programs.push(program);
+        table[index] = output;
+    }
+
+    let mut accumulator = ZERO_BYTES;
+    for window in windows.iter().rev() {
+        if *window >= 16 {
+            return Err(TexasAirError::SpecViolation(
+                "compressed fixed-window selector is outside 0..15".into(),
+            ));
+        }
+        for _ in 0..4 {
+            let (program, output) =
+                build_ristretto_fp_program_compressed_point_addition(&accumulator, &accumulator)?;
+            programs.push(program);
+            accumulator = output;
+        }
+        let (program, output) = build_ristretto_fp_program_compressed_point_addition(
+            &accumulator,
+            &table[usize::from(*window)],
+        )?;
+        programs.push(program);
+        accumulator = output;
+    }
+    debug_assert_eq!(programs.len(), COMPRESSED_FIXED_WINDOW_ROWS);
+    Ok((programs, accumulator))
+}
+
+/// Prove compressed fixed-window scalar multiplication as one 335-row batch.
+pub fn prove_ristretto_fp_program_compressed_fixed_window_scalar_mul(
+    scalar_windows: ArchivedRistrettoScalarWindowsProof,
+    base: [u8; LIMBS],
+) -> TexasAirResult<ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulProof> {
+    verify_ristretto_scalar_windows(&scalar_windows)?;
+    let (programs, output) =
+        build_compressed_fixed_window_scalar_mul_rows(&scalar_windows.windows, &base)?;
+    let additions = prove_ristretto_fp_program_batch(&programs)?;
+    let archive = ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulProof {
+        scalar_windows,
+        base,
+        output,
+        additions,
+    };
+    verify_ristretto_fp_program_compressed_fixed_window_scalar_mul(&archive)?;
+    Ok(archive)
+}
+
+fn validate_compressed_fixed_window_scalar_mul_statement(
+    archive: &ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulProof,
+) -> TexasAirResult<()> {
+    if archive.additions.programs.len() != COMPRESSED_FIXED_WINDOW_ROWS {
+        return Err(TexasAirError::ConstraintUnsatisfied(format!(
+            "compressed fixed-window scalar multiplication requires exactly {COMPRESSED_FIXED_WINDOW_ROWS} rows"
+        )));
+    }
+    let (expected_programs, expected_output) = build_compressed_fixed_window_scalar_mul_rows(
+        &archive.scalar_windows.windows,
+        &archive.base,
+    )?;
+    if archive.additions.programs != expected_programs || archive.output != expected_output {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "compressed fixed-window scalar multiplication is detached from its scalar, base, output, or row order"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Verify scalar windows, the complete table/Horner row schedule, and batch STARK.
+pub fn verify_ristretto_fp_program_compressed_fixed_window_scalar_mul(
+    archive: &ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulProof,
+) -> TexasAirResult<()> {
+    verify_ristretto_scalar_windows(&archive.scalar_windows)?;
+    validate_compressed_fixed_window_scalar_mul_statement(archive)?;
+    verify_ristretto_fp_program_batch(&archive.additions)
+}
+
+/// Prove multiple compressed fixed-window scalar multiplications in one batch STARK.
+pub fn prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
+    inputs: Vec<(ArchivedRistrettoScalarWindowsProof, [u8; LIMBS])>,
+) -> TexasAirResult<ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof> {
+    if inputs.is_empty() {
+        return Err(TexasAirError::SpecViolation(
+            "compressed scalar-multiplication batch cannot be empty".into(),
+        ));
+    }
+    let mut statements = Vec::with_capacity(inputs.len());
+    let mut programs = Vec::with_capacity(inputs.len() * COMPRESSED_FIXED_WINDOW_ROWS);
+    for (scalar_windows, base) in inputs {
+        verify_ristretto_scalar_windows(&scalar_windows)?;
+        let (rows, output) =
+            build_compressed_fixed_window_scalar_mul_rows(&scalar_windows.windows, &base)?;
+        programs.extend(rows);
+        statements.push(RistrettoCompressedFixedWindowScalarMulStatement {
+            scalar_windows,
+            base,
+            output,
+        });
+    }
+    let additions = prove_ristretto_fp_program_batch(&programs)?;
+    let archive = ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof {
+        statements,
+        additions,
+    };
+    verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(&archive)?;
+    Ok(archive)
+}
+
+fn validate_compressed_fixed_window_scalar_mul_batch_statement(
+    archive: &ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof,
+) -> TexasAirResult<()> {
+    if archive.statements.is_empty() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "compressed scalar-multiplication batch cannot be empty".into(),
+        ));
+    }
+    let expected_rows = archive
+        .statements
+        .len()
+        .checked_mul(COMPRESSED_FIXED_WINDOW_ROWS)
+        .ok_or_else(|| {
+            TexasAirError::SpecViolation(
+                "compressed scalar-multiplication batch row count overflow".into(),
+            )
+        })?;
+    if archive.additions.programs.len() != expected_rows {
+        return Err(TexasAirError::ConstraintUnsatisfied(format!(
+            "compressed scalar-multiplication batch requires exactly {expected_rows} rows"
+        )));
+    }
+    let mut offset = 0usize;
+    for statement in &archive.statements {
+        let (expected_programs, expected_output) = build_compressed_fixed_window_scalar_mul_rows(
+            &statement.scalar_windows.windows,
+            &statement.base,
+        )?;
+        let end = offset + COMPRESSED_FIXED_WINDOW_ROWS;
+        if archive.additions.programs[offset..end] != expected_programs
+            || statement.output != expected_output
+        {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "compressed scalar-multiplication batch statement or row order is detached".into(),
+            ));
+        }
+        offset = end;
+    }
+    Ok(())
+}
+
+/// Verify every scalar-window proof, fixed row slice, output, and shared STARK.
+pub fn verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
+    archive: &ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof,
+) -> TexasAirResult<()> {
+    for statement in &archive.statements {
+        verify_ristretto_scalar_windows(&statement.scalar_windows)?;
+    }
+    validate_compressed_fixed_window_scalar_mul_batch_statement(archive)?;
+    verify_ristretto_fp_program_batch(&archive.additions)
 }
 
 fn fixed_window_program_shape() -> (usize, usize) {
@@ -2820,10 +3936,10 @@ mod tests {
         let canonicity = program_canonicity(&program).unwrap();
         assert_eq!(canonicity[0], ValueCanonicity::Witnessed);
         assert_eq!(canonicity[1], ValueCanonicity::Witnessed);
-        assert_eq!(canonicity[2], ValueCanonicity::Derived);
+        assert_eq!(canonicity[2], ValueCanonicity::Witnessed);
         assert_eq!(canonicity[3], ValueCanonicity::Derived);
         assert_eq!(canonicity[4], ValueCanonicity::Witnessed);
-        assert_eq!(canonicity[5], ValueCanonicity::Derived);
+        assert_eq!(canonicity[5], ValueCanonicity::Witnessed);
     }
 
     #[test]
@@ -2844,6 +3960,36 @@ mod tests {
             outputs: vec![2],
         };
         assert!(program_canonicity(&duplicate_output).is_err());
+
+        let duplicate_multiplication_output = RistrettoFpProgram {
+            values: vec![small(2), small(3), small(0), small(6), small(0)],
+            ops: vec![
+                RistrettoFpProgramOp::Multiply {
+                    a: 0,
+                    b: 1,
+                    q: 2,
+                    out: 3,
+                },
+                RistrettoFpProgramOp::Multiply {
+                    a: 0,
+                    b: 1,
+                    q: 4,
+                    out: 3,
+                },
+            ],
+            outputs: vec![3],
+        };
+        assert!(program_canonicity(&duplicate_multiplication_output).is_err());
+
+        let forward_produced_operand = RistrettoFpProgram {
+            values: vec![small(2), small(3), small(0), small(0), small(0)],
+            ops: vec![
+                RistrettoFpProgramOp::Add { a: 2, b: 0, out: 3 },
+                RistrettoFpProgramOp::Add { a: 0, b: 1, out: 2 },
+            ],
+            outputs: vec![3],
+        };
+        assert!(program_canonicity(&forward_produced_operand).is_err());
     }
 
     #[test]
@@ -2863,14 +4009,14 @@ mod tests {
                 .iter()
                 .filter(|kind| **kind == ValueCanonicity::Derived)
                 .count(),
-            226
+            140
         );
         assert_eq!(
             canonicity
                 .iter()
                 .filter(|kind| **kind == ValueCanonicity::Witnessed)
                 .count(),
-            150
+            236
         );
     }
 
@@ -2902,6 +4048,143 @@ mod tests {
 
         let archive = prove_ristretto_fp_program(&program).unwrap();
         verify_ristretto_fp_program(&archive).unwrap();
+    }
+
+    fn small_batch_program(left: u8, right: u8) -> RistrettoFpProgram {
+        let mut builder = RistrettoFpProgramBuilder::new(&[small(left), small(right)]);
+        let sum = builder.add(0, 1).unwrap();
+        let product = builder.multiply(sum, 1).unwrap();
+        builder.finish(&[sum, product]).unwrap()
+    }
+
+    #[test]
+    fn batch_backend_binds_rows_order_and_effective_count() {
+        let programs = vec![
+            small_batch_program(2, 3),
+            small_batch_program(5, 7),
+            small_batch_program(11, 13),
+        ];
+        let archive = prove_ristretto_fp_program_batch(&programs).unwrap();
+        verify_ristretto_fp_program_batch(&archive).unwrap();
+
+        let mut row_splice = archive.clone();
+        row_splice.programs[1].values[0][0] ^= 1;
+        assert!(verify_ristretto_fp_program_batch(&row_splice).is_err());
+
+        let mut row_reorder = archive.clone();
+        row_reorder.programs.swap(0, 1);
+        assert!(verify_ristretto_fp_program_batch(&row_reorder).is_err());
+
+        // Three rows use a four-row domain whose last row is deterministic
+        // padding.  Appending that same row keeps both Merkle trees identical,
+        // so rejection here specifically checks that the transcript binds the
+        // public effective row count rather than trusting padding shape alone.
+        let mut padding_relabel = archive;
+        padding_relabel
+            .programs
+            .push(padding_relabel.programs[2].clone());
+        assert!(verify_ristretto_fp_program_batch(&padding_relabel).is_err());
+    }
+
+    #[test]
+    fn batch_backend_rejects_operation_and_output_shape_mismatch() {
+        let first = small_batch_program(2, 3);
+
+        let mut different_operation_builder = RistrettoFpProgramBuilder::new(&[small(5), small(7)]);
+        let difference = different_operation_builder.subtract(0, 1).unwrap();
+        let product = different_operation_builder.multiply(difference, 1).unwrap();
+        let different_operation = different_operation_builder
+            .finish(&[difference, product])
+            .unwrap();
+        assert!(prove_ristretto_fp_program_batch(&[first.clone(), different_operation]).is_err());
+
+        let mut different_outputs = small_batch_program(5, 7);
+        different_outputs.outputs.swap(0, 1);
+        assert!(prove_ristretto_fp_program_batch(&[first, different_outputs]).is_err());
+    }
+
+    #[test]
+    fn fixed_shape_compressed_additions_share_one_batch_stark() {
+        let (identity_plus_base, identity_plus_base_output) =
+            build_ristretto_fp_program_compressed_point_addition(&ZERO_BYTES, &basepoint())
+                .unwrap();
+        let (base_plus_base, base_plus_base_output) =
+            build_ristretto_fp_program_compressed_point_addition(&basepoint(), &basepoint())
+                .unwrap();
+        assert_eq!(identity_plus_base_output, basepoint());
+        assert_eq!(
+            base_plus_base_output,
+            [
+                0x6a, 0x49, 0x32, 0x10, 0xf7, 0x49, 0x9c, 0xd1, 0x7f, 0xec, 0xb5, 0x10, 0xae, 0x0c,
+                0xea, 0x23, 0xa1, 0x10, 0xe8, 0xd5, 0xb9, 0x01, 0xf8, 0xac, 0xad, 0xd3, 0x09, 0x5c,
+                0x73, 0xa3, 0xb9, 0x19,
+            ]
+        );
+        assert_eq!(identity_plus_base.ops, base_plus_base.ops);
+        assert_eq!(identity_plus_base.outputs, base_plus_base.outputs);
+        assert_eq!(identity_plus_base.values.len(), base_plus_base.values.len());
+
+        let archive =
+            prove_ristretto_fp_program_batch(&[identity_plus_base.clone(), base_plus_base.clone()])
+                .unwrap();
+        verify_ristretto_fp_program_batch(&archive).unwrap();
+        verify_ristretto_fp_program_compressed_point_addition_row(
+            &archive.programs[0],
+            &ZERO_BYTES,
+            &basepoint(),
+            &identity_plus_base_output,
+        )
+        .unwrap();
+        verify_ristretto_fp_program_compressed_point_addition_row(
+            &archive.programs[1],
+            &basepoint(),
+            &basepoint(),
+            &base_plus_base_output,
+        )
+        .unwrap();
+
+        let mut wrong_output = base_plus_base_output;
+        wrong_output[0] ^= 2;
+        assert!(
+            verify_ristretto_fp_program_compressed_point_addition_row(
+                &archive.programs[1],
+                &basepoint(),
+                &basepoint(),
+                &wrong_output,
+            )
+            .is_err()
+        );
+
+        let mut noncanonical = [0xffu8; LIMBS];
+        noncanonical[31] = 0x7f;
+        assert!(
+            build_ristretto_fp_program_compressed_point_addition(&noncanonical, &basepoint())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn projective_addition_rows_share_one_fixed_batch_shape() {
+        let identity = [ZERO_BYTES, ONE_BYTES, ONE_BYTES, ZERO_BYTES];
+        let (program, output) =
+            build_projective_addition_program_from_coordinates(identity, identity).unwrap();
+        assert_eq!(output[0], ZERO_BYTES);
+        assert_eq!(output[1], output[2]);
+        assert_eq!(output[3], ZERO_BYTES);
+        assert_eq!(program.values.len(), 38);
+        assert_eq!(program.ops.len(), 18);
+        assert_eq!(program.outputs, vec![31, 33, 35, 37]);
+
+        let archive = prove_ristretto_fp_program_projective_addition_batch(
+            &[identity, identity],
+            &[identity, identity],
+            &[output, output],
+        )
+        .unwrap();
+        verify_ristretto_fp_program_projective_addition_batch(&archive).unwrap();
+        let mut swapped = archive.clone();
+        swapped.output[0][0][0] ^= 1;
+        assert!(verify_ristretto_fp_program_projective_addition_batch(&swapped).is_err());
     }
 
     #[test]
@@ -3035,6 +4318,126 @@ mod tests {
         ]
     }
 
+    fn structural_scalar_windows(value: u8) -> ArchivedRistrettoScalarWindowsProof {
+        let mut scalar = [0u8; LIMBS];
+        scalar[0] = value;
+        let mut windows = [0u8; FIXED_WINDOW_COUNT];
+        windows[0] = value & 0x0f;
+        windows[1] = value >> 4;
+        ArchivedRistrettoScalarWindowsProof {
+            scalar,
+            windows,
+            canonical: crate::ristretto_scalar_air::ArchivedRistrettoScalarCanonicalProof {
+                value: scalar,
+                stark_proof_bytes: Vec::new(),
+            },
+            stark_proof_bytes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn compressed_fixed_window_batch_has_canonical_table_and_horner_order() {
+        let scalar_windows = structural_scalar_windows(0x12);
+        let (programs, output) =
+            build_compressed_fixed_window_scalar_mul_rows(&scalar_windows.windows, &basepoint())
+                .unwrap();
+        assert_eq!(programs.len(), COMPRESSED_FIXED_WINDOW_ROWS);
+        use poker_protocol::crypto::curve::{Curve, CurveScalar, RistrettoCurve};
+        let expected = RistrettoCurve::base_g() * <RistrettoCurve as Curve>::Scalar::from_u64(0x12);
+        assert_eq!(output.as_slice(), expected.compress().as_bytes());
+        let archive = ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulProof {
+            scalar_windows,
+            base: basepoint(),
+            output,
+            additions: ArchivedRistrettoFpProgramBatchProof {
+                programs,
+                stark_proof_bytes: Vec::new(),
+            },
+        };
+        validate_compressed_fixed_window_scalar_mul_statement(&archive).unwrap();
+
+        let mut row_swap = archive.clone();
+        row_swap.additions.programs.swap(0, 1);
+        assert!(validate_compressed_fixed_window_scalar_mul_statement(&row_swap).is_err());
+
+        let mut output_splice = archive.clone();
+        output_splice.output[0] ^= 2;
+        assert!(validate_compressed_fixed_window_scalar_mul_statement(&output_splice).is_err());
+
+        let mut scalar_splice = archive.clone();
+        scalar_splice.scalar_windows.windows[0] = 3;
+        assert!(validate_compressed_fixed_window_scalar_mul_statement(&scalar_splice).is_err());
+
+        let mut base_splice = archive;
+        base_splice.base = output;
+        assert!(validate_compressed_fixed_window_scalar_mul_statement(&base_splice).is_err());
+        let (identity_rows, identity_output) =
+            build_compressed_fixed_window_scalar_mul_rows(&[0; 64], &ZERO_BYTES).unwrap();
+        assert_eq!(identity_rows.len(), COMPRESSED_FIXED_WINDOW_ROWS);
+        assert_eq!(identity_output, ZERO_BYTES);
+    }
+
+    #[test]
+    fn compressed_scalar_multiplications_share_one_canonical_batch_schedule() {
+        let scalar_one = structural_scalar_windows(1);
+        let scalar_two = structural_scalar_windows(2);
+        let (rows_one, output_one) =
+            build_compressed_fixed_window_scalar_mul_rows(&scalar_one.windows, &basepoint())
+                .unwrap();
+        let (rows_two, output_two) =
+            build_compressed_fixed_window_scalar_mul_rows(&scalar_two.windows, &basepoint())
+                .unwrap();
+        let mut programs = rows_one;
+        programs.extend(rows_two);
+        let archive = ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof {
+            statements: vec![
+                RistrettoCompressedFixedWindowScalarMulStatement {
+                    scalar_windows: scalar_one,
+                    base: basepoint(),
+                    output: output_one,
+                },
+                RistrettoCompressedFixedWindowScalarMulStatement {
+                    scalar_windows: scalar_two,
+                    base: basepoint(),
+                    output: output_two,
+                },
+            ],
+            additions: ArchivedRistrettoFpProgramBatchProof {
+                programs,
+                stark_proof_bytes: Vec::new(),
+            },
+        };
+        assert_eq!(
+            archive.additions.programs.len(),
+            2 * COMPRESSED_FIXED_WINDOW_ROWS
+        );
+        validate_compressed_fixed_window_scalar_mul_batch_statement(&archive).unwrap();
+
+        let mut statement_swap = archive.clone();
+        statement_swap.statements.swap(0, 1);
+        assert!(
+            validate_compressed_fixed_window_scalar_mul_batch_statement(&statement_swap).is_err()
+        );
+
+        let mut cross_slice_swap = archive.clone();
+        cross_slice_swap.additions.programs.swap(
+            COMPRESSED_FIXED_WINDOW_ROWS - 1,
+            2 * COMPRESSED_FIXED_WINDOW_ROWS - 1,
+        );
+        assert!(
+            validate_compressed_fixed_window_scalar_mul_batch_statement(&cross_slice_swap).is_err()
+        );
+
+        let mut padding_relabel = archive;
+        padding_relabel
+            .additions
+            .programs
+            .push(padding_relabel.additions.programs[0].clone());
+        assert!(
+            validate_compressed_fixed_window_scalar_mul_batch_statement(&padding_relabel).is_err()
+        );
+    }
+
     #[test]
     fn folded_point_decode_handles_identity_and_basepoint() {
         let identity = prove_ristretto_fp_program_point_decode(&ZERO_BYTES).unwrap();
@@ -3149,6 +4552,86 @@ mod tests {
         let mut archive = prove_ristretto_fp_program_projective_addition(left, right).unwrap();
         archive.x[0] ^= 2;
         assert!(verify_ristretto_fp_program_projective_addition(&archive).is_err());
+    }
+
+    #[test]
+    fn folded_projective_encode_binds_addition_output() {
+        let left = ristretto_fp_program_projective_point_from_decode(
+            prove_ristretto_fp_program_point_decode(&basepoint()).unwrap(),
+        )
+        .unwrap();
+        let right = ristretto_fp_program_projective_point_from_decode(
+            prove_ristretto_fp_program_point_decode(&basepoint()).unwrap(),
+        )
+        .unwrap();
+        let addition = prove_ristretto_fp_program_projective_addition(left, right).unwrap();
+        let point = ArchivedRistrettoFpProgramProjectivePoint {
+            x: addition.x,
+            y: addition.y,
+            z: addition.z,
+            t: addition.t,
+            source: ArchivedRistrettoFpProgramProjectivePointSource::Addition(Box::new(addition)),
+        };
+        let archive = prove_ristretto_fp_program_projective_point_encode(point).unwrap();
+        assert_eq!(
+            archive.encoding,
+            [
+                0x6a, 0x49, 0x32, 0x10, 0xf7, 0x49, 0x9c, 0xd1, 0x7f, 0xec, 0xb5, 0x10, 0xae, 0x0c,
+                0xea, 0x23, 0xa1, 0x10, 0xe8, 0xd5, 0xb9, 0x01, 0xf8, 0xac, 0xad, 0xd3, 0x09, 0x5c,
+                0x73, 0xa3, 0xb9, 0x19,
+            ]
+        );
+        verify_ristretto_fp_program_projective_point_encode(&archive).unwrap();
+
+        let mut spliced_encoding = archive.clone();
+        spliced_encoding.encoding[0] ^= 2;
+        assert!(verify_ristretto_fp_program_projective_point_encode(&spliced_encoding).is_err());
+
+        let mut noncanonical_encoding = archive.clone();
+        noncanonical_encoding.encoding = P_BYTES;
+        assert!(
+            verify_ristretto_fp_program_projective_point_encode(&noncanonical_encoding).is_err()
+        );
+
+        let mut spliced_point = archive.clone();
+        spliced_point.point.x[0] ^= 2;
+        assert!(verify_ristretto_fp_program_projective_point_encode(&spliced_point).is_err());
+
+        let mut spliced_addition = archive;
+        let ArchivedRistrettoFpProgramProjectivePointSource::Addition(addition) =
+            &mut spliced_addition.point.source
+        else {
+            unreachable!("test point comes from projective addition");
+        };
+        addition.x[0] ^= 2;
+        assert!(verify_ristretto_fp_program_projective_point_encode(&spliced_addition).is_err());
+    }
+
+    #[test]
+    fn folded_projective_encode_handles_scaled_identity() {
+        let left = ristretto_fp_program_projective_point_from_decode(
+            prove_ristretto_fp_program_point_decode(&ZERO_BYTES).unwrap(),
+        )
+        .unwrap();
+        let right = ristretto_fp_program_projective_point_from_decode(
+            prove_ristretto_fp_program_point_decode(&ZERO_BYTES).unwrap(),
+        )
+        .unwrap();
+        let addition = prove_ristretto_fp_program_projective_addition(left, right).unwrap();
+        assert_eq!(addition.x, ZERO_BYTES);
+        assert_eq!(addition.y, addition.z);
+        assert_eq!(addition.t, ZERO_BYTES);
+        assert_ne!(addition.z, ONE_BYTES);
+        let point = ArchivedRistrettoFpProgramProjectivePoint {
+            x: addition.x,
+            y: addition.y,
+            z: addition.z,
+            t: addition.t,
+            source: ArchivedRistrettoFpProgramProjectivePointSource::Addition(Box::new(addition)),
+        };
+        let archive = prove_ristretto_fp_program_projective_point_encode(point).unwrap();
+        assert_eq!(archive.encoding, ZERO_BYTES);
+        verify_ristretto_fp_program_projective_point_encode(&archive).unwrap();
     }
 
     #[test]

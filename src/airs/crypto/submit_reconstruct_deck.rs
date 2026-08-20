@@ -28,6 +28,8 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
+use poker_l1::vm::contracts::texas_poker::constants::RECONSTRUCT_PHASE_COLLECTING;
+
 use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{DIGEST_LIMBS, PrecompileAirBinding};
@@ -126,14 +128,11 @@ impl FrameworkEval for SubmitReconstructDeckAir {
             eval.add_constraint(constraint);
         }
 
-        // 约束 4（Gap 8：ReconstructStateNotIdle）：reconstruct_phase ∈ {1,2}（非 NONE=0）。
-        // 用 degree-2 vanishing 多项式 (p-1)(p-2)==0（COLLECTING=1, COMPLETE=2），
-        // gated 后 degree 3。阻止恶意 prover 在 reconstruct_phase=0 下构造 trace。
-        let one: E::F = M31::from(1u32).into();
-        let two: E::F = M31::from(2u32).into();
-        let p = input_reconstruct_phase.clone();
-        let vp = (p.clone() - one) * (p - two);
-        eval.add_constraint(is_active.clone() * vp);
+        // 约束 4：submit_reconstruct_deck 只允许 COLLECTING=1。旧约束接受
+        // {COLLECTING, COMPLETE}，其安全性依赖 verifier 先做 VM replay；精确常量
+        // 约束让该 method AIR 可安全进入未来的 canonical tagged composition。
+        let collecting: E::F = M31::from(u32::from(RECONSTRUCT_PHASE_COLLECTING)).into();
+        eval.add_constraint(is_active.clone() * (input_reconstruct_phase - collecting));
 
         let expected_precompile_id: E::F =
             M31::from(u32::from(self.input.precompile.precompile_id)).into();
@@ -247,6 +246,11 @@ pub fn validate_public_inputs(
 ) -> crate::error::TexasAirResult<()> {
     use poker_protocol::precompile_abi::ReconstructionV3VerifyRequest;
 
+    if air.input.reconstruct_phase != RECONSTRUCT_PHASE_COLLECTING {
+        return Err(crate::error::TexasAirError::SpecViolation(
+            "submit_reconstruct_deck requires reconstruct COLLECTING phase".into(),
+        ));
+    }
     let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
         crate::error::TexasAirError::SpecViolation(
             "submit_reconstruct_deck requires a verifier-issued precompile binding".into(),
@@ -288,4 +292,45 @@ pub fn validate_public_inputs(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::public_inputs::TexasPublicInputs;
+
+    fn air(reconstruct_phase: u8) -> SubmitReconstructDeckAir {
+        SubmitReconstructDeckAir {
+            log_size: 5,
+            input: SubmitReconstructDeckInput {
+                seat_index: 0,
+                reconstruct_phase,
+                precompile: PrecompileAirBinding::synthetic_unverified(),
+            },
+            pre_state_root: [M31::from(0u32); 4],
+            post_state_root: [M31::from(0u32); 4],
+            table_id: 0,
+            hand_id: 0,
+            call_seq: 0,
+            pre_version: 0,
+            post_version: 1,
+        }
+    }
+
+    #[test]
+    fn public_input_validation_requires_exact_collecting_phase() {
+        let public_inputs =
+            TexasPublicInputs::synthetic_placeholder(MethodKind::SubmitReconstructDeck);
+        let complete = validate_public_inputs(&air(2), &public_inputs)
+            .expect_err("COMPLETE must not be accepted as a submission phase");
+        assert!(complete.to_string().contains("COLLECTING"));
+
+        let collecting = validate_public_inputs(&air(RECONSTRUCT_PHASE_COLLECTING), &public_inputs)
+            .expect_err("a synthetic request still lacks an issued receipt");
+        assert!(
+            collecting
+                .to_string()
+                .contains("verifier-issued precompile binding")
+        );
+    }
 }

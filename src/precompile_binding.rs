@@ -27,6 +27,7 @@ use stwo::core::fields::m31::M31;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::state_root::StateRoot;
+use crate::texas_canonical::CanonicalTransitionWitness;
 
 /// Number of M31 columns used for one full 256-bit digest.
 pub const DIGEST_LIMBS: usize = 16;
@@ -468,7 +469,7 @@ impl PrecompileCallBinding {
 
     fn issue(precompile_id: PokerPrecompileId, abi_version: u8, request_bytes: Vec<u8>) -> Self {
         let backend_id = PrecompileBackendId::NativeBls12381V1;
-        let request_digest = hash256(b"zchain.poker.precompile.request.v1", &request_bytes);
+        let request_digest = precompile_request_digest(&request_bytes);
         let mut receipt = Vec::with_capacity(4 + 32);
         receipt.extend_from_slice(&[
             precompile_id as u8,
@@ -646,6 +647,92 @@ pub fn precompile_call_context(
     context.extend_from_slice(&post_state_root.field().to_bytes_be());
     context.extend_from_slice(&dispatch_call_digest);
     context
+}
+
+/// Construct a no-replay call scope for a direct canonical crypto transition.
+///
+/// Unlike [`precompile_call_context`], this scope contains no dispatch-call
+/// digest or `ProveTask` material.  It binds the request to both complete
+/// canonical endpoint images and to a domain-separated transition commitment
+/// with the request digest itself zeroed, avoiding a circular commitment.
+#[must_use]
+pub fn canonical_precompile_call_context(witness: &CanonicalTransitionWitness) -> Vec<u8> {
+    canonical_precompile_call_context_from_digests(
+        witness,
+        witness.pre.commitment(),
+        witness.post.commitment(),
+        witness.crypto_scope_commitment(),
+    )
+}
+
+/// Construct the canonical call context from already-authenticated digest
+/// statements.  This is the verifier-side form used by the lookup-backed
+/// reconstruction binding proof so it does not need to invoke native Blake2b.
+#[must_use]
+pub fn canonical_precompile_call_context_from_digests(
+    witness: &CanonicalTransitionWitness,
+    pre_state_commitment: [u8; 32],
+    post_state_commitment: [u8; 32],
+    crypto_scope_commitment: [u8; 32],
+) -> Vec<u8> {
+    let mut context = Vec::with_capacity(256);
+    context.extend_from_slice(b"zchain.texas.canonical_precompile_call.v1");
+    context.extend_from_slice(&witness.pre.abi_version.to_le_bytes());
+    context.extend_from_slice(&[witness.kind as u8, witness.action.seat]);
+    context.extend_from_slice(&witness.pre.table_id.to_le_bytes());
+    context.extend_from_slice(&witness.pre.hand_id.to_le_bytes());
+    context.extend_from_slice(&witness.post.hand_id.to_le_bytes());
+    context.extend_from_slice(&witness.pre.call_seq.to_le_bytes());
+    context.extend_from_slice(&witness.post.call_seq.to_le_bytes());
+    context.extend_from_slice(&pre_state_commitment);
+    context.extend_from_slice(&post_state_commitment);
+    context.extend_from_slice(&witness.pre.state_root);
+    context.extend_from_slice(&witness.post.state_root);
+    context.extend_from_slice(&crypto_scope_commitment);
+    context
+}
+
+/// Exact Blake2b message whose digest is
+/// [`CanonicalTransitionWitness::crypto_scope_commitment`].
+pub fn canonical_crypto_scope_preimage(witness: &CanonicalTransitionWitness) -> Vec<u8> {
+    let mut payload = witness.clone();
+    payload.action.proof_commitment = [0; 32];
+    payload.transition_commitment = [0; 32];
+    payload.nullifier = [0; 32];
+    let encoded = borsh::to_vec(&payload)
+        .expect("canonical transition witness has an infallible fixed Borsh encoding");
+    let mut preimage =
+        Vec::with_capacity(b"zchain.texas.canonical-crypto-scope.v1".len() + encoded.len());
+    preimage.extend_from_slice(b"zchain.texas.canonical-crypto-scope.v1");
+    preimage.extend_from_slice(&encoded);
+    preimage
+}
+
+/// Domain-separated digest of one canonical poker-precompile request.
+///
+/// This is the value stored in a direct canonical transition's
+/// `action.proof_commitment`.  The lookup-backed Blake2b component can prove
+/// the identical byte-to-digest relation when the crypto request is composed
+/// into host-zero admission.
+#[must_use]
+pub fn precompile_request_digest(request_bytes: &[u8]) -> [u8; 32] {
+    let preimage = precompile_request_preimage(request_bytes);
+    let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+    hasher.update(&preimage);
+    let mut digest = [0u8; 32];
+    hasher.finalize_variable(&mut digest).expect("32 <= 64");
+    digest
+}
+
+/// Exact standard-Blake2b message used by [`precompile_request_digest`].
+#[must_use]
+pub fn precompile_request_preimage(request_bytes: &[u8]) -> Vec<u8> {
+    let domain = b"zchain.poker.precompile.request.v1";
+    let mut preimage = Vec::with_capacity(domain.len() + 8 + request_bytes.len());
+    preimage.extend_from_slice(domain);
+    preimage.extend_from_slice(&(request_bytes.len() as u64).to_le_bytes());
+    preimage.extend_from_slice(request_bytes);
+    preimage
 }
 
 /// Represent a 256-bit digest by sixteen exact u16 limbs in M31.
