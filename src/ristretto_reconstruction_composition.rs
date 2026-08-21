@@ -33,6 +33,16 @@ use crate::ristretto_reconstruction_slot_or_air::{
 };
 use crate::ristretto_reconstruction_transcript::RistrettoPoseidonTranscriptChallenges;
 
+/// Magic prefix for a serialized, composable Reconstruction V3 relation
+/// archive.  This is intentionally distinct from the `ZR3P` proof wire:
+/// `ZR3P` carries the protocol proof components while `ZR3A` carries the
+/// STARK relation archives that verify those components.
+pub const RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC: [u8; 4] = *b"ZR3A";
+/// Version of the relation-archive container, not the Reconstruction V3 ABI.
+pub const RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_VERSION: u8 = 1;
+const RELATION_ARCHIVE_DOMAIN: &[u8] =
+    b"zchain.texas.ristretto-reconstruction-v3.relation-archive.v1";
+
 /// A single request-scoped archive for every Reconstruction V3 relation that
 /// currently has a direct AIR implementation.
 ///
@@ -51,6 +61,96 @@ pub struct ArchivedRistrettoReconstructionRelationBundle {
     pub cross_key: ArchivedRistrettoReconstructionCrossKeyBatchProof,
     /// 52 fixed-order slot-OR proofs.
     pub slot_or: ArchivedRistrettoReconstructionSlotOrBatchProof,
+}
+
+/// Strict outer serialization for [`ArchivedRistrettoReconstructionRelationBundle`].
+///
+/// The digest is an archive-transport integrity check, not a replacement for
+/// any STARK verifier.  In particular, a producer can recompute it, so the
+/// semantic checks in [`verify_ristretto_reconstruction_relation_bundle`] are
+/// always required after decoding.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+struct RistrettoReconstructionRelationArchiveWire {
+    version: u8,
+    bundle: ArchivedRistrettoReconstructionRelationBundle,
+    bundle_digest: [u8; 32],
+}
+
+fn relation_archive_digest(
+    bundle: &ArchivedRistrettoReconstructionRelationBundle,
+) -> TexasAirResult<[u8; 32]> {
+    use blake2::{
+        Blake2bVar,
+        digest::{Update, VariableOutput},
+    };
+
+    let payload = borsh::to_vec(bundle)
+        .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+    let mut hasher = Blake2bVar::new(32).expect("Blake2b-256 output is valid");
+    hasher.update(RELATION_ARCHIVE_DOMAIN);
+    hasher.update(&payload);
+    let mut digest = [0u8; 32];
+    hasher
+        .finalize_variable(&mut digest)
+        .expect("Blake2b-256 output has fixed size");
+    Ok(digest)
+}
+
+impl ArchivedRistrettoReconstructionRelationBundle {
+    /// Serialize this relation bundle with a versioned, self-identifying
+    /// archive boundary suitable for another prover or verifier process.
+    pub fn encode_archive(&self) -> TexasAirResult<Vec<u8>> {
+        let wire = RistrettoReconstructionRelationArchiveWire {
+            version: RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_VERSION,
+            bundle: self.clone(),
+            bundle_digest: relation_archive_digest(self)?,
+        };
+        let payload = borsh::to_vec(&wire)
+            .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+        let mut encoded = Vec::with_capacity(
+            RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len() + payload.len(),
+        );
+        encoded.extend_from_slice(&RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC);
+        encoded.extend_from_slice(&payload);
+        Ok(encoded)
+    }
+
+    /// Decode a strict relation archive.  This verifies only its version,
+    /// canonical encoding and transport digest; call the relation verifier to
+    /// check the contained STARKs and statement bindings.
+    pub fn decode_archive(bytes: &[u8]) -> TexasAirResult<Self> {
+        if bytes.len() < RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len()
+            || bytes[..RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len()]
+                != RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC
+        {
+            return Err(TexasAirError::SerializationError(
+                "Ristretto Reconstruction V3 relation-archive magic mismatch".into(),
+            ));
+        }
+        let wire: RistrettoReconstructionRelationArchiveWire =
+            borsh::from_slice(&bytes[RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len()..])
+                .map_err(|error| {
+                    TexasAirError::SerializationError(format!(
+                        "Ristretto Reconstruction V3 relation-archive decode failed: {error}"
+                    ))
+                })?;
+        if wire.version != RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_VERSION {
+            return Err(TexasAirError::SpecViolation(
+                "unsupported Ristretto Reconstruction V3 relation-archive version".into(),
+            ));
+        }
+        if wire.bundle_digest != relation_archive_digest(&wire.bundle)? {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "Ristretto Reconstruction V3 relation-archive digest is detached".into(),
+            ));
+        }
+        if wire.bundle.encode_archive()? != bytes {
+            return Err(TexasAirError::SerializationError(
+                "Ristretto Reconstruction V3 relation-archive is not canonically encoded".into(),
+            ));
+        }
+        Ok(wire.bundle)
+    }
 }
 
 fn validate_common_statement_digest(
@@ -154,6 +254,16 @@ pub fn verify_ristretto_reconstruction_relation_bundle(
     Ok(())
 }
 
+/// Decode and verify a portable `ZR3A` relation archive.
+///
+/// This is the safe entry point for an archive received from another process:
+/// it never treats a successful outer decode or digest check as proof
+/// verification.
+pub fn verify_ristretto_reconstruction_relation_archive(bytes: &[u8]) -> TexasAirResult<()> {
+    let bundle = ArchivedRistrettoReconstructionRelationBundle::decode_archive(bytes)?;
+    verify_ristretto_reconstruction_relation_bundle(&bundle)
+}
+
 /// Production-shaped entry point for this partial bundle.
 ///
 /// It verifies the available relations first, then refuses to advance an
@@ -170,6 +280,13 @@ pub fn admit_ristretto_reconstruction_relation_bundle(
     ))
 }
 
+/// Production-shaped portable archive entry point.  It is deliberately the
+/// same fail-closed boundary as [`admit_ristretto_reconstruction_relation_bundle`].
+pub fn admit_ristretto_reconstruction_relation_archive(bytes: &[u8]) -> TexasAirResult<()> {
+    let bundle = ArchivedRistrettoReconstructionRelationBundle::decode_archive(bytes)?;
+    admit_ristretto_reconstruction_relation_bundle(&bundle)
+}
+
 /// Compile-time-facing marker for admission code and audit tooling.
 ///
 /// Keeping this as a constant makes it harder for a future caller to infer
@@ -179,6 +296,64 @@ pub const RISTRETTO_RECONSTRUCTION_RELATION_BUNDLE_COMPLETE: bool = false;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    // The serialization boundary is intentionally independent from semantic
+    // proof validity.  A zero-filled decode supplies a shape-complete but
+    // invalid bundle cheaply, which is sufficient to test strict transport
+    // encoding without manufacturing 54 expensive STARK proofs.
+    fn malformed_bundle_for_wire_test() -> ArchivedRistrettoReconstructionRelationBundle {
+        let mut bytes = Cursor::new(vec![0u8; 1_000_000]);
+        ArchivedRistrettoReconstructionRelationBundle::deserialize_reader(&mut bytes)
+            .expect("zero fixture covers the fixed archive layout")
+    }
+
+    #[test]
+    fn relation_archive_roundtrip_is_versioned_and_strict() {
+        let bundle = malformed_bundle_for_wire_test();
+        let wire = bundle.encode_archive().unwrap();
+        assert_eq!(
+            &wire[..RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len()],
+            &RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC
+        );
+        assert_eq!(
+            ArchivedRistrettoReconstructionRelationBundle::decode_archive(&wire).unwrap(),
+            bundle
+        );
+
+        let mut trailing = wire.clone();
+        trailing.push(0);
+        assert!(ArchivedRistrettoReconstructionRelationBundle::decode_archive(&trailing).is_err());
+
+        let mut wrong_version = wire;
+        wrong_version[RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len()] ^= 1;
+        assert!(
+            ArchivedRistrettoReconstructionRelationBundle::decode_archive(&wrong_version).is_err()
+        );
+    }
+
+    #[test]
+    fn relation_archive_rejects_magic_and_payload_splices() {
+        let bundle = malformed_bundle_for_wire_test();
+        let wire = bundle.encode_archive().unwrap();
+
+        let mut wrong_magic = wire.clone();
+        wrong_magic[0] ^= 1;
+        assert!(
+            ArchivedRistrettoReconstructionRelationBundle::decode_archive(&wrong_magic).is_err()
+        );
+
+        // The digest is the final fixed-width field in the wire.  Altering a
+        // relation-archive payload without regenerating that binding fails at
+        // the archive boundary, before any STARK verifier can be invoked.
+        let mut payload_splice = wire;
+        let payload_index = RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len() + 1;
+        payload_splice[payload_index] ^= 1;
+        assert!(
+            ArchivedRistrettoReconstructionRelationBundle::decode_archive(&payload_splice).is_err()
+        );
+    }
+
     #[test]
     fn scope_rejects_component_digest_splice_before_stark_verification() {
         let digest = [7; 32];

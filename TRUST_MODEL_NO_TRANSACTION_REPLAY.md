@@ -19,7 +19,7 @@ state root，而不执行交易回放。旧 `ProveTask`/VM replay 路径仍保�
 `texas_tagged::verify_tagged_texas_proof` 和
 `texas_canonical_air::verify_canonical_tagged_proof` 现在可以只使用归档中的公开
 scope 和 Stwo proof 完成验证，不再读取 `ProveTask`、交易 payload 或执行 native VM
-replay。前者只证明 betting/funding/leave 的投影关系；后者证明 21-kind canonical
+replay。前者只证明 betting/funding/leave 的投影关系；后者证明 23-kind canonical
 trace 的形状、selector、序号、表作用域和相邻 state-image commitment 链接，并证明
 下注完成后所有 seat `bet` 被精确收集进 pot；它还在 AIR 内约束 permissionless/actor
 authority、settlement commitment 不变，以及 transition/nullifier 非零。canonical
@@ -35,16 +35,19 @@ actions 打开全部九个 seat 的 mutable image（状态、stack、bet、total
 addon、time bank），并约束 Create/Start 的 seat 不变性、目标 lifecycle
 action 的非目标 seat 不变性、StartHand 的非零 deadline，以及
 `SetLeaveAfterHand` 的精确九位掩码写入。`AdvanceDeadline` 还以 64-bit limb/
-carry/range relation 证明 action height 不早于 pre deadline；但它
-还未为 identity/key/hole-card 与 crypto-state commitment 的所有可变 VM 分支建立
-专用关系，也未在同一 AIR 内重算 state image 的 Blake2b digest/state root。
+carry/range relation 证明 action height 不早于 pre deadline。`flag = true` 的
+shuffle-timeout 微步骤也已进入同一 AIR：它绑定最低 pending active seat、`auxiliary = 2`、
+`shuffle_timeout_ms` deadline、`stack + pending_addon` refund、pot/chip-pool 守恒、Out 状态、
+key/hole 清零、total/time-bank 历史、非目标 seat 不变，以及至少两人的新 pending mask 和非零
+deck commitment。该关系只证明固定宽度的非零 deck-rebuild statement，不重算洗牌密码学；其它
+timeout 分支和 crypto-state commitment 仍需专用关系，也未在同一 AIR 内重算 state image 的
+Blake2b digest/state root。
 
-`FoldWithProof` 已不再被误分类为“非 Betting crypto 行”：其非终局分支在 AIR
-中遵循 current turn，要求目标 `Active -> Folded + acted`，保持所有 chip/seat
-identity material，不允许改动 board/reveal/reconstruct/run-it-twice commitments，并
-只允许 deck commitment 被 leave-DLEQ 层移除替换。三个 submit 标签也直接约束其
-pre phase（shuffle/reveal/reconstruct）、非空提交座位和非零、16-bit range-bound 的
-proof commitment。canonical ABI v5 已增加固定九位 `protocol_pending_mask`：shuffle /
+`FoldWithProof`、`SubmitShuffle`、`SubmitReveal` 和 `SubmitReconstruct` 的 ABI 字段仍然
+保留，但 canonical direct AIR 当前对这四类 selector 统一 fail-closed：独立的 crypto AIR
+尚未与 canonical state-image relation 组合，因此非零 proof commitment、pending mask 和
+completion opening 都不能单独构成可接纳的密码学迁移证明。只有完成组合后，才应开启下述
+细粒度约束。canonical ABI v5 已增加固定九位 `protocol_pending_mask`：shuffle /
 reconstruct 直接投影 VM pending mask，reveal 投影所有 assignment pending mask 的并集。
 AIR 将 pre/post mask 分解成 boolean bits，要求 action seat 的 pre bit 为一、每次只清除该
 seat bit，并用 inverse 证明 post mask 仍非空；`StartHand` 与 `AdvanceRound` 打开的新
@@ -68,8 +71,9 @@ Ristretto 方程，也不重算 deck/reveal commitment。
 转换：它先运行有限次 normalization，随后按 reconstruct、shuffle、reveal、betting
 或 showdown deadline 分支；betting 还要区分消耗 time bank / 延长 deadline 与
 自动 fold，其他分支会 kick、refund/reset、reconstruct 或结算。当前 canonical
-`AdvanceDeadline` 行没有这些选择器、完整输入状态或确定性输出约束。因此任何把
-它作为 finalized-head 更新的入口都必须 fail-closed，不能把
+`AdvanceDeadline` 行没有 reconstruct/reveal/showdown 级联的完整输入状态或确定性输出约束；
+只有上面列出的 betting extension、AutoFold suffix 和 shuffle-timeout 微步骤可以直接验证。
+因此其它分支作为 finalized-head 更新的入口都必须 fail-closed，不能把
 `deadline_height >= pre.deadline` 当成完整 VM timeout 证明。
 
 ### Deadline / terminal direct-AIR 覆盖矩阵
@@ -82,7 +86,7 @@ Ristretto 方程，也不重算 deck/reveal commitment。
 | --- | --- | --- | --- |
 | deadline 前 / `NoDeadline` | 仅报告，不改变 table | 不应生成 head-changing row | 不需要证明；admission 必须拒绝把它编码为 state transition |
 | reconstruct timeout | kick 所有 reconstruct pending；按活跃数 reset、单人 award/reset，或以 accumulator 完成 reconstruct-shuffle | 未覆盖 | pending-seat kick schedule、active-count selector、refund/award/reset 或 completed-accumulator→shuffle continuation |
-| shuffle timeout | kick 当前 shuffler；按活跃数 reset/award，否则 rebuild deck 并继续 shuffle | 未覆盖 | current-shuffler opening、kick/refund cascade、52-card rebuild commitment 和新的 shuffle schedule |
+| shuffle timeout | kick 当前 shuffler；按活跃数 reset/award，否则 rebuild deck 并继续 shuffle | 已覆盖固定、非级联微步骤：最低 pending seat、refund/pot/chip-pool、Out/key/hole 清零、至少两人 pending mask、非零新 deck commitment | 若要覆盖 VM 的 reset/award cascade、完整 52-card rebuild schedule 与密码学 commitment 重算，仍需额外 bounded rows/AIR |
 | reveal timeout | kick 全部 reveal pending；0/1 active 时 reset/award；preflop reset，其他 street start reconstruct | 未覆盖 | assignment pending-union、bounded multi-kick schedule、phase-specific reset/reconstruct opening |
 | betting, time bank > 0 | 消耗 `min(time_bank, betting_timeout)`，延长 deadline | `AdvanceDeadline` 已覆盖 | 已有，保持为单一非级联 row |
 | betting, time bank = 0 | auto fold，再由 normalization 收池、round advance、single-winner award/reset 或下一 reveal | 只覆盖非终局 `AutoFold` suffix | 将 fold 与后续 bounded normalization 分成显式 `Collect/Advance/Award/Reset` 微步骤；不得让 AutoFold 隐含它们 |
@@ -123,10 +127,12 @@ AIR 已将 ABI/header、table、phase、资金、五类 root、九个 seat 的�
 run-it-twice 五个 commitment、protocol pending mask 和完整 timeout config（共 852 个 endpoint limb）回绑到这些 Borsh bytes；
 对下注、funding、join/leave、force/kick、SetLeaveAfterHand 与 AdvanceRound，
 已知不变的 commitment 字段也被约束为不变。完整 bytes 也进入 Fiat--Shamir scope。
-Shuffle/reveal/reconstruct 的 phase/seat/proof-presence shape、final reconstruct 的
+未组合前，Shuffle/reveal/reconstruct 的 phase/seat/proof-presence shape、final reconstruct 的
 `Reconstructing/1 -> Shuffling/2` normalization opening，以及非终局 `FoldWithProof` 的
-betting/state-preservation shape 已受约束；但 reconstruction 密码学、deck/reveal
-commitment 重算、final shuffle/reveal、完整 timeout/settlement 与其余 normalization 关系仍未
+betting/state-preservation shape 仅作为 ABI 设计和独立测试保留，canonical direct AIR 会拒绝
+这些 selector；reconstruction 密码学、deck/reveal
+commitment 重算、final shuffle/reveal、reconstruct/reveal/showdown timeout cascade、完整 settlement
+与其余 normalization 关系仍未
 组合，故这个新组合仍不是 host-zero admission 证据，
 `verify_canonical_proof` 仅供结构审计；`admit_canonical_proof` 与
 `admit_canonical_proof_with_state_openings` 都会明确 fail-closed。

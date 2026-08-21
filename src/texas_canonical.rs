@@ -346,6 +346,10 @@ pub enum CanonicalTransitionKind {
     /// Deterministic reset-only micro-step.  This is used by timeout/error
     /// normalization when no pot or live wager remains.
     ResetOnly = 22,
+    /// Narrow reconstruct-timeout branch: exactly one pending participant is
+    /// kicked and a zero-wager hand is reset to WAITING.  The general
+    /// multi-pending timeout/settlement cascade remains separate.
+    ReconstructTimeoutReset = 23,
 }
 
 impl CanonicalTransitionKind {
@@ -371,6 +375,7 @@ impl CanonicalTransitionKind {
                 | Self::SetLeaveAfterHand
                 | Self::FoldWithProof
                 | Self::EndWithoutShowdown
+                | Self::ReconstructTimeoutReset
         )
     }
 
@@ -382,6 +387,7 @@ impl CanonicalTransitionKind {
                 | Self::AutoFold
                 | Self::EndWithoutShowdown
                 | Self::ResetOnly
+                | Self::ReconstructTimeoutReset
         )
     }
 
@@ -588,6 +594,7 @@ impl CanonicalTransitionWitness {
                 self.kind,
                 CanonicalTransitionKind::EndWithoutShowdown
                     | CanonicalTransitionKind::ResetOnly
+                    | CanonicalTransitionKind::ReconstructTimeoutReset
             )
             && self.action.proof_commitment != [0; 32]
         {
@@ -595,7 +602,9 @@ impl CanonicalTransitionWitness {
         }
         if !matches!(
             self.kind,
-            CanonicalTransitionKind::AdvanceDeadline | CanonicalTransitionKind::AutoFold
+            CanonicalTransitionKind::AdvanceDeadline
+                | CanonicalTransitionKind::AutoFold
+                | CanonicalTransitionKind::ReconstructTimeoutReset
         ) && self.deadline_height != 0
         {
             return Err("transition carries an unused consensus deadline height".into());
@@ -604,11 +613,15 @@ impl CanonicalTransitionWitness {
             self.kind,
             CanonicalTransitionKind::AdvanceDeadline
                 | CanonicalTransitionKind::EndWithoutShowdown
+                | CanonicalTransitionKind::ReconstructTimeoutReset
         ) && self.action.auxiliary != 0
         {
             return Err("transition carries an unused auxiliary action field".into());
         }
-        if self.kind != CanonicalTransitionKind::SetLeaveAfterHand && self.action.flag {
+        if self.kind != CanonicalTransitionKind::SetLeaveAfterHand
+            && self.kind != CanonicalTransitionKind::AdvanceDeadline
+            && self.action.flag
+        {
             return Err("transition carries an unused action flag".into());
         }
         if matches!(
@@ -721,6 +734,26 @@ pub fn validate_batch(witnesses: &[CanonicalTransitionWitness]) -> Result<(), St
         if witness.kind == CanonicalTransitionKind::StartHand {
             hand_id = witness.post.hand_id;
         }
+    }
+    Ok(())
+}
+
+/// Validate the witness envelope accepted by the canonical direct AIR.
+///
+/// Crypto-bearing selectors retain their ABI and state-image shape checks so
+/// standalone crypto components can bind requests to a canonical transition.
+/// They are rejected here, at the direct AIR boundary, until the dedicated
+/// Ristretto relations are composed into the same verifier-visible proof.
+pub fn validate_direct_batch(witnesses: &[CanonicalTransitionWitness]) -> Result<(), String> {
+    validate_batch(witnesses)?;
+    if witnesses
+        .iter()
+        .any(|witness| witness.kind.carries_crypto_proof())
+    {
+        return Err(
+            "canonical crypto transition is unavailable until its dedicated crypto AIR is composed"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -1003,8 +1036,12 @@ fn validate_simple_reset_projection(
     for (index, (before, after)) in pre.seats.iter().zip(post.seats.iter()).enumerate() {
         let expected_status = match before.status {
             CanonicalSeatStatus::Empty => CanonicalSeatStatus::Empty,
-            CanonicalSeatStatus::Active | CanonicalSeatStatus::Folded => CanonicalSeatStatus::Active,
-            CanonicalSeatStatus::AllIn | CanonicalSeatStatus::Out | CanonicalSeatStatus::Waiting => {
+            CanonicalSeatStatus::Active | CanonicalSeatStatus::Folded => {
+                CanonicalSeatStatus::Active
+            }
+            CanonicalSeatStatus::AllIn
+            | CanonicalSeatStatus::Out
+            | CanonicalSeatStatus::Waiting => {
                 return Err("terminal reset only supports retained active/folded seats".into());
             }
         };
@@ -1017,14 +1054,24 @@ fn validate_simple_reset_projection(
             before.stack
         };
         if before.pending_addon != 0
-            || before.time_bank_ms != if before.status == CanonicalSeatStatus::Empty { 0 } else { TERMINAL_TIME_BANK_MS }
+            || before.time_bank_ms
+                != if before.status == CanonicalSeatStatus::Empty {
+                    0
+                } else {
+                    TERMINAL_TIME_BANK_MS
+                }
             || after.status != expected_status
             || after.acted
             || after.stack != expected_stack
             || after.bet != 0
             || after.total_bet != 0
             || after.pending_addon != 0
-            || after.time_bank_ms != if expected_status == CanonicalSeatStatus::Empty { 0 } else { TERMINAL_TIME_BANK_MS }
+            || after.time_bank_ms
+                != if expected_status == CanonicalSeatStatus::Empty {
+                    0
+                } else {
+                    TERMINAL_TIME_BANK_MS
+                }
             || after.identity_commitment != before.identity_commitment
             || after.key_commitment != before.key_commitment
             || after.hole_cards_commitment != [0; 32]
@@ -1102,12 +1149,109 @@ fn validate_reset_only(w: &CanonicalTransitionWitness) -> Result<(), String> {
         || pre.pot != 0
         || pre.current_bet != 0
         || pre.min_raise != 0
-        || pre.seats.iter().any(|seat| seat.bet != 0 || seat.total_bet != 0)
+        || pre
+            .seats
+            .iter()
+            .any(|seat| seat.bet != 0 || seat.total_bet != 0)
         || post.chip_pool != pre.chip_pool
     {
         return Err("reset_only has an unproved monetary or action payload".into());
     }
     validate_simple_reset_projection(pre, post, None, 0)
+}
+
+/// Validate the fixed-width subset of `on_reconstruct_timeout` that can be
+/// represented by one tagged row: one active participant is pending, there is
+/// no wager/addon ledger, and the VM's kick is followed by a clean reset.
+fn validate_reconstruct_timeout_reset(w: &CanonicalTransitionWitness) -> Result<(), String> {
+    let pre = &w.pre;
+    let post = &w.post;
+    let seat = usize::from(w.action.seat);
+    if pre.phase != CanonicalPhase::Reconstructing
+        || pre.phase_subtag != CANONICAL_RECONSTRUCT_COLLECTING_SUBTAG
+        || pre.street == 0
+        || w.action.flag
+        || w.action.auxiliary != 0
+        || w.action.proof_commitment != post.deck_commitment
+        || w.deadline_height < pre.deadline_ms
+        || seat >= usize::from(pre.max_players)
+        || pre.protocol_pending_mask != (1u16 << seat)
+        || pre.seats[seat].status != CanonicalSeatStatus::Active
+        || pre.seats[seat].bet != 0
+        || pre.seats[seat].total_bet != 0
+        || pre.seats[seat].pending_addon != 0
+        || pre.pot != 0
+        || pre.current_bet != 0
+        || pre.min_raise != 0
+    {
+        return Err("reconstruct timeout reset has an invalid pending/wager header".into());
+    }
+    let refund = pre.seats[seat].stack;
+    if refund == 0 || w.action.amount != refund {
+        return Err("reconstruct timeout reset has an invalid refund amount".into());
+    }
+    if post.phase != CanonicalPhase::Waiting
+        || post.phase_subtag != 0
+        || post.street != 0
+        || post.current_turn != NO_CANONICAL_SEAT
+        || post.deadline_ms != 0
+        || post.current_bet != 0
+        || post.min_raise != 0
+        || post.pot != 0
+        || post.acted_mask != 0
+        || post.leave_after_hand_mask != 0
+        || post.protocol_pending_mask != 0
+        || post.chip_pool
+            != pre
+                .chip_pool
+                .checked_sub(refund)
+                .ok_or("refund underflow")?
+        || post.deck_commitment == [0; 32]
+        || post.board_cards_commitment != [0; 32]
+        || post.reveal_commitment != [0; 32]
+        || post.reconstruction_commitment != [0; 32]
+        || post.run_it_twice_commitment != [0; 32]
+    {
+        return Err("reconstruct timeout reset has an invalid waiting endpoint".into());
+    }
+    for (index, (before, after)) in pre.seats.iter().zip(post.seats.iter()).enumerate() {
+        if index == seat {
+            if after != &CanonicalSeat::EMPTY {
+                return Err("timed-out reconstruct seat was not vacated".into());
+            }
+            continue;
+        }
+        match before.status {
+            CanonicalSeatStatus::Empty | CanonicalSeatStatus::Out => {
+                if after != before {
+                    return Err("unoccupied reconstruct seat changed during reset".into());
+                }
+            }
+            CanonicalSeatStatus::Active | CanonicalSeatStatus::Folded => {
+                if before.bet != 0
+                    || before.total_bet != 0
+                    || before.pending_addon != 0
+                    || before.time_bank_ms != TERMINAL_TIME_BANK_MS
+                    || after.status != CanonicalSeatStatus::Active
+                    || after.acted
+                    || after.stack != before.stack
+                    || after.bet != 0
+                    || after.total_bet != 0
+                    || after.pending_addon != 0
+                    || after.time_bank_ms != TERMINAL_TIME_BANK_MS
+                    || after.identity_commitment != before.identity_commitment
+                    || after.key_commitment != before.key_commitment
+                    || after.hole_cards_commitment != [0; 32]
+                {
+                    return Err("retained reconstruct seat has an invalid reset image".into());
+                }
+            }
+            CanonicalSeatStatus::Waiting | CanonicalSeatStatus::AllIn => {
+                return Err("unsupported seat status in reconstruct timeout reset".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), String> {
@@ -1290,52 +1434,124 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             })?;
         }
         CanonicalTransitionKind::AdvanceDeadline => {
-            if pre.phase != CanonicalPhase::Betting
-                || pre.current_turn == NO_CANONICAL_SEAT
-                || w.deadline_height == 0
-            {
-                return Err(
-                    "advance_deadline currently supports betting timeout extension only".into(),
-                );
-            }
-            if w.deadline_height < pre.deadline_ms {
+            let seat = usize::from(w.action.seat);
+            if w.deadline_height == 0 || w.deadline_height < pre.deadline_ms {
                 return Err("advance_deadline is before the committed deadline".into());
             }
-            let seat = usize::from(w.action.seat);
-            if w.action.seat != pre.current_turn
-                || seat >= MAX_CANONICAL_SEATS
-                || pre.seats[seat].status != CanonicalSeatStatus::Active
-                || w.action.auxiliary != 1
-                || w.action.flag
-            {
-                return Err("advance_deadline has an invalid betting extension selector".into());
+            if !w.action.flag {
+                if pre.phase != CanonicalPhase::Betting
+                    || pre.current_turn == NO_CANONICAL_SEAT
+                    || seat >= MAX_CANONICAL_SEATS
+                    || w.action.seat != pre.current_turn
+                    || pre.seats[seat].status != CanonicalSeatStatus::Active
+                    || w.action.auxiliary != 1
+                {
+                    return Err("advance_deadline has an invalid betting extension selector".into());
+                }
+                let consume =
+                    u64::from(pre.seats[seat].time_bank_ms).min(u64::from(pre.betting_timeout_ms));
+                if consume == 0
+                    || w.action.amount != consume
+                    || post.deadline_ms != pre.deadline_ms.saturating_add(consume)
+                    || post.seats[seat].time_bank_ms
+                        != pre.seats[seat].time_bank_ms - consume as u32
+                    || post.acted_mask != pre.acted_mask
+                    || post
+                        .seats
+                        .iter()
+                        .zip(pre.seats.iter())
+                        .any(|(after, before)| after.acted != before.acted)
+                {
+                    return Err("advance_deadline has an invalid time-bank extension".into());
+                }
+                only_allowed_changes(pre, post, Some(seat), |expected, actual| {
+                    expected.call_seq = actual.call_seq;
+                    expected.deadline_ms = actual.deadline_ms;
+                    expected.seats[seat] = actual.seats[seat];
+                })?;
+            } else {
+                // Fixed, non-cascading shuffle-timeout micro-step.  The VM
+                // kicks the current shuffler, rebuilds the encrypted deck and
+                // arms a fresh shuffle deadline.  Terminal refund/award/reset
+                // normalization is intentionally a separate transition.
+                if pre.phase != CanonicalPhase::Shuffling
+                    || pre.current_turn != NO_CANONICAL_SEAT
+                    || w.action.auxiliary != 2
+                    || pre.shuffle_timeout_ms == 0
+                    || seat >= MAX_CANONICAL_SEATS
+                    || pre.protocol_pending_mask != active_reveal_mask(&pre.seats)
+                    || pre.protocol_pending_mask & (1u16 << seat) == 0
+                    || (pre.protocol_pending_mask & (1u16 << seat)).trailing_zeros() as usize
+                        != seat
+                    || pre.seats[seat].status != CanonicalSeatStatus::Active
+                {
+                    return Err("advance_deadline has an invalid shuffle-timeout selector".into());
+                }
+                let before = pre.seats[seat];
+                let refund = before
+                    .stack
+                    .checked_add(before.pending_addon)
+                    .ok_or("shuffle timeout refund overflow")?;
+                if w.action.amount != refund
+                    || post.seats[seat].status != CanonicalSeatStatus::Out
+                    || post.seats[seat].stack != 0
+                    || post.seats[seat].pending_addon != 0
+                    || post.seats[seat].bet != 0
+                    || post.seats[seat].total_bet != before.total_bet
+                    || post.seats[seat].time_bank_ms != before.time_bank_ms
+                    || post.seats[seat].identity_commitment != before.identity_commitment
+                    || post.seats[seat].key_commitment != [0; 32]
+                    || post.seats[seat].hole_cards_commitment != [0; 32]
+                    || post.pot
+                        != pre
+                            .pot
+                            .checked_add(before.bet)
+                            .ok_or("shuffle timeout pot overflow")?
+                    || post.chip_pool
+                        != pre
+                            .chip_pool
+                            .checked_sub(refund)
+                            .ok_or("shuffle timeout chip_pool underflow")?
+                    || post.acted_mask != pre.acted_mask & !(1u16 << seat)
+                    || post.leave_after_hand_mask != pre.leave_after_hand_mask & !(1u16 << seat)
+                    || post.protocol_pending_mask != active_reveal_mask(&post.seats)
+                    || post.protocol_pending_mask.count_ones() < 2
+                    || post.phase_subtag == 0
+                    || post.current_turn != NO_CANONICAL_SEAT
+                    || post.deadline_ms
+                        != w.deadline_height
+                            .checked_add(u64::from(pre.shuffle_timeout_ms))
+                            .ok_or("shuffle timeout deadline overflow")?
+                    || post.deck_commitment == [0; 32]
+                    || post.deck_commitment == pre.deck_commitment
+                    || post.board_cards_commitment != pre.board_cards_commitment
+                    || post.reveal_commitment != pre.reveal_commitment
+                    || post.reconstruction_commitment != pre.reconstruction_commitment
+                    || post.run_it_twice_commitment != pre.run_it_twice_commitment
+                {
+                    return Err("shuffle timeout transition is invalid".into());
+                }
+                only_allowed_changes(pre, post, Some(seat), |expected, actual| {
+                    expected.call_seq = actual.call_seq;
+                    expected.deadline_ms = actual.deadline_ms;
+                    expected.acted_mask = actual.acted_mask;
+                    expected.leave_after_hand_mask = actual.leave_after_hand_mask;
+                    expected.protocol_pending_mask = actual.protocol_pending_mask;
+                    expected.pot = actual.pot;
+                    expected.chip_pool = actual.chip_pool;
+                    expected.deck_commitment = actual.deck_commitment;
+                    expected.custody_commitment = actual.custody_commitment;
+                })?;
             }
-            let consume =
-                u64::from(pre.seats[seat].time_bank_ms).min(u64::from(pre.betting_timeout_ms));
-            if consume == 0
-                || w.action.amount != consume
-                || post.deadline_ms != pre.deadline_ms.saturating_add(consume)
-                || post.seats[seat].time_bank_ms != pre.seats[seat].time_bank_ms - consume as u32
-                || post.acted_mask != pre.acted_mask
-                || post
-                    .seats
-                    .iter()
-                    .zip(pre.seats.iter())
-                    .any(|(after, before)| after.acted != before.acted)
-            {
-                return Err("advance_deadline has an invalid time-bank extension".into());
-            }
-            only_allowed_changes(pre, post, Some(seat), |expected, actual| {
-                expected.call_seq = actual.call_seq;
-                expected.deadline_ms = actual.deadline_ms;
-                expected.seats[seat] = actual.seats[seat];
-            })?;
         }
         CanonicalTransitionKind::EndWithoutShowdown => {
             validate_terminal_without_showdown(w)?;
         }
         CanonicalTransitionKind::ResetOnly => {
             validate_reset_only(w)?;
+        }
+        CanonicalTransitionKind::ReconstructTimeoutReset => {
+            validate_reconstruct_timeout_reset(w)?;
         }
         CanonicalTransitionKind::AutoFold => {
             if pre.phase != CanonicalPhase::Betting

@@ -19,20 +19,23 @@ The direct state-transition proving paths are documented in
 
 - `texas_tagged` is the existing fail-closed projected AIR for mid-round betting,
   addon, rebuy, and leave-after-hand transitions.
-- `texas_canonical_air` accepts the fixed-width ABI for all 21 Texas transition
-  selectors, and proves batch ordering, state-image links, selector validity,
+- `texas_canonical_air` encodes all 23 Texas transition selectors in the fixed-width ABI, but
+  currently admits only selector families whose complete relation is composed into this AIR. It
+  proves batch ordering, state-image links, selector validity,
   table scope, sequence rules, active-prefix padding, and the limited actor policy
   encoded in the AIR.
 
 Neither API yet proves all Texas VM semantics. The canonical AIR now independently
 constrains the fixed relations for `Call` (including short all-in), `Raise`, `Bet`, funding,
 join/leave, force/kick, `SetLeaveAfterHand`, `AdvanceRound`, bounded betting time-bank extension,
-the non-cascading `AutoFold` timeout suffix, and the final `SubmitReconstruct` normalization from
-reconstruct collection back to shuffle collection. Shuffle/reveal/reconstruction cryptography,
-the final shuffle/reveal phase changes, full timeout/terminal cascades, mental-poker proofs,
-settlement, and state-root recomputation remain outside the AIR until their dedicated components
-are implemented. A witness-free Stwo verification result alone must not advance a production
-table head.
+the non-cascading `AutoFold` timeout suffix, and the fixed non-cascading `AdvanceDeadline` shuffle-
+timeout micro-step (minimum pending seat, refund/pot/chip-pool conservation, Out/key/hole clearing,
+non-target-seat stability, at-least-two pending participants, and a non-zero rebuilt deck commitment).
+The AIR binds this micro-step statement directly in the performant tagged trace; it does not recompute
+the underlying shuffle cryptography. Reveal/reconstruction cryptography, final shuffle/reveal phase
+changes, full timeout/terminal cascades, mental-poker proofs, settlement, and state-root recomputation
+remain outside the AIR until their dedicated components are implemented. A witness-free Stwo
+verification result alone must not advance a production table head.
 
 The complete-state migration starts at [`src/texas_canonical.rs`](src/texas_canonical.rs):
 it defines a fixed-width ABI for every VM phase, seat lifecycle, deck/reveal/reconstruction
@@ -41,9 +44,10 @@ ABI v5 carries the fixed nine-seat protocol pending mask used by shuffle,
 reveal, and reconstruction, plus the VM's five immutable timeout durations.
 `texas_canonical_air` range-checks those timeout limbs and derives betting
 time-bank/auto-fold arithmetic from the opened `betting_timeout_ms` instead of
-a deployment constant. It proves each non-final protocol
-submit clears exactly the submitting seat's bit and cannot forge a final submit;
-the final reconstruct submit is additionally bound to a canonical completion opening containing
+a deployment constant. The ABI carries a canonical completion opening for a future reconstruction
+composition; ordinary shuffle/reveal/reconstruct submissions and `FoldWithProof` remain
+fail-closed until their dedicated Ristretto relations are composed. The intended final reconstruct
+relation is additionally bound to an opening containing
 an authenticated consensus timestamp, checked shuffle deadline addition, deck cursor reset,
 active-seat pending-mask rebuild, and the suspended reveal/deck/reconstruction commitments. The
 completion decision is derived from the pre pending mask rather than `action.flag`. Final shuffle
@@ -66,10 +70,10 @@ second equal-shape 156-row batch in fixed order: `1G..52G`, `1PK..52PK`, then
 opening says no accumulator exists, and its derived deck must equal the first accumulator prior.
 The final reconstruction-to-deck/shuffle path remains deliberately rejected until its dedicated
 AIR relations land. The generic Fp batch is
-still performance-heavy and requires lookup specialization before production admission. The ABI is still a
-structural/commitment boundary; `texas_canonical_air` now binds its
-fixed-width trace shape, but selector-specific semantic constraints still need to be
-implemented before it replaces the projected betting image.
+still performance-heavy and requires lookup specialization before production admission. For selector
+families not yet composed, the ABI remains a structural/commitment boundary; the covered direct AIR
+families—including the fixed shuffle-timeout micro-step—bind their semantic statement in the
+performance-oriented tagged trace without transaction replay.
 
 The Ristretto backend also now has a proof-producing compressed fixed-window scalar
 multiplication route. It derives `1P..15P` in 15 rows and evaluates 64 four-bit Horner windows in

@@ -667,7 +667,7 @@ pipeline 外方法拥有 `stage_row_count = 0`，但仍进入连续 stream 和 t
 新增固定宽度 tagged method STARK：它只承诺窄授权/编排行，不再生成每 task 一份旧 Method AIR。
 throughput 入口因而对一段同 hand transition 固定只启动两份 Stwo proof：一份 tagged method proof
 + 一份 tagged Stage proof。full-hand driver 已切到 mixed zero-Stage 路径：create/join×2 仍是 3 个
-legacy setup proofs；`start_hand + shuffle×2 + 18 composite transition` 形成 21-row method proof，
+legacy setup proofs；`start_hand + shuffle×2 + 20 composite transition` 形成 23-row method proof，
 其中只有 16 个 active Stage row。末尾通过 `prove_verify_and_accept_tagged_batch` 原子验证 package、
 签发逐 row receipt 并接入原有 host-verified chain。2026-08-09 debug test profile 端到端回归为
 26.55–26.92s；此前只批量化 18 个 composite rows 的版本约 36.30s，Stage-only batching 路径约 134.91s。

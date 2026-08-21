@@ -119,7 +119,10 @@ impl RistrettoSlotOrTranscriptChallenges {
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ArchivedRistrettoReconstructionSlotOrBatchProof {
     pub statement_digest: [u8; 32],
-    pub slots: [ArchivedRistrettoSlotOrProof; SLOT_COUNT],
+    /// Exactly 52 archives in canonical card-slot order.  This is a `Vec` so
+    /// serialized relation bundles can remain heap-backed; the verifier
+    /// rejects every other length before inspecting any equation.
+    pub slots: Vec<ArchivedRistrettoSlotOrProof>,
 }
 
 fn scalar_modulus() -> BigUint {
@@ -458,11 +461,7 @@ pub fn prove_ristretto_reconstruction_slot_or_batch(
         .map(|slot| {
             prove_ristretto_slot_or(expected_statement(request, &envelope, challenges, slot)?)
         })
-        .collect::<TexasAirResult<Vec<_>>>()?
-        .try_into()
-        .map_err(|_| {
-            TexasAirError::ConstraintUnsatisfied("slot-OR batch count is not fixed".into())
-        })?;
+        .collect::<TexasAirResult<Vec<_>>>()?;
     let archive = ArchivedRistrettoReconstructionSlotOrBatchProof {
         statement_digest: envelope.statement_digest,
         slots,
@@ -476,6 +475,7 @@ fn validate_slot_or_batch_statement_binding(
     challenges: &RistrettoSlotOrTranscriptChallenges,
     archive: &ArchivedRistrettoReconstructionSlotOrBatchProof,
 ) -> TexasAirResult<[RistrettoSlotOrStatement; SLOT_COUNT]> {
+    validate_slot_or_batch_cardinality(archive)?;
     let envelope = validate_ristretto_reconstruction_proof_wire(request)?;
     if archive.statement_digest != envelope.statement_digest {
         return Err(TexasAirError::ConstraintUnsatisfied(
@@ -497,6 +497,17 @@ fn validate_slot_or_batch_statement_binding(
         }
     }
     Ok(expected)
+}
+
+fn validate_slot_or_batch_cardinality(
+    archive: &ArchivedRistrettoReconstructionSlotOrBatchProof,
+) -> TexasAirResult<()> {
+    if archive.slots.len() != SLOT_COUNT {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "slot-OR batch archive count is not fixed".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn verify_ristretto_reconstruction_slot_or_batch(
@@ -658,5 +669,14 @@ mod tests {
             .c,
             changed.global_challenge
         );
+    }
+
+    #[test]
+    fn batch_rejects_any_slot_count_other_than_52() {
+        let archive = ArchivedRistrettoReconstructionSlotOrBatchProof {
+            statement_digest: [0; 32],
+            slots: Vec::new(),
+        };
+        assert!(validate_slot_or_batch_cardinality(&archive).is_err());
     }
 }

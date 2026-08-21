@@ -7,12 +7,18 @@
 直接 `texas_canonical_air` tagged receipt 路径混读。后者不依赖 `ProveTask` 或 host replay：
 `verify_canonical_proof` 只提供结构审计，`admit_canonical_proof` 及
 `admit_canonical_proof_with_state_openings` 当前明确 fail-closed。尤其是 direct AIR 的
-`AdvanceDeadline` 目前只证明由 ABI 打开的 `betting_timeout_ms` 所决定的 time-bank extension
-及状态不变性；direct
-AIR 另有受限的非级联 `AutoFold` timeout suffix，但尚未证明 VM 的 turn/round cascade、settlement
-或 reset。direct canonical ABI v5 已把 shuffle/reveal/reconstruct 的九位 pending participant
-mask 和五项 timeout config 纳入 endpoint opening；非终局 submit 必须在 AIR 内精确清除 action seat bit，post mask
-必须非空。final `SubmitReconstruct` 已有专用 completion opening：完成条件由 pre pending mask
+`AdvanceDeadline` 已直接覆盖两条固定宽度分支：`flag = false` 时由 ABI 打开的
+`betting_timeout_ms` 驱动 time-bank extension；`flag = true` 时是受限、非级联的 shuffle-timeout
+micro-step。后者要求 Shuffling header、pending mask 的最低 active seat、deadline height 和
+`shuffle_timeout_ms` 一致；AIR 约束该 seat 变为 Out，返还 `stack + pending_addon`、把其本轮
+bet 收入 pot、清空 key/hole commitments、重建剩余 active mask（至少两人）、保持 total/time-bank
+历史并以非零新 deck commitment 重建牌堆。其他 seat 和其它 opaque commitments 均不可变。
+这只证明 commitment 发生了受限、非零的状态转换，不重新计算洗牌的密码学关系；该关系仍属于
+dedicated crypto AIR/host-native verifier 的信任边界。direct AIR 另有受限的非级联 `AutoFold`
+timeout suffix，但尚未证明 VM 的 turn/round cascade、settlement 或 reset。direct canonical ABI v5
+已把 shuffle/reveal/reconstruct 的九位 pending participant mask 和五项 timeout config 纳入 endpoint
+opening；非终局 submit 必须在 AIR 内精确清除 action seat bit，post mask 必须非空。final
+`SubmitReconstruct` 已有专用 completion opening：完成条件由 pre pending mask
 精确等于 action seat bit 推导，不依赖 `action.flag`，并绑定 authenticated timestamp、checked
 shuffle deadline、deck cursor reset、active-seat shuffle mask 重建及 suspended reveal/deck/
 reconstruction commitments，从而约束 `Reconstructing/1 -> Shuffling/2` normalization。final
@@ -281,7 +287,7 @@ command digest、pre/post root/call_seq 和 Stage span 写入窄 method row。ca
 full-hand driver 已把 `start_hand`、两次 shuffle 与后续 composite tasks 一起入队，末尾原子生成
 该 two-proof package；Stage pipeline 外的三行拥有零 Stage rows。旧 per-task archive 目前只保留给
 create/join×2 和 hand stream 外的同步 service 路径。2026-08-09 debug test profile 的真实
-24-transition heads-up full-hand 只剩 3 个 legacy setup proofs，加一个 21-row tagged method /
+24-transition heads-up full-hand 只剩 3 个 legacy setup proofs，加一个 23-row tagged method /
 16-row tagged Stage package，端到端 prove/verify 为 26.55–26.92s。此前只批量化 18 个 composite rows、
 仍单独证明 start/shuffle 的版本约 36.30s；更早的 Stage-only batching 路径约 134.91s。
 
