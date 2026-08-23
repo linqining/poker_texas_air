@@ -6,6 +6,8 @@
 //! creates one proof.  It is the folding substrate for the production point
 //! codec, Edwards arithmetic, scalar multiplication, and later DLEQ/MSM AIRs.
 
+#![allow(missing_docs)]
+
 use bincode::Options;
 use borsh::{BorshDeserialize, BorshSerialize};
 use num_bigint::BigUint;
@@ -21,7 +23,8 @@ use stwo::prover::pcs::CommitmentSchemeProver;
 use stwo::prover::prove;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, TraceLocationAllocator,
+    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
+    TraceLocationAllocator, relation,
 };
 
 use crate::error::{TexasAirError, TexasAirResult};
@@ -33,7 +36,7 @@ use crate::trace_gen::MethodTrace;
 const LIMBS: usize = 32;
 const PRODUCT_LIMBS: usize = 2 * LIMBS;
 const BASE: u32 = 256;
-const LOG_SIZE: u32 = 1;
+const LOG_SIZE: u32 = 8;
 const MAX_VALUES: usize = 512;
 const MAX_OPS: usize = 512;
 const MAX_OUTPUTS: usize = 64;
@@ -145,6 +148,8 @@ pub struct ArchivedRistrettoFpProgramProof {
     pub program: RistrettoFpProgram,
     /// Serialized Stwo proof.
     pub stark_proof_bytes: Vec<u8>,
+    /// Public claimed sum of the shared range LogUp (4 M31 coordinates).
+    pub range_claimed_sum: [u32; 4],
 }
 
 /// Multiple equal-shape field programs proven as rows of one STARK.
@@ -155,6 +160,8 @@ pub struct ArchivedRistrettoFpProgramBatchProof {
     pub programs: Vec<RistrettoFpProgram>,
     /// Serialized Stwo proof for the complete batch.
     pub stark_proof_bytes: Vec<u8>,
+    /// Public claimed sum of the shared range LogUp (4 M31 coordinates).
+    pub range_claimed_sum: [u32; 4],
 }
 
 /// Public `sqrt_ratio_i` statement proven by one field-program STARK.
@@ -502,10 +509,24 @@ struct ProgramWitness {
     op_witnesses: Vec<OpWitness>,
 }
 
+/// Shared 256-entry byte range table LogUp relation for Fp program limbs.
+relation!(FpRange8, 1);
+
 #[derive(Clone)]
 struct FpProgramAir {
     log_size: u32,
     program: RistrettoFpProgram,
+    range: FpRange8,
+}
+
+impl FpProgramAir {
+    /// Number of (multiplicity, value) table-column pairs: the 256-entry
+    /// range table is striped across `256 >> log_size` column pairs, one
+    /// entry per row per column (`t * 2^log_size + row`), with an inert
+    /// value (and zero multiplicity) beyond 255.
+    fn table_columns(&self) -> usize {
+        (256usize >> self.log_size.min(8)).max(1)
+    }
 }
 
 fn modulus() -> BigUint {
@@ -851,39 +872,40 @@ fn nonnegative_sqrt(value: &BigUint) -> Option<BigUint> {
 fn append_signed_magnitude(row: &mut Vec<M31>, value: SignedMagnitude) {
     row.push(M31::from(u32::from(value.negative)));
     row.push(M31::from(u32::from(value.magnitude)));
-    for bit in 0..16 {
-        row.push(M31::from(u32::from((value.magnitude >> bit) & 1)));
-    }
+    // Two byte limbs instead of 16 bit columns; both bytes feed the shared
+    // LogUp range table and the magnitude equality is constrained in the AIR.
+    row.push(M31::from(u32::from(value.magnitude & 0xff)));
+    row.push(M31::from(u32::from(value.magnitude >> 8)));
 }
 
 fn append_limb(row: &mut Vec<M31>, limb: u8) {
+    // Byte only: range membership is proven by the shared LogUp table.
     row.push(M31::from(u32::from(limb)));
-    for bit in 0..8 {
-        row.push(M31::from(u32::from((limb >> bit) & 1)));
-    }
 }
 
-fn m31_inverse(value: u8) -> M31 {
-    if value == 0 {
-        M31::from(0u32)
-    } else {
-        M31::from(u32::from(value)).inverse()
-    }
-}
-
-fn trace_row(program: &RistrettoFpProgram) -> TexasAirResult<Vec<M31>> {
+/// Column indices of every LogUp use byte in one program row, in the exact
+/// order the AIR emits the corresponding relation entries (value limbs,
+/// witnessed difference limbs, then per-mul-carry `[low, high]` bytes).
+fn trace_row_with_bytes(
+    program: &RistrettoFpProgram,
+) -> TexasAirResult<(Vec<M31>, Vec<usize>)> {
+    let mut row = Vec::new();
+    let mut bytes = Vec::new();
+    let mut track_limb = |row: &mut Vec<M31>, bytes: &mut Vec<usize>, limb: u8| {
+        bytes.push(row.len());
+        append_limb(row, limb);
+    };
     let witness = program_witness(program)?;
     let canonicity = program_canonicity(program)?;
-    let mut row = Vec::new();
     for (value_index, value) in program.values.iter().enumerate() {
         for limb in value {
-            append_limb(&mut row, *limb);
+            track_limb(&mut row, &mut bytes, *limb);
         }
         if canonicity[value_index] == ValueCanonicity::Witnessed {
             let difference = witness.differences[value_index]
                 .expect("witnessed values carry a prime-difference witness");
             for limb in difference {
-                append_limb(&mut row, limb);
+                track_limb(&mut row, &mut bytes, limb);
             }
             let mut carries = [0u8; LIMBS];
             let mut carry_in = 0u16;
@@ -902,7 +924,6 @@ fn trace_row(program: &RistrettoFpProgram) -> TexasAirResult<Vec<M31>> {
             row.push(M31::from(nonzero_count).inverse());
         }
     }
-
     for op_witness in &witness.op_witnesses {
         match op_witness {
             OpWitness::Add {
@@ -914,27 +935,48 @@ fn trace_row(program: &RistrettoFpProgram) -> TexasAirResult<Vec<M31>> {
                 row.push(M31::from(u32::from(k.negative)));
                 row.push(M31::from(u32::from(k.magnitude)));
                 for carry in carries {
-                    // Add/sub carries only need sign and one magnitude bit.
                     row.push(M31::from(u32::from(carry.negative)));
                     row.push(M31::from(u32::from(carry.magnitude)));
                 }
             }
             OpWitness::Multiply { carries } => {
                 for carry in carries {
-                    append_signed_magnitude(&mut row, *carry);
+                    row.push(M31::from(u32::from(carry.negative)));
+                    row.push(M31::from(u32::from(carry.magnitude)));
+                    bytes.push(row.len());
+                    row.push(M31::from(u32::from(carry.magnitude & 0xff)));
+                    bytes.push(row.len());
+                    row.push(M31::from(u32::from(carry.magnitude >> 8)));
                 }
             }
         }
     }
+    Ok((row, bytes))
+}
 
-    Ok(row)
+fn m31_inverse(value: u8) -> M31 {
+    if value == 0 {
+        M31::from(0u32)
+    } else {
+        M31::from(u32::from(value)).inverse()
+    }
+}
+
+fn trace_row(program: &RistrettoFpProgram) -> TexasAirResult<Vec<M31>> {
+    Ok(trace_row_with_bytes(program)?.0)
 }
 
 fn trace_columns(program: &RistrettoFpProgram) -> TexasAirResult<MethodTrace> {
-    let row = trace_row(program)?;
-    let mut trace = MethodTrace::new(LOG_SIZE, row.len());
-    trace.write_row(0, &row)?;
-    trace.write_row(1, &row)?;
+    let (row, byte_columns) = trace_row_with_bytes(program)?;
+    let program_width = row.len();
+    let table_columns = range_table_column_count(LOG_SIZE);
+    let mut trace = MethodTrace::new(LOG_SIZE, program_width + 2 * table_columns);
+    let mut padded = row;
+    padded.resize(program_width + 2 * table_columns, M31::from(0u32));
+    for row_index in 0..(1usize << LOG_SIZE) {
+        trace.write_row(row_index, &padded)?;
+    }
+    append_range_table_columns(&mut trace, LOG_SIZE, &byte_columns, program_width);
     Ok(trace)
 }
 
@@ -949,8 +991,11 @@ fn scope_row(program: &RistrettoFpProgram) -> Vec<M31> {
 fn scope_columns(program: &RistrettoFpProgram) -> MethodTrace {
     let row = scope_row(program);
     let mut trace = MethodTrace::new(LOG_SIZE, row.len());
-    trace.write_row(0, &row).expect("fixed program scope width");
-    trace.write_row(1, &row).expect("fixed program scope width");
+    for row_index in 0..(1usize << LOG_SIZE) {
+        trace
+            .write_row(row_index, &row)
+            .expect("fixed program scope width");
+    }
     trace
 }
 
@@ -960,7 +1005,10 @@ fn batch_log_size(program_count: usize) -> TexasAirResult<u32> {
             "Fp program batch must not be empty".into(),
         ));
     }
-    Ok(program_count.max(2).next_power_of_two().ilog2())
+    // Floor of 256 rows: the LogUp trace generator needs at least one SIMD
+    // vector row, and the single-table layout assumes the full 256-entry
+    // range table fits one column.
+    Ok(program_count.max(1 << LOG_SIZE).next_power_of_two().ilog2())
 }
 
 fn validate_program_batch_shape(programs: &[RistrettoFpProgram]) -> TexasAirResult<()> {
@@ -982,25 +1030,80 @@ fn validate_program_batch_shape(programs: &[RistrettoFpProgram]) -> TexasAirResu
     Ok(())
 }
 
+/// Byte-column indices (relative to the program-row prefix) shared by every
+/// row of an equal-shape batch; recomputed from the template shape.
+fn trace_byte_columns(program: &RistrettoFpProgram) -> Vec<usize> {
+    trace_row_with_bytes(program)
+        .expect("program shape was validated before trace generation")
+        .1
+}
+
+fn range_table_column_count(log_size: u32) -> usize {
+    (256usize >> log_size.min(8)).max(1)
+}
+
+/// Append and fill the shared range-table columns: for each table column
+/// `t`, one multiplicity column followed by one value column, entry
+/// `t · 2^log_size + row` while below 256 (inert value and zero
+/// multiplicity beyond).
+fn append_range_table_columns(
+    trace: &mut MethodTrace,
+    log_size: u32,
+    byte_columns: &[usize],
+    program_width: usize,
+) {
+    let rows = 1usize << log_size;
+    let table_columns = range_table_column_count(log_size);
+    let mut multiplicities = vec![0u32; 256];
+    for column in byte_columns {
+        for row in 0..rows {
+            let value = u64::from(trace.cols[*column][row].0) as usize;
+            if value < 256 {
+                multiplicities[value] += 1;
+            }
+        }
+    }
+    for t in 0..table_columns {
+        let mult_index = program_width + 2 * t;
+        let value_index = program_width + 2 * t + 1;
+        for row in 0..rows {
+            let entry = t * rows + row;
+            let (value, multiplicity) = if entry < 256 {
+                (M31::from(entry as u32), M31::from(multiplicities[entry]))
+            } else {
+                // Inert entry: zero numerator contributes nothing.
+                (M31::from(256u32), M31::from(0u32))
+            };
+            trace.cols[value_index][row] = value;
+            trace.cols[mult_index][row] = multiplicity;
+        }
+    }
+}
+
 fn trace_columns_batch(programs: &[RistrettoFpProgram]) -> TexasAirResult<MethodTrace> {
     validate_program_batch_shape(programs)?;
     let log_size = batch_log_size(programs.len())?;
     let rows = 1usize << log_size;
+    let (template_row, byte_columns) = trace_row_with_bytes(&programs[0])?;
+    let program_width = template_row.len();
     let program_rows = programs
         .iter()
         .map(trace_row)
         .collect::<TexasAirResult<Vec<_>>>()?;
-    let width = program_rows[0].len();
-    if program_rows.iter().any(|row| row.len() != width) {
+    if program_rows.iter().any(|row| row.len() != program_width) {
         return Err(TexasAirError::SpecViolation(
             "Fp program batch witness widths disagree".into(),
         ));
     }
-    let mut trace = MethodTrace::new(log_size, width);
+    let table_columns = range_table_column_count(log_size);
+    let mut trace = MethodTrace::new(log_size, program_width + 2 * table_columns);
     for row_index in 0..rows {
         let source = row_index.min(program_rows.len() - 1);
-        trace.write_row(row_index, &program_rows[source])?;
+        let mut padded = program_rows[source].clone();
+        padded.resize(program_width + 2 * table_columns, M31::from(0u32));
+        trace.write_row(row_index, &padded)?;
     }
+    append_range_table_columns(&mut trace, log_size, &byte_columns, program_width);
     Ok(trace)
 }
 
@@ -1046,33 +1149,24 @@ impl FrameworkEval for FpProgramAir {
         for value_index in 0..self.program.values.len() {
             let mut value = Vec::with_capacity(LIMBS);
             for _ in 0..LIMBS {
+                // Byte limb; range membership via the shared LogUp table.
                 let limb = eval.next_trace_mask();
-                let mut bits = Vec::with_capacity(8);
-                for _ in 0..8 {
-                    bits.push(eval.next_trace_mask());
-                }
-                let mut reconstructed: E::F = M31::from(0u32).into();
-                for (bit_index, bit) in bits.iter().enumerate() {
-                    eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
-                    reconstructed += bit.clone() * E::F::from(M31::from(1u32 << bit_index));
-                }
-                eval.add_constraint(limb.clone() - reconstructed);
+                eval.add_to_relation(RelationEntry::new(
+                    &self.range,
+                    E::EF::from(one.clone()),
+                    &[limb.clone()],
+                ));
                 value.push(limb);
             }
             if canonicity[value_index] == ValueCanonicity::Witnessed {
                 let mut difference = Vec::with_capacity(LIMBS);
                 for _ in 0..LIMBS {
                     let limb = eval.next_trace_mask();
-                    let mut bits = Vec::with_capacity(8);
-                    for _ in 0..8 {
-                        bits.push(eval.next_trace_mask());
-                    }
-                    let mut reconstructed: E::F = M31::from(0u32).into();
-                    for (bit_index, bit) in bits.iter().enumerate() {
-                        eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
-                        reconstructed += bit.clone() * E::F::from(M31::from(1u32 << bit_index));
-                    }
-                    eval.add_constraint(limb.clone() - reconstructed);
+                    eval.add_to_relation(RelationEntry::new(
+                        &self.range,
+                        E::EF::from(one.clone()),
+                        &[limb.clone()],
+                    ));
                     difference.push(limb);
                 }
 
@@ -1180,17 +1274,22 @@ impl FrameworkEval for FpProgramAir {
                     for _ in 0..(PRODUCT_LIMBS - 1) {
                         let negative = eval.next_trace_mask();
                         let magnitude = eval.next_trace_mask();
-                        let mut bits = Vec::with_capacity(16);
-                        for _ in 0..16 {
-                            bits.push(eval.next_trace_mask());
-                        }
+                        let byte_low = eval.next_trace_mask();
+                        let byte_high = eval.next_trace_mask();
                         eval.add_constraint(negative.clone() * (negative.clone() - one.clone()));
-                        let mut reconstructed: E::F = M31::from(0u32).into();
-                        for (bit_index, bit) in bits.iter().enumerate() {
-                            eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
-                            reconstructed += bit.clone() * E::F::from(M31::from(1u32 << bit_index));
-                        }
-                        eval.add_constraint(magnitude.clone() - reconstructed);
+                        eval.add_constraint(
+                            magnitude.clone() - byte_low.clone() - base.clone() * byte_high.clone(),
+                        );
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.range,
+                            E::EF::from(one.clone()),
+                            &[byte_low.clone()],
+                        ));
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.range,
+                            E::EF::from(one.clone()),
+                            &[byte_high.clone()],
+                        ));
                         let positive = one.clone() - negative.clone();
                         signed_carries.push(positive * magnitude.clone() - negative * magnitude);
                     }
@@ -1221,6 +1320,22 @@ impl FrameworkEval for FpProgramAir {
                 }
             }
         }
+
+        // Table side of the shared range LogUp.  The last `table_columns()`
+        // trace columns hold the table values (entry `t * 2^log_size + row`
+        // while `< 256`, inert beyond), each followed by its negated
+        // multiplicity column, so uses and table balance to zero inside this
+        // single component exactly like the cairo-air range-check pattern.
+        for _ in 0..self.table_columns() {
+            let multiplicity = eval.next_trace_mask();
+            let table_value = eval.next_trace_mask();
+            eval.add_to_relation(RelationEntry::new(
+                &self.range,
+                -E::EF::from(multiplicity.clone()),
+                &[table_value.clone()],
+            ));
+        }
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -1258,6 +1373,124 @@ fn mix_program_batch(channel: &mut impl Channel, programs: &[RistrettoFpProgram]
 }
 
 /// Prove all canonical values and field operations in one STARK.
+
+/// Build the paired LogUp interaction columns for the shared 256-entry
+/// range table, mirroring the AIR's relation-entry emission order: all use
+/// entries (one per LogUp byte column) followed by the table entries
+/// (negated multiplicity over the table value column).  Entries are paired
+/// consecutively (`finalize_logup_in_pairs` semantics); an odd total leaves
+/// the last fraction alone in its own column.  Source columns are
+/// bit-reversed first to match `MethodTrace::to_evaluations` storage.
+fn fp_range_interaction(
+    trace: &MethodTrace,
+    log_size: u32,
+    range: &FpRange8,
+    byte_columns: &[usize],
+    program_width: usize,
+) -> (
+    Vec<
+        stwo::prover::poly::circle::CircleEvaluation<
+            stwo::prover::backend::simd::SimdBackend,
+            M31,
+            stwo::prover::poly::BitReversedOrder,
+        >,
+    >,
+    SecureField,
+) {
+    use stwo::prover::backend::simd::m31::{LOG_N_LANES, PackedBaseField};
+    use stwo::prover::backend::simd::qm31::PackedSecureField;
+
+    let bitrev = |column: &[M31]| -> Vec<M31> {
+        (0..column.len())
+            .map(|i| {
+                let mut r = 0usize;
+                for bit in 0..log_size {
+                    if (i >> bit) & 1 == 1 {
+                        r |= 1 << (log_size - 1 - bit);
+                    }
+                }
+                column[r]
+            })
+            .collect()
+    };
+    let pack_vec = |column: &[M31], vector_row: usize| {
+        let mut values = [M31::from(0u32); stwo::prover::backend::simd::m31::N_LANES];
+        for (lane, value) in values.iter_mut().enumerate() {
+            let row = vector_row * stwo::prover::backend::simd::m31::N_LANES + lane;
+            *value = if row < column.len() {
+                column[row]
+            } else {
+                M31::from(0u32)
+            };
+        }
+        PackedBaseField::from_array(values)
+    };
+
+    let table_columns = range_table_column_count(log_size);
+    let use_den: Vec<Vec<M31>> = byte_columns
+        .iter()
+        .map(|column| bitrev(&trace.cols[*column]))
+        .collect();
+    let table_mult: Vec<Vec<M31>> = (0..table_columns)
+        .map(|t| bitrev(&trace.cols[program_width + 2 * t]))
+        .collect();
+    let table_den: Vec<Vec<M31>> = (0..table_columns)
+        .map(|t| bitrev(&trace.cols[program_width + 2 * t + 1]))
+        .collect();
+
+    // Per-row entry (numerator, denominator) sources: uses first, then the
+    // table entries — the exact emission order of `FpProgramAir::evaluate`.
+    enum Entry {
+        Use(usize),
+        Table(usize),
+    }
+    let entries: Vec<Entry> = (0..byte_columns.len())
+        .map(Entry::Use)
+        .chain((0..table_columns).map(Entry::Table))
+        .collect();
+
+    let one_packed = PackedSecureField::from(PackedBaseField::from(M31::from(1u32)));
+    let den_of = |entry: &Entry, vector_row: usize| -> PackedSecureField {
+        match entry {
+            Entry::Use(i) => range.combine(&[pack_vec(&use_den[*i], vector_row)]),
+            Entry::Table(t) => range.combine(&[pack_vec(&table_den[*t], vector_row)]),
+        }
+    };
+    let num_of = |entry: &Entry, vector_row: usize| -> PackedSecureField {
+        match entry {
+            Entry::Use(_) => one_packed,
+            Entry::Table(t) => -PackedSecureField::from(pack_vec(&table_mult[*t], vector_row)),
+        }
+    };
+
+    let mut generator = LogupTraceGenerator::new(log_size);
+    let mut pair_index = 0usize;
+    while pair_index + 1 < entries.len() {
+        let mut col = generator.new_col();
+        for vector_row in 0..(1usize << (log_size - LOG_N_LANES)) {
+            let d0 = den_of(&entries[pair_index], vector_row);
+            let d1 = den_of(&entries[pair_index + 1], vector_row);
+            let n0 = num_of(&entries[pair_index], vector_row);
+            let n1 = num_of(&entries[pair_index + 1], vector_row);
+            col.write_frac(vector_row, n0 * d1 + n1 * d0, d0 * d1);
+        }
+        col.finalize_col();
+        pair_index += 2;
+    }
+    if pair_index < entries.len() {
+        let mut col = generator.new_col();
+        for vector_row in 0..(1usize << (log_size - LOG_N_LANES)) {
+            let n = num_of(&entries[pair_index], vector_row);
+            let d = den_of(&entries[pair_index], vector_row);
+            col.write_frac(vector_row, n, d);
+        }
+        col.finalize_col();
+    }
+    generator.finalize_last()
+}
+
+/// Prove one fixed public Fp program in a single STARK with the shared
+/// range LogUp interaction layer.
 pub fn prove_ristretto_fp_program(
     program: &RistrettoFpProgram,
 ) -> TexasAirResult<ArchivedRistrettoFpProgramProof> {
@@ -1284,6 +1517,17 @@ pub fn prove_ristretto_fp_program(
         tree.extend_evals(trace.to_evaluations());
         tree.commit(&mut channel);
     }
+    let byte_columns = trace_byte_columns(program);
+    let program_width = trace.cols.len() - 2 * range_table_column_count(LOG_SIZE);
+    let range = FpRange8::draw(&mut channel);
+    let (interaction, range_sum) =
+        fp_range_interaction(&trace, LOG_SIZE, &range, &byte_columns, program_width);
+    channel.mix_felts(&[range_sum]);
+    {
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(interaction);
+        tree.commit(&mut channel);
+    }
     let ids = preprocessed_ids(program);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
@@ -1291,8 +1535,9 @@ pub fn prove_ristretto_fp_program(
         FpProgramAir {
             log_size: LOG_SIZE,
             program: program.clone(),
+            range,
         },
-        SecureField::from(0u32),
+        range_sum,
     );
     let proof = prove(&[&component], &mut channel, scheme)
         .map_err(|error| TexasAirError::StwoProverError(error.to_string()))?;
@@ -1302,6 +1547,7 @@ pub fn prove_ristretto_fp_program(
     Ok(ArchivedRistrettoFpProgramProof {
         program: program.clone(),
         stark_proof_bytes,
+        range_claimed_sum: range_sum.to_m31_array().map(|limb| limb.0),
     })
 }
 
@@ -1361,6 +1607,20 @@ pub fn verify_ristretto_fp_program(
         &vec![LOG_SIZE; trace.cols.len()],
         &mut channel,
     );
+    let range = FpRange8::draw(&mut channel);
+    let claimed = SecureField::from_m31_array(core::array::from_fn(|index| {
+        M31::from(archive.range_claimed_sum[index])
+    }));
+    channel.mix_felts(&[claimed]);
+    let byte_columns = trace_byte_columns(&archive.program);
+    let program_width = trace.cols.len() - 2 * range_table_column_count(LOG_SIZE);
+    let interaction_columns =
+        (byte_columns.len() + range_table_column_count(LOG_SIZE)).div_ceil(2);
+    scheme.commit(
+        proof.commitments[2],
+        &vec![LOG_SIZE; interaction_columns * 4],
+        &mut channel,
+    );
     let ids = preprocessed_ids(&archive.program);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
@@ -1368,8 +1628,9 @@ pub fn verify_ristretto_fp_program(
         FpProgramAir {
             log_size: LOG_SIZE,
             program: archive.program.clone(),
+            range,
         },
-        SecureField::from(0u32),
+        claimed,
     );
     stwo::core::verifier::verify(&[&component], &mut channel, &mut scheme, proof)
         .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))
@@ -1405,6 +1666,17 @@ pub fn prove_ristretto_fp_program_batch(
         tree.commit(&mut channel);
     }
     let template = &programs[0];
+    let byte_columns = trace_byte_columns(template);
+    let program_width = trace.cols.len() - 2 * range_table_column_count(log_size);
+    let range = FpRange8::draw(&mut channel);
+    let (interaction, range_sum) =
+        fp_range_interaction(&trace, log_size, &range, &byte_columns, program_width);
+    channel.mix_felts(&[range_sum]);
+    {
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(interaction);
+        tree.commit(&mut channel);
+    }
     let ids = preprocessed_ids(template);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
@@ -1412,8 +1684,9 @@ pub fn prove_ristretto_fp_program_batch(
         FpProgramAir {
             log_size,
             program: template.clone(),
+            range,
         },
-        SecureField::from(0u32),
+        range_sum,
     );
     let proof = prove(&[&component], &mut channel, scheme)
         .map_err(|error| TexasAirError::StwoProverError(error.to_string()))?;
@@ -1423,6 +1696,7 @@ pub fn prove_ristretto_fp_program_batch(
     Ok(ArchivedRistrettoFpProgramBatchProof {
         programs: programs.to_vec(),
         stark_proof_bytes,
+        range_claimed_sum: range_sum.to_m31_array().map(|limb| limb.0),
     })
 }
 
@@ -1484,7 +1758,21 @@ pub fn verify_ristretto_fp_program_batch(
         &vec![log_size; trace.cols.len()],
         &mut channel,
     );
+    let range = FpRange8::draw(&mut channel);
+    let claimed = SecureField::from_m31_array(core::array::from_fn(|index| {
+        M31::from(archive.range_claimed_sum[index])
+    }));
+    channel.mix_felts(&[claimed]);
     let template = &archive.programs[0];
+    let byte_columns = trace_byte_columns(template);
+    let program_width = trace.cols.len() - 2 * range_table_column_count(log_size);
+    let interaction_columns =
+        (byte_columns.len() + range_table_column_count(log_size)).div_ceil(2);
+    scheme.commit(
+        proof.commitments[2],
+        &vec![log_size; interaction_columns * 4],
+        &mut channel,
+    );
     let ids = preprocessed_ids(template);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
@@ -1492,8 +1780,9 @@ pub fn verify_ristretto_fp_program_batch(
         FpProgramAir {
             log_size,
             program: template.clone(),
+            range,
         },
-        SecureField::from(0u32),
+        claimed,
     );
     stwo::core::verifier::verify(&[&component], &mut channel, &mut scheme, proof)
         .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))
@@ -4035,6 +4324,59 @@ mod tests {
         assert!(op_count > MAX_OPS);
     }
 
+
+
+
+    #[test]
+    fn range_logup_multiset_balances_algebraically() {
+        // Native check: for random z, sum of use fractions over all rows must
+        // equal sum of table fractions -- independent of the prover wiring.
+        let mut builder = RistrettoFpProgramBuilder::new(&[small(2), small(3), small(5)]);
+        let sum = builder.add(0, 1).unwrap();
+        let product = builder.multiply(sum, 2).unwrap();
+        let difference = builder.subtract(product, 0).unwrap();
+        let program = builder.finish(&[sum, product, difference]).unwrap();
+        let trace = trace_columns(&program).unwrap();
+        let byte_columns = trace_byte_columns(&program);
+        let program_width = trace.cols.len() - 2 * range_table_column_count(trace.log_size);
+        let rows = 1usize << trace.log_size;
+        let z: i64 = 123456789;
+        let mod_p = |x: i64| ((x % 2_147_483_647 + 2_147_483_647) % 2_147_483_647) as u64;
+        let inv = |a: u64| -> u64 {
+            // Fermat little inverse mod 2^31-1
+            let mut result = 1u64;
+            let base = a % 2_147_483_647;
+            let mut exp = 2_147_483_645u64;
+            let mut b = base;
+            while exp > 0 {
+                if exp & 1 == 1 {
+                    result = result * b % 2_147_483_647;
+                }
+                b = b * b % 2_147_483_647;
+                exp >>= 1;
+            }
+            result
+        };
+        let mut use_sum = 0u64;
+        for column in &byte_columns {
+            for row in 0..rows {
+                let byte = u64::from(trace.cols[*column][row].0);
+                use_sum = (use_sum + inv(mod_p(z + byte as i64 + 2_147_483_647))) % 2_147_483_647;
+            }
+        }
+        let mut table_sum = 0u64;
+        for t in 0..range_table_column_count(trace.log_size) {
+            for row in 0..rows {
+                let mult = u64::from(trace.cols[program_width + 2 * t][row].0);
+                let value = u64::from(trace.cols[program_width + 2 * t + 1][row].0);
+                table_sum =
+                    (table_sum + mult * inv(mod_p(z + value as i64)) % 2_147_483_647)
+                        % 2_147_483_647;
+            }
+        }
+        assert_eq!(use_sum, table_sum, "range multiset is not balanced");
+    }
+
     #[test]
     fn proves_add_subtract_and_multiply_in_one_stark() {
         let mut builder = RistrettoFpProgramBuilder::new(&[small(2), small(3), small(5)]);
@@ -4196,12 +4538,52 @@ mod tests {
         assert_program_trace(&program, &trace);
     }
 
+    /// Row-level assertion evaluator that delegates every constraint to
+    /// [`AssertEvaluator`] but treats the shared LogUp as unchecked: the
+    /// balanced-sum property is exercised end-to-end by the real prover
+    /// roundtrips, and replaying the interaction layer here would duplicate
+    /// that machinery for no extra coverage.
+    struct NoLogupAssertEvaluator<'a>(stwo_constraint_framework::AssertEvaluator<'a>);
+
+    impl<'a> EvalAtRow for NoLogupAssertEvaluator<'a> {
+        type F = M31;
+        type EF = SecureField;
+
+        fn next_interaction_mask<const N: usize>(
+            &mut self,
+            interaction: usize,
+            offsets: [isize; N],
+        ) -> [Self::F; N] {
+            self.0.next_interaction_mask(interaction, offsets)
+        }
+
+        fn add_constraint<G>(&mut self, constraint: G)
+        where
+            Self::EF: std::ops::Mul<G, Output = Self::EF> + From<G>,
+        {
+            self.0.add_constraint(constraint)
+        }
+
+        fn combine_ef(values: [Self::F; 4]) -> Self::EF {
+            SecureField::from_m31_array(values)
+        }
+
+        fn add_to_relation<R: Relation<Self::F, Self::EF>>(
+            &mut self,
+            _entry: stwo_constraint_framework::RelationEntry<'_, Self::F, Self::EF, R>,
+        ) {
+        }
+
+        fn finalize_logup_in_pairs(&mut self) {}
+    }
+
     fn assert_program_trace(program: &RistrettoFpProgram, trace: &MethodTrace) {
         let scope = scope_columns(program);
         let evals = stwo::core::pcs::TreeVec::new(vec![
             scope.cols.iter().collect(),
             trace.cols.iter().collect(),
         ]);
+        let range = FpRange8::draw(&mut stwo::core::channel::Poseidon252Channel::default());
         stwo_constraint_framework::assert_constraints_on_trace(
             &evals,
             LOG_SIZE,
@@ -4209,8 +4591,9 @@ mod tests {
                 FpProgramAir {
                     log_size: LOG_SIZE,
                     program: program.clone(),
+                    range: range.clone(),
                 }
-                .evaluate(eval);
+                .evaluate(NoLogupAssertEvaluator(eval));
             },
             SecureField::from(0u32),
         );
@@ -4263,6 +4646,7 @@ mod tests {
         evaluator = FpProgramAir {
             log_size: LOG_SIZE,
             program,
+            range: FpRange8::draw(&mut stwo::core::channel::Poseidon252Channel::default()),
         }
         .evaluate(evaluator);
         assert_eq!(evaluator.max, 2);
@@ -4352,6 +4736,7 @@ mod tests {
             additions: ArchivedRistrettoFpProgramBatchProof {
                 programs,
                 stark_proof_bytes: Vec::new(),
+                range_claimed_sum: [0, 0, 0, 0],
             },
         };
         validate_compressed_fixed_window_scalar_mul_statement(&archive).unwrap();
@@ -4405,6 +4790,7 @@ mod tests {
             additions: ArchivedRistrettoFpProgramBatchProof {
                 programs,
                 stark_proof_bytes: Vec::new(),
+                range_claimed_sum: [0, 0, 0, 0],
             },
         };
         assert_eq!(

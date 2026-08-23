@@ -415,6 +415,7 @@ mod tests {
             additions: ArchivedRistrettoFpProgramBatchProof {
                 programs: Vec::new(),
                 stark_proof_bytes: Vec::new(),
+            range_claimed_sum: [0, 0, 0, 0],
             },
         }
     }
@@ -490,6 +491,7 @@ mod tests {
             additions: ArchivedRistrettoFpProgramBatchProof {
                 programs,
                 stark_proof_bytes: Vec::new(),
+            range_claimed_sum: [0, 0, 0, 0],
             },
         }
     }
@@ -608,6 +610,31 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    #[ignore = "timing probe for step-2 optimization"]
+    fn timing_single_reconstruction_batch() {
+        let prior = CanonicalRistrettoCiphertext { c1: [0; 32], c2: [0; 32] };
+        let c1_base_c2_double = CanonicalRistrettoCiphertext {
+            c1: basepoint(),
+            c2: double_basepoint(),
+        };
+        let contributions = [c1_base_c2_double; CANONICAL_RECONSTRUCTION_CARDS];
+        let post = contributions;
+        let t = std::time::Instant::now();
+        let deck = prove_ristretto_reconstruction_deck_accumulator(
+            [prior; CANONICAL_RECONSTRUCTION_CARDS],
+            contributions,
+            post,
+        )
+        .unwrap();
+        eprintln!("104-row batch prove: {:.2}s", t.elapsed().as_secs_f64());
+        let t = std::time::Instant::now();
+        verify_ristretto_reconstruction_deck_accumulator(&deck).unwrap();
+        eprintln!("104-row batch verify: {:.2}s", t.elapsed().as_secs_f64());
+        let bytes = borsh::to_vec(&deck).map(|v| v.len()).unwrap_or(0);
+        eprintln!("proof bytes: {bytes}");
+    }
+
     fn proves_reconstruction_deck_in_one_ordered_batch_stark() {
         let prior = CanonicalRistrettoCiphertext {
             c1: [0; 32],

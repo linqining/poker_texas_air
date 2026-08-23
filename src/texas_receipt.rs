@@ -13,14 +13,16 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use poker_l1::object_model::{MerklePath, SparseMerkleTree, TREE_DEPTH};
 
 use crate::error::{TexasAirError, TexasAirResult};
+use crate::texas_canonical::CanonicalTransitionKind;
 use crate::texas_canonical_air::ArchivedCanonicalTaggedProof;
 use crate::texas_tagged::ArchivedTaggedTexasProof;
 
 /// Receipt ABI version.  Changing any field encoding requires a new version and domain.
 pub const TEXAS_RECEIPT_VERSION: u8 = 2;
-/// Canonical AIR receipt ABI.  Version 4 adds the fixed-width state-object
-/// key and epoch; it must never be decoded as an earlier root-only layout.
-pub const CANONICAL_TEXAS_RECEIPT_VERSION: u8 = 4;
+/// Canonical AIR receipt ABI. Version 5 adds the fixed-width first/last
+/// transition-kind selectors alongside the state-object key and epoch; it
+/// must never be decoded as an earlier root-only layout.
+pub const CANONICAL_TEXAS_RECEIPT_VERSION: u8 = 5;
 pub const TEXAS_RECEIPT_PATH_DOMAIN: &[u8] = b"zchain.texas.transition-receipt.path.v2";
 pub const TEXAS_RECEIPT_VALUE_DOMAIN: &[u8] = b"zchain.texas.transition-receipt.value.v2";
 
@@ -202,6 +204,11 @@ pub struct CanonicalReceiptStatement {
     pub first_call_seq: u32,
     pub last_call_seq: u32,
     pub transition_count: u16,
+    pub first_transition_kind: u8,
+    pub last_transition_kind: u8,
+    pub reveal_timeout_cascade_count: u8,
+    pub reveal_timeout_cascade_schedule:
+        [u8; crate::texas_canonical_air::MAX_REVEAL_TIMEOUT_CASCADE_KICKS],
     pub batch_digest: [u8; 32],
     pub pre_state_commitment: [u8; 32],
     pub post_state_commitment: [u8; 32],
@@ -255,6 +262,13 @@ impl CanonicalReceiptStatement {
                 "canonical receipt statement has an empty effect or batch".into(),
             ));
         }
+        if self.first_transition_kind > CanonicalTransitionKind::RevealTimeoutKick as u8
+            || self.last_transition_kind > CanonicalTransitionKind::RevealTimeoutKick as u8
+        {
+            return Err(TexasAirError::SpecViolation(
+                "canonical receipt transition kind is outside the ABI".into(),
+            ));
+        }
         if self.state_opening_epoch == 0 {
             return Err(TexasAirError::SpecViolation(
                 "canonical receipt statement has no fixed-width state-object epoch".into(),
@@ -290,6 +304,11 @@ pub struct CanonicalTransitionReceipt {
     pub first_call_seq: u32,
     pub last_call_seq: u32,
     pub transition_count: u16,
+    pub first_transition_kind: u8,
+    pub last_transition_kind: u8,
+    pub reveal_timeout_cascade_count: u8,
+    pub reveal_timeout_cascade_schedule:
+        [u8; crate::texas_canonical_air::MAX_REVEAL_TIMEOUT_CASCADE_KICKS],
     pub batch_digest: [u8; 32],
     pub pre_state_commitment: [u8; 32],
     pub post_state_commitment: [u8; 32],
@@ -317,6 +336,8 @@ impl CanonicalTransitionReceipt {
     pub fn validate(&self) -> TexasAirResult<()> {
         if self.version != CANONICAL_TEXAS_RECEIPT_VERSION
             || self.transition_count == 0
+            || self.first_transition_kind > CanonicalTransitionKind::RevealTimeoutKick as u8
+            || self.last_transition_kind > CanonicalTransitionKind::RevealTimeoutKick as u8
             || self.block_hash == [0; 32]
             || self.receipt_key == [0; 32]
         {
@@ -435,6 +456,32 @@ impl AuthenticatedCanonicalTexasReceipt {
         bind_canonical_proof_to_receipt(&archive.opening.canonical, &self.receipt)?;
         Err(TexasAirError::HostZeroAdmissionIncomplete(
             "complete Texas VM semantics and Ristretto crypto AIR are not yet composed into this proof".into(),
+        ))
+    }
+
+    /// Verify a reveal-dependent state-image composition without VM replay.
+    /// Admission remains fail-closed until the terminal continuation and
+    /// complete Texas/Ristretto relations are composed.
+    pub fn verify_canonical_proof_with_state_image_and_reveal_opening(
+        &self,
+        archive: &crate::canonical_state_opening::ArchivedCanonicalStateImageRevealOpeningProof,
+    ) -> TexasAirResult<()> {
+        crate::canonical_state_opening::verify_canonical_batch_with_state_image_and_reveal_opening(
+            archive,
+        )?;
+        bind_canonical_proof_to_receipt(&archive.opening.opening.canonical, &self.receipt)
+    }
+
+    /// Production admission for the reveal-dependent composition.  This
+    /// explicit gate prevents callers from treating the partial composition
+    /// as a complete host-zero Texas proof.
+    pub fn admit_canonical_proof_with_state_image_and_reveal_opening(
+        &self,
+        archive: &crate::canonical_state_opening::ArchivedCanonicalStateImageRevealOpeningProof,
+    ) -> TexasAirResult<()> {
+        self.verify_canonical_proof_with_state_image_and_reveal_opening(archive)?;
+        Err(TexasAirError::HostZeroAdmissionIncomplete(
+            "complete Texas terminal continuation, settlement, and Ristretto AIR are not yet composed".into(),
         ))
     }
 }
@@ -708,6 +755,10 @@ pub fn authenticate_canonical_receipt_l1(
         || receipt.first_call_seq != statement.first_call_seq
         || receipt.last_call_seq != statement.last_call_seq
         || receipt.transition_count != statement.transition_count
+        || receipt.first_transition_kind != statement.first_transition_kind
+        || receipt.last_transition_kind != statement.last_transition_kind
+        || receipt.reveal_timeout_cascade_count != statement.reveal_timeout_cascade_count
+        || receipt.reveal_timeout_cascade_schedule != statement.reveal_timeout_cascade_schedule
         || receipt.batch_digest != statement.batch_digest
         || receipt.pre_state_commitment != statement.pre_state_commitment
         || receipt.post_state_commitment != statement.post_state_commitment
@@ -802,6 +853,10 @@ pub fn bind_canonical_proof_to_receipt(
         || archive.first_call_seq != receipt.first_call_seq
         || archive.last_call_seq != receipt.last_call_seq
         || archive.transition_count != receipt.transition_count
+        || archive.first_transition_kind != receipt.first_transition_kind
+        || archive.last_transition_kind != receipt.last_transition_kind
+        || archive.reveal_timeout_cascade_count != receipt.reveal_timeout_cascade_count
+        || archive.reveal_timeout_cascade_schedule != receipt.reveal_timeout_cascade_schedule
         || archive.batch_digest != receipt.batch_digest
         || archive.pre_state_commitment != receipt.pre_state_commitment
         || archive.post_state_commitment != receipt.post_state_commitment
@@ -1060,6 +1115,12 @@ mod tests {
             first_call_seq: 4,
             last_call_seq: 5,
             transition_count: 1,
+            first_transition_kind: 0,
+            last_transition_kind: 0,
+            reveal_timeout_cascade_count: 0,
+            reveal_timeout_cascade_schedule:
+                [crate::texas_canonical_air::REVEAL_TIMEOUT_CASCADE_EMPTY_SEAT;
+                    crate::texas_canonical_air::MAX_REVEAL_TIMEOUT_CASCADE_KICKS],
             batch_digest: [11; 32],
             pre_state_commitment: [12; 32],
             post_state_commitment: [13; 32],
@@ -1075,9 +1136,12 @@ mod tests {
             post_custody_commitment: [23; 32],
             pre_state_image_bytes: Vec::new(),
             post_state_image_bytes: Vec::new(),
+            rake_opening: None,
+            rules_hash: None,
             state_object_key: [24; 32],
             state_opening_epoch: 1,
             stark_proof_bytes: vec![],
+            range_claimed_sum: [0, 0, 0, 0],
         };
         let receipt = CanonicalTransitionReceipt {
             version: CANONICAL_TEXAS_RECEIPT_VERSION,
@@ -1087,6 +1151,10 @@ mod tests {
             first_call_seq: archive.first_call_seq,
             last_call_seq: archive.last_call_seq,
             transition_count: archive.transition_count,
+            first_transition_kind: archive.first_transition_kind,
+            last_transition_kind: archive.last_transition_kind,
+            reveal_timeout_cascade_count: archive.reveal_timeout_cascade_count,
+            reveal_timeout_cascade_schedule: archive.reveal_timeout_cascade_schedule,
             batch_digest: archive.batch_digest,
             pre_state_commitment: archive.pre_state_commitment,
             post_state_commitment: archive.post_state_commitment,
@@ -1121,6 +1189,10 @@ mod tests {
         forged.state_opening_epoch += 1;
         assert!(bind_canonical_proof_to_receipt(&archive, &forged).is_err());
 
+        let mut forged = receipt.clone();
+        forged.first_transition_kind = CanonicalTransitionKind::JoinTable as u8;
+        assert!(bind_canonical_proof_to_receipt(&archive, &forged).is_err());
+
         let empty_compression =
             crate::blake2b_lookup_compression::ArchivedBlake2bLookupCompressionProof {
                 messages: Vec::new(),
@@ -1142,9 +1214,10 @@ mod tests {
                     },
             },
             state_image_hashes: crate::canonical_state_hash::ArchivedCanonicalStateImageHashProof {
-                hashes: crate::blake2b_lookup_compression::ArchivedBlake2bLookupHashesProof {
+                hashes: crate::blake3_flock::ArchivedFlockHashesProof {
                     statements: Vec::new(),
-                    compression: empty_compression,
+                    chains: Vec::new(),
+                    merkles: Vec::new(),
                 },
             },
         };
@@ -1162,6 +1235,10 @@ mod tests {
                 first_call_seq: archive.first_call_seq,
                 last_call_seq: archive.last_call_seq,
                 transition_count: archive.transition_count,
+                first_transition_kind: archive.first_transition_kind,
+                last_transition_kind: archive.last_transition_kind,
+                reveal_timeout_cascade_count: archive.reveal_timeout_cascade_count,
+                reveal_timeout_cascade_schedule: archive.reveal_timeout_cascade_schedule,
                 batch_digest: archive.batch_digest,
                 pre_state_commitment: archive.pre_state_commitment,
                 post_state_commitment: archive.post_state_commitment,

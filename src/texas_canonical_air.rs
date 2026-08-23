@@ -25,7 +25,8 @@ use stwo::prover::pcs::CommitmentSchemeProver;
 use stwo::prover::{ProvingError, prove};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, TraceLocationAllocator,
+    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
+    TraceLocationAllocator, relation,
 };
 
 use crate::error::{TexasAirError, TexasAirResult};
@@ -39,7 +40,11 @@ use crate::trace_gen::MethodTrace;
 use crate::trace_gen::generic_trace::tagged_batch_log_size;
 
 const MAX_ROWS: usize = 1 << 10;
-const KIND_COUNT: usize = 24;
+const KIND_COUNT: usize = 29;
+/// A reveal-timeout cascade cannot exceed the fixed table capacity.
+pub const MAX_REVEAL_TIMEOUT_CASCADE_KICKS: usize = MAX_CANONICAL_SEATS;
+/// Fixed padding value for unused public cascade schedule entries.
+pub const REVEAL_TIMEOUT_CASCADE_EMPTY_SEAT: u8 = u8::MAX;
 
 // active, kinds, table, hand(pre/post), seq(pre/post), image commitments(pre/post),
 // state roots(pre/post), lifecycle roots(pre/post), overlay roots(pre/post), settlement roots
@@ -47,7 +52,7 @@ const KIND_COUNT: usize = 24;
 // The fixed prefix carries the canonical ABI.  The projection suffix carries the
 // phase/round scalars and selected-seat image needed by the betting family. Keeping it in
 // the same row preserves the tagged batch's one-proof-per-table performance profile.
-const BASE_NUM_COLUMNS: usize = 1569;
+const BASE_NUM_COLUMNS: usize = 1574;
 const FULL_BETTING_SEAT_WIDTH: usize = SEAT_STATUS_COUNT + 4 * 4 + 2;
 const FULL_BETTING_SEATS_OFFSET: usize = BASE_NUM_COLUMNS;
 const FULL_POST_BETTING_SEATS_OFFSET: usize =
@@ -151,15 +156,74 @@ const SHUFFLE_PENDING_COUNT_PRODUCT_OFFSET: usize = SHUFFLE_TIMEOUT_GATE_OFFSET 
 const SHUFFLE_DECK_DIFF_SQUARE_SUM_OFFSET: usize = SHUFFLE_PENDING_COUNT_PRODUCT_OFFSET + 1;
 const SHUFFLE_DECK_PRODUCT_OFFSET: usize = SHUFFLE_DECK_DIFF_SQUARE_SUM_OFFSET + 1;
 const SHUFFLE_DECK_NONZERO_CHANGE_INV_OFFSET: usize = SHUFFLE_DECK_PRODUCT_OFFSET + 1;
-const NUM_COLUMNS: usize = SHUFFLE_DECK_NONZERO_CHANGE_INV_OFFSET + 1;
+// Reveal-timeout reconstruct-continuation advice, again appended so every
+// existing fixed-width ABI offset stays stable.  The two street bits range
+// the pre street into the VM's board reveal streets; the commitment-change
+// and live-count products keep their non-zero checks within degree three.
+const REVEAL_RECONSTRUCT_STREET_BITS_OFFSET: usize = SHUFFLE_DECK_NONZERO_CHANGE_INV_OFFSET + 1;
+const REVEAL_RECONSTRUCT_DIFF_SQUARE_SUM_OFFSET: usize = REVEAL_RECONSTRUCT_STREET_BITS_OFFSET + 2;
+const REVEAL_RECONSTRUCT_CHANGE_PRODUCT_OFFSET: usize =
+    REVEAL_RECONSTRUCT_DIFF_SQUARE_SUM_OFFSET + 1;
+const REVEAL_RECONSTRUCT_CHANGE_INV_OFFSET: usize = REVEAL_RECONSTRUCT_CHANGE_PRODUCT_OFFSET + 1;
+const REVEAL_RECONSTRUCT_LIVE_PRODUCT_OFFSET: usize = REVEAL_RECONSTRUCT_CHANGE_INV_OFFSET + 1;
+const REVEAL_RECONSTRUCT_LIVE_INV_OFFSET: usize = REVEAL_RECONSTRUCT_LIVE_PRODUCT_OFFSET + 1;
+// Three bits range a reveal-timeout kick street into the VM's exact
+// reveal-street domain {1..=5}; the high bit is forced to select street 5.
+const REVEAL_KICK_STREET_BITS_OFFSET: usize = REVEAL_RECONSTRUCT_LIVE_INV_OFFSET + 1;
+// Sole-survivor award advice: a one-hot winner credit vector plus the
+// inverse proving the awarded pot is non-zero.
+const REVEAL_AWARD_WINNER_CREDIT_OFFSET: usize = REVEAL_KICK_STREET_BITS_OFFSET + 3;
+const REVEAL_AWARD_POT_INV_OFFSET: usize = REVEAL_AWARD_WINNER_CREDIT_OFFSET + MAX_CANONICAL_SEATS;
+// Raked sole-survivor award advice.  The six config columns copy the public
+// authenticated opening; everything after them proves the exact
+// `min(floor(pot * bps / 10_000), cap)` arithmetic with 16-bit range
+// decompositions so no limb can wrap in M31.
+const RAKE_CONFIG_OFFSET: usize = REVEAL_AWARD_POT_INV_OFFSET + 1;
+// Rake range proofs use byte pairs checked against a shared 256-entry LogUp
+// range table: every 16-bit limb costs two advice columns (low/high byte)
+// plus two lookups instead of sixteen bit columns.
+const RAKE_POT_BYTES_OFFSET: usize = RAKE_CONFIG_OFFSET + 6;
+const RAKE_PRODUCT_OFFSET: usize = RAKE_POT_BYTES_OFFSET + 2 * 2;
+const RAKE_PRODUCT_BYTES_OFFSET: usize = RAKE_PRODUCT_OFFSET + 4;
+const RAKE_LIMBS_OFFSET: usize = RAKE_PRODUCT_BYTES_OFFSET + 4 * 2;
+const RAKE_LIMB_BYTES_OFFSET: usize = RAKE_LIMBS_OFFSET + 4;
+const RAKE_SCALED_OFFSET: usize = RAKE_LIMB_BYTES_OFFSET + 4 * 2;
+const RAKE_SCALED_BYTES_OFFSET: usize = RAKE_SCALED_OFFSET + 4;
+const RAKE_REMAINDER_OFFSET: usize = RAKE_SCALED_BYTES_OFFSET + 4 * 2;
+const RAKE_REMAINDER_BYTES_OFFSET: usize = RAKE_REMAINDER_OFFSET + 1;
+// Two extra bytes witnessing `9_999 - remainder`, pinning the remainder
+// strictly below the divisor for the exact floor division.
+const RAKE_REMAINDER_BOUND_BYTES_OFFSET: usize = RAKE_REMAINDER_BYTES_OFFSET + 2;
+const RAKE_DIV_CARRIES_OFFSET: usize = RAKE_REMAINDER_BOUND_BYTES_OFFSET + 2;
+const RAKE_MIN_DIFF_OFFSET: usize = RAKE_DIV_CARRIES_OFFSET + 3;
+const RAKE_MIN_DIFF_BYTES_OFFSET: usize = RAKE_MIN_DIFF_OFFSET + 4;
+const RAKE_MIN_BORROWS_OFFSET: usize = RAKE_MIN_DIFF_BYTES_OFFSET + 4 * 2;
+const RAKE_FINAL_OFFSET: usize = RAKE_MIN_BORROWS_OFFSET + 4;
+const RAKE_FINAL_BYTES_OFFSET: usize = RAKE_FINAL_OFFSET + 4;
+const RAKE_AWARD_LIMBS_OFFSET: usize = RAKE_FINAL_BYTES_OFFSET + 4 * 2;
+const RAKE_AWARD_BYTES_OFFSET: usize = RAKE_AWARD_LIMBS_OFFSET + 4;
+const RAKE_CHIP_INTERMEDIATE_OFFSET: usize = RAKE_AWARD_BYTES_OFFSET + 4 * 2;
+const RAKE_CHIP_EXTRA_CARRIES_OFFSET: usize = RAKE_CHIP_INTERMEDIATE_OFFSET + 4;
+const NUM_COLUMNS: usize = RAKE_CHIP_EXTRA_CARRIES_OFFSET + 3;
 // The fixed public scope contains the table/sequence/image boundary plus the
 // five authenticated root domains (state, lifecycle, overlay, settlement and
 // custody) at both ends of the batch.
-const PREPROCESSED_COLUMNS: usize = 39 + 16 * 10 + 2 * STATE_IMAGE_PROJECTION_LIMBS;
+const PREPROCESSED_COLUMNS: usize = 39 + 16 * 10 + 2 * STATE_IMAGE_PROJECTION_LIMBS + 4 + 6 + 1;
 const SEAT_STATUS_COUNT: usize = 6;
 const ROOT_SCOPE_OFFSET: usize = 39;
 const ROOT_DOMAIN_COUNT: usize = 5;
 const STATE_IMAGE_SCOPE_OFFSET: usize = ROOT_SCOPE_OFFSET + 16 * ROOT_DOMAIN_COUNT * 2;
+const FIRST_KIND_SCOPE_OFFSET: usize = STATE_IMAGE_SCOPE_OFFSET + 2 * STATE_IMAGE_PROJECTION_LIMBS;
+const LAST_KIND_SCOPE_OFFSET: usize = FIRST_KIND_SCOPE_OFFSET + 1;
+const REVEAL_TIMEOUT_CASCADE_ACTIVE_SCOPE_OFFSET: usize = LAST_KIND_SCOPE_OFFSET + 1;
+const REVEAL_TIMEOUT_CASCADE_SEAT_SCOPE_OFFSET: usize =
+    REVEAL_TIMEOUT_CASCADE_ACTIVE_SCOPE_OFFSET + 1;
+// Public rake-configuration scope (mode, bps, four cap limbs) for raked
+// settlement terminals.  The companion Blake2b rules-opening proof
+// authenticates these columns to the pre rules commitment.
+const RAKE_SCOPE_OFFSET: usize = REVEAL_TIMEOUT_CASCADE_SEAT_SCOPE_OFFSET + 1;
+// Shared 256-entry byte range table consumed through the LogUp relation.
+const RANGE_TABLE_SCOPE_OFFSET: usize = RAKE_SCOPE_OFFSET + 6;
 
 // `CanonicalStateImage` is deliberately a fixed Borsh ABI.  These constants
 // are byte positions in its 1,680-byte v5 encoding, not host projections.
@@ -224,28 +288,34 @@ const STATE_IMAGE_PROJECTION_LIMBS: usize = STATE_IMAGE_HEADER_PROJECTION_LIMBS
 // Stable positions in the fixed canonical ABI prefix.  Keep mutation tests
 // named rather than coupling them to incidental trace growth in the advice
 // suffix below.
-const ACTION_AMOUNT_OFFSET: usize = 261;
+const ACTION_AMOUNT_OFFSET: usize = 267;
 const PROOF_COMMITMENT_OFFSET: usize = ACTION_AMOUNT_OFFSET - 17;
-const ACTION_SEAT_OFFSET: usize = 260;
-const ACTION_AUXILIARY_OFFSET: usize = 265;
-const ACTION_FLAG_OFFSET: usize = 269;
-const ACTION_AMOUNT_INVERSE_OFFSET: usize = 352;
-const PRE_PHASE_OFFSET: usize = 275;
-const POST_PHASE_OFFSET: usize = 276;
-const POST_TURN_OFFSET: usize = 282;
-const PRE_POT_OFFSET: usize = 299;
-const POST_POT_OFFSET: usize = 303;
-const POST_LEAVE_MASK_OFFSET: usize = 310;
-const PRE_PROTOCOL_PENDING_MASK_OFFSET: usize = 311;
-const POST_PROTOCOL_PENDING_MASK_OFFSET: usize = 312;
-const SELECTED_POST_STATUS_OFFSET: usize = 333;
-const DEADLINE_HEIGHT_OFFSET: usize = 270;
+const ACTION_SEAT_OFFSET: usize = 266;
+const ACTION_AUXILIARY_OFFSET: usize = 271;
+const ACTION_FLAG_OFFSET: usize = 275;
+const ACTION_AMOUNT_INVERSE_OFFSET: usize = 357;
+const PRE_PHASE_OFFSET: usize = 281;
+const POST_PHASE_OFFSET: usize = 282;
+const POST_TURN_OFFSET: usize = 288;
+const PRE_POT_OFFSET: usize = 305;
+const POST_POT_OFFSET: usize = 309;
+const POST_LEAVE_MASK_OFFSET: usize = 316;
+const PRE_PROTOCOL_PENDING_MASK_OFFSET: usize = 317;
+const POST_PROTOCOL_PENDING_MASK_OFFSET: usize = 318;
+const SELECTED_POST_STATUS_OFFSET: usize = 339;
+const DEADLINE_HEIGHT_OFFSET: usize = 276;
 const PRE_CHIP_POOL_OFFSET: usize = BASE_NUM_COLUMNS - 2 * 4 * 16 - 9 - 8;
 const POST_CHIP_POOL_OFFSET: usize = PRE_CHIP_POOL_OFFSET + 4;
 
-#[derive(Debug, Clone, Copy)]
+/// Shared 256-entry byte range table for the raked-award LogUp lookups,
+/// following the cairo-air range-check component pattern (single component,
+/// paired fractions, log_size+1 degree bound).
+relation!(CanonicalRange8, 1);
+
+#[derive(Debug, Clone)]
 struct CanonicalAir {
     log_size: u32,
+    range: CanonicalRange8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -258,6 +328,18 @@ pub struct ArchivedCanonicalTaggedProof {
     pub first_call_seq: u32,
     pub last_call_seq: u32,
     pub transition_count: u16,
+    /// Selector on the first trace row, publicly bound by the canonical AIR.
+    pub first_transition_kind: u8,
+    /// Selector on the last trace row, publicly bound by the canonical AIR.
+    pub last_transition_kind: u8,
+    /// Number of non-terminal reveal-timeout kick rows in this tagged batch.
+    /// Zero denotes an ordinary canonical batch.  When the final row is a
+    /// `RevealTimeoutReset` continuation, the terminal seat is stored in the
+    /// next schedule slot and `transition_count == count + 1`.
+    pub reveal_timeout_cascade_count: u8,
+    /// Public seat sequence for the reveal-timeout kick rows. Unused entries
+    /// are padded with [`REVEAL_TIMEOUT_CASCADE_EMPTY_SEAT`].
+    pub reveal_timeout_cascade_schedule: [u8; MAX_REVEAL_TIMEOUT_CASCADE_KICKS],
     pub batch_digest: [u8; 32],
     pub pre_state_commitment: [u8; 32],
     pub post_state_commitment: [u8; 32],
@@ -277,6 +359,16 @@ pub struct ArchivedCanonicalTaggedProof {
     /// the complete byte strings to the two image commitments.
     pub pre_state_image_bytes: Vec<u8>,
     pub post_state_image_bytes: Vec<u8>,
+    /// Public claimed sum of the balanced range LogUp relation, serialized as
+    /// the four M31 coordinates of the secure field element.
+    pub range_claimed_sum: [u32; 4],
+    /// Public authenticated rake configuration for a raked sole-survivor
+    /// award terminal.  Present exactly when the batch contains a
+    /// `RevealTimeoutRakedAward` row.
+    pub rake_opening: Option<crate::canonical_rake_opening::CanonicalRakeOpening>,
+    /// Lookup-backed Blake2b proof that the complete table-rules byte string
+    /// hashes to the pre rules commitment, authenticating `rake_opening`.
+    pub rules_hash: Option<crate::canonical_rake_opening::ArchivedCanonicalRulesHashProof>,
     /// Immutable L1 object key of the fixed-width state-commitment leaf.
     ///
     /// A value of zero is reserved for the legacy canonical proof API.  The
@@ -329,7 +421,7 @@ fn options() -> impl Options {
         .with_limit(16 * 1024 * 1024)
 }
 
-fn digest_batch(witnesses: &[CanonicalTransitionWitness]) -> [u8; 32] {
+pub(crate) fn batch_digest_for_witnesses(witnesses: &[CanonicalTransitionWitness]) -> [u8; 32] {
     let encoded = borsh::to_vec(witnesses).expect("canonical witness encoding");
     let mut h = Blake2bVar::new(32).expect("digest length");
     h.update(b"zchain.texas.canonical-tagged-batch.v2");
@@ -496,8 +588,9 @@ fn decode_state_image_bytes(bytes: &[u8]) -> TexasAirResult<CanonicalStateImage>
     Ok(image)
 }
 
-fn validate_state_image_bytes(
+fn validate_state_image_bytes_inner(
     proof: &ArchivedCanonicalTaggedProof,
+    verify_commitment: bool,
 ) -> TexasAirResult<(CanonicalStateImage, CanonicalStateImage)> {
     let pre = decode_state_image_bytes(&proof.pre_state_image_bytes)?;
     let post = decode_state_image_bytes(&proof.post_state_image_bytes)?;
@@ -515,7 +608,7 @@ fn validate_state_image_bytes(
         if image.table_id != proof.table_id
             || image.hand_id != expected_hand
             || image.call_seq != expected_call_seq
-            || image.commitment() != expected_commitment
+            || (verify_commitment && image.commitment() != expected_commitment)
             || image.state_root != expected_state_root
             || image.lifecycle_root != expected_lifecycle_root
             || image.overlay_root != expected_overlay_root
@@ -552,12 +645,39 @@ fn validate_state_image_bytes(
         proof.post_custody_commitment,
         "post",
     )?;
-    // Keep the projection check explicit: the AIR's endpoint relation consumes
-    // this compact projection, while the typed checks above authenticate the
-    // complete fixed-width image and its domain-separated commitment.
+    // Keep the projection check explicit: the AIR consumes this compact
+    // fixed-width endpoint statement; a separate hash AIR authenticates the
+    // byte-to-commitment relation in the host-zero composition.
     state_image_projection(&proof.pre_state_image_bytes)?;
     state_image_projection(&proof.post_state_image_bytes)?;
     Ok((pre, post))
+}
+
+fn validate_state_image_bytes(
+    proof: &ArchivedCanonicalTaggedProof,
+) -> TexasAirResult<(CanonicalStateImage, CanonicalStateImage)> {
+    validate_state_image_bytes_inner(proof, true)
+}
+
+/// Validate the typed endpoint ABI and public scope without recomputing the
+/// Blake2b image commitment in the host.  The state-image opening composition
+/// supplies that missing relation through its dedicated lookup-backed hash
+/// AIR; this path is therefore the verifier-side boundary for host-zero
+/// composition.
+pub(crate) fn validate_state_image_bytes_without_commitment(
+    proof: &ArchivedCanonicalTaggedProof,
+) -> TexasAirResult<(CanonicalStateImage, CanonicalStateImage)> {
+    validate_state_image_bytes_inner(proof, false)
+}
+
+/// Decode the canonical endpoint bytes carried by an archived proof for a
+/// proof-composition module.  The returned images have already been checked
+/// against the archive's public scope and canonical Borsh ABI; no VM replay
+/// or native hash result is consulted.
+pub(crate) fn validate_canonical_state_image_scope_for_opening(
+    proof: &ArchivedCanonicalTaggedProof,
+) -> TexasAirResult<(CanonicalStateImage, CanonicalStateImage)> {
+    validate_state_image_bytes(proof)
 }
 
 fn u32_limbs(value: u32) -> [M31; 2] {
@@ -736,28 +856,34 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         out.extend(u64_limbs(image.pending_addon));
         out.extend(u32_limbs(image.time_bank_ms));
     }
-    // The inverse makes the AIR's `post_turn != action.seat` check a true field constraint.
-    // Protocol-submit rows reuse this otherwise idle advice cell to prove the
-    // selected seat is non-empty before accepting a shuffle/reveal/reconstruct
-    // submission.
-    let turn_delta = u32::from(w.post.current_turn) as u64 + 16 - u64::from(w.action.seat);
-    let turn_delta = (turn_delta % 16) as u32;
+    // The inverse makes the AIR's `post_turn != action.seat` check a true field
+    // constraint.  The AIR multiplies the raw field difference
+    // `post_turn - seat`, so the advice must invert that difference exactly:
+    // a wrapped successor (for example seat 1 handing action back to seat 0)
+    // is the field value `-1`, not the mod-16 residue 15.  Protocol-submit
+    // rows reuse this otherwise idle advice cell to prove the selected seat
+    // is non-empty before accepting a shuffle/reveal/reconstruct submission.
     let protocol_submit = matches!(
         w.kind,
         CanonicalTransitionKind::SubmitShuffle
             | CanonicalTransitionKind::SubmitReveal
             | CanonicalTransitionKind::SubmitReconstruct
     );
-    let turn_inverse_input = if protocol_submit {
-        before_seat.status as u32
+    let turn_inv = if protocol_submit {
+        let status = before_seat.status as u32;
+        if status == 0 {
+            M31::from(0)
+        } else {
+            M31::from(status).inverse()
+        }
     } else {
-        turn_delta
-    };
-    let turn_inv = if turn_inverse_input == 0 {
-        M31::from(0)
-    } else {
-        // M31 inversion is represented by a host constant; the AIR still checks the product.
-        M31::from(turn_inverse_input).inverse()
+        let difference =
+            M31::from(u32::from(w.post.current_turn)) - M31::from(u32::from(w.action.seat));
+        if difference == M31::from(0) {
+            M31::from(0)
+        } else {
+            difference.inverse()
+        }
     };
     out.push(turn_inv);
     // Keep Call's ripple carries in the committed row. The fourth limb equation
@@ -997,9 +1123,15 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     let funding = is_funding_action(w.kind);
     let is_join = w.kind == CanonicalTransitionKind::JoinTable;
     let is_leave = w.kind == CanonicalTransitionKind::LeaveTable;
-    let is_kick = w.kind == CanonicalTransitionKind::KickPlayer;
+    let is_kick = matches!(
+        w.kind,
+        CanonicalTransitionKind::KickPlayer | CanonicalTransitionKind::RevealTimeoutKick
+    );
     let is_shuffle_timeout = w.kind == CanonicalTransitionKind::AdvanceDeadline && w.action.flag;
     let is_reconstruct_timeout = w.kind == CanonicalTransitionKind::ReconstructTimeoutReset;
+    let is_reveal_timeout = w.kind == CanonicalTransitionKind::RevealTimeoutReset;
+    let is_timeout_reset = is_reconstruct_timeout || is_reveal_timeout;
+    let is_reveal_reconstruct = w.kind == CanonicalTransitionKind::RevealTimeoutReconstruct;
     let kick_refund = before_seat.stack.saturating_add(before_seat.pending_addon);
     let shuffle_refund = kick_refund;
     out.extend(u64_limbs(w.pre.chip_pool));
@@ -1010,8 +1142,10 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         add_carries(w.pre.chip_pool, w.action.amount)
     } else if is_leave || is_kick {
         add_carries(w.post.chip_pool, kick_refund)
-    } else if is_shuffle_timeout || is_reconstruct_timeout {
+    } else if is_shuffle_timeout || is_timeout_reset {
         add_carries(w.post.chip_pool, shuffle_refund)
+    } else if is_reveal_reconstruct || w.kind == CanonicalTransitionKind::RevealTimeoutAward {
+        add_carries(w.post.chip_pool, kick_refund)
     } else {
         [M31::from(0u32); 3]
     });
@@ -1021,6 +1155,8 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         add_carries(w.pre.pot, before_seat.bet)
     } else if is_shuffle_timeout {
         add_carries(w.pre.pot, before_seat.bet)
+    } else if is_reveal_reconstruct {
+        add_carries(w.pre.pot, before_seat.bet)
     } else {
         [M31::from(0u32); 3]
     });
@@ -1029,6 +1165,8 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     } else if is_leave || is_kick {
         add_carries(before_seat.stack, before_seat.pending_addon)
     } else if is_shuffle_timeout {
+        add_carries(before_seat.stack, before_seat.pending_addon)
+    } else if is_reveal_reconstruct || w.kind == CanonicalTransitionKind::RevealTimeoutAward {
         add_carries(before_seat.stack, before_seat.pending_addon)
     } else {
         [M31::from(0u32); 3]
@@ -1227,7 +1365,13 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     );
     let is_advance_deadline = w.kind == CanonicalTransitionKind::AdvanceDeadline;
     let is_auto_fold = w.kind == CanonicalTransitionKind::AutoFold;
-    let deadline_check = is_advance_deadline || is_auto_fold || is_reconstruct_timeout;
+    let deadline_check = is_advance_deadline
+        || is_auto_fold
+        || is_timeout_reset
+        || w.kind == CanonicalTransitionKind::RevealTimeoutKick
+        || w.kind == CanonicalTransitionKind::RevealTimeoutReconstruct
+        || w.kind == CanonicalTransitionKind::RevealTimeoutAward
+        || w.kind == CanonicalTransitionKind::RevealTimeoutRakedAward;
     let advance_deadline_difference = if deadline_check {
         // A checked limb addition in the AIR proves `height >= deadline`.
         // Saturation is only an advice fallback for an invalid witness; it
@@ -1288,6 +1432,8 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         } else if shuffle_timeout && post_pending_count > 1 {
             let product = post_pending_count * (post_pending_count - 1);
             M31::from(product).inverse()
+        } else if w.kind == CanonicalTransitionKind::RevealTimeoutKick && post_pending_count != 0 {
+            M31::from(post_pending_count).inverse()
         } else {
             M31::from(0u32)
         },
@@ -1408,9 +1554,13 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         add_carries(w.deadline_height, u64::from(w.pre.shuffle_timeout_ms))
     } else if is_auto_fold {
         add_carries(w.deadline_height, u64::from(w.pre.betting_timeout_ms))
+    } else if w.kind == CanonicalTransitionKind::RevealTimeoutReconstruct {
+        add_carries(w.deadline_height, u64::from(w.pre.reconstruct_timeout_ms))
     } else {
         [M31::from(0u32); 3]
     });
+    // The raked award arms the deadline from the height exactly like the
+    // reconstruct terminal; its deadline relation reuses these carries.
     // These gates keep selector * consume-all out of the carry boolean
     // relations, so the whole AIR remains cubic without enlarging the PCS.
     out.push(M31::from(u32::from(consume_all)));
@@ -1636,6 +1786,237 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
             M31::from(0u32)
         },
     );
+    let is_reveal_reconstruct = w.kind == CanonicalTransitionKind::RevealTimeoutReconstruct;
+    let street_offset = if is_reveal_reconstruct {
+        u32::from(w.pre.street).saturating_sub(2)
+    } else {
+        0
+    };
+    out.push(M31::from(street_offset & 1));
+    out.push(M31::from((street_offset >> 1) & 1));
+    let post_reconstruction_limbs = bytes16(&w.post.reconstruction_commitment);
+    let pre_reconstruction_limbs = bytes16(&w.pre.reconstruction_commitment);
+    let post_reconstruction_sum = post_reconstruction_limbs
+        .iter()
+        .fold(M31::from(0u32), |sum, limb| sum + *limb);
+    let reconstruction_diff_square_sum = post_reconstruction_limbs
+        .iter()
+        .zip(pre_reconstruction_limbs.iter())
+        .fold(M31::from(0u32), |sum, (post, pre)| {
+            let difference = *post - *pre;
+            sum + difference * difference
+        });
+    out.push(if is_reveal_reconstruct {
+        reconstruction_diff_square_sum
+    } else {
+        M31::from(0u32)
+    });
+    let reconstruction_change_product = post_reconstruction_sum * reconstruction_diff_square_sum;
+    out.push(if is_reveal_reconstruct {
+        reconstruction_change_product
+    } else {
+        M31::from(0u32)
+    });
+    out.push(
+        if is_reveal_reconstruct
+            && post_reconstruction_sum != M31::from(0u32)
+            && reconstruction_diff_square_sum != M31::from(0u32)
+        {
+            reconstruction_change_product.inverse()
+        } else {
+            M31::from(0u32)
+        },
+    );
+    let live_count = w
+        .post
+        .seats
+        .iter()
+        .filter(|seat| {
+            matches!(
+                seat.status,
+                crate::texas_canonical::CanonicalSeatStatus::Active
+                    | crate::texas_canonical::CanonicalSeatStatus::AllIn
+            )
+        })
+        .count();
+    out.push(if is_reveal_reconstruct {
+        M31::from((live_count * live_count.saturating_sub(1)) as u32)
+    } else {
+        M31::from(0u32)
+    });
+    out.push(if is_reveal_reconstruct && live_count >= 2 {
+        M31::from((live_count * live_count.saturating_sub(1)) as u32).inverse()
+    } else {
+        M31::from(0u32)
+    });
+    let is_reveal_kick = w.kind == CanonicalTransitionKind::RevealTimeoutKick;
+    let reveal_street_row = matches!(
+        w.kind,
+        CanonicalTransitionKind::RevealTimeoutKick
+            | CanonicalTransitionKind::RevealTimeoutAward
+            | CanonicalTransitionKind::RevealTimeoutRakedAward
+    );
+    let kick_street_offset = if reveal_street_row {
+        u32::from(w.pre.street).saturating_sub(1)
+    } else {
+        0
+    };
+    out.push(M31::from(kick_street_offset & 1));
+    out.push(M31::from((kick_street_offset >> 1) & 1));
+    out.push(M31::from((kick_street_offset >> 2) & 1));
+    // Sole-survivor award advice: the winner credit is the unique live seat
+    // other than the kicked participant, and the inverse proves the awarded
+    // pot limb sum is non-zero.
+    let is_reveal_award = matches!(
+        w.kind,
+        CanonicalTransitionKind::RevealTimeoutAward
+            | CanonicalTransitionKind::RevealTimeoutRakedAward
+    );
+    for index in 0..MAX_CANONICAL_SEATS {
+        let winner = is_reveal_award
+            && index != usize::from(w.action.seat)
+            && matches!(
+                w.pre.seats[index].status,
+                crate::texas_canonical::CanonicalSeatStatus::Active
+                    | crate::texas_canonical::CanonicalSeatStatus::AllIn
+            );
+        out.push(M31::from(u32::from(winner)));
+    }
+    let pre_pot_sum = u64_limbs(w.pre.pot)
+        .into_iter()
+        .map(|limb| u64::from(limb.0))
+        .sum::<u64>();
+    out.push(if is_reveal_award && pre_pot_sum != 0 {
+        M31::from(pre_pot_sum as u32).inverse()
+    } else {
+        M31::from(0u32)
+    });
+    // Raked sole-survivor award advice.  The config columns copy the
+    // authenticated opening; every limb below is a canonical 16-bit value so
+    // the AIR's weighted identities are exact over the integers.
+    let is_raked = w.kind == CanonicalTransitionKind::RevealTimeoutRakedAward;
+    let opening = w.rake_opening;
+    out.push(M31::from(u32::from(if is_raked {
+        opening.rake_mode
+    } else {
+        0
+    })));
+    out.push(M31::from(u32::from(if is_raked {
+        opening.rake_bps
+    } else {
+        0
+    })));
+    for limb in u64_limbs(if is_raked { opening.rake_cap } else { 0 }) {
+        out.push(limb);
+    }
+    let rake = if is_raked {
+        crate::canonical_rake_opening::canonical_settlement_rake(w.pre.pot, &opening)
+    } else {
+        0
+    };
+    let raw = if is_raked {
+        u128::from(w.pre.pot) * u128::from(opening.rake_bps) / 10_000
+    } else {
+        0
+    };
+    let remainder = if is_raked {
+        (u128::from(w.pre.pot) * u128::from(opening.rake_bps) % 10_000) as u64
+    } else {
+        0
+    };
+    let product = if is_raked {
+        u128::from(w.pre.pot) * u128::from(opening.rake_bps)
+    } else {
+        0
+    };
+    let scaled = u128::from(raw) * 10_000;
+    let limb_of = |value: u128| -> [M31; 4] {
+        [
+            M31::from((value & 0xffff) as u32),
+            M31::from(((value >> 16) & 0xffff) as u32),
+            M31::from(((value >> 32) & 0xffff) as u32),
+            M31::from(((value >> 48) & 0xffff) as u32),
+        ]
+    };
+    let bits_of = |value: u128| -> Vec<M31> {
+        limb_of(value)
+            .into_iter()
+            .flat_map(|limb| u16_bits(u16::try_from(u64::from(limb.0)).expect("16-bit limb")))
+            .collect()
+    };
+    let byte_pair = |value: u64| -> [M31; 2] {
+        [
+            M31::from((value & 0xff) as u32),
+            M31::from(((value >> 8) & 0xff) as u32),
+        ]
+    };
+    for value in [w.pre.pot & 0xffff, (w.pre.pot >> 16) & 0xffff] {
+        out.extend(byte_pair(value));
+    }
+    out.extend(limb_of(product));
+    for limb in 0..4 {
+        out.extend(byte_pair(((product >> (16 * limb)) & 0xffff) as u64));
+    }
+    out.extend(limb_of(raw));
+    for limb in 0..4 {
+        out.extend(byte_pair(((raw >> (16 * limb)) & 0xffff) as u64));
+    }
+    out.extend(limb_of(scaled));
+    for limb in 0..4 {
+        out.extend(byte_pair(((scaled >> (16 * limb)) & 0xffff) as u64));
+    }
+    out.push(M31::from(remainder as u32));
+    out.extend(byte_pair(remainder));
+    out.extend(byte_pair(9_999u64 - u64::from(remainder)));
+    let scaled_carries = if is_raked {
+        add_carries(scaled as u64, remainder)
+    } else {
+        [M31::from(0u32); 3]
+    };
+    out.extend(scaled_carries);
+    // min(raw, cap) borrow chain over `raw + (2^64 - 1 - cap) + 1`: the
+    // limb carries out of the wide sum are exactly the AIR's borrow bits
+    // and bit 64 of the sum is the `raw >= cap` selector.
+    let cap = if is_raked { opening.rake_cap } else { 0 };
+    let mut min_carry: u32 = 1;
+    let mut min_limbs = [0u64; 4];
+    let mut min_borrows = [0u32; 4];
+    for limb in 0..4 {
+        let raw_limb = ((raw >> (16 * limb)) & 0xffff) as u64;
+        let cap_limb = (cap >> (16 * limb)) & 0xffff;
+        let complement_limb = 65535u64 - cap_limb;
+        let sum = raw_limb + complement_limb + u64::from(min_carry);
+        min_limbs[limb] = sum & 0xffff;
+        min_borrows[limb] = (sum >> 16) as u32;
+        min_carry = min_borrows[limb];
+    }
+    for limb in min_limbs {
+        out.push(M31::from(limb as u32));
+    }
+    for limb in min_limbs {
+        out.extend(byte_pair(limb));
+    }
+    for borrow in min_borrows {
+        out.push(M31::from(borrow));
+    }
+    out.extend(limb_of(u128::from(rake)));
+    for limb in 0..4 {
+        out.extend(byte_pair(((rake >> (16 * limb)) & 0xffff) as u64));
+    }
+    out.extend(limb_of(u128::from(w.pre.pot - rake)));
+    for limb in 0..4 {
+        out.extend(byte_pair(
+            (((w.pre.pot - rake) >> (16 * limb)) & 0xffff) as u64,
+        ));
+    }
+    out.extend(limb_of(u128::from(
+        w.post.chip_pool + u64::from(w.action.amount),
+    )));
+    out.extend(if is_raked {
+        add_carries(w.post.chip_pool + w.action.amount, rake)
+    } else {
+        [M31::from(0u32); 3]
+    });
     debug_assert_eq!(out.len(), NUM_COLUMNS);
     out
 }
@@ -1659,6 +2040,19 @@ fn mix_scope(channel: &mut Poseidon252Channel, proof: &ArchivedCanonicalTaggedPr
         u32::from(proof.transition_count),
     ]);
     mix_digest(channel, &proof.batch_digest);
+    channel.mix_u32s(&[
+        u32::from(proof.first_transition_kind),
+        u32::from(proof.last_transition_kind),
+        u32::from(proof.reveal_timeout_cascade_count),
+    ]);
+    channel.mix_u32s(&proof.reveal_timeout_cascade_schedule.map(u32::from));
+    match &proof.rake_opening {
+        Some(rake) => {
+            channel.mix_u32s(&[1, u32::from(rake.rake_mode), u32::from(rake.rake_bps)]);
+            channel.mix_u64(rake.rake_cap);
+        }
+        None => channel.mix_u32s(&[0]),
+    }
     mix_digest(channel, &proof.pre_state_commitment);
     mix_digest(channel, &proof.post_state_commitment);
     mix_digest(channel, &proof.state_object_key);
@@ -1754,6 +2148,26 @@ fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
             });
         }
     }
+    ids.push(PreProcessedColumnId {
+        id: "texas.canonical.first-kind.v5".into(),
+    });
+    ids.push(PreProcessedColumnId {
+        id: "texas.canonical.last-kind.v5".into(),
+    });
+    ids.push(PreProcessedColumnId {
+        id: "texas.canonical.reveal-timeout-cascade-active.v1".into(),
+    });
+    ids.push(PreProcessedColumnId {
+        id: "texas.canonical.reveal-timeout-cascade-seat.v1".into(),
+    });
+    for index in 0..6 {
+        ids.push(PreProcessedColumnId {
+            id: format!("texas.canonical.rake-scope-{index}.v1"),
+        });
+    }
+    ids.push(PreProcessedColumnId {
+        id: "texas.canonical.range-table.v1".into(),
+    });
     debug_assert_eq!(ids.len(), PREPROCESSED_COLUMNS);
     ids
 }
@@ -1774,11 +2188,47 @@ fn scope_trace(proof: &ArchivedCanonicalTaggedProof, log_size: u32) -> MethodTra
         values[1] = M31::from(u32::from(index == 0));
         values[2] = M31::from(u32::from(index + 1 == usize::from(proof.transition_count)));
         values[3..7].copy_from_slice(&table);
+        // The schedule carries both the non-terminal kick prefix and, for a
+        // terminal continuation, the final reset seat.  Keep that final slot
+        // in the preprocessed trace as well: mixing it into Fiat--Shamir
+        // authenticates the archive, but this column is what proves that the
+        // terminal state transition actually acted on that scheduled seat.
+        let kick_count = usize::from(proof.reveal_timeout_cascade_count);
+        let terminal_continuation = proof.transition_count
+            == proof.reveal_timeout_cascade_count as u16 + 1
+            && (proof.last_transition_kind == CanonicalTransitionKind::RevealTimeoutReset as u8
+                || proof.last_transition_kind
+                    == CanonicalTransitionKind::RevealTimeoutReconstruct as u8
+                || proof.last_transition_kind == CanonicalTransitionKind::RevealTimeoutAward as u8
+                || proof.last_transition_kind
+                    == CanonicalTransitionKind::RevealTimeoutRakedAward as u8);
+        let cascade = proof.reveal_timeout_cascade_count != 0
+            && (index < kick_count || (terminal_continuation && index == kick_count));
+        if cascade {
+            values[REVEAL_TIMEOUT_CASCADE_ACTIVE_SCOPE_OFFSET] = M31::from(1u32);
+            values[REVEAL_TIMEOUT_CASCADE_SEAT_SCOPE_OFFSET] =
+                M31::from(u32::from(proof.reveal_timeout_cascade_schedule[index]));
+        }
+        // The rake configuration is public batch scope: the companion
+        // Blake2b rules proof authenticates it to the pre rules commitment
+        // and every row can compare its copy against these columns.
+        if let Some(rake) = proof.rake_opening {
+            let cap = u64_limbs(rake.rake_cap);
+            values[RAKE_SCOPE_OFFSET] = M31::from(u32::from(rake.rake_mode));
+            values[RAKE_SCOPE_OFFSET + 1] = M31::from(u32::from(rake.rake_bps));
+            values[RAKE_SCOPE_OFFSET + 2..RAKE_SCOPE_OFFSET + 6].copy_from_slice(&cap);
+        }
         if index == 0 {
             values[7..23].copy_from_slice(&pre_image);
         }
         if index + 1 == usize::from(proof.transition_count) {
             values[23..39].copy_from_slice(&post_image);
+        }
+        if index == 0 {
+            values[FIRST_KIND_SCOPE_OFFSET] = M31::from(u32::from(proof.first_transition_kind));
+        }
+        if index + 1 == usize::from(proof.transition_count) {
+            values[LAST_KIND_SCOPE_OFFSET] = M31::from(u32::from(proof.last_transition_kind));
         }
         for (root_index, root) in roots.iter().enumerate() {
             let is_pre = root_index % 2 == 0;
@@ -1801,6 +2251,15 @@ fn scope_trace(proof: &ArchivedCanonicalTaggedProof, log_size: u32) -> MethodTra
         }
         trace.write_row(index, &values).expect("scope width");
     }
+    // The shared byte range table is public constant scope over the WHOLE
+    // domain: values 0..=255 on the first 256 rows, zero beyond.
+    for (row, cell) in trace.cols[RANGE_TABLE_SCOPE_OFFSET]
+        .iter_mut()
+        .enumerate()
+        .take(256)
+    {
+        *cell = M31::from(row as u32);
+    }
     trace
 }
 
@@ -1816,7 +2275,7 @@ fn trace_for_with_state_opening_scope(
     crate::texas_canonical::validate_direct_batch(witnesses)
         .map_err(TexasAirError::SpecViolation)?;
     let log_size = tagged_batch_log_size(witnesses.len())?;
-    let mut trace = MethodTrace::new(log_size, NUM_COLUMNS);
+    let mut trace = MethodTrace::new(log_size, NUM_COLUMNS + 1);
     for (index, witness) in witnesses.iter().enumerate() {
         // These are fixed-width ABI guards, not VM replay.  Keeping them here
         // makes malformed protocol/round envelopes fail closed before advice
@@ -1879,10 +2338,98 @@ fn trace_for_with_state_opening_scope(
             ));
         }
         let next_pre = witnesses.get(index + 1).map(|next| &next.pre);
-        trace.write_row(index, &row(witness, next_pre))?;
+        let mut values = row(witness, next_pre);
+        // The appended range-table multiplicity column starts zeroed; the
+        // derived counts are filled in after all witness rows exist.
+        values.push(M31::from(0u32));
+        trace.write_row(index, &values)?;
     }
+    append_range_multiplicity(&mut trace);
     let first = &witnesses[0];
     let last = &witnesses[witnesses.len() - 1];
+    let mut reveal_timeout_cascade_count = 0u8;
+    let mut reveal_timeout_cascade_schedule =
+        [REVEAL_TIMEOUT_CASCADE_EMPTY_SEAT; MAX_REVEAL_TIMEOUT_CASCADE_KICKS];
+    let all_reveal_kicks = witnesses
+        .iter()
+        .all(|w| w.kind == CanonicalTransitionKind::RevealTimeoutKick);
+    if all_reveal_kicks {
+        if witnesses.len() > MAX_REVEAL_TIMEOUT_CASCADE_KICKS {
+            return Err(TexasAirError::SpecViolation(
+                "reveal-timeout cascade exceeds fixed schedule width".into(),
+            ));
+        }
+        reveal_timeout_cascade_count = witnesses.len() as u8;
+        for (index, witness) in witnesses.iter().enumerate() {
+            reveal_timeout_cascade_schedule[index] = witness.action.seat;
+            if index > 0 && witnesses[index - 1].action.seat >= witness.action.seat {
+                return Err(TexasAirError::SpecViolation(
+                    "reveal-timeout cascade seats must be strictly ascending".into(),
+                ));
+            }
+        }
+    } else if witnesses.len() >= 2
+        && witnesses[..witnesses.len() - 1]
+            .iter()
+            .all(|w| w.kind == CanonicalTransitionKind::RevealTimeoutKick)
+        && witnesses.last().is_some_and(|w| {
+            matches!(
+                w.kind,
+                CanonicalTransitionKind::RevealTimeoutReset
+                    | CanonicalTransitionKind::RevealTimeoutReconstruct
+                    | CanonicalTransitionKind::RevealTimeoutAward
+                    | CanonicalTransitionKind::RevealTimeoutRakedAward
+            ) && w.action.seat < MAX_CANONICAL_SEATS as u8
+        })
+    {
+        let kick_count = witnesses.len() - 1;
+        if kick_count > MAX_REVEAL_TIMEOUT_CASCADE_KICKS - 1 {
+            return Err(TexasAirError::SpecViolation(
+                "reveal-timeout terminal cascade exceeds fixed schedule width".into(),
+            ));
+        }
+        reveal_timeout_cascade_count = kick_count as u8;
+        for (index, witness) in witnesses[..kick_count].iter().enumerate() {
+            reveal_timeout_cascade_schedule[index] = witness.action.seat;
+            if index > 0 && witnesses[index - 1].action.seat >= witness.action.seat {
+                return Err(TexasAirError::SpecViolation(
+                    "reveal-timeout cascade seats must be strictly ascending".into(),
+                ));
+            }
+        }
+        reveal_timeout_cascade_schedule[kick_count] = witnesses[kick_count].action.seat;
+    } else if witnesses
+        .iter()
+        .any(|w| w.kind == CanonicalTransitionKind::RevealTimeoutKick)
+    {
+        return Err(TexasAirError::SpecViolation(
+            "reveal-timeout kick rows must form a dedicated tagged batch".into(),
+        ));
+    }
+    let rake_opening = witnesses
+        .iter()
+        .find(|w| w.kind == CanonicalTransitionKind::RevealTimeoutRakedAward)
+        .map(|w| {
+            let opening = w.rake_opening;
+            if opening == crate::canonical_rake_opening::CanonicalRakeOpening::ZERO {
+                return Err(TexasAirError::SpecViolation(
+                    "raked award transition carries a zero rake opening".into(),
+                ));
+            }
+            Ok(opening)
+        })
+        .transpose()?;
+    if rake_opening.is_some()
+        && witnesses
+            .iter()
+            .filter(|w| w.kind == CanonicalTransitionKind::RevealTimeoutRakedAward)
+            .count()
+            != 1
+    {
+        return Err(TexasAirError::SpecViolation(
+            "a tagged batch carries at most one raked award terminal".into(),
+        ));
+    }
     let pre_state_image_bytes = borsh::to_vec(&first.pre)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
     let post_state_image_bytes = borsh::to_vec(&last.post)
@@ -1905,7 +2452,11 @@ fn trace_for_with_state_opening_scope(
             first_call_seq: first.pre.call_seq,
             last_call_seq: last.post.call_seq,
             transition_count: witnesses.len() as u16,
-            batch_digest: digest_batch(witnesses),
+            first_transition_kind: first.kind as u8,
+            last_transition_kind: last.kind as u8,
+            reveal_timeout_cascade_count,
+            reveal_timeout_cascade_schedule,
+            batch_digest: batch_digest_for_witnesses(witnesses),
             pre_state_commitment: first.pre.commitment(),
             post_state_commitment: last.post.commitment(),
             pre_state_root: first.pre.state_root,
@@ -1920,6 +2471,9 @@ fn trace_for_with_state_opening_scope(
             post_custody_commitment: last.post.custody_commitment,
             pre_state_image_bytes,
             post_state_image_bytes,
+            range_claimed_sum: [0, 0, 0, 0],
+            rake_opening,
+            rules_hash: None,
             state_object_key: state_opening.state_object_key,
             state_opening_epoch: state_opening.state_opening_epoch,
             stark_proof_bytes: Vec::new(),
@@ -2000,6 +2554,32 @@ fn trace_limbs<E: EvalAtRow>(eval: &mut E) -> [E::F; 4] {
 
 fn trace_bits16<E: EvalAtRow>(eval: &mut E) -> [E::F; 16] {
     std::array::from_fn(|_| eval.next_trace_mask())
+}
+
+fn trace_limbs2<E: EvalAtRow>(eval: &mut E) -> [E::F; 2] {
+    std::array::from_fn(|_| eval.next_trace_mask())
+}
+
+/// Reconstruct `value = low + 256 * high` and range-check both bytes into
+/// the shared 256-entry LogUp table.
+fn range8_logup_constraints<E: EvalAtRow>(
+    eval: &mut E,
+    gate: &E::F,
+    value: &E::F,
+    bytes: &[E::F; 2],
+    range: &CanonicalRange8,
+) {
+    let base: E::F = M31::from(256u32).into();
+    eval.add_constraint(
+        gate.clone() * (value.clone() - bytes[0].clone() - base * bytes[1].clone()),
+    );
+    for byte in bytes {
+        eval.add_to_relation(RelationEntry::new(
+            range,
+            E::EF::from(gate.clone()),
+            &[byte.clone()],
+        ));
+    }
 }
 
 fn range16_constraints<E: EvalAtRow>(eval: &mut E, gate: &E::F, value: &E::F, bits: &[E::F; 16]) {
@@ -2411,6 +2991,45 @@ impl FrameworkEval for CanonicalAir {
         let shuffle_deck_diff_square_sum = eval.next_trace_mask();
         let shuffle_deck_product = eval.next_trace_mask();
         let shuffle_deck_nonzero_change_inv = eval.next_trace_mask();
+        let reveal_reconstruct_street_bits = [eval.next_trace_mask(), eval.next_trace_mask()];
+        let reveal_reconstruct_diff_square_sum = eval.next_trace_mask();
+        let reveal_reconstruct_change_product = eval.next_trace_mask();
+        let reveal_reconstruct_change_inv = eval.next_trace_mask();
+        let reveal_reconstruct_live_product = eval.next_trace_mask();
+        let reveal_reconstruct_live_inv = eval.next_trace_mask();
+        let reveal_kick_street_bits: [E::F; 3] = std::array::from_fn(|_| eval.next_trace_mask());
+        let reveal_award_winner_credit: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let reveal_award_pot_inv = eval.next_trace_mask();
+        let rake_config: [E::F; 6] = std::array::from_fn(|_| eval.next_trace_mask());
+        let rake_pot_bytes: [[E::F; 2]; 2] = std::array::from_fn(|_| trace_limbs2(&mut eval));
+        let rake_product: [E::F; 4] = trace_limbs(&mut eval);
+        let rake_product_bytes: [[E::F; 2]; 4] = std::array::from_fn(|_| trace_limbs2(&mut eval));
+        let rake_limbs: [E::F; 4] = trace_limbs(&mut eval);
+        let rake_limb_bytes: [[E::F; 2]; 4] = std::array::from_fn(|_| trace_limbs2(&mut eval));
+        let rake_scaled: [E::F; 4] = trace_limbs(&mut eval);
+        let rake_scaled_bytes: [[E::F; 2]; 4] = std::array::from_fn(|_| trace_limbs2(&mut eval));
+        let rake_remainder = eval.next_trace_mask();
+        let rake_remainder_bytes: [E::F; 2] = trace_limbs2(&mut eval);
+        let rake_remainder_bound_bytes: [E::F; 2] = trace_limbs2(&mut eval);
+        let rake_div_carries = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let rake_min_diff: [E::F; 4] = trace_limbs(&mut eval);
+        let rake_min_diff_bytes: [[E::F; 2]; 4] = std::array::from_fn(|_| trace_limbs2(&mut eval));
+        let rake_min_borrows: [E::F; 4] = std::array::from_fn(|_| eval.next_trace_mask());
+        let rake_final: [E::F; 4] = trace_limbs(&mut eval);
+        let rake_final_bytes: [[E::F; 2]; 4] = std::array::from_fn(|_| trace_limbs2(&mut eval));
+        let rake_award: [E::F; 4] = trace_limbs(&mut eval);
+        let rake_award_bytes: [[E::F; 2]; 4] = std::array::from_fn(|_| trace_limbs2(&mut eval));
+        let rake_chip_intermediate: [E::F; 4] = trace_limbs(&mut eval);
+        let rake_chip_extra_carries = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
         eval.add_constraint(active.clone() * flag.clone() * (flag.clone() - one.clone()));
         eval.add_constraint(seq_carry.clone() * (seq_carry.clone() - one.clone()));
         for (pre, post) in [
@@ -2496,8 +3115,23 @@ impl FrameworkEval for CanonicalAir {
         );
         let is_fold = kinds[CanonicalTransitionKind::Fold as usize].clone();
         let is_auto_fold = kinds[CanonicalTransitionKind::AutoFold as usize].clone();
+        let is_reveal_timeout = kinds[CanonicalTransitionKind::RevealTimeoutReset as usize].clone();
+        let is_reveal_kick = kinds[CanonicalTransitionKind::RevealTimeoutKick as usize].clone();
+        let is_reveal_reconstruct =
+            kinds[CanonicalTransitionKind::RevealTimeoutReconstruct as usize].clone();
+        let is_reveal_award = kinds[CanonicalTransitionKind::RevealTimeoutAward as usize].clone();
+        let is_reveal_raked_award =
+            kinds[CanonicalTransitionKind::RevealTimeoutRakedAward as usize].clone();
+        // Both sole-survivor terminals share the award shape; only the
+        // winner credit and the chip-pool custody chain differ by the rake.
+        let is_award_family = is_reveal_award.clone() + is_reveal_raked_award.clone();
+        // The shared reset relation below covers both bounded timeout
+        // selectors. Keep a reconstruct-only gate for its phase/subtag
+        // header, since reveal timeout has the preflop reveal header instead.
         let is_reconstruct_timeout =
-            kinds[CanonicalTransitionKind::ReconstructTimeoutReset as usize].clone();
+            kinds[CanonicalTransitionKind::ReconstructTimeoutReset as usize].clone()
+                + is_reveal_timeout.clone();
+        let is_reconstruct_only = is_reconstruct_timeout.clone() - is_reveal_timeout.clone();
         let is_fold_like = is_fold.clone() + is_fold_with_proof.clone() + is_auto_fold.clone();
         eval.add_constraint(is_fold_like.clone() * (post_status.clone() - M31::from(3u32).into()));
         let is_check = kinds[CanonicalTransitionKind::Check as usize].clone();
@@ -2517,8 +3151,12 @@ impl FrameworkEval for CanonicalAir {
         // into the many existing state relations.
         let is_shuffle_timeout = shuffle_timeout_gate.clone();
         let is_deadline_extension = is_advance_deadline.clone() - is_shuffle_timeout.clone();
-        let deadline_check =
-            is_advance_deadline.clone() + is_auto_fold.clone() + is_reconstruct_timeout.clone();
+        let deadline_check = is_advance_deadline.clone()
+            + is_auto_fold.clone()
+            + is_reconstruct_timeout.clone()
+            + is_reveal_kick.clone()
+            + is_reveal_reconstruct.clone()
+            + is_award_family.clone();
         for limb in &deadline_height {
             eval.add_constraint((active.clone() - deadline_check.clone()) * limb.clone());
         }
@@ -2532,7 +3170,8 @@ impl FrameworkEval for CanonicalAir {
         let is_join = kinds[CanonicalTransitionKind::JoinTable as usize].clone();
         let is_leave = kinds[CanonicalTransitionKind::LeaveTable as usize].clone();
         let is_force_fold = kinds[CanonicalTransitionKind::ForceFold as usize].clone();
-        let is_kick = kinds[CanonicalTransitionKind::KickPlayer as usize].clone();
+        let is_kick =
+            kinds[CanonicalTransitionKind::KickPlayer as usize].clone() + is_reveal_kick.clone();
         let is_force_or_kick = is_force_fold.clone() + is_kick.clone();
         let is_submit_shuffle = kinds[CanonicalTransitionKind::SubmitShuffle as usize].clone();
         let is_submit_reveal = kinds[CanonicalTransitionKind::SubmitReveal as usize].clone();
@@ -2609,7 +3248,10 @@ impl FrameworkEval for CanonicalAir {
                 (active.clone()
                     - proof_bound.clone()
                     - is_terminal_reset.clone()
-                    - is_reconstruct_timeout.clone())
+                    - is_timeout_reset.clone()
+                    - is_reveal_kick.clone()
+                    - is_reveal_reconstruct.clone()
+                    - is_award_family.clone())
                     * proof_commitment[limb].clone(),
             );
         }
@@ -2764,7 +3406,7 @@ impl FrameworkEval for CanonicalAir {
             + is_funding.clone()
             + is_join.clone()
             + is_leave.clone()
-            + is_force_or_kick.clone()
+            + (is_force_or_kick.clone() - is_reveal_kick.clone())
             + is_set_leave.clone()
             + is_deadline_extension.clone();
         for commitment in 0..OPAQUE_COMMITMENT_COUNT {
@@ -2785,6 +3427,23 @@ impl FrameworkEval for CanonicalAir {
                             * post_opaque_commitments[commitment][limb].clone(),
                     );
                 }
+            }
+        }
+        // A reveal-timeout kick consumes exactly the selected reveal ledger
+        // commitment.  Unlike the ordinary KickPlayer path, the reveal
+        // commitment is replaced by the action's authenticated endpoint;
+        // all other table-level protocol commitments remain immutable.
+        for limb in 0..16 {
+            eval.add_constraint(
+                is_reveal_kick.clone()
+                    * (post_opaque_commitments[2][limb].clone() - proof_commitment[limb].clone()),
+            );
+            for commitment in [0usize, 1, 3, 4] {
+                eval.add_constraint(
+                    is_reveal_kick.clone()
+                        * (post_opaque_commitments[commitment][limb].clone()
+                            - pre_opaque_commitments[commitment][limb].clone()),
+                );
             }
         }
         // `fold_with_proof` removes one ElGamal layer and may therefore only
@@ -2838,7 +3497,8 @@ impl FrameworkEval for CanonicalAir {
         let selected_seat_commitment_transition = is_join.clone()
             + is_leave.clone()
             + is_force_or_kick.clone()
-            + is_shuffle_timeout.clone();
+            + is_shuffle_timeout.clone()
+            + is_reveal_reconstruct.clone();
         for seat_index in 0..MAX_CANONICAL_SEATS {
             for commitment in 0..SEAT_COMMITMENT_FIELD_COUNT {
                 for limb in 0..16 {
@@ -2880,11 +3540,25 @@ impl FrameworkEval for CanonicalAir {
                 eval.add_constraint(
                     is_kick.clone()
                         * transition_seat_selectors[seat_index].clone()
+                        * (post_identity.clone() - pre_identity.clone()),
+                );
+                // The reveal-timeout reconstruct terminal kicks its seat with
+                // the same internal VM primitive as an ordinary kick: identity
+                // is preserved while the key and hole-card commitments are
+                // erased for the vacated seat.
+                eval.add_constraint(
+                    is_reveal_reconstruct.clone()
+                        * transition_seat_selectors[seat_index].clone()
                         * (post_identity - pre_identity),
                 );
                 for commitment in 1..SEAT_COMMITMENT_FIELD_COUNT {
                     eval.add_constraint(
                         is_kick.clone()
+                            * transition_seat_selectors[seat_index].clone()
+                            * post_seat_commitments[seat_index][commitment][limb].clone(),
+                    );
+                    eval.add_constraint(
+                        is_reveal_reconstruct.clone()
                             * transition_seat_selectors[seat_index].clone()
                             * post_seat_commitments[seat_index][commitment][limb].clone(),
                     );
@@ -2911,7 +3585,8 @@ impl FrameworkEval for CanonicalAir {
             + is_leave.clone()
             + is_force_or_kick.clone()
             + is_fold_with_proof.clone()
-            + is_shuffle_timeout.clone();
+            + is_shuffle_timeout.clone()
+            + is_reveal_reconstruct.clone();
         let requires_transition_seat = is_betting.clone()
             + is_funding.clone()
             + is_join.clone()
@@ -2924,7 +3599,9 @@ impl FrameworkEval for CanonicalAir {
             + is_set_leave.clone()
             + is_advance_deadline.clone()
             + is_end_without_showdown.clone()
-            + is_reconstruct_timeout.clone();
+            + is_timeout_reset.clone()
+            + is_reveal_reconstruct.clone()
+            + is_award_family.clone();
         // Lifecycle actions that do not depend on an opaque crypto commitment
         // are constrained directly from the fixed canonical image.  The
         // transition-seat selector below binds `pre_status`/`post_status` to
@@ -3177,21 +3854,73 @@ impl FrameworkEval for CanonicalAir {
             &post_deadline_image,
             &advance_deadline_extension_carries,
         );
-        // Narrow reconstruct-timeout cascade.  This is the exact VM branch
-        // where the reconstruct pending mask contains one active seat and the
-        // hand has no wager/addon ledger: kick that seat, refund its stack,
-        // then perform the ordinary zero-wager reset.
+        // Narrow reconstruct-timeout cascade.  It mirrors the VM path where
+        // the reconstruct pending mask contains one active seat, at most one
+        // other active seat remains, and the hand has no wager/addon ledger.
+        // The internal kick cascade then resets before the outer timeout
+        // handler reaches its accumulator-presence branch.
         eval.add_constraint(
-            is_reconstruct_timeout.clone() * (pre_phase.clone() - M31::from(3u32).into()),
+            is_reconstruct_only.clone() * (pre_phase.clone() - M31::from(3u32).into()),
         );
         eval.add_constraint(
-            is_reconstruct_timeout.clone()
+            is_reconstruct_only.clone()
                 * (pre_subtag.clone()
                     - M31::from(u32::from(CANONICAL_RECONSTRUCT_COLLECTING_SUBTAG)).into()),
         );
         eval.add_constraint(
-            is_reconstruct_timeout.clone() * (pre_turn.clone() - no_seat.clone()),
+            is_reveal_timeout.clone() * (pre_phase.clone() - M31::from(2u32).into()),
         );
+        eval.add_constraint(is_reveal_timeout.clone() * (pre_subtag.clone() - one.clone()));
+        eval.add_constraint(is_reveal_timeout.clone() * (pre_street.clone() - one.clone()));
+        // A non-terminal reveal-timeout row remains in the same reveal
+        // header while its selected active pending participant is kicked.
+        // The VM runs the kick loop at every reveal street (preflop through
+        // showdown), so the row fixes the canonical reveal encoding
+        // (`subtag == street`), the phase, and the exact street domain
+        // {1..=5}; the preflop/board split is decided by the terminal row.
+        let reveal_street_kinds = is_reveal_kick.clone() + is_award_family.clone();
+        eval.add_constraint(is_reveal_kick.clone() * (pre_phase.clone() - M31::from(2u32).into()));
+        eval.add_constraint(is_reveal_kick.clone() * (pre_subtag.clone() - pre_street.clone()));
+        eval.add_constraint(
+            reveal_street_kinds.clone()
+                * (pre_street.clone()
+                    - one.clone()
+                    - reveal_kick_street_bits[0].clone()
+                    - two.clone() * reveal_kick_street_bits[1].clone()
+                    - E::F::from(M31::from(4u32)) * reveal_kick_street_bits[2].clone()),
+        );
+        for bit in &reveal_kick_street_bits {
+            eval.add_constraint(
+                reveal_street_kinds.clone() * bit.clone() * (bit.clone() - one.clone()),
+            );
+            eval.add_constraint((active.clone() - reveal_street_kinds.clone()) * bit.clone());
+        }
+        // The high bit selects street 5 exactly, excluding 6..=8 from the
+        // three-bit decomposition.
+        eval.add_constraint(
+            reveal_street_kinds.clone()
+                * reveal_kick_street_bits[2].clone()
+                * reveal_kick_street_bits[0].clone(),
+        );
+        eval.add_constraint(
+            reveal_street_kinds.clone()
+                * reveal_kick_street_bits[2].clone()
+                * reveal_kick_street_bits[1].clone(),
+        );
+        eval.add_constraint(is_reveal_kick.clone() * (post_phase.clone() - pre_phase.clone()));
+        eval.add_constraint(is_reveal_kick.clone() * (post_subtag.clone() - pre_subtag.clone()));
+        eval.add_constraint(is_reveal_kick.clone() * (post_street.clone() - pre_street.clone()));
+        eval.add_constraint(is_reveal_kick.clone() * (pre_turn.clone() - no_seat.clone()));
+        eval.add_constraint(is_reveal_kick.clone() * (post_turn.clone() - no_seat.clone()));
+        eval.add_constraint(
+            is_reveal_kick.clone()
+                * (pre_status.clone() - M31::from(CanonicalSeatStatus::Active as u32).into()),
+        );
+        eval.add_constraint(
+            is_reveal_kick.clone()
+                * (post_status.clone() - M31::from(CanonicalSeatStatus::Out as u32).into()),
+        );
+        eval.add_constraint(is_reconstruct_timeout.clone() * (pre_turn.clone() - no_seat.clone()));
         eval.add_constraint(is_reconstruct_timeout.clone() * post_phase.clone());
         eval.add_constraint(is_reconstruct_timeout.clone() * post_subtag.clone());
         eval.add_constraint(is_reconstruct_timeout.clone() * post_street.clone());
@@ -3226,18 +3955,33 @@ impl FrameworkEval for CanonicalAir {
         );
         // The selected seat is the sole pending protocol bit.
         let mut pending_sum: E::F = M31::from(0u32).into();
+        let mut reconstruct_pre_active_count: E::F = M31::from(0u32).into();
         for index in 0..MAX_CANONICAL_SEATS {
             let selector = transition_seat_selectors[index].clone();
             pending_sum += pre_protocol_pending_mask_bits[index].clone();
+            reconstruct_pre_active_count +=
+                full_pre_status[index][CanonicalSeatStatus::Active as usize].clone();
             eval.add_constraint(
                 is_reconstruct_timeout.clone()
                     * (pre_protocol_pending_mask_bits[index].clone() - selector.clone()),
             );
+            // A terminal reveal-timeout continuation may arrive with seats
+            // already marked `Out` by preceding kick rows.  Reconstruct
+            // timeout starts from a fresh active/folded/empty image, while
+            // reveal reset preserves those prior `Out` markers.
             eval.add_constraint(
-                is_reconstruct_timeout.clone()
+                is_reconstruct_only.clone()
                     * (full_pre_status[index][CanonicalSeatStatus::Active as usize].clone()
                         + full_pre_status[index][CanonicalSeatStatus::Folded as usize].clone()
                         + full_pre_status[index][CanonicalSeatStatus::Empty as usize].clone()
+                        - one.clone()),
+            );
+            eval.add_constraint(
+                is_reveal_timeout.clone()
+                    * (full_pre_status[index][CanonicalSeatStatus::Active as usize].clone()
+                        + full_pre_status[index][CanonicalSeatStatus::Folded as usize].clone()
+                        + full_pre_status[index][CanonicalSeatStatus::Empty as usize].clone()
+                        + full_pre_status[index][CanonicalSeatStatus::Out as usize].clone()
                         - one.clone()),
             );
             eval.add_constraint(
@@ -3262,9 +4006,13 @@ impl FrameworkEval for CanonicalAir {
                                     .clone())),
             );
             eval.add_constraint(
-                is_reconstruct_timeout.clone()
+                is_reconstruct_only.clone()
+                    * full_post_status[index][CanonicalSeatStatus::Out as usize].clone(),
+            );
+            eval.add_constraint(
+                is_reveal_timeout.clone()
                     * (full_post_status[index][CanonicalSeatStatus::Out as usize].clone()
-                        - M31::from(0u32).into()),
+                        - full_pre_status[index][CanonicalSeatStatus::Out as usize].clone()),
             );
             eval.add_constraint(
                 is_reconstruct_timeout.clone()
@@ -3302,8 +4050,16 @@ impl FrameworkEval for CanonicalAir {
                 CanonicalSeatStatus::Folded,
             ] {
                 eval.add_constraint(
-                    is_reconstruct_timeout.clone()
-                        * full_post_status[index][status as usize].clone(),
+                    is_reconstruct_only.clone() * full_post_status[index][status as usize].clone(),
+                );
+            }
+            for status in [
+                CanonicalSeatStatus::Waiting,
+                CanonicalSeatStatus::AllIn,
+                CanonicalSeatStatus::Folded,
+            ] {
+                eval.add_constraint(
+                    is_reveal_timeout.clone() * full_post_status[index][status as usize].clone(),
                 );
             }
             eval.add_constraint(is_reconstruct_timeout.clone() * post_acted_bits[index].clone());
@@ -3350,6 +4106,15 @@ impl FrameworkEval for CanonicalAir {
             }
         }
         eval.add_constraint(is_reconstruct_timeout.clone() * (pending_sum.clone() - one.clone()));
+        // Reconstruct timeout has a narrow one/two-active reset endpoint.
+        // Preflop reveal timeout differs in the VM: it kicks the complete
+        // pending union and then resets even when three or more non-pending
+        // active seats remain, so that population bound is reconstruct-only.
+        eval.add_constraint(
+            is_reconstruct_only.clone()
+                * (reconstruct_pre_active_count.clone() - one.clone())
+                * (reconstruct_pre_active_count - M31::from(2u32).into()),
+        );
         limb4_add_constraints(
             &mut eval,
             &is_reconstruct_timeout,
@@ -3358,6 +4123,415 @@ impl FrameworkEval for CanonicalAir {
             &pre_chip_pool,
             &funding_rebuy_carries,
         );
+
+        // Non-preflop reveal timeout: the last pending seat is kicked by the
+        // shared internal primitive, the reveal ledger is suspended, and the
+        // table enters reconstruct collection with a freshly armed deadline.
+        // Every relation below is field-checked; none of it is host advice.
+        eval.add_constraint(
+            is_reveal_reconstruct.clone() * (pre_phase.clone() - M31::from(2u32).into()),
+        );
+        eval.add_constraint(
+            is_reveal_reconstruct.clone() * (pre_subtag.clone() - pre_street.clone()),
+        );
+        // The board reveal streets are exactly 2..=5 (flop, turn, river,
+        // showdown).  Two binary bits range the street so a preflop or
+        // waiting street cannot reach the reconstruct continuation.
+        eval.add_constraint(
+            is_reveal_reconstruct.clone()
+                * (pre_street.clone()
+                    - two.clone()
+                    - reveal_reconstruct_street_bits[0].clone()
+                    - two.clone() * reveal_reconstruct_street_bits[1].clone()),
+        );
+        for bit in &reveal_reconstruct_street_bits {
+            eval.add_constraint(
+                is_reveal_reconstruct.clone() * bit.clone() * (bit.clone() - one.clone()),
+            );
+            eval.add_constraint((active.clone() - is_reveal_reconstruct.clone()) * bit.clone());
+        }
+        eval.add_constraint(is_reveal_reconstruct.clone() * (pre_turn.clone() - no_seat.clone()));
+        eval.add_constraint(is_reveal_reconstruct.clone() * (post_turn.clone() - no_seat.clone()));
+        eval.add_constraint(
+            is_reveal_reconstruct.clone() * (post_phase.clone() - M31::from(3u32).into()),
+        );
+        eval.add_constraint(
+            is_reveal_reconstruct.clone()
+                * (post_subtag.clone()
+                    - M31::from(u32::from(CANONICAL_RECONSTRUCT_COLLECTING_SUBTAG)).into()),
+        );
+        eval.add_constraint(
+            is_reveal_reconstruct.clone() * (post_street.clone() - pre_street.clone()),
+        );
+        eval.add_constraint(is_reveal_reconstruct.clone() * flag.clone());
+        for value in &auxiliary {
+            eval.add_constraint(is_reveal_reconstruct.clone() * value.clone());
+        }
+        for (pre_value, post_value) in [(&pre_current, &post_current), (&pre_min, &post_min)] {
+            for (left, right) in pre_value.iter().zip(post_value.iter()) {
+                eval.add_constraint(is_reveal_reconstruct.clone() * (right.clone() - left.clone()));
+            }
+        }
+        // Board, deck, suspended reveal, and run-it-twice state is preserved
+        // verbatim; only the reconstruction commitment moves, to a non-zero
+        // value that differs from the pre image.
+        for commitment in [0usize, 1, 2, 4] {
+            for limb in 0..16 {
+                eval.add_constraint(
+                    is_reveal_reconstruct.clone()
+                        * (post_opaque_commitments[commitment][limb].clone()
+                            - pre_opaque_commitments[commitment][limb].clone()),
+                );
+            }
+        }
+        for limb in 0..16 {
+            eval.add_constraint(
+                is_reveal_reconstruct.clone()
+                    * (post_opaque_commitments[3][limb].clone() - proof_commitment[limb].clone()),
+            );
+        }
+        let mut reconstruct_post_commitment_sum: E::F = M31::from(0u32).into();
+        let mut reconstruct_commitment_difference_square_sum: E::F = M31::from(0u32).into();
+        for limb in 0..16 {
+            reconstruct_post_commitment_sum += post_opaque_commitments[3][limb].clone();
+            let difference =
+                post_opaque_commitments[3][limb].clone() - pre_opaque_commitments[3][limb].clone();
+            reconstruct_commitment_difference_square_sum += difference.clone() * difference;
+        }
+        eval.add_constraint(
+            is_reveal_reconstruct.clone()
+                * (reconstruct_commitment_difference_square_sum
+                    - reveal_reconstruct_diff_square_sum.clone()),
+        );
+        eval.add_constraint(
+            is_reveal_reconstruct.clone()
+                * (reconstruct_post_commitment_sum * reveal_reconstruct_diff_square_sum.clone()
+                    - reveal_reconstruct_change_product.clone()),
+        );
+        eval.add_constraint(
+            is_reveal_reconstruct.clone()
+                * (reveal_reconstruct_change_product.clone()
+                    * reveal_reconstruct_change_inv.clone()
+                    - one.clone()),
+        );
+        // The terminal seat leaves with the same kick shape as every prefix
+        // row: stack, live bet, and pending addon are vacated into the refund
+        // and the pot, while the historical ledger fields are preserved.
+        eval.add_constraint(
+            is_reveal_reconstruct.clone()
+                * (pre_status.clone() - M31::from(CanonicalSeatStatus::Active as u32).into()),
+        );
+        eval.add_constraint(
+            is_reveal_reconstruct.clone()
+                * (post_status.clone() - M31::from(CanonicalSeatStatus::Out as u32).into()),
+        );
+        for limb in 0..4 {
+            eval.add_constraint(is_reveal_reconstruct.clone() * post_stack[limb].clone());
+            eval.add_constraint(is_reveal_reconstruct.clone() * post_bet[limb].clone());
+            eval.add_constraint(is_reveal_reconstruct.clone() * post_pending[limb].clone());
+            eval.add_constraint(
+                is_reveal_reconstruct.clone()
+                    * (post_total[limb].clone() - pre_total[limb].clone()),
+            );
+        }
+        for limb in 0..2 {
+            eval.add_constraint(
+                is_reveal_reconstruct.clone()
+                    * (post_time_bank[limb].clone() - pre_time_bank[limb].clone()),
+            );
+        }
+        // The reconstruct deadline is armed from the committed consensus
+        // height plus the reconstruct timeout configuration.
+        let reconstruct_timeout_limbs: [E::F; 4] = [
+            pre_timeout_config[6].clone(),
+            pre_timeout_config[7].clone(),
+            M31::from(0u32).into(),
+            M31::from(0u32).into(),
+        ];
+        limb4_add_constraints(
+            &mut eval,
+            &is_reveal_reconstruct,
+            &deadline_height,
+            &reconstruct_timeout_limbs,
+            &post_deadline_image,
+            &advance_deadline_extension_carries,
+        );
+        // The acted and leave-after-hand masks clear exactly the kicked bit;
+        // a bit that was already clear stays clear.
+        for index in 0..MAX_CANONICAL_SEATS {
+            let selector = transition_seat_selectors[index].clone();
+            eval.add_constraint(
+                is_reveal_reconstruct.clone()
+                    * (post_acted_bits[index].clone()
+                        - pre_acted_bits[index].clone() * (one.clone() - selector.clone())),
+            );
+            eval.add_constraint(
+                is_reveal_reconstruct.clone()
+                    * (post_leave_mask_bits[index].clone()
+                        - pre_leave_mask_bits[index].clone() * (one.clone() - selector.clone())),
+            );
+            eval.add_constraint(
+                is_reveal_kick.clone()
+                    * (post_acted_bits[index].clone()
+                        - pre_acted_bits[index].clone() * (one.clone() - selector.clone())),
+            );
+            eval.add_constraint(
+                is_reveal_kick.clone()
+                    * (post_leave_mask_bits[index].clone()
+                        - pre_leave_mask_bits[index].clone() * (one.clone() - selector)),
+            );
+        }
+        // At least two live players remain and the reconstruct pending mask
+        // is the VM's active-seat mask over the post image.
+        let mut reveal_reconstruct_live_count: E::F = M31::from(0u32).into();
+        for index in 0..MAX_CANONICAL_SEATS {
+            reveal_reconstruct_live_count +=
+                full_post_status[index][CanonicalSeatStatus::Active as usize].clone()
+                    + full_post_status[index][CanonicalSeatStatus::AllIn as usize].clone();
+        }
+        eval.add_constraint(
+            is_reveal_reconstruct.clone()
+                * (reveal_reconstruct_live_product.clone()
+                    - reveal_reconstruct_live_count.clone()
+                        * (reveal_reconstruct_live_count.clone() - one.clone())),
+        );
+        eval.add_constraint(
+            is_reveal_reconstruct.clone()
+                * (reveal_reconstruct_live_product.clone() * reveal_reconstruct_live_inv.clone()
+                    - one.clone()),
+        );
+        for value in [
+            &reveal_reconstruct_diff_square_sum,
+            &reveal_reconstruct_change_product,
+            &reveal_reconstruct_change_inv,
+            &reveal_reconstruct_live_product,
+            &reveal_reconstruct_live_inv,
+        ] {
+            eval.add_constraint((active.clone() - is_reveal_reconstruct.clone()) * value.clone());
+        }
+
+        // Sole-survivor reveal timeout: the final pending participant is
+        // kicked and the complete pot is awarded to the one remaining live
+        // player (`end_without_showdown`, zero-rake branch only).  The winner
+        // credit is proven as a one-hot subset of the live seats that is
+        // disjoint from the kicked-seat selector, so with exactly two live
+        // seats the two singletons partition the live set.
+        eval.add_constraint(is_award_family.clone() * (pre_phase.clone() - M31::from(2u32).into()));
+        eval.add_constraint(is_award_family.clone() * (pre_subtag.clone() - pre_street.clone()));
+        eval.add_constraint(is_award_family.clone() * (pre_turn.clone() - no_seat.clone()));
+        eval.add_constraint(is_award_family.clone() * (post_turn.clone() - no_seat.clone()));
+        for (pre, post) in [
+            (&pre_subtag, &post_subtag),
+            (&pre_leave_mask, &post_leave_mask),
+        ] {
+            eval.add_constraint(is_award_family.clone() * post.clone());
+        }
+        eval.add_constraint(is_award_family.clone() * (pre_leave_mask.clone()));
+        eval.add_constraint(is_award_family.clone() * flag.clone());
+        for value in &auxiliary {
+            eval.add_constraint(is_award_family.clone() * value.clone());
+        }
+        for (pre, post) in [(&pre_current, &post_current), (&pre_min, &post_min)] {
+            for limb in pre.iter().zip(post.iter()) {
+                eval.add_constraint(is_award_family.clone() * limb.0.clone());
+                eval.add_constraint(is_award_family.clone() * limb.1.clone());
+            }
+        }
+        // The award endpoint is the same cleared waiting header as the other
+        // terminals, carrying a fresh non-zero deck commitment.
+        eval.add_constraint(is_award_family.clone() * post_phase.clone());
+        eval.add_constraint(is_award_family.clone() * post_street.clone());
+        for value in [&post_acted_mask, &post_protocol_pending_mask] {
+            eval.add_constraint(is_award_family.clone() * value.clone());
+        }
+        for value in [&post_min, &post_pot] {
+            for limb in value {
+                eval.add_constraint(is_award_family.clone() * limb.clone());
+            }
+        }
+        for limb in &post_deadline_image {
+            eval.add_constraint(is_award_family.clone() * limb.clone());
+        }
+        for commitment in [0usize, 2, 3, 4] {
+            for limb in 0..16 {
+                eval.add_constraint(
+                    is_award_family.clone() * post_opaque_commitments[commitment][limb].clone(),
+                );
+                eval.add_constraint(
+                    is_award_family.clone()
+                        * (post_opaque_commitments[1][limb].clone()
+                            - proof_commitment[limb].clone()),
+                );
+            }
+        }
+        // The kicked seat is vacated exactly like every other terminal kick.
+        eval.add_constraint(
+            is_award_family.clone()
+                * (pre_status.clone() - M31::from(CanonicalSeatStatus::Active as u32).into()),
+        );
+        for limb in 0..4 {
+            eval.add_constraint(is_award_family.clone() * post_stack[limb].clone());
+            eval.add_constraint(is_award_family.clone() * post_bet[limb].clone());
+            eval.add_constraint(is_award_family.clone() * post_pending[limb].clone());
+        }
+        let mut award_live_count: E::F = M31::from(0u32).into();
+        let mut award_pot_sum: E::F = M31::from(0u32).into();
+        let mut award_credit_sum: E::F = M31::from(0u32).into();
+        for limb in &pre_pot {
+            award_pot_sum += limb.clone();
+        }
+        eval.add_constraint(
+            is_award_family.clone()
+                * (award_pot_sum.clone() * reveal_award_pot_inv.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            (active.clone() - is_award_family.clone()) * reveal_award_pot_inv.clone(),
+        );
+        for index in 0..MAX_CANONICAL_SEATS {
+            let selector = transition_seat_selectors[index].clone();
+            let credit = reveal_award_winner_credit[index].clone();
+            let live = full_pre_status[index][CanonicalSeatStatus::Active as usize].clone()
+                + full_pre_status[index][CanonicalSeatStatus::AllIn as usize].clone();
+            award_live_count += live.clone();
+            award_credit_sum += credit.clone();
+            // The credit is a binary one-hot over live seats, disjoint from
+            // the kicked-seat selector.
+            eval.add_constraint(
+                is_award_family.clone() * credit.clone() * (credit.clone() - one.clone()),
+            );
+            eval.add_constraint(is_award_family.clone() * credit.clone() * selector.clone());
+            eval.add_constraint(
+                is_award_family.clone() * credit.clone() * (one.clone() - live.clone()),
+            );
+            eval.add_constraint(
+                is_award_family.clone() * selector.clone() * (live.clone() - one.clone()),
+            );
+            // Kicked seat vacated, winner credited with the whole pot, every
+            // other retained seat keeps its stack but drops the hand-local
+            // ledger.
+            for limb in 0..4 {
+                eval.add_constraint(
+                    is_reveal_award.clone()
+                        * credit.clone()
+                        * (full_post_stack[index][limb].clone()
+                            - full_pre_stack[index][limb].clone()
+                            - pre_pot[limb].clone()),
+                );
+                eval.add_constraint(
+                    is_award_family.clone()
+                        * (one.clone() - credit.clone() - selector.clone())
+                        * (full_post_stack[index][limb].clone()
+                            - full_pre_stack[index][limb].clone()),
+                );
+                eval.add_constraint(
+                    is_award_family.clone()
+                        * (one.clone() - credit.clone() - selector.clone())
+                        * full_pre_pending[index][limb].clone(),
+                );
+                eval.add_constraint(is_award_family.clone() * full_post_bet[index][limb].clone());
+                eval.add_constraint(is_award_family.clone() * full_post_total[index][limb].clone());
+                eval.add_constraint(
+                    is_award_family.clone() * full_post_pending[index][limb].clone(),
+                );
+            }
+            // The retained seats return to the terminal Active/Empty shape;
+            // the reset clears acted bits and hole cards while preserving
+            // identity and key commitments.
+            // Retained seats return to Active; Empty and earlier-kicked Out
+            // seats end Empty (the reset vacates departed seats).  The
+            // terminal kick selector and a prior `Out` marker are disjoint
+            // binary flags, so their sum is the single vacated indicator.
+            let vacated = selector.clone()
+                + full_pre_status[index][CanonicalSeatStatus::Out as usize].clone();
+            eval.add_constraint(
+                is_award_family.clone() * vacated.clone() * (vacated.clone() - one.clone()),
+            );
+            eval.add_constraint(
+                is_award_family.clone()
+                    * (one.clone() - vacated.clone())
+                    * (full_post_status[index][CanonicalSeatStatus::Active as usize].clone()
+                        - (one.clone()
+                            - full_pre_status[index][CanonicalSeatStatus::Empty as usize].clone())),
+            );
+            eval.add_constraint(
+                is_award_family.clone()
+                    * vacated.clone()
+                    * (full_post_status[index][CanonicalSeatStatus::Empty as usize].clone()
+                        - one.clone()),
+            );
+            for status in [
+                CanonicalSeatStatus::Folded,
+                CanonicalSeatStatus::AllIn,
+                CanonicalSeatStatus::Out,
+                CanonicalSeatStatus::Waiting,
+            ] {
+                eval.add_constraint(
+                    is_award_family.clone() * full_post_status[index][status as usize].clone(),
+                );
+            }
+            eval.add_constraint(is_award_family.clone() * post_acted_bits[index].clone());
+            eval.add_constraint(
+                is_award_family.clone()
+                    * (full_pre_time_bank[index][0].clone()
+                        - E::F::from(M31::from(30_000u32))
+                            * (one.clone()
+                                - full_pre_status[index][CanonicalSeatStatus::Empty as usize]
+                                    .clone())),
+            );
+            eval.add_constraint(is_award_family.clone() * full_pre_time_bank[index][1].clone());
+            for limb in 0..2 {
+                eval.add_constraint(
+                    is_award_family.clone()
+                        * (one.clone() - vacated.clone())
+                        * (full_post_time_bank[index][limb].clone()
+                            - full_pre_time_bank[index][limb].clone()),
+                );
+                eval.add_constraint(
+                    is_award_family.clone()
+                        * vacated.clone()
+                        * full_post_time_bank[index][limb].clone(),
+                );
+            }
+            for limb in 0..16 {
+                // Retained seats preserve identity and key commitments and
+                // drop their hole-card commitment; every vacated seat clears
+                // all commitment fields.
+                eval.add_constraint(
+                    is_award_family.clone()
+                        * (one.clone() - vacated.clone())
+                        * (post_seat_commitments[index][0][limb].clone()
+                            - pre_seat_commitments[index][0][limb].clone()),
+                );
+                eval.add_constraint(
+                    is_award_family.clone()
+                        * (one.clone() - vacated.clone())
+                        * (post_seat_commitments[index][1][limb].clone()
+                            - pre_seat_commitments[index][1][limb].clone()),
+                );
+                eval.add_constraint(
+                    is_award_family.clone() * post_seat_commitments[index][2][limb].clone(),
+                );
+                for commitment in 0..SEAT_COMMITMENT_FIELD_COUNT {
+                    eval.add_constraint(
+                        is_award_family.clone()
+                            * vacated.clone()
+                            * post_seat_commitments[index][commitment][limb].clone(),
+                    );
+                }
+            }
+        }
+        // Exactly two live seats (the kicked participant and the survivor)
+        // and exactly one winner credit.
+        eval.add_constraint(is_award_family.clone() * (award_live_count.clone() - two.clone()));
+        eval.add_constraint(is_award_family.clone() * (award_credit_sum - one.clone()));
+
+        // Raked sole-survivor award.  Every shared zero-rake relation above is
+        // duplicated for the raked selector with the two raked differences:
+        // the winner is credited `pot - rake` and the rake itself leaves the
+        // table vault.  The rake configuration is bound to the public
+        // authenticated scope columns; the arithmetic proves the exact
+        // `min(floor(pot * bps / 10_000), cap)` value with 16-bit limb
+        // decompositions, so no limb can wrap in M31.
         // AutoFold consumes the expired betting deadline, folds the selected
         // actor through the shared betting relation, and arms the next
         // actor's fixed deployment timeout from the committed height.
@@ -3969,6 +5143,16 @@ impl FrameworkEval for CanonicalAir {
             post_protocol_mask_from_bits += post_bit.clone() * bit_weight.clone();
             post_protocol_pending_count += post_bit.clone();
             selected_protocol_pre_bit += selector.clone() * pre_bit.clone();
+            let later_transition_selector = transition_seat_selectors[index + 1..]
+                .iter()
+                .cloned()
+                .fold(E::F::from(M31::from(0u32)), |sum, value| sum + value);
+            // The VM's timeout loop always selects the lowest pending seat.
+            // If any higher seat is selected on this row, every lower pending
+            // bit must therefore be zero.
+            eval.add_constraint(
+                is_reveal_kick.clone() * pre_bit.clone() * later_transition_selector,
+            );
             let non_final_protocol_submit =
                 is_protocol_submit.clone() - is_reconstruct_completion.clone();
             eval.add_constraint(
@@ -3977,6 +5161,9 @@ impl FrameworkEval for CanonicalAir {
             eval.add_constraint(
                 is_shuffle_timeout.clone()
                     * (post_bit.clone() - pre_bit.clone() + selector.clone()),
+            );
+            eval.add_constraint(
+                is_reveal_kick.clone() * (post_bit.clone() - pre_bit.clone() + selector.clone()),
             );
             eval.add_constraint(is_reconstruct_completion.clone() * (pre_bit.clone() - selector));
             let pre_participating = full_pre_status[index][CanonicalSeatStatus::Active as usize]
@@ -4003,7 +5190,13 @@ impl FrameworkEval for CanonicalAir {
             active.clone() * (post_protocol_mask_from_bits - post_protocol_pending_mask.clone()),
         );
         eval.add_constraint(
-            selected_protocol_pre_bit - is_protocol_submit.clone() - is_shuffle_timeout.clone(),
+            selected_protocol_pre_bit
+                - is_protocol_submit.clone()
+                - is_shuffle_timeout.clone()
+                - is_timeout_reset.clone()
+                - is_reveal_kick.clone()
+                - is_reveal_reconstruct.clone()
+                - is_award_family.clone(),
         );
         eval.add_constraint(
             (is_protocol_submit.clone() - is_reconstruct_completion.clone())
@@ -4019,6 +5212,11 @@ impl FrameworkEval for CanonicalAir {
         eval.add_constraint(
             shuffle_timeout_gate.clone()
                 * (shuffle_pending_count_product.clone() * protocol_pending_post_inv.clone()
+                    - one.clone()),
+        );
+        eval.add_constraint(
+            is_reveal_kick.clone()
+                * (post_protocol_pending_count.clone() * protocol_pending_post_inv.clone()
                     - one.clone()),
         );
         eval.add_constraint(is_reconstruct_completion.clone() * protocol_pending_post_inv.clone());
@@ -4180,6 +5378,10 @@ impl FrameworkEval for CanonicalAir {
         let ordinary_non_protocol = active.clone()
             - is_protocol_submit.clone()
             - is_shuffle_timeout.clone()
+            - is_timeout_reset.clone()
+            - is_reveal_kick.clone()
+            - is_reveal_reconstruct.clone()
+            - is_award_family.clone()
             - is_start.clone()
             - is_round_advance.clone();
         eval.add_constraint(ordinary_non_protocol.clone() * pre_protocol_pending_mask.clone());
@@ -4192,6 +5394,12 @@ impl FrameworkEval for CanonicalAir {
         );
         eval.add_constraint(
             is_shuffle_timeout.clone()
+                * (post_protocol_pending_mask.clone() - expected_protocol_participants.clone()),
+        );
+        // The reconstruct continuation derives its pending mask from the full
+        // post seat image, exactly like the VM's active-seat mask.
+        eval.add_constraint(
+            is_reveal_reconstruct.clone()
                 * (post_protocol_pending_mask.clone() - expected_protocol_participants.clone()),
         );
         eval.add_constraint(
@@ -5164,7 +6372,10 @@ impl FrameworkEval for CanonicalAir {
             (is_call.clone()
                 + is_bet.clone()
                 + is_shuffle_timeout.clone()
-                + is_reconstruct_timeout.clone())
+                + is_timeout_reset.clone()
+                + is_reveal_kick.clone()
+                + is_reveal_reconstruct.clone()
+                + is_award_family.clone())
                 * (amount_sum * amount_inv.clone() - one.clone()),
         );
         // The native funding selectors are the only transitions that credit
@@ -5193,7 +6404,9 @@ impl FrameworkEval for CanonicalAir {
                     - is_join.clone()
                     - is_leave.clone()
                     - is_shuffle_timeout.clone()
-                    - is_reconstruct_timeout.clone())
+                    - is_timeout_reset.clone()
+                    - is_reveal_reconstruct.clone()
+                    - is_award_family.clone())
                     * carry.clone(),
             );
         }
@@ -5251,7 +6464,8 @@ impl FrameworkEval for CanonicalAir {
                     - is_addon.clone()
                     - is_kick.clone()
                     - is_shuffle_timeout.clone()
-                    - is_reconstruct_timeout.clone())
+                    - is_timeout_reset.clone()
+                    - is_reveal_reconstruct.clone())
                     * carry.clone(),
             );
         }
@@ -5262,7 +6476,9 @@ impl FrameworkEval for CanonicalAir {
                     - is_kick.clone()
                     - is_leave.clone()
                     - is_shuffle_timeout.clone()
-                    - is_reconstruct_timeout.clone())
+                    - is_timeout_reset.clone()
+                    - is_reveal_reconstruct.clone()
+                    - is_award_family.clone())
                     * carry.clone(),
             );
         }
@@ -5360,6 +6576,81 @@ impl FrameworkEval for CanonicalAir {
             &post_pot,
             &funding_addon_carries,
         );
+        // The reveal-timeout reconstruct terminal reuses the kick refund
+        // arithmetic: `amount = stack + pending_addon`, `pot += bet`, and
+        // `chip_pool -= amount`, all against the transition-selector opening
+        // of the terminal seat rather than a host projection.
+        for limb in 0..4 {
+            eval.add_constraint(
+                is_reveal_reconstruct.clone()
+                    * (pre_stack[limb].clone() - selected_transition_pre_stack[limb].clone()),
+            );
+            eval.add_constraint(
+                is_reveal_reconstruct.clone()
+                    * (pre_pending[limb].clone() - selected_transition_pre_pending[limb].clone()),
+            );
+            eval.add_constraint(
+                is_reveal_reconstruct.clone()
+                    * (pre_bet[limb].clone() - selected_transition_pre_bet[limb].clone()),
+            );
+        }
+        limb4_add_constraints(
+            &mut eval,
+            &is_reveal_reconstruct,
+            &selected_transition_pre_stack,
+            &selected_transition_pre_pending,
+            &amount,
+            &funding_rebuy_carries,
+        );
+        limb4_add_constraints(
+            &mut eval,
+            &is_reveal_reconstruct,
+            &post_chip_pool,
+            &amount,
+            &pre_chip_pool,
+            &funding_chip_pool_carries,
+        );
+        limb4_add_constraints(
+            &mut eval,
+            &is_reveal_reconstruct,
+            &pre_pot,
+            &selected_transition_pre_bet,
+            &post_pot,
+            &funding_addon_carries,
+        );
+        // The sole-survivor award reuses the same kick refund arithmetic; the
+        // pot itself is credited to the winner's stack, not collected.
+        for limb in 0..4 {
+            eval.add_constraint(
+                is_award_family.clone()
+                    * (pre_stack[limb].clone() - selected_transition_pre_stack[limb].clone()),
+            );
+            eval.add_constraint(
+                is_award_family.clone()
+                    * (pre_pending[limb].clone() - selected_transition_pre_pending[limb].clone()),
+            );
+            eval.add_constraint(
+                is_award_family.clone()
+                    * (pre_bet[limb].clone() - selected_transition_pre_bet[limb].clone()),
+            );
+        }
+        limb4_add_constraints(
+            &mut eval,
+            &is_award_family,
+            &selected_transition_pre_stack,
+            &selected_transition_pre_pending,
+            &amount,
+            &funding_rebuy_carries,
+        );
+        limb4_add_constraints(
+            &mut eval,
+            &is_reveal_award,
+            &post_chip_pool,
+            &amount,
+            &pre_chip_pool,
+            &funding_chip_pool_carries,
+        );
+
         for (pre, post) in [
             (&pre_phase, &post_phase),
             (&pre_subtag, &post_subtag),
@@ -5764,6 +7055,69 @@ impl FrameworkEval for CanonicalAir {
         eval.add_constraint(inactive.clone() * shuffle_deck_diff_square_sum.clone());
         eval.add_constraint(inactive.clone() * shuffle_deck_product.clone());
         eval.add_constraint(inactive.clone() * shuffle_deck_nonzero_change_inv.clone());
+        for value in [
+            &reveal_reconstruct_diff_square_sum,
+            &reveal_reconstruct_change_product,
+            &reveal_reconstruct_change_inv,
+            &reveal_reconstruct_live_product,
+            &reveal_reconstruct_live_inv,
+        ] {
+            eval.add_constraint(inactive.clone() * value.clone());
+        }
+        for bit in &reveal_reconstruct_street_bits {
+            eval.add_constraint(inactive.clone() * bit.clone());
+        }
+        for bit in &reveal_kick_street_bits {
+            eval.add_constraint(inactive.clone() * bit.clone());
+        }
+        for credit in &reveal_award_winner_credit {
+            eval.add_constraint(inactive.clone() * credit.clone());
+        }
+        eval.add_constraint(inactive.clone() * reveal_award_pot_inv.clone());
+        for value in rake_config
+            .iter()
+            .chain(rake_product.iter())
+            .chain(rake_limbs.iter())
+        {
+            eval.add_constraint(inactive.clone() * value.clone());
+        }
+        for value in rake_scaled
+            .iter()
+            .chain(std::iter::once(&rake_remainder))
+            .chain(rake_min_diff.iter())
+            .chain(rake_min_borrows.iter())
+            .chain(rake_final.iter())
+            .chain(rake_award.iter())
+            .chain(rake_chip_intermediate.iter())
+        {
+            eval.add_constraint(inactive.clone() * value.clone());
+        }
+        for carry in rake_div_carries
+            .iter()
+            .chain(rake_chip_extra_carries.iter())
+        {
+            eval.add_constraint(inactive.clone() * carry.clone());
+        }
+        for pair in rake_pot_bytes
+            .iter()
+            .chain(rake_product_bytes.iter())
+            .chain(rake_limb_bytes.iter())
+            .chain(rake_scaled_bytes.iter())
+            .chain(rake_min_diff_bytes.iter())
+            .chain(rake_final_bytes.iter())
+            .chain(rake_award_bytes.iter())
+        {
+            for byte in pair {
+                eval.add_constraint(inactive.clone() * byte.clone());
+            }
+        }
+        for byte in rake_remainder_bytes
+            .iter()
+            .chain(rake_remainder_bound_bytes.iter())
+        {
+            eval.add_constraint(inactive.clone() * byte.clone());
+        }
+        eval.add_constraint(inactive.clone() * reveal_award_pot_inv.clone());
         for carry in stack_carries
             .iter()
             .chain(bet_carries.iter())
@@ -6156,7 +7510,10 @@ impl FrameworkEval for CanonicalAir {
             + kinds[CanonicalTransitionKind::AdvanceRound as usize].clone()
             + kinds[CanonicalTransitionKind::AutoFold as usize].clone()
             + is_terminal_reset.clone()
-            + is_timeout_reset.clone();
+            + is_timeout_reset.clone()
+            + is_reveal_kick.clone()
+            + is_reveal_reconstruct.clone()
+            + is_award_family.clone();
         // `AdvanceDeadline` is permissionless in the VM and therefore carries
         // the canonical zero actor.  Constrain every limb directly; a non-zero
         // sum check would both accept a forged actor and reject only the
@@ -6197,9 +7554,218 @@ impl FrameworkEval for CanonicalAir {
             active.clone() * (transition_sum * transition_commitment_inv.clone() - one.clone()),
         );
         eval.add_constraint(active.clone() * (nullifier_sum * nullifier_inv.clone() - one.clone()));
-        eval.add_constraint((one.clone() - active.clone()) * (kind_sum + seat + flag));
+        eval.add_constraint((one.clone() - active.clone()) * (kind_sum + seat.clone() + flag));
         let first = eval.get_preprocessed_column(preprocessed_ids()[1].clone());
         let last = eval.get_preprocessed_column(preprocessed_ids()[2].clone());
+        let first_kind =
+            eval.get_preprocessed_column(preprocessed_ids()[FIRST_KIND_SCOPE_OFFSET].clone());
+        let last_kind =
+            eval.get_preprocessed_column(preprocessed_ids()[LAST_KIND_SCOPE_OFFSET].clone());
+        let cascade_active = eval.get_preprocessed_column(
+            preprocessed_ids()[REVEAL_TIMEOUT_CASCADE_ACTIVE_SCOPE_OFFSET].clone(),
+        );
+        let cascade_seat = eval.get_preprocessed_column(
+            preprocessed_ids()[REVEAL_TIMEOUT_CASCADE_SEAT_SCOPE_OFFSET].clone(),
+        );
+        let mut row_kind: E::F = M31::from(0u32).into();
+        for (index, selector) in kinds.iter().enumerate() {
+            row_kind += selector.clone() * E::F::from(M31::from(index as u32));
+        }
+        eval.add_constraint(first.clone() * (row_kind.clone() - first_kind));
+        eval.add_constraint(last.clone() * (row_kind - last_kind));
+        // A dedicated reveal-timeout cascade batch is archive-bound to the
+        // public seat schedule. Every active row must carry either a
+        // non-terminal kick or the final typed reset, and its action seat must
+        // equal the corresponding schedule entry.
+        let is_reveal_timeout_kick =
+            kinds[CanonicalTransitionKind::RevealTimeoutKick as usize].clone();
+        eval.add_constraint(
+            cascade_active.clone()
+                * (is_reveal_timeout_kick.clone()
+                    + is_reveal_timeout.clone()
+                    + is_reveal_reconstruct.clone()
+                    + is_award_family.clone()
+                    - one.clone()),
+        );
+        eval.add_constraint(cascade_active.clone() * (seat.clone() - cascade_seat.clone()));
+        let range = self.range.clone();
+        let rake_scope: [E::F; 6] = std::array::from_fn(|index| {
+            eval.get_preprocessed_column(preprocessed_ids()[RAKE_SCOPE_OFFSET + index].clone())
+        });
+        for index in 0..6 {
+            eval.add_constraint(
+                is_reveal_raked_award.clone()
+                    * (rake_config[index].clone() - rake_scope[index].clone()),
+            );
+            eval.add_constraint(
+                (active.clone() - is_reveal_raked_award.clone()) * rake_config[index].clone(),
+            );
+        }
+        eval.add_constraint(is_reveal_raked_award.clone() * (rake_config[0].clone() - one.clone()));
+        let rake_bps = rake_config[1].clone();
+        let rake_cap_limbs: [E::F; 4] = [
+            rake_config[2].clone(),
+            rake_config[3].clone(),
+            rake_config[4].clone(),
+            rake_config[5].clone(),
+        ];
+        // The awarded pot fits 32 bits and both low limbs are range-bound.
+        for limb in 2..4 {
+            eval.add_constraint(is_reveal_raked_award.clone() * pre_pot[limb].clone());
+        }
+        for (limb, bytes) in pre_pot.iter().take(2).zip(rake_pot_bytes.iter()) {
+            range8_logup_constraints(&mut eval, &is_reveal_raked_award, limb, bytes, &range);
+        }
+        // Product `M = pot * bps` as one weighted field identity over
+        // range-bound limbs; the weighted integer stays far below the M31
+        // modulus, so the identity is exact over the integers.
+        let mut weighted_product: E::F = M31::from(0u32).into();
+        let mut weighted_scaled: E::F = M31::from(0u32).into();
+        let mut weighted_rake: E::F = M31::from(0u32).into();
+        let mut weighted_final: E::F = M31::from(0u32).into();
+        let mut weighted_award: E::F = M31::from(0u32).into();
+        let mut weighted_pot: E::F = M31::from(0u32).into();
+        let mut weight: E::F = one.clone();
+        for limb in 0..4 {
+            weighted_product += rake_product[limb].clone() * weight.clone();
+            weighted_scaled += rake_scaled[limb].clone() * weight.clone();
+            weighted_rake += rake_limbs[limb].clone() * weight.clone();
+            weighted_final += rake_final[limb].clone() * weight.clone();
+            weighted_award += rake_award[limb].clone() * weight.clone();
+            weighted_pot += pre_pot[limb].clone() * weight.clone();
+            weight = weight * E::F::from(M31::from(65536u32));
+        }
+        eval.add_constraint(
+            is_reveal_raked_award.clone()
+                * (weighted_product.clone()
+                    - pre_pot[0].clone() * rake_bps.clone()
+                    - E::F::from(M31::from(65536u32)) * pre_pot[1].clone() * rake_bps.clone()),
+        );
+        for (limb, bytes) in rake_product.iter().zip(rake_product_bytes.iter()) {
+            range8_logup_constraints(&mut eval, &is_reveal_raked_award, limb, bytes, &range);
+        }
+        for (limb, bytes) in rake_limbs.iter().zip(rake_limb_bytes.iter()) {
+            range8_logup_constraints(&mut eval, &is_reveal_raked_award, limb, bytes, &range);
+        }
+        // Scaled identity `rake_raw * 10_000 + remainder = M` fixes the floor
+        // division because the remainder is range-bound below 10_000.
+        eval.add_constraint(
+            is_reveal_raked_award.clone()
+                * (weighted_scaled.clone()
+                    - E::F::from(M31::from(10_000u32)) * weighted_rake.clone()),
+        );
+        for (limb, bytes) in rake_scaled.iter().zip(rake_scaled_bytes.iter()) {
+            range8_logup_constraints(&mut eval, &is_reveal_raked_award, limb, bytes, &range);
+        }
+        // The remainder decomposes into two range-checked bytes, and a second
+        // byte pair witnesses `9_999 - remainder`, pinning the remainder
+        // strictly below the divisor so the floor division is exact.
+        range8_logup_constraints(
+            &mut eval,
+            &is_reveal_raked_award,
+            &rake_remainder,
+            &rake_remainder_bytes,
+            &range,
+        );
+        let bound = E::F::from(M31::from(9_999u32)) - rake_remainder.clone();
+        range8_logup_constraints(
+            &mut eval,
+            &is_reveal_raked_award,
+            &bound,
+            &rake_remainder_bound_bytes,
+            &range,
+        );
+        limb4_add_constraints(
+            &mut eval,
+            &is_reveal_raked_award,
+            &rake_scaled,
+            &[
+                rake_remainder.clone(),
+                M31::from(0u32).into(),
+                M31::from(0u32).into(),
+                M31::from(0u32).into(),
+            ],
+            &rake_product,
+            &rake_div_carries,
+        );
+        // `min(raw, cap)` through a borrow chain over `raw + (2^64 - 1 - cap)
+        // + 1`: the final borrow is set exactly when `raw >= cap`.
+        let mut min_borrow_in: E::F = one.clone();
+        for limb in 0..4 {
+            let complement = E::F::from(M31::from(65535u32)) - rake_cap_limbs[limb].clone();
+            let borrow_out = rake_min_borrows[limb].clone();
+            let sum = rake_limbs[limb].clone() + complement + min_borrow_in.clone();
+            eval.add_constraint(
+                is_reveal_raked_award.clone()
+                    * (sum
+                        - rake_min_diff[limb].clone()
+                        - E::F::from(M31::from(65536u32)) * borrow_out.clone()),
+            );
+            eval.add_constraint(
+                is_reveal_raked_award.clone()
+                    * borrow_out.clone()
+                    * (borrow_out.clone() - one.clone()),
+            );
+            min_borrow_in = borrow_out;
+        }
+        for (limb, bytes) in rake_min_diff.iter().zip(rake_min_diff_bytes.iter()) {
+            range8_logup_constraints(&mut eval, &is_reveal_raked_award, limb, bytes, &range);
+        }
+        let min_selector = rake_min_borrows[3].clone();
+        for limb in 0..4 {
+            eval.add_constraint(
+                is_reveal_raked_award.clone()
+                    * (rake_final[limb].clone()
+                        - rake_limbs[limb].clone()
+                        - min_selector.clone()
+                            * (rake_cap_limbs[limb].clone() - rake_limbs[limb].clone())),
+            );
+        }
+        for (limb, bytes) in rake_final.iter().zip(rake_final_bytes.iter()) {
+            range8_logup_constraints(&mut eval, &is_reveal_raked_award, limb, bytes, &range);
+        }
+        // The survivor is credited `pot - rake` and the rake leaves custody.
+        eval.add_constraint(
+            is_reveal_raked_award.clone()
+                * (weighted_award.clone() + weighted_final.clone() - weighted_pot.clone()),
+        );
+        let mut weighted_stack_deltas: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| M31::from(0u32).into());
+        for index in 0..MAX_CANONICAL_SEATS {
+            let mut delta_weight: E::F = one.clone();
+            for limb in 0..4 {
+                weighted_stack_deltas[index] += (full_post_stack[index][limb].clone()
+                    - full_pre_stack[index][limb].clone())
+                    * delta_weight.clone();
+                delta_weight = delta_weight * E::F::from(M31::from(65536u32));
+            }
+            eval.add_constraint(
+                is_reveal_raked_award.clone()
+                    * reveal_award_winner_credit[index].clone()
+                    * (weighted_stack_deltas[index].clone() - weighted_award.clone()),
+            );
+        }
+        for (limb, bytes) in rake_award.iter().zip(rake_award_bytes.iter()) {
+            range8_logup_constraints(&mut eval, &is_reveal_raked_award, limb, bytes, &range);
+        }
+        limb4_add_constraints(
+            &mut eval,
+            &is_reveal_raked_award,
+            &post_chip_pool,
+            &amount,
+            &rake_chip_intermediate,
+            &funding_chip_pool_carries,
+        );
+        limb4_add_constraints(
+            &mut eval,
+            &is_reveal_raked_award,
+            &rake_chip_intermediate,
+            &rake_final,
+            &pre_chip_pool,
+            &rake_chip_extra_carries,
+        );
+
+        eval.add_constraint((one.clone() - cascade_active.clone()) * is_reveal_timeout_kick);
         for value in next_pre_image
             .iter()
             .chain(next_pre_state_root.iter())
@@ -6424,8 +7990,237 @@ impl FrameworkEval for CanonicalAir {
             &post_state_binding,
             &scope_post_state,
         );
+        // Table side of the shared range LogUp: rows 0..=255 yield
+        // `-multiplicity / (z + row)` so the uses and the table balance to
+        // zero inside this single component, exactly like the cairo-air
+        // range-check pattern.
+        let range_multiplicity = eval.next_trace_mask();
+        let range_table_value =
+            eval.get_preprocessed_column(preprocessed_ids()[RANGE_TABLE_SCOPE_OFFSET].clone());
+        eval.add_to_relation(RelationEntry::new(
+            &self.range,
+            -E::EF::from(range_multiplicity),
+            &[range_table_value],
+        ));
+        eval.finalize_logup_in_pairs();
         eval
     }
+}
+
+/// Prove a tagged batch whose terminal is a raked sole-survivor award.  The
+/// complete table rules are hashed by the shared lookup-backed Blake2b STARK
+/// and attached alongside the public rake opening, so the verifier can bind
+/// the opening to the pre rules commitment without any native hashing.
+pub fn prove_canonical_raked_tagged_batch(
+    witnesses: &[CanonicalTransitionWitness],
+    rules: &poker_l1::vm::contracts::texas_poker::types::TableRules,
+) -> TexasAirResult<ArchivedCanonicalTaggedProof> {
+    let has_raked = witnesses
+        .iter()
+        .any(|w| w.kind == CanonicalTransitionKind::RevealTimeoutRakedAward);
+    if !has_raked {
+        return Err(TexasAirError::SpecViolation(
+            "raked canonical proof requires a raked award terminal".into(),
+        ));
+    }
+    crate::canonical_rake_opening::validate_rules_opening(rules)?;
+    let mut archive = prove_canonical_tagged_batch(witnesses)?;
+    let expected = crate::canonical_rake_opening::rake_opening_of(rules);
+    if archive.rake_opening != Some(expected) {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "witness rake opening is detached from the table rules".into(),
+        ));
+    }
+    archive.rules_hash = Some(crate::canonical_rake_opening::prove_canonical_rules_hash(
+        rules,
+    )?);
+    Ok(archive)
+}
+
+/// Storage order of the 56 raked-award byte advice columns, matching the
+/// relation-entry emission order inside `CanonicalAir::evaluate`.
+const RAKE_BYTE_COLUMN_ORDER: [usize; 56] = [
+    RAKE_POT_BYTES_OFFSET,
+    RAKE_POT_BYTES_OFFSET + 1,
+    RAKE_POT_BYTES_OFFSET + 2,
+    RAKE_POT_BYTES_OFFSET + 3,
+    RAKE_PRODUCT_BYTES_OFFSET,
+    RAKE_PRODUCT_BYTES_OFFSET + 1,
+    RAKE_PRODUCT_BYTES_OFFSET + 2,
+    RAKE_PRODUCT_BYTES_OFFSET + 3,
+    RAKE_PRODUCT_BYTES_OFFSET + 4,
+    RAKE_PRODUCT_BYTES_OFFSET + 5,
+    RAKE_PRODUCT_BYTES_OFFSET + 6,
+    RAKE_PRODUCT_BYTES_OFFSET + 7,
+    RAKE_LIMB_BYTES_OFFSET,
+    RAKE_LIMB_BYTES_OFFSET + 1,
+    RAKE_LIMB_BYTES_OFFSET + 2,
+    RAKE_LIMB_BYTES_OFFSET + 3,
+    RAKE_LIMB_BYTES_OFFSET + 4,
+    RAKE_LIMB_BYTES_OFFSET + 5,
+    RAKE_LIMB_BYTES_OFFSET + 6,
+    RAKE_LIMB_BYTES_OFFSET + 7,
+    RAKE_SCALED_BYTES_OFFSET,
+    RAKE_SCALED_BYTES_OFFSET + 1,
+    RAKE_SCALED_BYTES_OFFSET + 2,
+    RAKE_SCALED_BYTES_OFFSET + 3,
+    RAKE_SCALED_BYTES_OFFSET + 4,
+    RAKE_SCALED_BYTES_OFFSET + 5,
+    RAKE_SCALED_BYTES_OFFSET + 6,
+    RAKE_SCALED_BYTES_OFFSET + 7,
+    RAKE_REMAINDER_BYTES_OFFSET,
+    RAKE_REMAINDER_BYTES_OFFSET + 1,
+    RAKE_REMAINDER_BOUND_BYTES_OFFSET,
+    RAKE_REMAINDER_BOUND_BYTES_OFFSET + 1,
+    RAKE_MIN_DIFF_BYTES_OFFSET,
+    RAKE_MIN_DIFF_BYTES_OFFSET + 1,
+    RAKE_MIN_DIFF_BYTES_OFFSET + 2,
+    RAKE_MIN_DIFF_BYTES_OFFSET + 3,
+    RAKE_MIN_DIFF_BYTES_OFFSET + 4,
+    RAKE_MIN_DIFF_BYTES_OFFSET + 5,
+    RAKE_MIN_DIFF_BYTES_OFFSET + 6,
+    RAKE_MIN_DIFF_BYTES_OFFSET + 7,
+    RAKE_FINAL_BYTES_OFFSET,
+    RAKE_FINAL_BYTES_OFFSET + 1,
+    RAKE_FINAL_BYTES_OFFSET + 2,
+    RAKE_FINAL_BYTES_OFFSET + 3,
+    RAKE_FINAL_BYTES_OFFSET + 4,
+    RAKE_FINAL_BYTES_OFFSET + 5,
+    RAKE_FINAL_BYTES_OFFSET + 6,
+    RAKE_FINAL_BYTES_OFFSET + 7,
+    RAKE_AWARD_BYTES_OFFSET,
+    RAKE_AWARD_BYTES_OFFSET + 1,
+    RAKE_AWARD_BYTES_OFFSET + 2,
+    RAKE_AWARD_BYTES_OFFSET + 3,
+    RAKE_AWARD_BYTES_OFFSET + 4,
+    RAKE_AWARD_BYTES_OFFSET + 5,
+    RAKE_AWARD_BYTES_OFFSET + 6,
+    RAKE_AWARD_BYTES_OFFSET + 7,
+];
+
+/// Column of the `RevealTimeoutRakedAward` kind selector (active flag plus
+/// one selector per kind).
+const RAKED_KIND_COLUMN: usize = 1 + CanonicalTransitionKind::RevealTimeoutRakedAward as usize;
+
+/// Number of paired LogUp interaction columns: 56 use lookups + 1 table
+/// entry = 57 fractions, paired into 29 secure columns (four base columns
+/// each).
+const RANGE_INTERACTION_COLUMNS: usize = 29;
+
+/// Append the shared range-table multiplicity column to a completed trace.
+fn append_range_multiplicity(trace: &mut MethodTrace) {
+    let mut multiplicities = vec![0u32; 256];
+    for row in 0..trace.cols[RAKED_KIND_COLUMN].len() {
+        if trace.cols[RAKED_KIND_COLUMN][row] != M31::from(1u32) {
+            continue;
+        }
+        for column in RAKE_BYTE_COLUMN_ORDER {
+            let value = u64::from(trace.cols[column][row].0) as usize;
+            if value < 256 {
+                multiplicities[value] += 1;
+            }
+        }
+    }
+    for (row, cell) in trace.cols[NUM_COLUMNS].iter_mut().enumerate() {
+        *cell = if row < 256 {
+            M31::from(multiplicities[row])
+        } else {
+            M31::from(0u32)
+        };
+    }
+}
+
+/// Build the paired LogUp interaction columns for the shared range table in
+/// the single-component cairo-air layout: 28 columns pair the 56 use
+/// lookups, and the last column holds the single negated table entry, so
+/// the generator's claimed sum is exactly zero for a balanced multiset.
+fn canonical_range_interaction(
+    trace: &MethodTrace,
+    log_size: u32,
+    range: &CanonicalRange8,
+) -> (
+    Vec<
+        stwo::prover::poly::circle::CircleEvaluation<
+            stwo::prover::backend::simd::SimdBackend,
+            M31,
+            stwo::prover::poly::BitReversedOrder,
+        >,
+    >,
+    SecureField,
+) {
+    use stwo::prover::backend::simd::m31::{LOG_N_LANES, PackedBaseField};
+    use stwo::prover::backend::simd::qm31::PackedSecureField;
+
+    // The committed trace/preprocessed columns are bit-reversed by
+    // MethodTrace::to_evaluations; the interaction columns must align with
+    // that storage, so every source column is bit-reversed before packing.
+    let bitrev = |column: &[M31]| -> Vec<M31> {
+        (0..column.len())
+            .map(|i| {
+                let mut r = 0usize;
+                for bit in 0..log_size {
+                    if (i >> bit) & 1 == 1 {
+                        r |= 1 << (log_size - 1 - bit);
+                    }
+                }
+                column[r]
+            })
+            .collect()
+    };
+    let raked_gate = bitrev(&trace.cols[RAKED_KIND_COLUMN]);
+    let multiplicity = bitrev(&trace.cols[NUM_COLUMNS]);
+    let byte_columns: [Vec<M31>; 56] =
+        std::array::from_fn(|lookup| bitrev(&trace.cols[RAKE_BYTE_COLUMN_ORDER[lookup]]));
+    let table_values: Vec<M31> = {
+        let natural: Vec<M31> = (0..(1usize << log_size))
+            .map(|row| {
+                if row < 256 {
+                    M31::from(row as u32)
+                } else {
+                    M31::from(0u32)
+                }
+            })
+            .collect();
+        bitrev(&natural)
+    };
+    let pack_vec = |column: &[M31], vector_row: usize| {
+        let mut values = [M31::from(0u32); stwo::prover::backend::simd::m31::N_LANES];
+        for (lane, value) in values.iter_mut().enumerate() {
+            let row = vector_row * stwo::prover::backend::simd::m31::N_LANES + lane;
+            *value = if row < column.len() {
+                column[row]
+            } else {
+                M31::from(0u32)
+            };
+        }
+        PackedBaseField::from_array(values)
+    };
+
+    let mut generator = LogupTraceGenerator::new(log_size);
+    for pair in 0..28 {
+        let mut col = generator.new_col();
+        for vector_row in 0..(1usize << (log_size - LOG_N_LANES)) {
+            let gate = pack_vec(&raked_gate, vector_row);
+            let d0: PackedSecureField =
+                range.combine(&[pack_vec(&byte_columns[2 * pair], vector_row)]);
+            let d1: PackedSecureField =
+                range.combine(&[pack_vec(&byte_columns[2 * pair + 1], vector_row)]);
+            let gate_secure = PackedSecureField::from(gate);
+            col.write_frac(vector_row, gate_secure * (d0 + d1), d0 * d1);
+        }
+        col.finalize_col();
+    }
+    {
+        let mut col = generator.new_col();
+        for vector_row in 0..(1usize << (log_size - LOG_N_LANES)) {
+            let multiplicity_packed = pack_vec(&multiplicity, vector_row);
+            let d: PackedSecureField = range.combine(&[pack_vec(&table_values, vector_row)]);
+            let numerator = -PackedSecureField::from(multiplicity_packed);
+            col.write_frac(vector_row, numerator, d);
+        }
+        col.finalize_col();
+    }
+    generator.finalize_last()
 }
 
 pub fn prove_canonical_tagged_batch(
@@ -6454,17 +8249,27 @@ pub fn prove_canonical_tagged_batch(
         b.extend_evals(trace.to_evaluations());
         b.commit(&mut channel);
     }
+    let range = CanonicalRange8::draw(&mut channel);
+    let (interaction, range_sum) = canonical_range_interaction(&trace, trace.log_size, &range);
+    channel.mix_felts(&[range_sum]);
+    {
+        let mut b = scheme.tree_builder();
+        b.extend_evals(interaction);
+        b.commit(&mut channel);
+    }
     let ids = preprocessed_ids();
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
         &mut allocator,
         CanonicalAir {
             log_size: trace.log_size,
+            range,
         },
-        SecureField::from(0u32),
+        range_sum,
     );
     let proof = prove(&[&component], &mut channel, scheme)
         .map_err(|e: ProvingError| TexasAirError::StwoProverError(e.to_string()))?;
+    archive.range_claimed_sum = range_sum.to_m31_array().map(|limb| limb.0);
     archive.stark_proof_bytes = options()
         .serialize(&proof)
         .map_err(|e| TexasAirError::SerializationError(e.to_string()))?;
@@ -6506,17 +8311,27 @@ pub fn prove_canonical_tagged_batch_for_state_opening(
         b.extend_evals(trace.to_evaluations());
         b.commit(&mut channel);
     }
+    let range = CanonicalRange8::draw(&mut channel);
+    let (interaction, range_sum) = canonical_range_interaction(&trace, trace.log_size, &range);
+    channel.mix_felts(&[range_sum]);
+    {
+        let mut b = scheme.tree_builder();
+        b.extend_evals(interaction);
+        b.commit(&mut channel);
+    }
     let ids = preprocessed_ids();
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
         &mut allocator,
         CanonicalAir {
             log_size: trace.log_size,
+            range,
         },
-        SecureField::from(0u32),
+        range_sum,
     );
     let proof = prove(&[&component], &mut channel, scheme)
         .map_err(|e: ProvingError| TexasAirError::StwoProverError(e.to_string()))?;
+    archive.range_claimed_sum = range_sum.to_m31_array().map(|limb| limb.0);
     archive.stark_proof_bytes = options()
         .serialize(&proof)
         .map_err(|e| TexasAirError::SerializationError(e.to_string()))?;
@@ -6528,12 +8343,47 @@ pub fn verify_canonical_tagged_proof(archive: &ArchivedCanonicalTaggedProof) -> 
         || archive.transition_count == 0
         || archive.transition_count as usize > (1usize << archive.log_size)
         || archive.log_size > 10
+        || archive.first_transition_kind as usize >= KIND_COUNT
+        || archive.last_transition_kind as usize >= KIND_COUNT
     {
         return Err(TexasAirError::SpecViolation(
             "canonical proof shape is invalid".into(),
         ));
     }
-    let _ = validate_state_image_bytes(archive)?;
+    validate_reveal_timeout_cascade_archive_shape(archive)?;
+    let (pre_image, _) = validate_state_image_bytes(archive)?;
+    verify_canonical_rake_binding(archive, &pre_image)?;
+    verify_canonical_stark(archive)
+}
+
+/// Bind the public rake opening to the pre rules commitment through the
+/// companion lookup-backed Blake2b rules proof.  A raked terminal without
+/// the proof, or a proof without the terminal, fails closed.
+fn verify_canonical_rake_binding(
+    archive: &ArchivedCanonicalTaggedProof,
+    pre_image: &CanonicalStateImage,
+) -> TexasAirResult<()> {
+    match (&archive.rake_opening, &archive.rules_hash) {
+        (Some(opening), Some(rules_hash)) => {
+            let authenticated = crate::canonical_rake_opening::verify_canonical_rules_hash(
+                rules_hash,
+                pre_image.rules_commitment,
+            )?;
+            if authenticated.rake != *opening {
+                return Err(TexasAirError::ConstraintUnsatisfied(
+                    "canonical rake opening is detached from the authenticated rules".into(),
+                ));
+            }
+            Ok(())
+        }
+        (None, None) => Ok(()),
+        _ => Err(TexasAirError::SpecViolation(
+            "canonical rake opening and rules proof must be carried together".into(),
+        )),
+    }
+}
+
+fn verify_canonical_stark(archive: &ArchivedCanonicalTaggedProof) -> TexasAirResult<()> {
     let proof: StarkProof<Poseidon252MerkleHasher> = options()
         .deserialize(&archive.stark_proof_bytes)
         .map_err(|e| TexasAirError::SerializationError(e.to_string()))?;
@@ -6574,7 +8424,17 @@ pub fn verify_canonical_tagged_proof(archive: &ArchivedCanonicalTaggedProof) -> 
     );
     scheme.commit(
         proof.commitments[1],
-        &vec![archive.log_size; NUM_COLUMNS],
+        &vec![archive.log_size; NUM_COLUMNS + 1],
+        &mut channel,
+    );
+    let range = CanonicalRange8::draw(&mut channel);
+    let claimed = SecureField::from_m31_array(core::array::from_fn(|index| {
+        M31::from(archive.range_claimed_sum[index])
+    }));
+    channel.mix_felts(&[claimed]);
+    scheme.commit(
+        proof.commitments[2],
+        &vec![archive.log_size; RANGE_INTERACTION_COLUMNS * 4],
         &mut channel,
     );
     let ids = preprocessed_ids();
@@ -6583,6 +8443,7 @@ pub fn verify_canonical_tagged_proof(archive: &ArchivedCanonicalTaggedProof) -> 
         &mut allocator,
         CanonicalAir {
             log_size: archive.log_size,
+            range,
         },
         SecureField::from(0u32),
     );
@@ -6590,6 +8451,85 @@ pub fn verify_canonical_tagged_proof(archive: &ArchivedCanonicalTaggedProof) -> 
         .map_err(|e: VerificationError| TexasAirError::ConstraintUnsatisfied(e.to_string()))
 }
 
+/// Verify a canonical proof while leaving image-commitment authentication to
+/// the composed state-image hash AIR.  This is intentionally not a standalone
+/// verifier: callers must immediately verify the matching hash/opening proof.
+pub(crate) fn verify_canonical_tagged_proof_for_state_opening(
+    archive: &ArchivedCanonicalTaggedProof,
+) -> TexasAirResult<()> {
+    if archive.num_columns != NUM_COLUMNS as u32
+        || archive.transition_count == 0
+        || archive.transition_count as usize > (1usize << archive.log_size)
+        || archive.log_size > 10
+        || archive.first_transition_kind as usize >= KIND_COUNT
+        || archive.last_transition_kind as usize >= KIND_COUNT
+    {
+        return Err(TexasAirError::SpecViolation(
+            "canonical proof shape is invalid".into(),
+        ));
+    }
+    validate_reveal_timeout_cascade_archive_shape(archive)?;
+    let _ = validate_state_image_bytes_without_commitment(archive)?;
+    verify_canonical_stark(archive)
+}
+
+fn validate_reveal_timeout_cascade_archive_shape(
+    archive: &ArchivedCanonicalTaggedProof,
+) -> TexasAirResult<()> {
+    let schedule = &archive.reveal_timeout_cascade_schedule;
+    if archive.reveal_timeout_cascade_count == 0 {
+        if schedule
+            .iter()
+            .any(|seat| *seat != REVEAL_TIMEOUT_CASCADE_EMPTY_SEAT)
+        {
+            return Err(TexasAirError::SpecViolation(
+                "ordinary canonical batch carries a reveal-timeout schedule".into(),
+            ));
+        }
+        return Ok(());
+    }
+    let count = usize::from(archive.reveal_timeout_cascade_count);
+    let terminal_continuation = archive.transition_count
+        == archive.reveal_timeout_cascade_count as u16 + 1
+        && (archive.last_transition_kind == CanonicalTransitionKind::RevealTimeoutReset as u8
+            || archive.last_transition_kind
+                == CanonicalTransitionKind::RevealTimeoutReconstruct as u8
+            || archive.last_transition_kind == CanonicalTransitionKind::RevealTimeoutAward as u8
+            || archive.last_transition_kind
+                == CanonicalTransitionKind::RevealTimeoutRakedAward as u8);
+    let strict_prefix = archive.transition_count == archive.reveal_timeout_cascade_count as u16
+        && archive.last_transition_kind == CanonicalTransitionKind::RevealTimeoutKick as u8;
+    if count > MAX_REVEAL_TIMEOUT_CASCADE_KICKS
+        || archive.first_transition_kind != CanonicalTransitionKind::RevealTimeoutKick as u8
+        || (!terminal_continuation && !strict_prefix)
+        || schedule[..count]
+            .iter()
+            .any(|seat| *seat >= MAX_CANONICAL_SEATS as u8)
+        || schedule[..count]
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1] || pair[0] >= MAX_CANONICAL_SEATS as u8)
+        || (terminal_continuation
+            && (count >= MAX_REVEAL_TIMEOUT_CASCADE_KICKS
+                || schedule[count] >= MAX_CANONICAL_SEATS as u8
+                || schedule[count] <= schedule[count - 1]))
+        || schedule[if terminal_continuation {
+            count + 1
+        } else {
+            count
+        }..]
+            .iter()
+            .any(|seat| *seat != REVEAL_TIMEOUT_CASCADE_EMPTY_SEAT)
+    {
+        return Err(TexasAirError::SpecViolation(
+            "reveal-timeout cascade archive schedule is non-canonical".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Verify a proof against the exact public scope reconstructed from a retained
+/// witness batch.  Production admission uses the archive-only verifier above;
+/// this compatibility helper is deliberately replay-oriented test tooling.
 pub fn verify_canonical_tagged_batch(
     witnesses: &[CanonicalTransitionWitness],
     archive: &ArchivedCanonicalTaggedProof,
@@ -6601,6 +8541,8 @@ pub fn verify_canonical_tagged_batch(
         || expected.post_state_commitment != archive.post_state_commitment
         || expected.pre_state_image_bytes != archive.pre_state_image_bytes
         || expected.post_state_image_bytes != archive.post_state_image_bytes
+        || expected.first_transition_kind != archive.first_transition_kind
+        || expected.last_transition_kind != archive.last_transition_kind
         || archive_root_scope(&expected) != archive_root_scope(archive)
         || expected.state_object_key != archive.state_object_key
         || expected.state_opening_epoch != archive.state_opening_epoch
@@ -6624,6 +8566,7 @@ mod tests {
         CanonicalStateImage, MAX_CANONICAL_SEATS, NO_CANONICAL_SEAT,
     };
     use stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE;
+    use stwo::prover::backend::Column as _;
     use stwo_constraint_framework::EvalAtRow;
 
     #[derive(Clone, Copy, Debug)]
@@ -6786,6 +8729,14 @@ mod tests {
         fn combine_ef(_: [Self::F; SECURE_EXTENSION_DEGREE]) -> Self::EF {
             num_traits::Zero::zero()
         }
+        fn add_to_relation<R: Relation<Self::F, Self::EF>>(
+            &mut self,
+            _entry: stwo_constraint_framework::RelationEntry<'_, Self::F, Self::EF, R>,
+        ) {
+        }
+        fn write_logup_frac(&mut self, _fraction: stwo::core::Fraction<Self::EF, Self::EF>) {}
+        fn finalize_logup_in_pairs(&mut self) {}
+        fn finalize_logup(&mut self) {}
     }
 
     fn image() -> CanonicalStateImage {
@@ -6832,7 +8783,11 @@ mod tests {
     #[test]
     fn canonical_air_declares_the_maximum_expression_degree() {
         let mut evaluator = DegreeEvaluator { max: 0 };
-        evaluator = CanonicalAir { log_size: 10 }.evaluate(evaluator);
+        evaluator = CanonicalAir {
+            log_size: 10,
+            range: CanonicalRange8::dummy(),
+        }
+        .evaluate(evaluator);
         assert_eq!(evaluator.max, 3);
     }
 
@@ -6858,6 +8813,26 @@ mod tests {
         assert_eq!(STATE_IMAGE_PROJECTION_LIMBS, 852);
     }
 
+    #[test]
+    fn endpoint_projection_binds_every_canonical_state_image_byte() {
+        // The endpoint scope uses 16-bit limbs where possible and individual
+        // M31 values for byte-sized enum fields.  Mutating any byte must
+        // therefore change at least one AIR-bound projection limb; otherwise
+        // a companion byte-hash proof could authenticate data the transition
+        // AIR never observes.
+        let bytes = borsh::to_vec(&image()).expect("canonical state image");
+        let baseline = state_image_projection(&bytes).expect("projection");
+        for index in 0..CANONICAL_STATE_IMAGE_BORSH_BYTES {
+            let mut changed = bytes.clone();
+            changed[index] ^= 1;
+            assert_ne!(
+                state_image_projection(&changed).expect("same fixed width"),
+                baseline,
+                "state-image byte {index} is absent from the endpoint projection",
+            );
+        }
+    }
+
     fn create_table() -> CanonicalTransitionWitness {
         let pre = image();
         let mut post = pre.clone();
@@ -6876,6 +8851,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -6922,6 +8898,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -6975,6 +8952,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -7009,6 +8987,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7053,6 +9032,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7098,6 +9078,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7151,6 +9132,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7205,6 +9187,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7262,6 +9245,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7332,7 +9316,6 @@ mod tests {
         post.seats[0].pending_addon = 0;
         post.seats[0].key_commitment = [0; 32];
         post.seats[0].hole_cards_commitment = [0; 32];
-
         let mut witness = CanonicalTransitionWitness {
             pre,
             post,
@@ -7347,6 +9330,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 2_000,
@@ -7425,12 +9409,680 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
         };
         witness.seal();
         witness
+    }
+
+    fn reveal_timeout_reset() -> CanonicalTransitionWitness {
+        let mut witness = reconstruct_timeout_reset();
+        witness.pre.phase = CanonicalPhase::Revealing;
+        witness.pre.phase_subtag = 1;
+        witness.pre.street = 1;
+        witness.kind = CanonicalTransitionKind::RevealTimeoutReset;
+        witness.seal();
+        witness
+    }
+
+    fn reveal_timeout_kick() -> CanonicalTransitionWitness {
+        let mut pre = image();
+        pre.phase = CanonicalPhase::Revealing;
+        pre.phase_subtag = 1;
+        pre.street = 1;
+        pre.current_turn = NO_CANONICAL_SEAT;
+        pre.max_players = 3;
+        pre.deadline_ms = 1_000;
+        pre.chip_pool = 367;
+        pre.pot = 25;
+        pre.current_bet = 5;
+        pre.min_raise = 5;
+        pre.protocol_pending_mask = 0b111;
+        for (index, seat) in pre.seats[..3].iter_mut().enumerate() {
+            *seat = CanonicalSeat {
+                status: CanonicalSeatStatus::Active,
+                acted: false,
+                stack: 100 + index as u64 * 10,
+                bet: if index == 0 { 5 } else { 0 },
+                total_bet: if index == 0 { 15 } else { 0 },
+                pending_addon: if index == 0 { 7 } else { 0 },
+                time_bank_ms: 30_000,
+                identity_commitment: [31 + index as u8; 32],
+                key_commitment: [41 + index as u8; 32],
+                hole_cards_commitment: [51 + index as u8; 32],
+            };
+        }
+
+        let mut post = pre.clone();
+        post.call_seq = pre.call_seq + 1;
+        post.protocol_pending_mask = 0b110;
+        post.pot = pre.pot + pre.seats[0].bet;
+        post.chip_pool = pre.chip_pool - pre.seats[0].stack - pre.seats[0].pending_addon;
+        post.reveal_commitment = [121; 32];
+        post.seats[0].status = CanonicalSeatStatus::Out;
+        post.seats[0].stack = 0;
+        post.seats[0].bet = 0;
+        post.seats[0].pending_addon = 0;
+        post.seats[0].key_commitment = [0; 32];
+        post.seats[0].hole_cards_commitment = [0; 32];
+
+        let mut witness = CanonicalTransitionWitness {
+            pre,
+            post,
+            kind: CanonicalTransitionKind::RevealTimeoutKick,
+            actor: [0; 32],
+            action: CanonicalActionPayload {
+                seat: 0,
+                amount: 107,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [121; 32],
+            },
+            round_advance: Default::default(),
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 1_000,
+        };
+        witness.seal();
+        witness
+    }
+
+    fn reveal_timeout_kick_batch() -> Vec<CanonicalTransitionWitness> {
+        let mut first = reveal_timeout_kick();
+        first.pre.max_players = 4;
+        first.pre.seats[3] = CanonicalSeat {
+            status: CanonicalSeatStatus::Active,
+            acted: false,
+            stack: 130,
+            bet: 0,
+            total_bet: 0,
+            pending_addon: 0,
+            time_bank_ms: 30_000,
+            identity_commitment: [61; 32],
+            key_commitment: [62; 32],
+            hole_cards_commitment: [63; 32],
+        };
+        first.post.max_players = 4;
+        first.post.seats[3] = first.pre.seats[3];
+        first.pre.chip_pool += 130;
+        first.post.chip_pool += 130;
+        first.seal();
+        let mut second_pre = first.post.clone();
+        let mut second_post = second_pre.clone();
+        second_post.call_seq = second_pre.call_seq + 1;
+        second_post.protocol_pending_mask = 0b100;
+        second_post.chip_pool = second_pre.chip_pool - second_pre.seats[1].stack;
+        second_post.reveal_commitment = [122; 32];
+        second_post.seats[1].status = CanonicalSeatStatus::Out;
+        second_post.seats[1].stack = 0;
+        second_post.seats[1].key_commitment = [0; 32];
+        second_post.seats[1].hole_cards_commitment = [0; 32];
+        let mut second = CanonicalTransitionWitness {
+            pre: std::mem::replace(&mut second_pre, first.post.clone()),
+            post: second_post,
+            kind: CanonicalTransitionKind::RevealTimeoutKick,
+            actor: [0; 32],
+            action: CanonicalActionPayload {
+                seat: 1,
+                amount: 110,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [122; 32],
+            },
+            round_advance: Default::default(),
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 1_000,
+        };
+        second.seal();
+        vec![first, second]
+    }
+
+    /// Four-player preflop timeout with three pending reveal participants.
+    /// The first two removals remain in the reveal phase; the third invokes
+    /// the VM's low-population reset continuation in the same tagged batch.
+    fn reveal_timeout_kick_reset_batch() -> Vec<CanonicalTransitionWitness> {
+        let mut pre = image();
+        pre.phase = CanonicalPhase::Revealing;
+        pre.phase_subtag = 1;
+        pre.street = 1;
+        pre.current_turn = NO_CANONICAL_SEAT;
+        pre.max_players = 4;
+        pre.deadline_ms = 1_000;
+        pre.chip_pool = 400;
+        pre.pot = 0;
+        pre.current_bet = 0;
+        pre.min_raise = 0;
+        pre.protocol_pending_mask = 0b111;
+        for (index, seat) in pre.seats[..4].iter_mut().enumerate() {
+            *seat = CanonicalSeat {
+                status: CanonicalSeatStatus::Active,
+                acted: false,
+                stack: 100,
+                bet: 0,
+                total_bet: 0,
+                pending_addon: 0,
+                time_bank_ms: 30_000,
+                identity_commitment: [31 + index as u8; 32],
+                key_commitment: [41 + index as u8; 32],
+                hole_cards_commitment: [51 + index as u8; 32],
+            };
+        }
+
+        let mut first_post = pre.clone();
+        first_post.call_seq += 1;
+        first_post.protocol_pending_mask = 0b110;
+        first_post.chip_pool = 300;
+        first_post.reveal_commitment = [121; 32];
+        first_post.seats[0].status = CanonicalSeatStatus::Out;
+        first_post.seats[0].stack = 0;
+        first_post.seats[0].key_commitment = [0; 32];
+        first_post.seats[0].hole_cards_commitment = [0; 32];
+        let mut first = CanonicalTransitionWitness {
+            pre,
+            post: first_post,
+            kind: CanonicalTransitionKind::RevealTimeoutKick,
+            actor: [0; 32],
+            action: CanonicalActionPayload {
+                seat: 0,
+                amount: 100,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [121; 32],
+            },
+            round_advance: Default::default(),
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 1_000,
+        };
+        first.seal();
+
+        let second_pre = first.post.clone();
+        let mut second_post = second_pre.clone();
+        second_post.call_seq += 1;
+        second_post.protocol_pending_mask = 0b100;
+        second_post.chip_pool = 200;
+        second_post.reveal_commitment = [122; 32];
+        second_post.seats[1].status = CanonicalSeatStatus::Out;
+        second_post.seats[1].stack = 0;
+        second_post.seats[1].key_commitment = [0; 32];
+        second_post.seats[1].hole_cards_commitment = [0; 32];
+        let mut second = CanonicalTransitionWitness {
+            pre: second_pre,
+            post: second_post,
+            kind: CanonicalTransitionKind::RevealTimeoutKick,
+            actor: [0; 32],
+            action: CanonicalActionPayload {
+                seat: 1,
+                amount: 100,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [122; 32],
+            },
+            round_advance: Default::default(),
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 1_000,
+        };
+        second.seal();
+
+        let terminal_pre = second.post.clone();
+        let mut terminal_post = terminal_pre.clone();
+        terminal_post.call_seq += 1;
+        terminal_post.phase = CanonicalPhase::Waiting;
+        terminal_post.phase_subtag = 0;
+        terminal_post.street = 0;
+        terminal_post.current_turn = NO_CANONICAL_SEAT;
+        terminal_post.deadline_ms = 0;
+        terminal_post.current_bet = 0;
+        terminal_post.min_raise = 0;
+        terminal_post.pot = 0;
+        terminal_post.chip_pool = 100;
+        terminal_post.acted_mask = 0;
+        terminal_post.leave_after_hand_mask = 0;
+        terminal_post.protocol_pending_mask = 0;
+        terminal_post.board_cards_commitment = [0; 32];
+        terminal_post.reveal_commitment = [0; 32];
+        terminal_post.reconstruction_commitment = [0; 32];
+        terminal_post.run_it_twice_commitment = [0; 32];
+        terminal_post.seats[2] = CanonicalSeat::EMPTY;
+        terminal_post.seats[3].acted = false;
+        terminal_post.seats[3].hole_cards_commitment = [0; 32];
+        let mut terminal = CanonicalTransitionWitness {
+            pre: terminal_pre,
+            post: terminal_post.clone(),
+            kind: CanonicalTransitionKind::RevealTimeoutReset,
+            actor: [0; 32],
+            action: CanonicalActionPayload {
+                seat: 2,
+                amount: 100,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: terminal_post.deck_commitment,
+            },
+            round_advance: Default::default(),
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 1_000,
+        };
+        terminal.seal();
+        vec![first, second, terminal]
+    }
+
+    /// Two pending seats with a non-contiguous union. The deterministic VM
+    /// schedule is `0`, then `2`, followed by the typed reset continuation.
+    fn reveal_timeout_kick_reset_two_pending_batch() -> Vec<CanonicalTransitionWitness> {
+        let mut full = reveal_timeout_kick_reset_batch();
+        let mut first = full.remove(0);
+        let _second = full.remove(0);
+        let mut terminal = full.remove(0);
+
+        first.pre.protocol_pending_mask = 0b101;
+        first.post.protocol_pending_mask = 0b100;
+        first.seal();
+
+        terminal.pre = first.post.clone();
+        terminal.post = terminal.pre.clone();
+        terminal.post.call_seq += 1;
+        terminal.post.phase = CanonicalPhase::Waiting;
+        terminal.post.phase_subtag = 0;
+        terminal.post.street = 0;
+        terminal.post.current_turn = NO_CANONICAL_SEAT;
+        terminal.post.deadline_ms = 0;
+        terminal.post.current_bet = 0;
+        terminal.post.min_raise = 0;
+        terminal.post.pot = 0;
+        terminal.post.chip_pool = 200;
+        terminal.post.acted_mask = 0;
+        terminal.post.leave_after_hand_mask = 0;
+        terminal.post.protocol_pending_mask = 0;
+        terminal.post.board_cards_commitment = [0; 32];
+        terminal.post.reveal_commitment = [0; 32];
+        terminal.post.reconstruction_commitment = [0; 32];
+        terminal.post.run_it_twice_commitment = [0; 32];
+        terminal.post.seats[1].acted = false;
+        terminal.post.seats[1].hole_cards_commitment = [0; 32];
+        terminal.post.seats[2] = CanonicalSeat::EMPTY;
+        terminal.post.seats[3].acted = false;
+        terminal.post.seats[3].hole_cards_commitment = [0; 32];
+        terminal.action.seat = 2;
+        terminal.action.amount = 100;
+        terminal.action.proof_commitment = terminal.post.deck_commitment;
+        terminal.seal();
+        vec![first, terminal]
+    }
+
+    /// A standalone non-preflop reveal-timeout terminal: the final pending
+    /// seat is kicked and the table enters reconstruct collection.
+    fn reveal_timeout_reconstruct() -> CanonicalTransitionWitness {
+        let mut pre = image();
+        pre.phase = CanonicalPhase::Revealing;
+        pre.phase_subtag = 3;
+        pre.street = 3;
+        pre.current_turn = NO_CANONICAL_SEAT;
+        pre.max_players = 4;
+        pre.deadline_ms = 1_000;
+        pre.current_bet = 30;
+        pre.min_raise = 20;
+        pre.chip_pool = 525;
+        pre.pot = 40;
+        pre.protocol_pending_mask = 0b10;
+        for (index, seat) in pre.seats[..4].iter_mut().enumerate() {
+            *seat = CanonicalSeat {
+                status: CanonicalSeatStatus::Active,
+                acted: index != 1,
+                stack: 100 + index as u64 * 10,
+                bet: if index == 1 { 20 } else { 0 },
+                total_bet: if index == 1 { 35 } else { 30 },
+                pending_addon: if index == 1 { 5 } else { 0 },
+                time_bank_ms: 30_000,
+                identity_commitment: [31 + index as u8; 32],
+                key_commitment: [41 + index as u8; 32],
+                hole_cards_commitment: [51 + index as u8; 32],
+            };
+        }
+        pre.acted_mask = 0b1101;
+        pre.leave_after_hand_mask = 0b1000;
+
+        let mut post = pre.clone();
+        post.call_seq += 1;
+        post.phase = CanonicalPhase::Reconstructing;
+        post.phase_subtag = CANONICAL_RECONSTRUCT_COLLECTING_SUBTAG;
+        post.deadline_ms = 11_000;
+        post.pot = pre.pot + pre.seats[1].bet;
+        post.chip_pool = pre.chip_pool - (pre.seats[1].stack + pre.seats[1].pending_addon);
+        post.acted_mask = pre.acted_mask & !0b10;
+        post.leave_after_hand_mask = pre.leave_after_hand_mask & !0b10;
+        post.protocol_pending_mask = 0b1101;
+        post.reconstruction_commitment = [77; 32];
+        post.seats[1].status = CanonicalSeatStatus::Out;
+        post.seats[1].stack = 0;
+        post.seats[1].bet = 0;
+        post.seats[1].pending_addon = 0;
+        post.seats[1].key_commitment = [0; 32];
+        post.seats[1].hole_cards_commitment = [0; 32];
+
+        let mut witness = CanonicalTransitionWitness {
+            pre,
+            post,
+            kind: CanonicalTransitionKind::RevealTimeoutReconstruct,
+            actor: [0; 32],
+            action: CanonicalActionPayload {
+                seat: 1,
+                amount: 115,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [77; 32],
+            },
+            round_advance: Default::default(),
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 1_000,
+        };
+        witness.seal();
+        witness
+    }
+
+    /// A full non-preflop cascade: kick seat 0, then the typed reconstruct
+    /// terminal kicks seat 1 and enters reconstruction.
+    fn reveal_timeout_kick_reconstruct_batch() -> Vec<CanonicalTransitionWitness> {
+        let mut first = reveal_timeout_kick();
+        first.pre.max_players = 4;
+        first.pre.phase_subtag = 3;
+        first.pre.street = 3;
+        first.pre.chip_pool = 537;
+        first.pre.pot = 40;
+        first.pre.current_bet = 30;
+        first.pre.min_raise = 20;
+        first.pre.protocol_pending_mask = 0b011;
+        first.pre.seats[3] = CanonicalSeat {
+            status: CanonicalSeatStatus::Active,
+            acted: false,
+            stack: 130,
+            bet: 0,
+            total_bet: 30,
+            pending_addon: 0,
+            time_bank_ms: 30_000,
+            identity_commitment: [34; 32],
+            key_commitment: [44; 32],
+            hole_cards_commitment: [54; 32],
+        };
+        first.pre.seats[1].bet = 20;
+        first.pre.seats[1].total_bet = 35;
+        first.pre.seats[1].pending_addon = 5;
+        first.post = first.pre.clone();
+        first.post.call_seq += 1;
+        first.post.protocol_pending_mask = 0b10;
+        first.post.chip_pool =
+            first.pre.chip_pool - (first.pre.seats[0].stack + first.pre.seats[0].pending_addon);
+        first.post.pot = first.pre.pot + first.pre.seats[0].bet;
+        first.post.reveal_commitment = [121; 32];
+        first.post.seats[0].status = CanonicalSeatStatus::Out;
+        first.post.seats[0].stack = 0;
+        first.post.seats[0].bet = 0;
+        first.post.seats[0].pending_addon = 0;
+        first.post.seats[0].key_commitment = [0; 32];
+        first.post.seats[0].hole_cards_commitment = [0; 32];
+        first.seal();
+
+        let mut terminal = reveal_timeout_reconstruct();
+        terminal.pre = first.post.clone();
+        terminal.post = terminal.pre.clone();
+        terminal.post.call_seq += 1;
+        terminal.post.phase = CanonicalPhase::Reconstructing;
+        terminal.post.phase_subtag = CANONICAL_RECONSTRUCT_COLLECTING_SUBTAG;
+        terminal.post.deadline_ms = 11_000;
+        terminal.post.pot = terminal.pre.pot + terminal.pre.seats[1].bet;
+        terminal.post.chip_pool = terminal.pre.chip_pool
+            - (terminal.pre.seats[1].stack + terminal.pre.seats[1].pending_addon);
+        terminal.post.acted_mask = terminal.pre.acted_mask & !0b10;
+        terminal.post.leave_after_hand_mask = terminal.pre.leave_after_hand_mask & !0b10;
+        terminal.post.protocol_pending_mask = 0b1100;
+        terminal.post.reconstruction_commitment = [77; 32];
+        terminal.post.seats[1].status = CanonicalSeatStatus::Out;
+        terminal.post.seats[1].stack = 0;
+        terminal.post.seats[1].bet = 0;
+        terminal.post.seats[1].pending_addon = 0;
+        terminal.post.seats[1].key_commitment = [0; 32];
+        terminal.post.seats[1].hole_cards_commitment = [0; 32];
+        terminal.action.amount = 115;
+        terminal.deadline_height = 1_000;
+        terminal.seal();
+        vec![first, terminal]
+    }
+
+    /// A standalone sole-survivor reveal-timeout terminal: the final pending
+    /// seat is kicked and the complete pot is awarded to the survivor.
+    fn reveal_timeout_award() -> CanonicalTransitionWitness {
+        let mut pre = image();
+        pre.phase = CanonicalPhase::Revealing;
+        pre.phase_subtag = 3;
+        pre.street = 3;
+        pre.current_turn = NO_CANONICAL_SEAT;
+        pre.max_players = 4;
+        pre.deadline_ms = 1_000;
+        pre.chip_pool = 405;
+        pre.pot = 90;
+        pre.acted_mask = 0b001;
+        pre.protocol_pending_mask = 0b010;
+        pre.seats[0] = CanonicalSeat {
+            status: CanonicalSeatStatus::Folded,
+            acted: true,
+            stack: 80,
+            bet: 0,
+            total_bet: 30,
+            pending_addon: 0,
+            time_bank_ms: 30_000,
+            identity_commitment: [31; 32],
+            key_commitment: [41; 32],
+            hole_cards_commitment: [51; 32],
+        };
+        pre.seats[1] = CanonicalSeat {
+            status: CanonicalSeatStatus::Active,
+            acted: false,
+            stack: 110,
+            bet: 0,
+            total_bet: 35,
+            pending_addon: 5,
+            time_bank_ms: 30_000,
+            identity_commitment: [32; 32],
+            key_commitment: [42; 32],
+            hole_cards_commitment: [52; 32],
+        };
+        pre.seats[2] = CanonicalSeat {
+            status: CanonicalSeatStatus::Active,
+            acted: false,
+            stack: 120,
+            bet: 0,
+            total_bet: 25,
+            pending_addon: 0,
+            time_bank_ms: 30_000,
+            identity_commitment: [33; 32],
+            key_commitment: [43; 32],
+            hole_cards_commitment: [53; 32],
+        };
+
+        let mut post = pre.clone();
+        post.call_seq += 1;
+        post.phase = CanonicalPhase::Waiting;
+        post.phase_subtag = 0;
+        post.street = 0;
+        post.current_turn = NO_CANONICAL_SEAT;
+        post.deadline_ms = 0;
+        post.current_bet = 0;
+        post.min_raise = 0;
+        post.pot = 0;
+        post.acted_mask = 0;
+        post.protocol_pending_mask = 0;
+        post.chip_pool = pre.chip_pool - (pre.seats[1].stack + pre.seats[1].pending_addon);
+        post.deck_commitment = [121; 32];
+        post.board_cards_commitment = [0; 32];
+        post.reveal_commitment = [0; 32];
+        post.reconstruction_commitment = [0; 32];
+        post.run_it_twice_commitment = [0; 32];
+        post.seats[0].status = CanonicalSeatStatus::Active;
+        post.seats[0].acted = false;
+        post.seats[0].total_bet = 0;
+        post.seats[0].hole_cards_commitment = [0; 32];
+        post.seats[1] = CanonicalSeat::EMPTY;
+        post.seats[2].stack += pre.pot;
+        post.seats[2].total_bet = 0;
+        post.seats[2].hole_cards_commitment = [0; 32];
+
+        let mut witness = CanonicalTransitionWitness {
+            pre,
+            post,
+            kind: CanonicalTransitionKind::RevealTimeoutAward,
+            actor: [0; 32],
+            action: CanonicalActionPayload {
+                seat: 1,
+                amount: 115,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [121; 32],
+            },
+            round_advance: Default::default(),
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 1_000,
+        };
+        witness.seal();
+        witness
+    }
+
+    /// A full sole-survivor cascade: kick seat 0, then the typed award
+    /// terminal kicks seat 1 and pays the complete pot to seat 2.
+    /// Table rules with a live percentage rake, used by the raked fixtures.
+    fn raked_table_rules() -> poker_l1::vm::contracts::texas_poker::types::TableRules {
+        poker_l1::vm::contracts::texas_poker::types::TableRules {
+            max_players: 4,
+            small_blind: 25,
+            big_blind: 50,
+            timeout_config: Default::default(),
+            ante_mode: 0,
+            ante_amount: 0,
+            rake_mode: 1,
+            rake_bps: 500,
+            rake_cap: 1_000,
+            rit_mode: 0,
+        }
+    }
+
+    /// A standalone raked sole-survivor terminal derived from the zero-rake
+    /// fixture: 5% of the 90-chip pot rakes 4, so seat 2 is credited 86.
+    fn reveal_timeout_raked_award() -> CanonicalTransitionWitness {
+        let mut witness = reveal_timeout_award();
+        let rules = raked_table_rules();
+        let opening = crate::canonical_rake_opening::rake_opening_of(&rules);
+        let rake = crate::canonical_rake_opening::canonical_settlement_rake(90, &opening);
+        assert_eq!(rake, 4);
+        witness.kind = CanonicalTransitionKind::RevealTimeoutRakedAward;
+        witness.rake_opening = opening;
+        witness.pre.rules_commitment =
+            crate::canonical_rake_opening::canonical_rules_commitment(&rules).unwrap();
+        witness.post.rules_commitment = witness.pre.rules_commitment;
+        witness.post.seats[2].stack -= rake;
+        witness.post.chip_pool -= rake;
+        witness.seal();
+        witness
+    }
+
+    /// A raked cascade: kick seat 0, then the raked award terminal kicks
+    /// seat 1 and pays `pot - rake` to seat 2.
+    fn reveal_timeout_kick_raked_award_batch() -> Vec<CanonicalTransitionWitness> {
+        let mut batch = reveal_timeout_kick_award_batch();
+        let rules = raked_table_rules();
+        let opening = crate::canonical_rake_opening::rake_opening_of(&rules);
+        let rake = crate::canonical_rake_opening::canonical_settlement_rake(90, &opening);
+        let commitment = crate::canonical_rake_opening::canonical_rules_commitment(&rules).unwrap();
+        batch[0].pre.rules_commitment = commitment;
+        batch[0].post.rules_commitment = commitment;
+        batch[0].seal();
+        let terminal = &mut batch[1];
+        terminal.pre.rules_commitment = commitment;
+        terminal.post.rules_commitment = commitment;
+        terminal.kind = CanonicalTransitionKind::RevealTimeoutRakedAward;
+        terminal.rake_opening = opening;
+        terminal.post.seats[2].stack -= rake;
+        terminal.post.chip_pool -= rake;
+        terminal.seal();
+        batch
+    }
+
+    fn reveal_timeout_kick_award_batch() -> Vec<CanonicalTransitionWitness> {
+        let mut first = reveal_timeout_kick();
+        first.pre.max_players = 4;
+        first.pre.phase_subtag = 3;
+        first.pre.street = 3;
+        first.pre.chip_pool = 427;
+        first.pre.pot = 90;
+        first.pre.current_bet = 0;
+        first.pre.min_raise = 0;
+        first.pre.seats[0].bet = 0;
+        first.pre.protocol_pending_mask = 0b011;
+        first.pre.seats[3] = CanonicalSeat::EMPTY;
+        first.post = first.pre.clone();
+        first.post.call_seq += 1;
+        first.post.protocol_pending_mask = 0b010;
+        first.post.chip_pool =
+            first.pre.chip_pool - (first.pre.seats[0].stack + first.pre.seats[0].pending_addon);
+        first.post.pot = first.pre.pot + first.pre.seats[0].bet;
+        first.post.reveal_commitment = [121; 32];
+        first.post.seats[0].status = CanonicalSeatStatus::Out;
+        first.post.seats[0].stack = 0;
+        first.post.seats[0].bet = 0;
+        first.post.seats[0].pending_addon = 0;
+        first.post.seats[0].key_commitment = [0; 32];
+        first.post.seats[0].hole_cards_commitment = [0; 32];
+        first.seal();
+
+        let mut terminal = reveal_timeout_award();
+        terminal.pre = first.post.clone();
+        terminal.post = terminal.pre.clone();
+        terminal.post.call_seq += 1;
+        terminal.post.phase = CanonicalPhase::Waiting;
+        terminal.post.phase_subtag = 0;
+        terminal.post.street = 0;
+        terminal.post.current_turn = NO_CANONICAL_SEAT;
+        terminal.post.deadline_ms = 0;
+        terminal.post.current_bet = 0;
+        terminal.post.min_raise = 0;
+        terminal.post.pot = 0;
+        terminal.post.acted_mask = 0;
+        terminal.post.protocol_pending_mask = 0;
+        terminal.post.chip_pool = terminal.pre.chip_pool
+            - (terminal.pre.seats[1].stack + terminal.pre.seats[1].pending_addon);
+        terminal.post.deck_commitment = [121; 32];
+        terminal.post.board_cards_commitment = [0; 32];
+        terminal.post.reveal_commitment = [0; 32];
+        terminal.post.reconstruction_commitment = [0; 32];
+        terminal.post.run_it_twice_commitment = [0; 32];
+        terminal.post.seats[0] = CanonicalSeat::EMPTY;
+        terminal.post.seats[1] = CanonicalSeat::EMPTY;
+        terminal.post.seats[2].stack += terminal.pre.pot;
+        terminal.post.seats[2].total_bet = 0;
+        terminal.post.seats[2].hole_cards_commitment = [0; 32];
+        terminal.action.amount = terminal.pre.seats[1].stack + terminal.pre.seats[1].pending_addon;
+        terminal.deadline_height = 1_000;
+        terminal.seal();
+        vec![first, terminal]
     }
 
     fn submit_reconstruct_completion() -> CanonicalTransitionWitness {
@@ -7490,6 +10142,7 @@ mod tests {
                 pre_reconstruction_commitment: [4; 32],
                 post_reconstruction_commitment: [51; 32],
             },
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7557,6 +10210,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7596,6 +10250,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7649,6 +10304,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7717,6 +10373,7 @@ mod tests {
             },
             round_advance: Default::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7762,6 +10419,7 @@ mod tests {
             },
             round_advance: Default::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7819,6 +10477,7 @@ mod tests {
             },
             round_advance: Default::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -7939,6 +10598,7 @@ mod tests {
                 ],
             },
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -8030,6 +10690,7 @@ mod tests {
             },
             round_advance: Default::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -8088,6 +10749,7 @@ mod tests {
             },
             round_advance: Default::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -8096,31 +10758,291 @@ mod tests {
         witness
     }
 
-    fn assert_trace_satisfies_air(trace: &MethodTrace, archive: &ArchivedCanonicalTaggedProof) {
+    /// Non-panicking constraint checker for tamper tests.  Stwo's assert
+    /// evaluator aborts the process when a constraint fails mid-`evaluate`
+    /// because the partially built LogupAtRow asserts finalization during
+    /// unwinding; this recorder collects violations instead.
+    struct QuietEvaluator<'a> {
+        trace: &'a stwo::core::pcs::TreeVec<Vec<&'a Vec<M31>>>,
+        col_index: stwo::core::pcs::TreeVec<usize>,
+        row: usize,
+        log_size: u32,
+        logup: stwo_constraint_framework::logup::LogupAtRow<QuietEvaluator<'a>>,
+        constraint_counter: usize,
+        violations: usize,
+    }
+
+    impl<'a> QuietEvaluator<'a> {
+        fn new(
+            trace: &'a stwo::core::pcs::TreeVec<Vec<&'a Vec<M31>>>,
+            row: usize,
+            log_size: u32,
+            claimed_sum: SecureField,
+        ) -> Self {
+            Self {
+                trace,
+                col_index: stwo::core::pcs::TreeVec::new(vec![0; trace.len()]),
+                row,
+                log_size,
+                logup: stwo_constraint_framework::logup::LogupAtRow::new(
+                    stwo_constraint_framework::INTERACTION_TRACE_IDX,
+                    claimed_sum,
+                    log_size,
+                ),
+                constraint_counter: 0,
+                violations: 0,
+            }
+        }
+
+        fn finalize_logup_batched(&mut self, batching: &[usize]) {
+            let last_batch = *batching.iter().max().unwrap();
+            let mut fracs_by_batch: std::collections::HashMap<usize, Vec<(SecureField, SecureField)>> =
+                std::collections::HashMap::new();
+            let fracs: Vec<(SecureField, SecureField)> = std::mem::take(&mut self.logup.fracs)
+                .into_iter()
+                .map(|f| {
+                    let n = f.numerator;
+                    let d = f.denominator;
+                    (n, d)
+                })
+                .collect();
+            for (batch, (num, den)) in batching.iter().zip(fracs.iter()) {
+                fracs_by_batch
+                    .entry(*batch)
+                    .or_default()
+                    .push((num.clone(), den.clone()));
+            }
+            let mut sum_frac = |num: &SecureField, den: &SecureField| -> (SecureField, SecureField) {
+                // Sum fractions pairwise: (n1/d1 + n2/d2) = (n1*d2+n2*d1)/(d1*d2)
+                ((*num), (*den))
+            };
+            let _ = &mut sum_frac;
+            // Combine each batch's fractions.
+            let mut batch_fracs: Vec<(usize, SecureField, SecureField)> = Vec::new();
+            for (batch, fracs) in &fracs_by_batch {
+                let (mut n, mut d) = fracs[0].clone();
+                for (n2, d2) in &fracs[1..] {
+                    let (n2, d2) = (n2.clone(), d2.clone());
+                    n = n * d2.clone() + n2 * d.clone();
+                    d = d * d2;
+                }
+                batch_fracs.push((*batch, n, d));
+            }
+            batch_fracs.sort_by_key(|(batch, _, _)| *batch);
+            let mut prev_col_cumsum = SecureField::from(0u32);
+            for (batch, n, d) in batch_fracs.iter() {
+                if *batch < last_batch {
+                    let [cur_cumsum] = self.next_extension_interaction_mask::<1>(
+                        stwo_constraint_framework::INTERACTION_TRACE_IDX,
+                        [0],
+                    );
+                    let diff = cur_cumsum - prev_col_cumsum;
+                    prev_col_cumsum = cur_cumsum;
+                    let d = d.clone();
+                    let n = n.clone();
+                    self.record(diff * d - n);
+                } else {
+                    let [prev_row, cur] = self.next_extension_interaction_mask::<2>(
+                        stwo_constraint_framework::INTERACTION_TRACE_IDX,
+                        [-1, 0],
+                    );
+                    let diff = cur - prev_row - prev_col_cumsum;
+                    let shifted = diff + self.logup.cumsum_shift;
+                    let d = d.clone();
+                    let n = n.clone();
+                    self.record(shifted * d - n);
+                }
+            }
+            self.logup.is_finalized = true;
+        }
+
+        fn record(&mut self, value: SecureField) {
+            if value != SecureField::from(0u32) {
+                self.violations += 1;
+            }
+            self.constraint_counter += 1;
+        }
+    }
+
+    impl<'a> EvalAtRow for QuietEvaluator<'a> {
+        type F = M31;
+        type EF = SecureField;
+
+        fn next_interaction_mask<const N: usize>(
+            &mut self,
+            interaction: usize,
+            offsets: [isize; N],
+        ) -> [Self::F; N] {
+            let col_index = self.col_index[interaction];
+            self.col_index[interaction] += 1;
+            offsets.map(|off| {
+                if off == 0 {
+                    self.trace[interaction][col_index][self.row]
+                } else {
+                    let domain_size = 1usize << self.log_size;
+                    let rev = |index: usize| -> usize {
+                        let mut r = 0usize;
+                        for bit in 0..self.log_size {
+                            if (index >> bit) & 1 == 1 {
+                                r |= 1 << (self.log_size - 1 - bit);
+                            }
+                        }
+                        r
+                    };
+                    // Mirror the assert evaluator's circle-domain conversion.
+                    let coset = rev(self.row);
+                    let next = ((coset as isize + off).rem_euclid(domain_size as isize)) as usize;
+                    self.trace[interaction][col_index][rev(next)]
+                }
+            })
+        }
+
+        fn add_constraint<G>(&mut self, constraint: G)
+        where
+            Self::EF: std::ops::Mul<G, Output = Self::EF> + From<G>,
+        {
+            self.record(Self::EF::from(constraint));
+        }
+
+        fn combine_ef(values: [Self::F; SECURE_EXTENSION_DEGREE]) -> Self::EF {
+            SecureField::from_m31_array(values)
+        }
+
+        fn write_logup_frac(
+            &mut self,
+            fraction: stwo::core::Fraction<Self::EF, Self::EF>,
+        ) {
+            if self.logup.fracs.is_empty() {
+                self.logup.is_finalized = false;
+            }
+            self.logup.fracs.push(fraction);
+        }
+
+        fn finalize_logup_in_pairs(&mut self) {
+            let batches: Vec<usize> = (0..self.logup.fracs.len()).map(|n| n / 2).collect();
+            self.finalize_logup_batched(&batches);
+        }
+
+        fn finalize_logup(&mut self) {
+            let batches: Vec<usize> = (0..self.logup.fracs.len()).collect();
+            self.finalize_logup_batched(&batches);
+        }
+    }
+
+    /// Count constraint violations row-wise without panicking.
+    fn quiet_trace_violations(
+        trace: &MethodTrace,
+        archive: &ArchivedCanonicalTaggedProof,
+    ) -> usize {
         let scope = scope_trace(archive, trace.log_size);
-        // `FrameworkComponent` consumes preprocessed masks in the order in which
-        // `evaluate` requests them, rather than the storage order of `scope`.
-        let preprocessed_cols = [
+        let preprocessed_cols: Vec<&Vec<M31>> = [
             scope.cols[0..1].iter(),
             scope.cols[3..7].iter(),
             scope.cols[1..3].iter(),
-            scope.cols[7..PREPROCESSED_COLUMNS].iter(),
+            scope.cols[FIRST_KIND_SCOPE_OFFSET..PREPROCESSED_COLUMNS - 1].iter(),
+            scope.cols[7..FIRST_KIND_SCOPE_OFFSET].iter(),
+            scope.cols[PREPROCESSED_COLUMNS - 1..PREPROCESSED_COLUMNS].iter(),
         ]
         .into_iter()
         .flatten()
         .collect();
-        let evals =
-            stwo::core::pcs::TreeVec::new(vec![preprocessed_cols, trace.cols.iter().collect()]);
+        let range = CanonicalRange8::dummy();
+        let (interaction, sum) = canonical_range_interaction(trace, trace.log_size, &range);
+        let interaction_cols: Vec<Vec<M31>> = interaction
+            .iter()
+            .map(|evaluation| evaluation.values.to_cpu())
+            .collect();
+        let evals = stwo::core::pcs::TreeVec::new(vec![
+            preprocessed_cols,
+            trace.cols.iter().collect(),
+            interaction_cols.iter().collect(),
+        ]);
+        let mut violations = 0usize;
+        for row in 0..(1usize << trace.log_size) {
+            let mut evaluator = QuietEvaluator::new(&evals, row, trace.log_size, sum);
+            evaluator = CanonicalAir {
+                log_size: trace.log_size,
+                range: range.clone(),
+            }
+            .evaluate(evaluator);
+            violations += evaluator.violations;
+        }
+        violations
+    }
+
+    fn assert_trace_satisfies_air(trace: &MethodTrace, archive: &ArchivedCanonicalTaggedProof) {
+        let scope = scope_trace(archive, trace.log_size);
+        // `FrameworkComponent` consumes preprocessed masks in the order in which
+        // `evaluate` requests them, rather than the storage order of `scope`.
+        // The range-table column is requested last, after the endpoint image
+        // projections, so it sits at the end of the permutation.
+        let preprocessed_cols: Vec<&Vec<M31>> = [
+            scope.cols[0..1].iter(),
+            scope.cols[3..7].iter(),
+            scope.cols[1..3].iter(),
+            scope.cols[FIRST_KIND_SCOPE_OFFSET..PREPROCESSED_COLUMNS - 1].iter(),
+            scope.cols[7..FIRST_KIND_SCOPE_OFFSET].iter(),
+            scope.cols[PREPROCESSED_COLUMNS - 1..PREPROCESSED_COLUMNS].iter(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        // The range lookups run against a fixed challenge here; the
+        // interaction columns are rebuilt from the trace so tamper tests
+        // exercise the byte columns themselves.
+        let range = CanonicalRange8::dummy();
+        let (interaction, sum) = canonical_range_interaction(trace, trace.log_size, &range);
+        // The generator stores its columns bit-reversed, matching how the
+        // blake2b G tests feed interaction evaluations to the row-wise
+        // assert directly.
+        let interaction_cols: Vec<Vec<M31>> = interaction
+            .iter()
+            .map(|evaluation| evaluation.values.to_cpu())
+            .collect();
+        // Per-row constraints are row-order invariant, but the logup
+        // neighbor offsets are only correct over bit-reversed storage (the
+        // generator's convention, matched by the committed trees).  Feed
+        // every layer in bit-reversed row order.
+        let rows = 1usize << trace.log_size;
+        let reorder = |column: &Vec<M31>| -> Vec<M31> {
+            let mut out = vec![M31::from(0u32); rows];
+            for (index, value) in column.iter().enumerate() {
+                let mut target = 0usize;
+                for bit in 0..trace.log_size {
+                    if (index >> bit) & 1 == 1 {
+                        target |= 1 << (trace.log_size - 1 - bit);
+                    }
+                }
+                out[target] = *value;
+            }
+            out
+        };
+        let reordered = std::env::var_os("NATURAL_ASSERT").is_none();
+        let preprocessed_reordered: Vec<Vec<M31>> = preprocessed_cols
+            .iter()
+            .map(|column| if reordered { reorder(column) } else { (*column).clone() })
+            .collect();
+        let trace_reordered: Vec<Vec<M31>> = trace
+            .cols
+            .iter()
+            .map(|column| if reordered { reorder(column) } else { column.clone() })
+            .collect();
+        let evals = stwo::core::pcs::TreeVec::new(vec![
+            preprocessed_reordered.iter().collect(),
+            trace_reordered.iter().collect(),
+            interaction_cols.iter().collect(),
+        ]);
         stwo_constraint_framework::assert_constraints_on_trace(
             &evals,
             trace.log_size,
             |eval| {
                 CanonicalAir {
                     log_size: trace.log_size,
+                    range: range.clone(),
                 }
                 .evaluate(eval);
             },
-            SecureField::from(0u32),
+            sum,
         );
     }
 
@@ -8132,10 +11054,8 @@ mod tests {
         let mut tampered = trace.clone();
         tampered.cols[column][0] += M31::from(1u32);
         assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                assert_trace_satisfies_air(&tampered, archive);
-            }))
-            .is_err()
+            quiet_trace_violations(&tampered, archive) > 0,
+            "AIR accepted tampered column {column}"
         );
     }
 
@@ -8413,6 +11333,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -8757,7 +11678,7 @@ mod tests {
         assert_trace_satisfies_air(&trace, &archive);
         // The appended post-chip-pool low limb is bound by the exact funding
         // addition, not merely by the host-built canonical state image.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1_435);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_436);
     }
 
     #[test]
@@ -8798,7 +11719,7 @@ mod tests {
         // The post acted-bit suffix has one entry per seat.  Seat 1 is active
         // but not the raiser, so setting it back to one violates the exact VM
         // reset, independently of the host transition validator.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1_405);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_406);
 
         // The full-seat suffix binds non-acting stacks to their pre-state
         // images.  Modifying opponent stack[0] cannot be hidden behind the
@@ -8826,7 +11747,7 @@ mod tests {
         // Rebuild the next-turn advice consistently for 0 -> 2. Seat 1 is
         // Active and lies between them, so only the circular scan constraint
         // (not a stale one-hot or scalar mismatch) can reject the splice.
-        trace.cols[280][0] = M31::from(2u32);
+        trace.cols[282][0] = M31::from(2u32);
         trace.cols[NEXT_TURN_SELECTOR_OFFSET + 1][0] = M31::from(0u32);
         trace.cols[NEXT_TURN_SELECTOR_OFFSET + 2][0] = M31::from(1u32);
         trace.cols[NEXT_TURN_PAIR_OFFSET + 1][0] = M31::from(0u32);
@@ -8848,10 +11769,10 @@ mod tests {
         // Keep all old mask relations consistent while making the selected
         // successor (seat 1) already acted. Before the new successor rule,
         // this was a structurally valid but VM-impossible stale betting row.
-        trace.cols[305][0] = M31::from(2u32);
-        trace.cols[306][0] = M31::from(3u32);
-        trace.cols[1_394][0] = M31::from(1u32);
-        trace.cols[1_403][0] = M31::from(1u32);
+        trace.cols[307][0] = M31::from(2u32);
+        trace.cols[308][0] = M31::from(3u32);
+        trace.cols[1_396][0] = M31::from(1u32);
+        trace.cols[1_405][0] = M31::from(1u32);
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 assert_trace_satisfies_air(&trace, &archive);
@@ -8868,13 +11789,13 @@ mod tests {
 
         // Projection fields: selected post-seat bet, post pot, and post stack.
         // These locations are in the stable canonical projection prefix.
-        for column in [338, 302, 334] {
+        for column in [346, 309, 342] {
             assert_air_rejects_trace_mutation(&trace, &archive, column);
         }
-        // Raise-only advice starts at 1088: needed limbs, then carries at
-        // 1109 and the 16-bit decomposition at 1124.  None of these checks
+        // Raise-only advice starts at 1094: needed limbs, then carries at
+        // 1115 and the 16-bit decomposition at 1130.  None of these checks
         // calls `validate_batch`; rejection is solely the AIR relation.
-        for column in [1090, 1111, 1126] {
+        for column in [1096, 1117, 1132] {
             assert_air_rejects_trace_mutation(&trace, &archive, column);
         }
     }
@@ -8887,7 +11808,7 @@ mod tests {
         // all Raise relations were selector-gated.  The canonical-zero
         // constraints above make the same malicious advice invalid without
         // relying on host validation.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1089);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1096);
     }
 
     #[test]
@@ -8896,14 +11817,14 @@ mod tests {
         let (trace, archive) = trace_for(&[witness]).expect("call trace");
         assert_trace_satisfies_air(&trace, &archive);
 
-        // 306 is the canonical post acted-mask projection.  It is now linked
+        // 307 is the canonical post acted-mask projection.  It is now linked
         // to nine boolean mask bits and to the selected seat's `acted` flag,
         // rather than being accepted as a host-provided scalar.
-        assert_air_rejects_trace_mutation(&trace, &archive, 308);
+        assert_air_rejects_trace_mutation(&trace, &archive, 309);
         // The appended selected-seat/mask advice begins at the former trace
         // width 1381: selector[0], then pre bits, then post bits.  Tampering
         // with post bit 0 must fail independently of the raw mask field.
-        assert_air_rejects_trace_mutation(&trace, &archive, 1_404);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_405);
     }
 
     #[test]
@@ -9040,6 +11961,466 @@ mod tests {
     }
 
     #[test]
+    fn canonical_direct_air_proves_narrow_reveal_timeout_reset() {
+        let witness = reveal_timeout_reset();
+        witness
+            .validate_shape()
+            .expect("reveal-timeout reset native witness");
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("reveal-timeout trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        let archive = prove_canonical_tagged_batch(std::slice::from_ref(&witness))
+            .expect("reveal-timeout proof");
+        verify_canonical_tagged_batch(&[witness], &archive).expect("reveal-timeout verification");
+        let mut detached_kind = archive.clone();
+        detached_kind.first_transition_kind = CanonicalTransitionKind::ResetOnly as u8;
+        assert!(verify_canonical_tagged_proof(&detached_kind).is_err());
+    }
+
+    #[test]
+    fn canonical_reveal_timeout_reset_rejects_reconstruct_header() {
+        let mut invalid = reveal_timeout_reset();
+        invalid.pre.phase_subtag = 2;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        assert!(prove_canonical_tagged_batch(&[invalid]).is_err());
+    }
+
+    #[test]
+    fn canonical_reveal_timeout_reset_rejects_state_and_action_tampering() {
+        let witness = reveal_timeout_reset();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("reveal-timeout trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        for column in [
+            ACTION_AMOUNT_OFFSET,
+            ACTION_SEAT_OFFSET,
+            DEADLINE_HEIGHT_OFFSET,
+            PRE_PHASE_OFFSET,
+            PRE_PROTOCOL_PENDING_MASK_OFFSET,
+            POST_PROTOCOL_PENDING_MASK_OFFSET,
+            PRE_CHIP_POOL_OFFSET,
+            POST_CHIP_POOL_OFFSET,
+            SELECTED_POST_STATUS_OFFSET,
+        ] {
+            assert_air_rejects_trace_mutation(&trace, &archive, column);
+        }
+    }
+
+    #[test]
+    fn canonical_direct_air_proves_reveal_timeout_kick() {
+        let witness = reveal_timeout_kick();
+        witness
+            .validate_shape()
+            .expect("reveal-timeout kick witness");
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("reveal-timeout kick trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        let archive = prove_canonical_tagged_batch(std::slice::from_ref(&witness))
+            .expect("reveal-timeout kick proof");
+        verify_canonical_tagged_batch(&[witness], &archive)
+            .expect("reveal-timeout kick verification");
+    }
+
+    #[test]
+    fn canonical_direct_air_proves_multi_pending_reveal_timeout_kick_batch() {
+        let batch = reveal_timeout_kick_batch();
+        let archive = prove_canonical_tagged_batch(&batch).expect("cascade proof");
+        verify_canonical_tagged_batch(&batch, &archive).expect("cascade verification");
+        assert_eq!(archive.reveal_timeout_cascade_count, 2);
+        assert_eq!(&archive.reveal_timeout_cascade_schedule[..2], &[0, 1]);
+        let mut malformed = archive.clone();
+        malformed.reveal_timeout_cascade_schedule[0] = 1;
+        malformed.reveal_timeout_cascade_schedule[1] = 0;
+        assert!(verify_canonical_tagged_proof(&malformed).is_err());
+    }
+
+    #[test]
+    fn canonical_direct_air_proves_multi_pending_reveal_timeout_terminal_reset_batch() {
+        let batch = reveal_timeout_kick_reset_batch();
+        let (trace, expected) = trace_for(&batch).expect("terminal cascade trace");
+        assert_trace_satisfies_air(&trace, &expected);
+        let archive = prove_canonical_tagged_batch(&batch).expect("terminal cascade proof");
+        verify_canonical_tagged_batch(&batch, &archive).expect("terminal cascade verification");
+        assert_eq!(archive.reveal_timeout_cascade_count, 2);
+        assert_eq!(&archive.reveal_timeout_cascade_schedule[..3], &[0, 1, 2]);
+        let mut detached_terminal = archive.clone();
+        detached_terminal.reveal_timeout_cascade_schedule[2] = 3;
+        assert!(verify_canonical_tagged_proof(&detached_terminal).is_err());
+        // The terminal schedule slot is constrained in the AIR itself, not
+        // merely mixed into the verifier transcript.  Reusing the valid trace
+        // with a detached public terminal seat must therefore fail before
+        // proof verification.
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_trace_satisfies_air(&trace, &detached_terminal);
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn canonical_direct_air_proves_non_contiguous_pending_reveal_timeout_terminal_reset_batch() {
+        let batch = reveal_timeout_kick_reset_two_pending_batch();
+        let (trace, expected) = trace_for(&batch).expect("two-seat terminal cascade trace");
+        assert_trace_satisfies_air(&trace, &expected);
+        let archive =
+            prove_canonical_tagged_batch(&batch).expect("two-seat terminal cascade proof");
+        verify_canonical_tagged_batch(&batch, &archive)
+            .expect("two-seat terminal cascade verification");
+        assert_eq!(archive.reveal_timeout_cascade_count, 1);
+        assert_eq!(&archive.reveal_timeout_cascade_schedule[..2], &[0, 2]);
+    }
+
+    #[test]
+    fn canonical_direct_air_proves_reveal_timeout_reconstruct() {
+        let witness = reveal_timeout_reconstruct();
+        witness
+            .validate_shape()
+            .expect("reveal-timeout reconstruct witness");
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("reveal-timeout reconstruct trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        let archive = prove_canonical_tagged_batch(std::slice::from_ref(&witness))
+            .expect("reveal-timeout reconstruct proof");
+        verify_canonical_tagged_batch(&[witness], &archive)
+            .expect("reveal-timeout reconstruct verification");
+    }
+
+    #[test]
+    fn canonical_direct_air_proves_multi_pending_reveal_timeout_reconstruct_batch() {
+        let batch = reveal_timeout_kick_reconstruct_batch();
+        let (trace, expected) = trace_for(&batch).expect("reconstruct cascade trace");
+        assert_trace_satisfies_air(&trace, &expected);
+        let archive = prove_canonical_tagged_batch(&batch).expect("reconstruct cascade proof");
+        verify_canonical_tagged_batch(&batch, &archive).expect("cascade verification");
+        assert_eq!(archive.reveal_timeout_cascade_count, 1);
+        assert_eq!(&archive.reveal_timeout_cascade_schedule[..2], &[0, 1]);
+        assert_eq!(
+            archive.last_transition_kind,
+            CanonicalTransitionKind::RevealTimeoutReconstruct as u8
+        );
+        let mut malformed = archive.clone();
+        malformed.reveal_timeout_cascade_schedule[1] = 3;
+        assert!(verify_canonical_tagged_proof(&malformed).is_err());
+        // The terminal schedule slot is constrained inside the AIR itself, so
+        // reusing the valid trace against a detached public terminal seat
+        // fails before proof verification.
+        let mut detached_terminal = archive.clone();
+        detached_terminal.reveal_timeout_cascade_schedule[1] = 2;
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_trace_satisfies_air(&trace, &detached_terminal);
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn canonical_reveal_timeout_reconstruct_rejects_state_and_action_tampering() {
+        let witness = reveal_timeout_reconstruct();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("reveal-timeout reconstruct trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        for column in [
+            ACTION_AMOUNT_OFFSET,
+            ACTION_SEAT_OFFSET,
+            DEADLINE_HEIGHT_OFFSET,
+            PRE_PHASE_OFFSET,
+            PRE_PROTOCOL_PENDING_MASK_OFFSET,
+            POST_PROTOCOL_PENDING_MASK_OFFSET,
+            PRE_CHIP_POOL_OFFSET,
+            POST_CHIP_POOL_OFFSET,
+            SELECTED_POST_STATUS_OFFSET,
+            OPAQUE_COMMITMENTS_OFFSET + 3 * 16,
+            SEAT_COMMITMENTS_OFFSET + SEAT_COMMITMENT_LIMBS,
+        ] {
+            assert_air_rejects_trace_mutation(&trace, &archive, column);
+        }
+    }
+
+    #[test]
+    fn canonical_reveal_timeout_reconstruct_rejects_witness_forgeries() {
+        let witness = reveal_timeout_reconstruct();
+        witness
+            .validate_shape()
+            .expect("valid reconstruct terminal");
+        // A single live remainder cannot enter reconstruction; the VM awards
+        // or resets instead.
+        let mut invalid = witness.clone();
+        invalid.post.seats[2] = CanonicalSeat::EMPTY;
+        invalid.post.seats[3] = CanonicalSeat::EMPTY;
+        invalid.post.protocol_pending_mask = 0;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        // The suspended reveal ledger must be preserved verbatim.
+        let mut invalid = witness.clone();
+        invalid.post.reveal_commitment = [9; 32];
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        // The reconstruction commitment must actually change.
+        let mut invalid = witness;
+        invalid.post.reconstruction_commitment = invalid.pre.reconstruction_commitment;
+        invalid.action.proof_commitment = invalid.pre.reconstruction_commitment;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+    }
+
+    #[test]
+    fn canonical_direct_air_proves_reveal_timeout_award() {
+        let witness = reveal_timeout_award();
+        witness
+            .validate_shape()
+            .expect("reveal-timeout award witness");
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("reveal-timeout award trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        let archive = prove_canonical_tagged_batch(std::slice::from_ref(&witness))
+            .expect("reveal-timeout award proof");
+        verify_canonical_tagged_batch(&[witness], &archive)
+            .expect("reveal-timeout award verification");
+    }
+
+    #[test]
+    fn canonical_direct_air_proves_multi_pending_reveal_timeout_award_batch() {
+        let batch = reveal_timeout_kick_award_batch();
+        let (trace, expected) = trace_for(&batch).expect("award cascade trace");
+        assert_trace_satisfies_air(&trace, &expected);
+        let archive = prove_canonical_tagged_batch(&batch).expect("award cascade proof");
+        verify_canonical_tagged_batch(&batch, &archive).expect("award cascade verification");
+        assert_eq!(archive.reveal_timeout_cascade_count, 1);
+        assert_eq!(&archive.reveal_timeout_cascade_schedule[..2], &[0, 1]);
+        assert_eq!(
+            archive.last_transition_kind,
+            CanonicalTransitionKind::RevealTimeoutAward as u8
+        );
+        let mut malformed = archive.clone();
+        malformed.reveal_timeout_cascade_schedule[1] = 2;
+        assert!(verify_canonical_tagged_proof(&malformed).is_err());
+        let mut detached_terminal = archive.clone();
+        detached_terminal.reveal_timeout_cascade_schedule[1] = 3;
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_trace_satisfies_air(&trace, &detached_terminal);
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn canonical_reveal_timeout_award_rejects_state_and_action_tampering() {
+        let witness = reveal_timeout_award();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("reveal-timeout award trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        for column in [
+            ACTION_AMOUNT_OFFSET,
+            ACTION_SEAT_OFFSET,
+            DEADLINE_HEIGHT_OFFSET,
+            PRE_PHASE_OFFSET,
+            PRE_PROTOCOL_PENDING_MASK_OFFSET,
+            POST_PROTOCOL_PENDING_MASK_OFFSET,
+            PRE_CHIP_POOL_OFFSET,
+            POST_CHIP_POOL_OFFSET,
+            PRE_POT_OFFSET,
+            OPAQUE_COMMITMENTS_OFFSET + 16,
+            SEAT_COMMITMENTS_OFFSET + SEAT_COMMITMENT_LIMBS,
+            REVEAL_AWARD_WINNER_CREDIT_OFFSET + 2,
+            REVEAL_AWARD_POT_INV_OFFSET,
+        ] {
+            assert_air_rejects_trace_mutation(&trace, &archive, column);
+        }
+    }
+
+    #[test]
+    fn probe_reconstruct_failures() {
+        let witness = reconstruct_timeout_reset();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("reconstruct trace");
+        // Collect ALL failing constraint indices at row 0 by swallowing the
+        // per-constraint panic inside the closure.
+        let scope = scope_trace(&archive, trace.log_size);
+        let preprocessed_cols: Vec<&Vec<M31>> = [
+            scope.cols[0..1].iter(),
+            scope.cols[3..7].iter(),
+            scope.cols[1..3].iter(),
+            scope.cols[FIRST_KIND_SCOPE_OFFSET..PREPROCESSED_COLUMNS - 1].iter(),
+            scope.cols[7..FIRST_KIND_SCOPE_OFFSET].iter(),
+            scope.cols[PREPROCESSED_COLUMNS - 1..PREPROCESSED_COLUMNS].iter(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let range = CanonicalRange8::dummy();
+        let (interaction, sum) = canonical_range_interaction(&trace, trace.log_size, &range);
+        let interaction_cols: Vec<Vec<M31>> = interaction
+            .iter()
+            .map(|evaluation| evaluation.values.to_cpu())
+            .collect();
+        let evals = stwo::core::pcs::TreeVec::new(vec![
+            preprocessed_cols,
+            trace.cols.iter().collect(),
+            interaction_cols.iter().collect(),
+        ]);
+        stwo_constraint_framework::assert_constraints_on_trace(
+            &evals,
+            trace.log_size,
+            |eval| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    CanonicalAir {
+                        log_size: trace.log_size,
+                        range: range.clone(),
+                    }
+                    .evaluate(eval);
+                }));
+                if result.is_err() {
+                    std::process::abort();
+                }
+            },
+            sum,
+        );
+    }
+
+    #[test]
+    fn canonical_direct_air_proves_reveal_timeout_raked_award() {
+        let witness = reveal_timeout_raked_award();
+        witness
+            .validate_shape()
+            .expect("reveal-timeout raked award witness");
+        let rules = raked_table_rules();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("raked award trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        let archive = prove_canonical_raked_tagged_batch(std::slice::from_ref(&witness), &rules)
+            .expect("raked award proof");
+        verify_canonical_tagged_proof(&archive).expect("raked award verification");
+        // The rules proof is mandatory: stripping it fails closed.
+        let mut stripped = archive.clone();
+        stripped.rules_hash = None;
+        assert!(verify_canonical_tagged_proof(&stripped).is_err());
+        // A detached opening (wrong bps) is rejected by the rules binding.
+        let mut detached = archive.clone();
+        let mut wrong_rules = rules;
+        wrong_rules.rake_bps = 250;
+        detached.rules_hash =
+            Some(crate::canonical_rake_opening::prove_canonical_rules_hash(&wrong_rules).unwrap());
+        assert!(verify_canonical_tagged_proof(&detached).is_err());
+    }
+
+    #[test]
+    fn canonical_direct_air_proves_multi_pending_reveal_timeout_raked_award_batch() {
+        let batch = reveal_timeout_kick_raked_award_batch();
+        let rules = raked_table_rules();
+        let (trace, expected) = trace_for(&batch).expect("raked cascade trace");
+        assert_trace_satisfies_air(&trace, &expected);
+        let archive =
+            prove_canonical_raked_tagged_batch(&batch, &rules).expect("raked cascade proof");
+        verify_canonical_tagged_batch(&batch, &archive).expect("raked cascade verification");
+        assert_eq!(archive.reveal_timeout_cascade_count, 1);
+        assert_eq!(
+            archive.last_transition_kind,
+            CanonicalTransitionKind::RevealTimeoutRakedAward as u8
+        );
+    }
+
+    #[test]
+    fn canonical_reveal_timeout_raked_award_rejects_arithmetic_tampering() {
+        let witness = reveal_timeout_raked_award();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("raked award trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        for column in [
+            RAKE_CONFIG_OFFSET + 1,
+            RAKE_CONFIG_OFFSET + 3,
+            RAKE_PRODUCT_OFFSET,
+            RAKE_LIMBS_OFFSET,
+            RAKE_SCALED_OFFSET,
+            RAKE_REMAINDER_OFFSET,
+            RAKE_FINAL_OFFSET,
+            RAKE_AWARD_LIMBS_OFFSET,
+            RAKE_CHIP_INTERMEDIATE_OFFSET,
+        ] {
+            assert_air_rejects_trace_mutation(&trace, &archive, column);
+        }
+    }
+
+    #[test]
+    fn canonical_reveal_timeout_raked_award_rejects_witness_forgeries() {
+        let witness = reveal_timeout_raked_award();
+        witness.validate_shape().expect("valid raked terminal");
+        // A zero-rake configuration must use the plain award selector.
+        let mut invalid = witness.clone();
+        invalid.rake_opening.rake_mode = 0;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        // Out-of-range basis points are rejected before proving.
+        let mut invalid = witness.clone();
+        invalid.rake_opening.rake_bps = 10_001;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        // The survivor must be credited pot - rake exactly.
+        let mut invalid = witness;
+        invalid.post.seats[2].stack += 1;
+        invalid.post.chip_pool -= 1;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+    }
+
+    #[test]
+    fn canonical_reveal_timeout_award_rejects_witness_forgeries() {
+        let witness = reveal_timeout_award();
+        witness.validate_shape().expect("valid award terminal");
+        // Two survivors cannot take a sole-survivor award.
+        let mut invalid = witness.clone();
+        invalid.pre.seats[3] = CanonicalSeat {
+            status: CanonicalSeatStatus::Active,
+            acted: false,
+            stack: 50,
+            bet: 0,
+            total_bet: 0,
+            pending_addon: 0,
+            time_bank_ms: 30_000,
+            identity_commitment: [34; 32],
+            key_commitment: [44; 32],
+            hole_cards_commitment: [54; 32],
+        };
+        invalid.pre.chip_pool += 50;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        // A zero pot is not a payable award.
+        let mut invalid = witness.clone();
+        invalid.pre.pot = 0;
+        invalid.pre.chip_pool -= 90;
+        invalid.post.seats[2].stack -= 90;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        // The winner must actually be credited.
+        let mut invalid = witness;
+        invalid.post.seats[2].stack = invalid.pre.seats[2].stack;
+        invalid.post.chip_pool += invalid.pre.pot;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+    }
+
+    #[test]
+    fn canonical_reveal_timeout_kick_rejects_pending_refund_and_unrelated_seat_mutations() {
+        let witness = reveal_timeout_kick();
+        witness.validate_shape().expect("valid reveal-timeout kick");
+        let mut invalid = witness.clone();
+        invalid.action.seat = 1;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        let mut invalid = witness.clone();
+        invalid.post.protocol_pending_mask = 0b101;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        let mut invalid = witness;
+        invalid.post.seats[1].stack += 1;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+    }
+
+    #[test]
     fn canonical_reconstruct_timeout_reset_rejects_refund_or_endpoint_tampering() {
         let witness = reconstruct_timeout_reset();
         let (trace, archive) =
@@ -9059,6 +12440,42 @@ mod tests {
         ] {
             assert_air_rejects_trace_mutation(&trace, &archive, column);
         }
+    }
+
+    #[test]
+    fn canonical_reconstruct_timeout_reset_rejects_accumulator_dependent_population() {
+        let mut invalid = reconstruct_timeout_reset();
+        // With a third active pre-seat, kicking seat 0 leaves two active
+        // players. The VM then reaches its `accumulated_deck.is_some()`
+        // branch, whose bit is deliberately not carried by this selector.
+        invalid.pre.max_players = 3;
+        invalid.post.max_players = 3;
+        invalid.pre.chip_pool = 400;
+        invalid.post.chip_pool = 300;
+        // The base fixture uses one folded survivor.  Make that survivor an
+        // active participant as well so this mutation really exercises the
+        // three-active population that can reach the accumulator continuation.
+        invalid.pre.seats[1].status = CanonicalSeatStatus::Active;
+        invalid.pre.seats[1].acted = false;
+        invalid.pre.seats[2] = CanonicalSeat {
+            status: CanonicalSeatStatus::Active,
+            acted: false,
+            stack: 100,
+            bet: 0,
+            total_bet: 0,
+            pending_addon: 0,
+            time_bank_ms: 30_000,
+            identity_commitment: [131; 32],
+            key_commitment: [132; 32],
+            hole_cards_commitment: [133; 32],
+        };
+        invalid.post.seats[2] = CanonicalSeat {
+            hole_cards_commitment: [0; 32],
+            ..invalid.pre.seats[2].clone()
+        };
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        assert!(prove_canonical_tagged_batch(&[invalid]).is_err());
     }
 
     #[test]
@@ -9219,8 +12636,8 @@ mod tests {
         let (trace, archive) = trace_for(std::slice::from_ref(&witness)).expect("deadline trace");
         // The endpoint acted-mask projection and the fixed seat bit opening
         // are both independently constrained by the AdvanceDeadline gate.
-        assert_air_rejects_trace_mutation(&trace, &archive, 308);
-        assert_air_rejects_trace_mutation(&trace, &archive, 1_404);
+        assert_air_rejects_trace_mutation(&trace, &archive, 309);
+        assert_air_rejects_trace_mutation(&trace, &archive, 1_405);
     }
 
     #[test]

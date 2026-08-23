@@ -12,17 +12,18 @@ use crate::blake2b_lookup_compression::{
     ArchivedBlake2bLookupHashesProof, prove_blake2b_lookup_hashes, verify_blake2b_lookup_hashes,
 };
 use crate::error::{TexasAirError, TexasAirResult};
+use crate::hash_prover::HashProofProvider as _;
 use crate::texas_canonical::CanonicalStateImage;
 
 /// Domain prefix used by `CanonicalStateImage::commitment`.
-pub const CANONICAL_STATE_IMAGE_DOMAIN: &[u8] = b"zchain.texas.canonical-state.v2";
+pub const CANONICAL_STATE_IMAGE_DOMAIN: &[u8] = b"zchain.texas.canonical-state.v3";
 
 /// The two Blake2b statements for one canonical transition's state endpoints.
 /// The first statement authenticates the pre-image and the second the
 /// post-image.  They share one lookup-table commitment.
 #[derive(Debug, Clone, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct ArchivedCanonicalStateImageHashProof {
-    pub hashes: ArchivedBlake2bLookupHashesProof,
+    pub hashes: crate::blake3_flock::ArchivedFlockHashesProof,
 }
 
 /// Return the exact byte preimage covered by a canonical state commitment.
@@ -43,13 +44,27 @@ pub fn prove_canonical_state_image_hashes(
     pre: &CanonicalStateImage,
     post: &CanonicalStateImage,
 ) -> TexasAirResult<ArchivedCanonicalStateImageHashProof> {
-    let messages = vec![
-        canonical_state_image_preimage(pre)?,
-        canonical_state_image_preimage(post)?,
+    let statements = vec![
+        crate::hash_prover::Blake2bStatement::new(
+            canonical_state_image_preimage(pre)?,
+            pre.commitment(),
+        ),
+        crate::hash_prover::Blake2bStatement::new(
+            canonical_state_image_preimage(post)?,
+            post.commitment(),
+        ),
     ];
-    Ok(ArchivedCanonicalStateImageHashProof {
-        hashes: prove_blake2b_lookup_hashes(&messages)?,
-    })
+    let hashes = crate::blake3_flock::FlockProvider
+        .prove_statements(&statements)
+        .map_err(|error| {
+            TexasAirError::SpecViolation(format!("flock state-image proof failed: {error:?}"))
+        })?;
+    let crate::hash_prover::ArchivedHashProof::Flock(hashes) = hashes else {
+        return Err(TexasAirError::SpecViolation(
+            "flock backend must produce flock proofs".into(),
+        ));
+    };
+    Ok(ArchivedCanonicalStateImageHashProof { hashes })
 }
 
 /// Verify that the archived endpoint byte statements hash to the exact public
@@ -71,7 +86,8 @@ pub fn verify_canonical_state_image_hashes(
             "canonical state-image hash proof is detached from an endpoint commitment".into(),
         ));
     }
-    verify_blake2b_lookup_hashes(&archive.hashes)
+    crate::blake3_flock::FlockProvider
+        .verify_proof(&crate::hash_prover::ArchivedHashProof::Flock(archive.hashes.clone()))
 }
 
 #[cfg(test)]
@@ -126,42 +142,31 @@ mod tests {
     #[test]
     fn preimage_is_the_exact_native_commitment_input() {
         use blake2::Blake2bVar;
-        use blake2::digest::{Update, VariableOutput};
-
         let image = image();
         let preimage = canonical_state_image_preimage(&image).unwrap();
-        let mut hasher = Blake2bVar::new(32).unwrap();
-        hasher.update(&preimage);
-        let mut digest = [0; 32];
-        hasher.finalize_variable(&mut digest).unwrap();
-        assert_eq!(digest, image.commitment());
+        assert_eq!(
+            image.commitment(),
+            crate::blake3_flock::blake3_chain_digest(&preimage)
+        );
     }
 
     #[test]
     fn verifier_rejects_an_endpoint_commitment_splice_before_stark_work() {
         let image = image();
         let preimage = canonical_state_image_preimage(&image).unwrap();
-        let hashes = ArchivedBlake2bLookupHashesProof {
+        let hashes = crate::blake3_flock::ArchivedFlockHashesProof {
             statements: vec![
-                crate::blake2b_lookup_compression::Blake2bLookupHashStatement {
+                crate::hash_prover::Blake2bStatement {
                     message: preimage.clone(),
                     digest: image.commitment(),
                 },
-                crate::blake2b_lookup_compression::Blake2bLookupHashStatement {
+                crate::hash_prover::Blake2bStatement {
                     message: preimage,
                     digest: image.commitment(),
                 },
             ],
-            compression: crate::blake2b_lookup_compression::ArchivedBlake2bLookupCompressionProof {
-                messages: Vec::new(),
-                digests: Vec::new(),
-                initial_states: Vec::new(),
-                hash_states: Vec::new(),
-                chain_to_next: Vec::new(),
-                calls: Vec::new(),
-                g_proof_bytes: Vec::new(),
-                schedule_proof_bytes: Vec::new(),
-            },
+            chains: Vec::new(),
+            merkles: Vec::new(),
         };
         let archive = ArchivedCanonicalStateImageHashProof { hashes };
         let mut wrong = image.commitment();

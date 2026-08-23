@@ -1,0 +1,13 @@
+[package]
+name = "poker-hand-bench"
+version = "0.1.0"
+edition = "2024"
+description = "End-to-end proving benchmark for one complete Texas Hold'em hand"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+poker_texas_air = { path = ".." }
+poker_l1 = { path = "../poker_l1" }
+borsh = { workspace = true }
+rayon = { workspace = true }

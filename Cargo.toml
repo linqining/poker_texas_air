@@ -7,8 +7,10 @@ license = "MIT OR Apache-2.0"
 
 [workspace]
 resolver = "2"
+exclude = ["third_party", "third_party/flock", "third_party/flock/crates/flock-core", "third_party/flock/crates/flock-prover", "third_party/flock/crates/flock-cuda-ffi"]
 members = [
     ".",
+    "hand-bench",
     "poker_l1",
     "vm-common",
     "poker_protocol",
@@ -84,6 +86,9 @@ bincode = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 blake2 = { workspace = true }
+# ===== 二元域哈希证明后端（vendored flock，BLAKE3 merkle fork）=====
+flock-core = { path = "third_party/flock/crates/flock-core" }
+flock-prover = { path = "third_party/flock/crates/flock-prover" }
 tracing = { workspace = true }
 rayon = { workspace = true }
 num-bigint = "0.4.8"

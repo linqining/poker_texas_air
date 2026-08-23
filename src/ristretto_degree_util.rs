@@ -153,4 +153,14 @@ impl EvalAtRow for DegreeEvaluator {
     fn combine_ef(_: [Self::F; SECURE_EXTENSION_DEGREE]) -> Self::EF {
         num_traits::Zero::zero()
     }
+
+    fn add_to_relation<R: stwo_constraint_framework::Relation<Self::F, Self::EF>>(
+        &mut self,
+        _entry: stwo_constraint_framework::RelationEntry<'_, Self::F, Self::EF, R>,
+    ) {
+        // Degree tracking only; the shared LogUp table contributes a fixed
+        // relation degree accounted for by the log_size+1 bound.
+    }
+
+    fn finalize_logup_in_pairs(&mut self) {}
 }

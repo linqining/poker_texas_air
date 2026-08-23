@@ -872,6 +872,7 @@ fn verify_schedule_proof(
     bytes: &[u8],
 ) -> TexasAirResult<()> {
     let log_size = log_size_for_calls(calls)?;
+    let rebuild_timing = std::time::Instant::now();
     let scope = scope_columns(
         messages,
         digests,
@@ -883,6 +884,12 @@ fn verify_schedule_proof(
     )?;
     let trace = trace_columns(messages, initial_states, calls, log_size)?;
     let multiplicity = xor_multiplicity_column(&trace, &scope);
+    crate::prove_timing::record(
+        "blake2b:schedule-verify-rebuild",
+        crate::prove_timing::TimingKind::Verify,
+        rebuild_timing,
+        None,
+    );
     let proof: StarkProof<Poseidon252MerkleHasher> = options()
         .deserialize(bytes)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
@@ -1227,15 +1234,35 @@ pub fn prove_blake2b_lookup_compression_with_initial_states(
     }
     let (calls, hash_states) = compression_calls(messages, initial_states)?;
     validate_chaining_links(initial_states, &hash_states, chain_to_next)?;
-    let g_proof = prove_blake2b_g(&calls)?;
-    let schedule_proof_bytes = build_schedule_proof(
-        messages,
-        digests,
-        initial_states,
-        &hash_states,
-        chain_to_next,
-        &calls,
-    )?;
+    // The G and scheduler STARKs are independent statements over the same
+    // calls; proving them concurrently halves the fixed per-proof wall clock
+    // (table commitment + FRI dominate and do not scale with block count).
+    let timing_start = std::time::Instant::now();
+    let schedule_messages = messages;
+    let schedule_digests = digests;
+    let schedule_initial_states = initial_states;
+    let schedule_chain = chain_to_next;
+    let (g_proof, schedule_proof_bytes) = rayon::join(
+        || prove_blake2b_g(&calls),
+        || {
+            build_schedule_proof(
+                schedule_messages,
+                schedule_digests,
+                schedule_initial_states,
+                &hash_states,
+                schedule_chain,
+                &calls,
+            )
+        },
+    );
+    let g_proof = g_proof?;
+    let schedule_proof_bytes = schedule_proof_bytes?;
+    crate::prove_timing::record(
+        "blake2b:g+schedule-parallel",
+        crate::prove_timing::TimingKind::Prove,
+        timing_start,
+        None,
+    );
     Ok(ArchivedBlake2bLookupCompressionProof {
         messages: messages.to_vec(),
         digests: digests.to_vec(),
@@ -1277,16 +1304,50 @@ pub fn verify_blake2b_lookup_compression(
             "Blake2b G proof call scope mismatch".into(),
         ));
     }
-    verify_blake2b_g(&g_archive)?;
-    verify_schedule_proof(
-        &archive.messages,
-        &archive.digests,
-        &archive.initial_states,
-        &archive.hash_states,
-        &archive.chain_to_next,
-        &archive.calls,
-        &archive.schedule_proof_bytes,
-    )
+    // The G and scheduler STARK verifications are independent; run them
+    // concurrently to halve the fixed verifier wall clock.
+    let g_timing = std::time::Instant::now();
+    let (g_result, schedule_result) = rayon::join(
+        || {
+            let start = std::time::Instant::now();
+            let result = verify_blake2b_g(&g_archive);
+            crate::prove_timing::record(
+                "blake2b:g-verify",
+                crate::prove_timing::TimingKind::Verify,
+                start,
+                None,
+            );
+            result
+        },
+        || {
+            let start = std::time::Instant::now();
+            let result = verify_schedule_proof(
+                &archive.messages,
+                &archive.digests,
+                &archive.initial_states,
+                &archive.hash_states,
+                &archive.chain_to_next,
+                &archive.calls,
+                &archive.schedule_proof_bytes,
+            );
+            crate::prove_timing::record(
+                "blake2b:schedule-verify",
+                crate::prove_timing::TimingKind::Verify,
+                start,
+                None,
+            );
+            result
+        },
+    );
+    g_result?;
+    let schedule_result = schedule_result?;
+    crate::prove_timing::record(
+        "blake2b:g+schedule-verify-parallel",
+        crate::prove_timing::TimingKind::Verify,
+        g_timing,
+        None,
+    );
+    Ok(schedule_result)
 }
 
 fn hash_messages(message: &[u8]) -> Vec<[u8; 128]> {

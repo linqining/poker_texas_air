@@ -1321,6 +1321,10 @@ fn start_reconstruct(
         .ok_or_else(|| PokerL1Error::Serialization("reconstruct deadline overflows u64".into()))?;
     let active_seats = get_active_seat_indices(&table.seats);
     let active_mask = get_active_seat_mask(&table.seats);
+    // Capture the outer street before `take_reveal_payload` temporarily puts
+    // the hand phase into `Waiting`. Reading `table.round_state()` after the
+    // take would pass `ROUND_WAITING` (0) to `enter_reconstructing`.
+    let street = table.round_state();
     // 生成 coefficient = hash_to_scalar("reconstruct_coefficient/" || table_id_bytes || timestamp_ascii)
     let mut input = b"reconstruct_coefficient/".to_vec();
     input.extend_from_slice(&table.id.to_bytes());
@@ -1331,7 +1335,7 @@ fn start_reconstruct(
 
     let suspended_reveal = table.take_reveal_payload()?;
     table.enter_reconstructing(
-        table.round_state(),
+        street,
         super::types::ReconstructState {
             pending_mask: active_mask,
             accumulated_deck: None,
@@ -2909,7 +2913,13 @@ fn on_reveal_timeout(
     );
 
     for &seat in &pending {
-        kick_player_internal(table, seat, KICK_REASON_TIMEOUT, events)?;
+        // Raw kick: the reveal-timeout endpoint (refund, sole-survivor award,
+        // preflop reset, or reconstruct continuation) is decided once below,
+        // after the complete pending union has been kicked.  Running the
+        // generic low-player cascade mid-loop would reset and silently clear
+        // the pot before the sole survivor can be awarded, and would then
+        // kick seats that the reset already returned to waiting.
+        kick_player_raw(table, seat, KICK_REASON_TIMEOUT, events)?;
     }
 
     let active = count_active_players(&table.seats);
@@ -3418,7 +3428,73 @@ pub fn kick_player_internal(
     Ok(())
 }
 
+/// Atomic raw kick without the generic post-kick cascades.
+///
+/// Mirrors the candidate-table atomicity of [`kick_player_internal`] so a late
+/// failure cannot leave a partially refunded seat in the caller's state.
+fn kick_player_raw(
+    table: &mut TexasPokerTable,
+    seat_index: u8,
+    reason: super::events::KickCause,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    let mut candidate = table.clone();
+    let mut candidate_events = Vec::new();
+    kick_seat_in_place_raw(&mut candidate, seat_index, reason, &mut candidate_events)?;
+    *table = candidate;
+    events.extend(candidate_events);
+    Ok(())
+}
+
 fn kick_player_internal_in_place(
+    table: &mut TexasPokerTable,
+    seat_index: u8,
+    reason: super::events::KickCause,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    let was_current_shuffler = table.shuffle_state().derived_current_shuffler() == seat_index;
+    let was_current_turn = table.current_turn() == seat_index && is_betting_round(table);
+    kick_seat_in_place_raw(table, seat_index, reason, events)?;
+    if was_current_shuffler && table.shuffle_phase() != SHUFFLE_PHASE_NONE {
+        let mut tmp_events = Vec::new();
+        advance_shuffle(table, &mut tmp_events)?;
+        events.extend(tmp_events);
+    }
+    if was_current_turn && is_betting_round(table) {
+        let active = count_active_players(&table.seats);
+        if active <= 1 {
+            end_without_showdown(table, events)?;
+            // end_without_showdown already performs the complete award + reset cascade. Do not
+            // fall through to the generic low-player reset below, which would reset and bump the
+            // version a second time in the same kick dispatch.
+            return Ok(());
+        } else {
+            advance_turn(table, events)?;
+        }
+    }
+
+    let active = count_active_players(&table.seats);
+    if active < MIN_PLAYERS_TO_START {
+        if active == 1 && is_betting_round(table) {
+            // Kicking a non-current heads-up player must award the complete pot to the survivor;
+            // a bare reset here would silently clear the kicked bet, all remaining live bets and
+            // the pre-existing pot without a winner event.
+            end_without_showdown(table, events)?;
+        } else {
+            reset_for_next_hand(table, events)?;
+        }
+    }
+    Ok(())
+}
+
+/// Kick one seat without running the generic shuffle/turn/low-player cascades.
+///
+/// `on_reveal_timeout` uses this so the reveal-timeout endpoint (refund/award/
+/// preflop reset/reconstruct) is decided once, after the complete pending
+/// union has been kicked.  Letting the low-player cascade run mid-loop would
+/// reset and silently clear the pot before the sole survivor can be awarded,
+/// and would then kick seats that the reset already returned to waiting.
+fn kick_seat_in_place_raw(
     table: &mut TexasPokerTable,
     seat_index: u8,
     reason: super::events::KickCause,
@@ -3435,8 +3511,6 @@ fn kick_player_internal_in_place(
         // 座位空闲视为无操作成功（幂等），但区分于越界错误。
         return Ok(());
     }
-    let was_current_shuffler = table.shuffle_state().derived_current_shuffler() == seat_index;
-    let was_current_turn = table.current_turn() == seat_index && is_betting_round(table);
     let seat = &table.seats[seat_index as usize];
     let stack_refund = seat.stack();
     let pending_refund = seat.pending_addon();
@@ -3491,36 +3565,6 @@ fn kick_player_internal_in_place(
             reason,
         },
     );
-
-    if was_current_shuffler && table.shuffle_phase() != SHUFFLE_PHASE_NONE {
-        let mut tmp_events = Vec::new();
-        advance_shuffle(table, &mut tmp_events)?;
-        events.extend(tmp_events);
-    }
-    if was_current_turn && is_betting_round(table) {
-        let active = count_active_players(&table.seats);
-        if active <= 1 {
-            end_without_showdown(table, events)?;
-            // end_without_showdown already performs the complete award + reset cascade. Do not
-            // fall through to the generic low-player reset below, which would reset and bump the
-            // version a second time in the same kick dispatch.
-            return Ok(());
-        } else {
-            advance_turn(table, events)?;
-        }
-    }
-
-    let active = count_active_players(&table.seats);
-    if active < MIN_PLAYERS_TO_START {
-        if active == 1 && is_betting_round(table) {
-            // Kicking a non-current heads-up player must award the complete pot to the survivor;
-            // a bare reset here would silently clear the kicked bet, all remaining live bets and
-            // the pre-existing pot without a winner event.
-            end_without_showdown(table, events)?;
-        } else {
-            reset_for_next_hand(table, events)?;
-        }
-    }
     Ok(())
 }
 

@@ -1,0 +1,1 @@
+{"rustc":17286804632689684399,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[14441156423005900414,"build_script_build",false,8550458440717713379]],"local":[{"RerunIfChanged":{"output":"release/build/aleo-std-b9c0cf6c981bff12/output","paths":["."]}}],"rustflags":[],"config":0,"compile_kind":0}

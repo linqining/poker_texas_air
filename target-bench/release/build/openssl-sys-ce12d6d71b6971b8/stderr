@@ -1,0 +1,156 @@
+DEBUG: all keys: APPLINKDIR, BINDIR, CMAKECONFIGDIR, COMMENT, ENGINESDIR, INCLUDEDIR, LDLIBS, LIBDIR, MODULESDIR, PKGCONFIGDIR, PREFIX, VERSION, libdir
+Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 55.
+DEBUG: LIBDIR = , libdir =  => Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 57.
+LIBDIR = 
+No value given for CMAKECONFIGDIR
+No value given for PKGCONFIGDIR
+No value given for libdir
+DEBUG: PREFIX = . => PREFIX = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/build/src
+Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 72.
+DEBUG: libdir =  => Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 75.
+libdir = 
+DEBUG: BINDIR = apps => BINDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/build/src/apps, BINDIR_REL_PREFIX = apps
+DEBUG: LIBDIR = Use of uninitialized value in print at util/mkinstallvars.pl line 91.
+ => Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 108.
+LIBDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/build/src, LIBDIR_REL_PREFIX = 
+DEBUG: INCLUDEDIR = [ include, ./include ] => INCLUDEDIR = [ /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/build/src/include, /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/build/src/include ], INCLUDEDIR_REL_PREFIX = [ include, ./include ]
+DEBUG: APPLINKDIR = ms => APPLINKDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/build/src/ms, APPLINKDIR_REL_PREFIX = ms
+DEBUG: ENGINESDIR = engines => ENGINESDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/build/src/engines, ENGINESDIR_REL_LIBDIR = engines
+DEBUG: MODULESDIR = providers => MODULESDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/build/src/providers, MODULESDIR_REL_LIBDIR = providers
+DEBUG: PKGCONFIGDIR = . => PKGCONFIGDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/build/src, PKGCONFIGDIR_REL_LIBDIR = .
+DEBUG: CMAKECONFIGDIR = . => CMAKECONFIGDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/build/src, CMAKECONFIGDIR_REL_LIBDIR = .
+Use of uninitialized value in join or string at util/mkinstallvars.pl line 157.
+DEBUG: all keys: APPLINKDIR, BINDIR, CMAKECONFIGDIR, COMMENT, ENGINESDIR, INCLUDEDIR, LDLIBS, LIBDIR, MODULESDIR, PKGCONFIGDIR, PREFIX, VERSION, libdir
+DEBUG: LIBDIR = lib, libdir = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib => LIBDIR = lib
+No value given for COMMENT
+DEBUG: PREFIX = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install => PREFIX = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install
+DEBUG: libdir = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib => libdir = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib
+DEBUG: BINDIR = bin => BINDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/bin, BINDIR_REL_PREFIX = bin
+DEBUG: LIBDIR = lib => LIBDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib, LIBDIR_REL_PREFIX = lib
+DEBUG: INCLUDEDIR = include => INCLUDEDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/include, INCLUDEDIR_REL_PREFIX = include
+DEBUG: APPLINKDIR = include/openssl => APPLINKDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/include/openssl, APPLINKDIR_REL_PREFIX = include/openssl
+DEBUG: ENGINESDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib/engines-3 => ENGINESDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib/engines-3, ENGINESDIR_REL_LIBDIR = engines-3
+DEBUG: MODULESDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib/ossl-modules => MODULESDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib/ossl-modules, MODULESDIR_REL_LIBDIR = ossl-modules
+DEBUG: PKGCONFIGDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib/pkgconfig => PKGCONFIGDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib/pkgconfig, PKGCONFIGDIR_REL_LIBDIR = pkgconfig
+DEBUG: CMAKECONFIGDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib/cmake/OpenSSL => CMAKECONFIGDIR = /Users/mac/projects/poker_texas_air/target-bench/release/build/openssl-sys-ce12d6d71b6971b8/out/openssl-build/install/lib/cmake/OpenSSL, CMAKECONFIGDIR_REL_LIBDIR = cmake/OpenSSL
+Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 137.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.
+Use of uninitialized value in join or string at /System/Library/Perl/5.34/darwin-thread-multi-2level/re.pm line 47.

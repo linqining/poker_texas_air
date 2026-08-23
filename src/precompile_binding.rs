@@ -657,10 +657,23 @@ pub fn precompile_call_context(
 /// with the request digest itself zeroed, avoiding a circular commitment.
 #[must_use]
 pub fn canonical_precompile_call_context(witness: &CanonicalTransitionWitness) -> Vec<u8> {
+    // This family authenticates its endpoint images through the Blake2b
+    // lookup stack, so the context binds the Blake2b statement digests (the
+    // same values `validate_hash_statement_binding` re-derives), NOT the
+    // BLAKE3 `CanonicalStateImage::commitment` used by the hand-bundle path.
+    let blake2b_image_digest = |image: &crate::texas_canonical::CanonicalStateImage| {
+        let preimage = crate::canonical_state_hash::canonical_state_image_preimage(image)
+            .expect("canonical state image is serializable");
+        let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+        hasher.update(&preimage);
+        let mut out = [0u8; 32];
+        hasher.finalize_variable(&mut out).expect("digest length");
+        out
+    };
     canonical_precompile_call_context_from_digests(
         witness,
-        witness.pre.commitment(),
-        witness.post.commitment(),
+        blake2b_image_digest(&witness.pre),
+        blake2b_image_digest(&witness.post),
         witness.crypto_scope_commitment(),
     )
 }

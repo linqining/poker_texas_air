@@ -778,6 +778,7 @@ mod tests {
                     )
                     .unwrap(),
                     stark_proof_bytes: Vec::new(),
+            range_claimed_sum: [0, 0, 0, 0],
                 },
                 scalar_multiplications:
                     ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof {
@@ -785,11 +786,13 @@ mod tests {
                         additions: ArchivedRistrettoFpProgramBatchProof {
                             programs: Vec::new(),
                             stark_proof_bytes: Vec::new(),
+            range_claimed_sum: [0, 0, 0, 0],
                         },
                     },
                 additions: ArchivedRistrettoFpProgramBatchProof {
                     programs: Vec::new(),
                     stark_proof_bytes: Vec::new(),
+            range_claimed_sum: [0, 0, 0, 0],
                 },
             }),
         };

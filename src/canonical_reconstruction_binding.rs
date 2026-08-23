@@ -703,6 +703,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,

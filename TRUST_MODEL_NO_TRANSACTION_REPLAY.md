@@ -19,7 +19,7 @@ state root，而不执行交易回放。旧 `ProveTask`/VM replay 路径仍保�
 `texas_tagged::verify_tagged_texas_proof` 和
 `texas_canonical_air::verify_canonical_tagged_proof` 现在可以只使用归档中的公开
 scope 和 Stwo proof 完成验证，不再读取 `ProveTask`、交易 payload 或执行 native VM
-replay。前者只证明 betting/funding/leave 的投影关系；后者证明 23-kind canonical
+replay。前者只证明 betting/funding/leave 的投影关系；后者证明 26-kind canonical
 trace 的形状、selector、序号、表作用域和相邻 state-image commitment 链接，并证明
 下注完成后所有 seat `bet` 被精确收集进 pot；它还在 AIR 内约束 permissionless/actor
 authority、settlement commitment 不变，以及 transition/nullifier 非零。canonical
@@ -85,12 +85,12 @@ Ristretto 方程，也不重算 deck/reveal commitment。
 | VM 分支 | VM 的原子结果 | 当前 direct AIR | 解除 fail-closed 所需的固定宽度关系 |
 | --- | --- | --- | --- |
 | deadline 前 / `NoDeadline` | 仅报告，不改变 table | 不应生成 head-changing row | 不需要证明；admission 必须拒绝把它编码为 state transition |
-| reconstruct timeout | kick 所有 reconstruct pending；按活跃数 reset、单人 award/reset，或以 accumulator 完成 reconstruct-shuffle | 未覆盖 | pending-seat kick schedule、active-count selector、refund/award/reset 或 completed-accumulator→shuffle continuation |
+| reconstruct timeout | kick 所有 reconstruct pending；按活跃数 reset、单人 award/reset，或以 accumulator 完成 reconstruct-shuffle | 仅覆盖窄 reset 子集：恰有一个 pending active seat、总 active 数为 1 或 2、零 wager/addon。`kick_player_internal` 的低人数 cascade 在外层读取 accumulator 前完成 reset；AIR 约束 pending bit、active-count、refund、seat vacate 和 reset endpoint | 多 pending kick schedule、单人 award/settlement，以及三名以上 active 时的 accumulator→reconstruct-shuffle continuation |
 | shuffle timeout | kick 当前 shuffler；按活跃数 reset/award，否则 rebuild deck 并继续 shuffle | 已覆盖固定、非级联微步骤：最低 pending seat、refund/pot/chip-pool、Out/key/hole 清零、至少两人 pending mask、非零新 deck commitment | 若要覆盖 VM 的 reset/award cascade、完整 52-card rebuild schedule 与密码学 commitment 重算，仍需额外 bounded rows/AIR |
-| reveal timeout | kick 全部 reveal pending；0/1 active 时 reset/award；preflop reset，其他 street start reconstruct | 未覆盖 | assignment pending-union、bounded multi-kick schedule、phase-specific reset/reconstruct opening |
+| reveal timeout | kick 全部 reveal pending；0/1 active 时 reset/award；preflop reset，其他 street start reconstruct | 已覆盖 preflop reset、非 preflop reconstruct 与 sole-survivor award 三个终局：单一 pending reset、固定宽度、升序的多 pending `RevealTimeoutKick…Kick→RevealTimeoutReset`（reset endpoint 允许任意数量的 retained active seats，AIR 约束每一 kick 的 custody/lifecycle delta、终局 `Out` 保留、refund/deadline，并由 ZR4 固定宽度 assignment opening 认证 pending union/reveal commitment）；`RevealTimeoutKick…Kick→RevealTimeoutReconstruct`（kick 行按 3-bit 分解约束 street ∈ {1..=5} 且 `subtag == street`；terminal 行约束 `Revealing→Reconstructing/Collecting` 头、`height + reconstruct_timeout` 武装的 deadline、板/牌组/suspended reveal/run-it-twice 不变、非零且变化的 reconstruction commitment（平方和乘积逆证明）、终局 kick 的 stack/bet/addon 清零与 total/time-bank 保留、`amount = stack + addon`、`pot += bet`、`chip_pool −= refund`、acted/leave 掩码按 `pre × (1 − selector)` 清位、post pending mask 由完整 post 座位像推导，并以 `live_count × (live_count − 1)` 的逆证明至少两名 live 玩家）；以及 `RevealTimeoutKick…Kick→RevealTimeoutAward` 零抽水单人 award（VM 侧 `on_reveal_timeout` 改用 raw kick，使 kick 级联不再于循环中提前 reset 偷走 pot——与 VM 自身对 betting 轮同一漏洞的修复注释一致；AIR 约束 `Revealing→Waiting` reset 头、`live == 2` 与 credit/selector 对 live 集的划分、winner stack 精确 `+= pre_pot`（pot 非零逆证明）、被踢与既有 `Out` 座位以 vacated 指示清空、retained 座位 Active 化、time-bank cap、identity/key 保留与 hole 清零、`amount = stack + addon`、`chip_pool −= refund`，以及全部 reset 掩码/承诺清零）。sidecar AIR 还约束完整 assignment 字段、typed/连续 padding、canonical target order、card `<52`/唯一性、pending/submitted mask 的 bit/range/disjoint/union 关系，以及按 seat mask 的确定性 kick schedule。真实 VM fixture 锁定 union→kick→reset/reconstruct/award 语义 | 0-survivor 且 pot > 0 的终点在 VM 内清空 pot 后违反 canonical custody 守恒（筹码滞留 vault 无归属），需要 VM 先决定退款/运营者提取政策才能给出 AIR 关系，保持 fail-closed；rake > 0 的单人 award 已由 `RevealTimeoutRakedAward` 覆盖：新增 `canonical_rake_opening` 以共享 lookup-backed Blake2b STARK 证明完整 `Borsh(TableRules)` 预像哈希到 pre `rules_commitment`（域分隔 `zchain.texas.rules.v1`），公开三元组（mode/bps/cap）进入 Fiat--Shamir scope 与 6 列预处理公共 scope；AIR 以加权场恒等式与 16-bit 肢范围分解精确证明 `rake = min(floor(pot × bps / 10_000), cap, pot)`（pot 截断 32 位，除法余数 14-bit 分解，cap 比较用借位链），winner 精确记 `pot − rake`、`chip_pool −= refund + rake`，缺少/不匹配规则证明均 fail-closed；真实 VM fixture 锁定 rake 公式；完整 deck commitment derivation 与更一般的 reset/assignment ledger 组合仍需专用关系 |
 | betting, time bank > 0 | 消耗 `min(time_bank, betting_timeout)`，延长 deadline | `AdvanceDeadline` 已覆盖 | 已有，保持为单一非级联 row |
 | betting, time bank = 0 | auto fold，再由 normalization 收池、round advance、single-winner award/reset 或下一 reveal | 只覆盖非终局 `AutoFold` suffix | 将 fold 与后续 bounded normalization 分成显式 `Collect/Advance/Award/Reset` 微步骤；不得让 AutoFold 隐含它们 |
-| showdown display timeout | derive side pots/rake/runout/winners，award，reset | 未覆盖 | 9-seat/≤9-side-pot/≤2-runout settlement plan、hand-rank、odd-chip、rake、custody 和 reset 关系 |
+| showdown display timeout | derive side pots/rake/runout/winners，award，reset | 部分覆盖（`src/canonical_settlement_air.rs`：结算代数 AIR——守恒/层平铺、runout 对半拆分、odd-chip 线性分解、winner⊆eligible、无争议层免抽水，四 VM fixture 全链路 prove/verify + 篡改拒绝 10/10；层切片推导/rake 公式链/hand-rank 由牌面派生（7 张评估器电路）仍待补；已落地：层切片由 bet 向量推导（eligible/gross 借位链），总 rake 公式链（school-mul/除法/min 借位链 + mode 门控），以及 rank↔winner 一致性——rank 以 24 位字典序值（category/kickers nibble 打包）入 scope，逐 (层,runout) 以运行最大值选择链 + 双向借位链等式约束 winner_mask = eligible ∧ (rank = max)，runout-1 槽按 two_runouts∧contested 门控） | 9-seat/≤9-side-pot/≤2-runout settlement plan、hand-rank、odd-chip、rake、custody 和 reset 关系 |
 
 每个 deadline branch 都会先运行最多 `MAX_NORMALIZATION_STEPS` 次 pre-normalization；该循环可被
 展开为有界 selector batch，但每一个 `CompleteReconstruct`、`AdvanceShuffle`、
@@ -98,7 +98,7 @@ Ristretto 方程，也不重算 deck/reveal commitment。
 relation。特别是 `settlement_commitment` 目前被 canonical AIR 锁定为不变；在拥有完整
 settlement opening 和 award/reset AIR 前，绝不能仅放宽这个 gate。
 
-canonical archive 中的 batch digest、state-image commitment，以及 state、lifecycle、
+canonical archive 中的 batch digest、首尾 transition kind、state-image commitment，以及 state、lifecycle、
 overlay、settlement、custody 五个域的首尾根都已进入 Fiat--Shamir transcript、公开
 scope、trace 连续性约束和 canonical receipt binding，因此不能再把有效 proof 与另一组
 根/receipt 拼接。AIR 仍未重算这些 Blake2b 值，也不能单独作为 admission 的语义来源。
@@ -188,6 +188,14 @@ Poseidon Fiat--Shamir transcript 或任何 native success receipt 的替代。�
 线性关系和每槽 slot-OR 方程现在都有 request/envelope-bound 的 AIR archive，但 challenge
 仍只能来自未来 Poseidon transcript AIR 的认证输出；在 transcript 与 shuffle AIR 全部合成前，
 production admission 仍保持 fail-closed。
+
+当前 state-image composition 的 verifier 已将 endpoint commitment 的职责明确分层：
+standalone state-opening verifier 仍是 audit/building block；完整
+`Borsh(image) -> Blake2b(image commitment) -> SMT root` composition 会调用不重算
+Blake2b 的 canonical verifier，并由独立 lookup-backed state-image hash AIR 认证两个
+endpoint digest。这样不会把 host 端 `CanonicalStateImage::commitment()` 重算误当成
+host-zero 证明；VM cascade、settlement、deck/reveal 和 Ristretto 关系仍未因此完成，
+production admission 继续 fail-closed。
 
 为避免未来 transcript AIR 在字段编码或 challenge 顺序上另起一套未认证的 host 规范，
 `ristretto_reconstruction_transcript` 已固定 Poseidon252/v1 的协议输入：domain、完整 request

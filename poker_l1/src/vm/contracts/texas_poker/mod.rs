@@ -39,6 +39,7 @@ pub mod constants;
 pub mod events;
 pub mod hand_evaluator;
 pub mod settlement;
+pub mod settlement_fixture;
 pub mod side_pot;
 pub mod types;
 pub mod utils;

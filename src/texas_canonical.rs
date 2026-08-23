@@ -300,7 +300,14 @@ impl CanonicalStateImage {
     }
 
     pub fn commitment(&self) -> [u8; 32] {
-        digest(b"zchain.texas.canonical-state.v2", self)
+        // BLAKE3 padded-chain commitment (v3); the flock chain statement
+        // authenticates the identical preimage on the verify path.
+        const CANONICAL_STATE_DOMAIN: &[u8] = b"zchain.texas.canonical-state.v3";
+        let bytes = borsh::to_vec(self).expect("canonical ABI is serializable");
+        let mut preimage = Vec::with_capacity(CANONICAL_STATE_DOMAIN.len() + bytes.len());
+        preimage.extend_from_slice(CANONICAL_STATE_DOMAIN);
+        preimage.extend_from_slice(&bytes);
+        crate::blake3_flock::blake3_chain_digest(&preimage)
     }
 }
 
@@ -347,9 +354,35 @@ pub enum CanonicalTransitionKind {
     /// normalization when no pot or live wager remains.
     ResetOnly = 22,
     /// Narrow reconstruct-timeout branch: exactly one pending participant is
-    /// kicked and a zero-wager hand is reset to WAITING.  The general
-    /// multi-pending timeout/settlement cascade remains separate.
+    /// kicked and a zero-wager hand is reset to WAITING.  The pre-state has
+    /// at most two active seats, so the VM's internal kick cascade resets
+    /// before the outer timeout handler can inspect the reconstruction
+    /// accumulator.  The general multi-pending/three-or-more-active timeout
+    /// cascade remains separate.
     ReconstructTimeoutReset = 23,
+    /// Narrow preflop reveal-timeout branch: one pending active participant
+    /// is kicked and the VM's low-population cascade resets the hand.
+    RevealTimeoutReset = 24,
+    /// Non-terminal reveal-timeout kick.  This is one row of the deterministic
+    /// ascending pending-seat cascade; the terminal kick/reset continuation is
+    /// represented by a separate typed transition.
+    RevealTimeoutKick = 25,
+    /// Non-preflop reveal-timeout continuation after the complete pending
+    /// union has been kicked. The VM suspends the reveal ledger and enters
+    /// reconstruct collecting for every retained participant.
+    RevealTimeoutReconstruct = 26,
+    /// Sole-survivor reveal-timeout terminal: the final pending seat is
+    /// kicked and the complete pot is awarded to the one remaining live
+    /// player, mirroring the VM's `end_without_showdown` endpoint.  Only the
+    /// zero-rake branch is represented; a raked award requires the dedicated
+    /// settlement opening and stays fail-closed.
+    RevealTimeoutAward = 27,
+    /// Raked sole-survivor reveal-timeout terminal: identical kick and award
+    /// shape as `RevealTimeoutAward`, but the authenticated rules opening
+    /// carries a percentage rake configuration and the AIR proves
+    /// `rake = min(floor(pot * bps / 10_000), cap, pot)` before crediting
+    /// `pot - rake` to the survivor and removing the rake from table custody.
+    RevealTimeoutRakedAward = 28,
 }
 
 impl CanonicalTransitionKind {
@@ -376,6 +409,11 @@ impl CanonicalTransitionKind {
                 | Self::FoldWithProof
                 | Self::EndWithoutShowdown
                 | Self::ReconstructTimeoutReset
+                | Self::RevealTimeoutReset
+                | Self::RevealTimeoutKick
+                | Self::RevealTimeoutReconstruct
+                | Self::RevealTimeoutAward
+                | Self::RevealTimeoutRakedAward
         )
     }
 
@@ -388,6 +426,11 @@ impl CanonicalTransitionKind {
                 | Self::EndWithoutShowdown
                 | Self::ResetOnly
                 | Self::ReconstructTimeoutReset
+                | Self::RevealTimeoutReset
+                | Self::RevealTimeoutKick
+                | Self::RevealTimeoutReconstruct
+                | Self::RevealTimeoutAward
+                | Self::RevealTimeoutRakedAward
         )
     }
 
@@ -547,6 +590,10 @@ pub struct CanonicalTransitionWitness {
     /// Fixed-width deterministic protocol-completion opening.  It is non-zero
     /// only for the final `SubmitReconstruct` branch currently enabled.
     pub protocol_completion: CanonicalProtocolCompletionOpening,
+    /// Authenticated rake configuration for raked settlement terminals.  It
+    /// is canonical-zero for every other kind and is bound to the pre rules
+    /// commitment by the companion Blake2b rules-opening proof.
+    pub rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening,
     pub transition_commitment: [u8; 32],
     pub nullifier: [u8; 32],
     pub deadline_height: u64,
@@ -595,6 +642,11 @@ impl CanonicalTransitionWitness {
                 CanonicalTransitionKind::EndWithoutShowdown
                     | CanonicalTransitionKind::ResetOnly
                     | CanonicalTransitionKind::ReconstructTimeoutReset
+                    | CanonicalTransitionKind::RevealTimeoutReset
+                    | CanonicalTransitionKind::RevealTimeoutKick
+                    | CanonicalTransitionKind::RevealTimeoutReconstruct
+                    | CanonicalTransitionKind::RevealTimeoutAward
+                    | CanonicalTransitionKind::RevealTimeoutRakedAward
             )
             && self.action.proof_commitment != [0; 32]
         {
@@ -605,6 +657,11 @@ impl CanonicalTransitionWitness {
             CanonicalTransitionKind::AdvanceDeadline
                 | CanonicalTransitionKind::AutoFold
                 | CanonicalTransitionKind::ReconstructTimeoutReset
+                | CanonicalTransitionKind::RevealTimeoutReset
+                | CanonicalTransitionKind::RevealTimeoutKick
+                | CanonicalTransitionKind::RevealTimeoutReconstruct
+                | CanonicalTransitionKind::RevealTimeoutAward
+                | CanonicalTransitionKind::RevealTimeoutRakedAward
         ) && self.deadline_height != 0
         {
             return Err("transition carries an unused consensus deadline height".into());
@@ -614,6 +671,9 @@ impl CanonicalTransitionWitness {
             CanonicalTransitionKind::AdvanceDeadline
                 | CanonicalTransitionKind::EndWithoutShowdown
                 | CanonicalTransitionKind::ReconstructTimeoutReset
+                | CanonicalTransitionKind::RevealTimeoutReset
+                | CanonicalTransitionKind::RevealTimeoutKick
+                | CanonicalTransitionKind::RevealTimeoutReconstruct
         ) && self.action.auxiliary != 0
         {
             return Err("transition carries an unused auxiliary action field".into());
@@ -1161,8 +1221,9 @@ fn validate_reset_only(w: &CanonicalTransitionWitness) -> Result<(), String> {
 }
 
 /// Validate the fixed-width subset of `on_reconstruct_timeout` that can be
-/// represented by one tagged row: one active participant is pending, there is
-/// no wager/addon ledger, and the VM's kick is followed by a clean reset.
+/// represented by one tagged row: one active participant is pending, there are
+/// at most two active seats, no wager/addon ledger, and the VM's internal kick
+/// cascade resets before the outer timeout handler can inspect the accumulator.
 fn validate_reconstruct_timeout_reset(w: &CanonicalTransitionWitness) -> Result<(), String> {
     let pre = &w.pre;
     let post = &w.post;
@@ -1189,6 +1250,14 @@ fn validate_reconstruct_timeout_reset(w: &CanonicalTransitionWitness) -> Result<
     let refund = pre.seats[seat].stack;
     if refund == 0 || w.action.amount != refund {
         return Err("reconstruct timeout reset has an invalid refund amount".into());
+    }
+    let active_count = pre
+        .seats
+        .iter()
+        .filter(|seat| seat.status == CanonicalSeatStatus::Active)
+        .count();
+    if !(1..=2).contains(&active_count) {
+        return Err("reconstruct timeout reset must have one or two active seats".into());
     }
     if post.phase != CanonicalPhase::Waiting
         || post.phase_subtag != 0
@@ -1254,6 +1323,538 @@ fn validate_reconstruct_timeout_reset(w: &CanonicalTransitionWitness) -> Result<
     Ok(())
 }
 
+/// Validate the bounded preflop reveal-timeout cascade.  The authenticated
+/// reveal ledger is supplied as a composition sidecar; this transition only
+/// consumes the already-projected single pending seat and proves the VM's
+/// low-population kick/reset result.
+fn validate_reveal_timeout_reset(w: &CanonicalTransitionWitness) -> Result<(), String> {
+    let pre = &w.pre;
+    let post = &w.post;
+    let seat = usize::from(w.action.seat);
+    if pre.phase != CanonicalPhase::Revealing
+        || pre.phase_subtag != 1
+        || pre.street != 1
+        || w.action.flag
+        || w.action.auxiliary != 0
+        || w.action.proof_commitment != post.deck_commitment
+        || w.deadline_height < pre.deadline_ms
+        || seat >= usize::from(pre.max_players)
+        || pre.protocol_pending_mask != (1u16 << seat)
+        || pre.seats[seat].status != CanonicalSeatStatus::Active
+        || pre.seats[seat].bet != 0
+        || pre.seats[seat].total_bet != 0
+        || pre.seats[seat].pending_addon != 0
+        || pre.pot != 0
+        || pre.current_bet != 0
+        || pre.min_raise != 0
+    {
+        return Err("reveal timeout reset has an invalid pending/wager header".into());
+    }
+    let refund = pre.seats[seat].stack;
+    if refund == 0 || w.action.amount != refund {
+        return Err("reveal timeout reset has an invalid refund amount".into());
+    }
+    // Unlike reconstruct timeout, preflop reveal timeout resets after every
+    // pending seat has been kicked regardless of how many non-pending players
+    // remain. `on_reveal_timeout` takes its preflop reset branch after the
+    // complete pending-union loop, so limiting this endpoint to one or two
+    // active seats would reject a real VM continuation.
+    if post.phase != CanonicalPhase::Waiting
+        || post.phase_subtag != 0
+        || post.street != 0
+        || post.current_turn != NO_CANONICAL_SEAT
+        || post.deadline_ms != 0
+        || post.current_bet != 0
+        || post.min_raise != 0
+        || post.pot != 0
+        || post.acted_mask != 0
+        || post.leave_after_hand_mask != 0
+        || post.protocol_pending_mask != 0
+        || post.chip_pool
+            != pre
+                .chip_pool
+                .checked_sub(refund)
+                .ok_or("refund underflow")?
+        || post.deck_commitment == [0; 32]
+        || post.board_cards_commitment != [0; 32]
+        || post.reveal_commitment != [0; 32]
+        || post.reconstruction_commitment != [0; 32]
+        || post.run_it_twice_commitment != [0; 32]
+    {
+        return Err("reveal timeout reset has an invalid waiting endpoint".into());
+    }
+    for (index, (before, after)) in pre.seats.iter().zip(post.seats.iter()).enumerate() {
+        if index == seat {
+            if after != &CanonicalSeat::EMPTY {
+                return Err("timed-out reveal seat was not vacated".into());
+            }
+            continue;
+        }
+        match before.status {
+            CanonicalSeatStatus::Empty | CanonicalSeatStatus::Out => {
+                if after != before {
+                    return Err("unoccupied reveal seat changed during reset".into());
+                }
+            }
+            CanonicalSeatStatus::Active | CanonicalSeatStatus::Folded => {
+                if before.bet != 0
+                    || before.total_bet != 0
+                    || before.pending_addon != 0
+                    || before.time_bank_ms != TERMINAL_TIME_BANK_MS
+                    || after.status != CanonicalSeatStatus::Active
+                    || after.acted
+                    || after.stack != before.stack
+                    || after.bet != 0
+                    || after.total_bet != 0
+                    || after.pending_addon != 0
+                    || after.time_bank_ms != TERMINAL_TIME_BANK_MS
+                    || after.identity_commitment != before.identity_commitment
+                    || after.key_commitment != before.key_commitment
+                    || after.hole_cards_commitment != [0; 32]
+                {
+                    return Err("retained reveal seat has an invalid reset image".into());
+                }
+            }
+            CanonicalSeatStatus::Waiting | CanonicalSeatStatus::AllIn => {
+                return Err("unsupported seat status in reveal timeout reset".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate one non-terminal micro-step in the VM's ordered reveal-timeout
+/// cascade.  The reveal-ledger sidecar proves that the selected seat is the
+/// next assignment-union bit and that its removal changes every assignment
+/// mask; this state relation proves the accompanying custody/lifecycle delta.
+fn validate_reveal_timeout_kick(w: &CanonicalTransitionWitness) -> Result<(), String> {
+    let pre = &w.pre;
+    let post = &w.post;
+    let seat = usize::from(w.action.seat);
+    if pre.phase != CanonicalPhase::Revealing
+        || pre.phase_subtag == 0
+        || pre.street == 0
+        || pre.current_turn != NO_CANONICAL_SEAT
+        || post.phase != pre.phase
+        || post.phase_subtag != pre.phase_subtag
+        || post.street != pre.street
+        || post.current_turn != NO_CANONICAL_SEAT
+        || post.deadline_ms != pre.deadline_ms
+        || w.deadline_height < pre.deadline_ms
+        || w.action.auxiliary != 0
+        || w.action.flag
+        || seat >= usize::from(pre.max_players)
+        || pre.protocol_pending_mask & (1u16 << seat) == 0
+        || post.protocol_pending_mask != pre.protocol_pending_mask & !(1u16 << seat)
+        || post.protocol_pending_mask == 0
+        || pre.seats[seat].status != CanonicalSeatStatus::Active
+        || post.seats[seat].status != CanonicalSeatStatus::Out
+        || post.reveal_commitment == pre.reveal_commitment
+        || w.action.proof_commitment != post.reveal_commitment
+    {
+        return Err("reveal timeout kick has an invalid protocol header".into());
+    }
+    let before = pre.seats[seat];
+    let after = post.seats[seat];
+    let refund = before
+        .stack
+        .checked_add(before.pending_addon)
+        .ok_or("reveal timeout kick refund overflow")?;
+    if refund == 0
+        || w.action.amount != refund
+        || post.pot
+            != pre
+                .pot
+                .checked_add(before.bet)
+                .ok_or("reveal timeout kick pot overflow")?
+        || post.chip_pool
+            != pre
+                .chip_pool
+                .checked_sub(refund)
+                .ok_or("reveal timeout kick chip_pool underflow")?
+        || after.stack != 0
+        || after.pending_addon != 0
+        || after.bet != 0
+        || after.total_bet != before.total_bet
+        || after.time_bank_ms != before.time_bank_ms
+        || after.identity_commitment != before.identity_commitment
+        || after.key_commitment != [0; 32]
+        || after.hole_cards_commitment != [0; 32]
+        || post.acted_mask != pre.acted_mask & !(1u16 << seat)
+        || post.leave_after_hand_mask != pre.leave_after_hand_mask & !(1u16 << seat)
+    {
+        return Err("reveal timeout kick has an invalid custody/lifecycle delta".into());
+    }
+    if post
+        .seats
+        .iter()
+        .filter(|seat| seat.status == CanonicalSeatStatus::Active)
+        .count()
+        < 2
+    {
+        return Err("reveal timeout kick must leave a non-terminal population".into());
+    }
+    only_allowed_changes(pre, post, Some(seat), |expected, actual| {
+        expected.call_seq = actual.call_seq;
+        expected.acted_mask = actual.acted_mask;
+        expected.leave_after_hand_mask = actual.leave_after_hand_mask;
+        expected.protocol_pending_mask = actual.protocol_pending_mask;
+        expected.pot = actual.pot;
+        expected.chip_pool = actual.chip_pool;
+        expected.reveal_commitment = actual.reveal_commitment;
+        expected.custody_commitment = actual.custody_commitment;
+        expected.seats[seat] = actual.seats[seat];
+    })?;
+    Ok(())
+}
+
+/// Validate the non-preflop terminal continuation of a reveal-timeout
+/// cascade. The VM kicks the final pending seat, then suspends the reveal
+/// payload and enters `Reconstructing/Collecting` when at least two live
+/// players remain. The reveal ledger itself is authenticated by the ZR4
+/// sidecar; this row proves the resulting public state boundary.
+fn validate_reveal_timeout_reconstruct(w: &CanonicalTransitionWitness) -> Result<(), String> {
+    let pre = &w.pre;
+    let post = &w.post;
+    let seat = usize::from(w.action.seat);
+    if pre.phase != CanonicalPhase::Revealing
+        || pre.phase_subtag == 1
+        || pre.street <= 1
+        || pre.current_turn != NO_CANONICAL_SEAT
+        || post.phase != CanonicalPhase::Reconstructing
+        || post.phase_subtag != CANONICAL_RECONSTRUCT_COLLECTING_SUBTAG
+        || post.street != pre.street
+        || post.current_turn != NO_CANONICAL_SEAT
+        || w.action.flag
+        || w.action.auxiliary != 0
+        || w.action.proof_commitment != post.reconstruction_commitment
+        || post.reconstruction_commitment == [0; 32]
+        || post.reconstruction_commitment == pre.reconstruction_commitment
+        || post.reveal_commitment != pre.reveal_commitment
+        || w.deadline_height < pre.deadline_ms
+        || post.deadline_ms
+            != w.deadline_height
+                .checked_add(u64::from(pre.reconstruct_timeout_ms))
+                .ok_or("reveal timeout reconstruct deadline overflow")?
+        || seat >= usize::from(pre.max_players)
+        || pre.protocol_pending_mask != (1u16 << seat)
+        || pre.seats[seat].status != CanonicalSeatStatus::Active
+    {
+        return Err("reveal timeout reconstruct has an invalid phase/header".into());
+    }
+    let before = pre.seats[seat];
+    let after = post.seats[seat];
+    let refund = before
+        .stack
+        .checked_add(before.pending_addon)
+        .ok_or("reveal timeout reconstruct refund overflow")?;
+    if refund == 0
+        || w.action.amount != refund
+        || after.status != CanonicalSeatStatus::Out
+        || after.stack != 0
+        || after.pending_addon != 0
+        || after.bet != 0
+        || after.total_bet != before.total_bet
+        || after.time_bank_ms != before.time_bank_ms
+        || after.identity_commitment != before.identity_commitment
+        || after.key_commitment != [0; 32]
+        || after.hole_cards_commitment != [0; 32]
+        || post.pot
+            != pre
+                .pot
+                .checked_add(before.bet)
+                .ok_or("reveal timeout reconstruct pot overflow")?
+        || post.chip_pool
+            != pre
+                .chip_pool
+                .checked_sub(refund)
+                .ok_or("reveal timeout reconstruct chip_pool underflow")?
+        || post.acted_mask != pre.acted_mask & !(1u16 << seat)
+        || post.leave_after_hand_mask != pre.leave_after_hand_mask & !(1u16 << seat)
+        || post.current_bet != pre.current_bet
+        || post.min_raise != pre.min_raise
+    {
+        return Err("reveal timeout reconstruct has an invalid terminal kick delta".into());
+    }
+    let expected_pending = post
+        .seats
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| {
+            matches!(
+                value.status,
+                CanonicalSeatStatus::Active
+                    | CanonicalSeatStatus::Folded
+                    | CanonicalSeatStatus::AllIn
+            )
+        })
+        .fold(0u16, |mask, (index, _)| mask | (1u16 << index));
+    if post.protocol_pending_mask != expected_pending
+        || post
+            .seats
+            .iter()
+            .filter(|value| {
+                matches!(
+                    value.status,
+                    CanonicalSeatStatus::Active | CanonicalSeatStatus::AllIn
+                )
+            })
+            .count()
+            < 2
+    {
+        return Err("reveal timeout reconstruct has an invalid active pending mask".into());
+    }
+    only_allowed_changes(pre, post, Some(seat), |expected, actual| {
+        expected.call_seq = actual.call_seq;
+        expected.phase = actual.phase;
+        expected.phase_subtag = actual.phase_subtag;
+        expected.deadline_ms = actual.deadline_ms;
+        expected.acted_mask = actual.acted_mask;
+        expected.leave_after_hand_mask = actual.leave_after_hand_mask;
+        expected.protocol_pending_mask = actual.protocol_pending_mask;
+        expected.pot = actual.pot;
+        expected.chip_pool = actual.chip_pool;
+        expected.reconstruction_commitment = actual.reconstruction_commitment;
+        expected.custody_commitment = actual.custody_commitment;
+        expected.seats[seat] = actual.seats[seat];
+    })?;
+    Ok(())
+}
+
+/// Sole-survivor reveal-timeout terminal: the final pending participant is
+/// kicked and the complete pot is awarded to the one remaining live player,
+/// mirroring `end_without_showdown` after the raw reveal-timeout kick loop.
+/// Only the zero-rake branch is represented; a raked award needs the
+/// dedicated settlement opening and stays fail-closed.
+fn validate_reveal_timeout_award(w: &CanonicalTransitionWitness) -> Result<(), String> {
+    let pre = &w.pre;
+    let post = &w.post;
+    let seat = usize::from(w.action.seat);
+    if pre.phase != CanonicalPhase::Revealing
+        || pre.phase_subtag == 0
+        || pre.phase_subtag != pre.street
+        || pre.street == 0
+        || pre.current_turn != NO_CANONICAL_SEAT
+        || w.action.flag
+        || w.action.auxiliary != 0
+        || w.action.proof_commitment != post.deck_commitment
+        || post.deck_commitment == [0; 32]
+        || w.deadline_height < pre.deadline_ms
+        || seat >= usize::from(pre.max_players)
+        || pre.protocol_pending_mask != (1u16 << seat)
+        || pre.seats[seat].status != CanonicalSeatStatus::Active
+        || pre.leave_after_hand_mask != 0
+        || pre.seats.iter().any(|value| value.bet != 0)
+    {
+        return Err("reveal timeout award has an invalid phase/wager header".into());
+    }
+    let refund = pre.seats[seat]
+        .stack
+        .checked_add(pre.seats[seat].pending_addon)
+        .ok_or("reveal timeout award refund overflow")?;
+    if refund == 0 || w.action.amount != refund || pre.pot == 0 {
+        return Err("reveal timeout award has an invalid refund/award payload".into());
+    }
+    let live: Vec<usize> = pre
+        .seats
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| {
+            matches!(
+                value.status,
+                CanonicalSeatStatus::Active | CanonicalSeatStatus::AllIn
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if live.len() != 2 || !live.contains(&seat) {
+        return Err("reveal timeout award must retain exactly one survivor".into());
+    }
+    let winner = live
+        .iter()
+        .copied()
+        .find(|index| *index != seat)
+        .expect("two distinct live seats contain a survivor");
+    if post.phase != CanonicalPhase::Waiting
+        || post.phase_subtag != 0
+        || post.street != 0
+        || post.current_turn != NO_CANONICAL_SEAT
+        || post.deadline_ms != 0
+        || post.current_bet != 0
+        || post.min_raise != 0
+        || post.pot != 0
+        || post.acted_mask != 0
+        || post.leave_after_hand_mask != 0
+        || post.protocol_pending_mask != 0
+        || post.board_cards_commitment != [0; 32]
+        || post.reveal_commitment != [0; 32]
+        || post.reconstruction_commitment != [0; 32]
+        || post.run_it_twice_commitment != [0; 32]
+        || post.chip_pool
+            != pre
+                .chip_pool
+                .checked_sub(refund)
+                .ok_or("reveal timeout award chip_pool underflow")?
+    {
+        return Err("reveal timeout award has an invalid waiting endpoint".into());
+    }
+    for (index, (before, after)) in pre.seats.iter().zip(post.seats.iter()).enumerate() {
+        if index == seat {
+            if after != &CanonicalSeat::EMPTY {
+                return Err("reveal timeout award did not vacate the kicked seat".into());
+            }
+            continue;
+        }
+        if before.status == CanonicalSeatStatus::Out {
+            // Seats kicked by earlier cascade rows are vacated by the reset.
+            if after != &CanonicalSeat::EMPTY {
+                return Err("reveal timeout award did not vacate an earlier kicked seat".into());
+            }
+            continue;
+        }
+        if index == winner {
+            if after.status != CanonicalSeatStatus::Active
+                || after.stack
+                    != before
+                        .stack
+                        .checked_add(pre.pot)
+                        .ok_or("reveal timeout award winner stack overflow")?
+            {
+                return Err("reveal timeout award did not credit the survivor".into());
+            }
+        } else {
+            let expected_status =
+                match before.status {
+                    CanonicalSeatStatus::Empty => CanonicalSeatStatus::Empty,
+                    CanonicalSeatStatus::Active | CanonicalSeatStatus::Folded => {
+                        CanonicalSeatStatus::Active
+                    }
+                    // Seats kicked by earlier cascade rows are still marked `Out`
+                    // here; the reset vacates them like the kicked terminal seat.
+                    CanonicalSeatStatus::Out => CanonicalSeatStatus::Empty,
+                    CanonicalSeatStatus::AllIn | CanonicalSeatStatus::Waiting => return Err(
+                        "reveal timeout award only supports retained active/folded/kicked seats"
+                            .into(),
+                    ),
+                };
+            if after.status != expected_status
+                || (before.status != CanonicalSeatStatus::Out && after.stack != before.stack)
+                || (before.status == CanonicalSeatStatus::Out && after != &CanonicalSeat::EMPTY)
+            {
+                return Err("reveal timeout award changed an unrelated seat".into());
+            }
+        }
+        let time_bank = if before.status == CanonicalSeatStatus::Empty {
+            0
+        } else {
+            TERMINAL_TIME_BANK_MS
+        };
+        if before.pending_addon != 0
+            || before.time_bank_ms != time_bank
+            || after.acted
+            || after.bet != 0
+            || after.total_bet != 0
+            || after.pending_addon != 0
+            || after.time_bank_ms != time_bank
+            || after.identity_commitment != before.identity_commitment
+            || after.key_commitment != before.key_commitment
+            || after.hole_cards_commitment != [0; 32]
+        {
+            return Err("reveal timeout award seat projection is not canonical".into());
+        }
+    }
+    only_allowed_changes(pre, post, None, |expected, actual| {
+        expected.call_seq = actual.call_seq;
+        expected.phase = actual.phase;
+        expected.phase_subtag = actual.phase_subtag;
+        expected.street = actual.street;
+        expected.current_turn = actual.current_turn;
+        expected.deadline_ms = actual.deadline_ms;
+        expected.current_bet = actual.current_bet;
+        expected.min_raise = actual.min_raise;
+        expected.pot = actual.pot;
+        expected.acted_mask = actual.acted_mask;
+        expected.leave_after_hand_mask = actual.leave_after_hand_mask;
+        expected.protocol_pending_mask = actual.protocol_pending_mask;
+        expected.board_cards_commitment = actual.board_cards_commitment;
+        expected.deck_commitment = actual.deck_commitment;
+        expected.reveal_commitment = actual.reveal_commitment;
+        expected.reconstruction_commitment = actual.reconstruction_commitment;
+        expected.run_it_twice_commitment = actual.run_it_twice_commitment;
+        expected.custody_commitment = actual.custody_commitment;
+        expected.chip_pool = actual.chip_pool;
+        expected.seats = actual.seats;
+    })?;
+    Ok(())
+}
+
+/// Raked sole-survivor reveal-timeout terminal.  Identical shape to
+/// [`validate_reveal_timeout_award`], except the authenticated rules opening
+/// carries a percentage rake configuration: the AIR proves
+/// `rake = min(floor(pot * bps / 10_000), cap, pot)`, the survivor is
+/// credited `pot - rake`, and the rake leaves table custody.
+fn validate_reveal_timeout_raked_award(w: &CanonicalTransitionWitness) -> Result<(), String> {
+    let opening = &w.rake_opening;
+    if opening.rake_mode != crate::canonical_rake_opening::CanonicalRakeOpening::PERCENTAGE_MODE
+        || opening.rake_bps == 0
+        || opening.rake_bps > 10_000
+        || w.pre.pot > u32::MAX as u64
+    {
+        return Err("raked award has an invalid rake configuration".into());
+    }
+    let rake = crate::canonical_rake_opening::canonical_settlement_rake(w.pre.pot, opening);
+    let winner = winner_of(w)?;
+    let refund = w.pre.seats[usize::from(w.action.seat)]
+        .stack
+        .checked_add(w.pre.seats[usize::from(w.action.seat)].pending_addon)
+        .ok_or("raked award refund overflow")?;
+    // The raked terminal differs from the zero-rake shape by exactly the
+    // rake on the two credited amounts; everything else is validated by the
+    // shared award relation against the zero-rake projection.
+    let mut adjusted = w.clone();
+    adjusted.kind = CanonicalTransitionKind::RevealTimeoutAward;
+    adjusted.post.seats[winner].stack = adjusted.pre.seats[winner].stack + adjusted.pre.pot;
+    adjusted.post.chip_pool = adjusted
+        .pre
+        .chip_pool
+        .checked_sub(refund)
+        .ok_or("chip underflow")?;
+    adjusted.rake_opening = crate::canonical_rake_opening::CanonicalRakeOpening::ZERO;
+    validate_reveal_timeout_award(&adjusted)?;
+    if w.post.seats[winner]
+        .stack
+        .checked_add(rake)
+        .map(|value| value != adjusted.post.seats[winner].stack)
+        .unwrap_or(true)
+        || w.post
+            .chip_pool
+            .checked_add(rake)
+            .map(|value| value != adjusted.post.chip_pool)
+            .unwrap_or(true)
+    {
+        return Err("raked award does not remove the exact rake from the credit".into());
+    }
+    Ok(())
+}
+
+/// The unique live seat other than the action seat of an award terminal.
+fn winner_of(w: &CanonicalTransitionWitness) -> Result<usize, String> {
+    let seat = usize::from(w.action.seat);
+    w.pre
+        .seats
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| {
+            matches!(
+                value.status,
+                CanonicalSeatStatus::Active | CanonicalSeatStatus::AllIn
+            )
+        })
+        .map(|(index, _)| index)
+        .find(|index| *index != seat)
+        .ok_or_else(|| "reveal timeout award has no live survivor".into())
+}
+
 fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), String> {
     let pre = &w.pre;
     let post = &w.post;
@@ -1270,6 +1871,11 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
         && w.protocol_completion != CanonicalProtocolCompletionOpening::default()
     {
         return Err("only submit_reconstruct may carry a protocol completion opening".into());
+    }
+    if w.kind != CanonicalTransitionKind::RevealTimeoutRakedAward
+        && w.rake_opening != crate::canonical_rake_opening::CanonicalRakeOpening::ZERO
+    {
+        return Err("only the raked award may carry a rake opening".into());
     }
     let seat = usize::from(w.action.seat);
     let seat_index = (seat < MAX_CANONICAL_SEATS).then_some(seat);
@@ -1552,6 +2158,21 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
         }
         CanonicalTransitionKind::ReconstructTimeoutReset => {
             validate_reconstruct_timeout_reset(w)?;
+        }
+        CanonicalTransitionKind::RevealTimeoutReset => {
+            validate_reveal_timeout_reset(w)?;
+        }
+        CanonicalTransitionKind::RevealTimeoutKick => {
+            validate_reveal_timeout_kick(w)?;
+        }
+        CanonicalTransitionKind::RevealTimeoutReconstruct => {
+            validate_reveal_timeout_reconstruct(w)?;
+        }
+        CanonicalTransitionKind::RevealTimeoutAward => {
+            validate_reveal_timeout_award(w)?;
+        }
+        CanonicalTransitionKind::RevealTimeoutRakedAward => {
+            validate_reveal_timeout_raked_award(w)?;
         }
         CanonicalTransitionKind::AutoFold => {
             if pre.phase != CanonicalPhase::Betting
@@ -2200,6 +2821,15 @@ fn digest<T: BorshSerialize>(domain: &[u8], value: &T) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use poker_l1::object_model::ObjectID;
+    use poker_l1::vm::contracts::texas_poker::constants::ROUND_FLOP;
+    use poker_l1::vm::contracts::texas_poker::state_machine;
+    use poker_l1::vm::contracts::texas_poker::types::{
+        ReconstructState, RevealAssignment, RevealPurpose, RevealTarget, RevealTokenState, Seat,
+        SeatStatus, TexasPokerTable,
+    };
+    use poker_l1::vm::contracts::texas_poker::utils::{g1_generator, scalar_from_u64};
+    use poker_protocol::crypto::types::ECPoint;
 
     fn image() -> CanonicalStateImage {
         CanonicalStateImage {
@@ -2296,6 +2926,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: CanonicalProtocolCompletionOpening::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -2352,6 +2983,7 @@ mod tests {
             },
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: CanonicalProtocolCompletionOpening::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -2429,6 +3061,7 @@ mod tests {
                 pre_reconstruction_commitment: [4; 32],
                 post_reconstruction_commitment: [51; 32],
             },
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -2487,5 +3120,137 @@ mod tests {
         witness.post.deck_commitment[0] ^= 1;
         witness.seal();
         assert!(witness.validate_shape().is_err());
+    }
+
+    #[test]
+    fn vm_reconstruct_timeout_narrow_population_resets_before_accumulator_branch() {
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xA5; 20], 0),
+            "narrow-reconstruct-timeout".into(),
+            [0; 20],
+            2,
+            50,
+            100,
+        );
+        let generator = g1_generator();
+        table.seats[0] = Seat::occupied(
+            [1; 20],
+            100,
+            ECPoint(generator * scalar_from_u64(1)),
+            SeatStatus::Active,
+        )
+        .expect("active timed-out fixture seat");
+        table.seats[1] = Seat::occupied(
+            [2; 20],
+            200,
+            ECPoint(generator * scalar_from_u64(2)),
+            SeatStatus::Active,
+        )
+        .expect("active retained fixture seat");
+        table.seats[1].set_status(SeatStatus::Folded);
+        table.chip_pool = 300;
+        state_machine::set_initial_encrypted_deck(&mut table).expect("fixture deck");
+        table.deck_state.contributor_mask = 0b11;
+        table
+            .enter_reconstructing(
+                ROUND_FLOP,
+                ReconstructState {
+                    pending_mask: 0b01,
+                    accumulated_deck: None,
+                },
+                RevealTokenState {
+                    purpose: RevealPurpose::Board,
+                    assignments: vec![],
+                },
+                1_000,
+            )
+            .expect("fixture reconstruction phase");
+
+        let mut events = Vec::new();
+        state_machine::advance_deadline(&mut table, 11_000, &mut events)
+            .expect("expired reconstruct deadline");
+
+        // Kicking seat 0 leaves zero active players, so the internal kick
+        // cascade resets first. The outer handler subsequently sees only one
+        // retained seat and resets again without ever observing the
+        // reconstruction accumulator.
+        assert_eq!(table.round_state(), 0);
+        assert!(!table.seats[0].is_occupied());
+        assert_eq!(table.seats[1].status(), SeatStatus::Active);
+        assert_eq!(table.seats[1].stack(), 200);
+        assert_eq!(table.chip_pool, 200);
+        assert_eq!(table.reconstruct_phase(), 0);
+    }
+
+    #[test]
+    fn vm_reveal_timeout_uses_assignment_union_before_preflop_reset() {
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xA6; 20], 0),
+            "narrow-reveal-timeout".into(),
+            [0; 20],
+            2,
+            50,
+            100,
+        );
+        let generator = g1_generator();
+        table.seats[0] = Seat::occupied(
+            [1; 20],
+            100,
+            ECPoint(generator * scalar_from_u64(1)),
+            SeatStatus::Active,
+        )
+        .expect("active timed-out reveal fixture seat");
+        table.seats[1] = Seat::occupied(
+            [2; 20],
+            200,
+            ECPoint(generator * scalar_from_u64(2)),
+            SeatStatus::Active,
+        )
+        .expect("active retained reveal fixture seat");
+        table.chip_pool = 300;
+        state_machine::set_initial_encrypted_deck(&mut table).expect("fixture deck");
+        table.deck_state.contributor_mask = 0b11;
+        table
+            .enter_revealing(
+                poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP,
+                RevealTokenState {
+                    purpose: RevealPurpose::DealHole,
+                    assignments: vec![
+                        RevealAssignment {
+                            encrypted_card_index: 0,
+                            target: RevealTarget::Hole {
+                                seat_index: 1,
+                                card_slot: 0,
+                            },
+                            pending_mask: 0b01,
+                            submitted_mask: 0,
+                            reveal_tokens: vec![],
+                        },
+                        RevealAssignment {
+                            encrypted_card_index: 1,
+                            target: RevealTarget::Hole {
+                                seat_index: 1,
+                                card_slot: 1,
+                            },
+                            pending_mask: 0b01,
+                            submitted_mask: 0,
+                            reveal_tokens: vec![],
+                        },
+                    ],
+                },
+                1_000,
+            )
+            .expect("fixture reveal phase");
+
+        let mut events = Vec::new();
+        state_machine::advance_deadline(&mut table, 11_000, &mut events)
+            .expect("expired reveal deadline");
+
+        assert_eq!(table.round_state(), 0);
+        assert!(!table.seats[0].is_occupied());
+        assert_eq!(table.seats[1].status(), SeatStatus::Active);
+        assert_eq!(table.seats[1].stack(), 200);
+        assert_eq!(table.chip_pool, 200);
+        assert_eq!(table.reveal_phase(), 0);
     }
 }

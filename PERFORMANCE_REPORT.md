@@ -1,0 +1,215 @@
+# poker_texas_air 性能报告 —— 以一手完整德州扑克为准（标准 9 座桌）
+
+日期：2026-08-23 · 主机：Apple Silicon `Mac15,7` (aarch64) · 工具链：nightly + stwo 2.3（`--release`）
+复现：`cargo run --release -p poker-hand-bench`
+
+## “一手完整牌局”的构成（标准 9 座桌）
+
+基准按标准 9 座满员桌构造，为当前 canonical tagged AIR **端到端可证明的最大连续组合**
+（洗牌/揭牌的 Ristretto 组合仍 fail-closed，见 TRUST_MODEL 矩阵）：
+
+| 批次 | 行（VM 转换） | 说明 |
+| --- | --- | --- |
+| lifecycle（11 行） | CreateTable → JoinTable×9 → StartHand | 建桌、九人各带 1000 入座、开局（止于洗牌边界） |
+| hand（11 行） | Bet(50) → Raise(150) → Fold×8 → EndWithoutShowdown(200) | 九人 preflop：开注、加注、七连弃 + 开注者弃牌、零抽水单人结算 |
+| hand openings（1 个共享 STARK） | 规则字节 + 首末状态像字节 | `Borsh(TableRules)`→rules_commitment 与两个 `Borsh(image)`→image_commitment 的 lookup-Blake2b 证明 |
+
+验证组合链：rake 配置 ← 规则字节 ← rules_commitment ← 状态像字节 ← 像承诺 ← SMT root，
+全程无 host 断言（host-zero）。AIR 侧全程打开九座位（`MAX_CANONICAL_SEATS = 9`）。
+
+## 优化后数字（3 次运行，中值）
+
+完整 host-zero 捆绑已落地：规则 + 首末状态像 + 两条 256 层 SMT 开销作为
+**517 条语句一体证明**（`prove_canonical_hand_bundle`，经 `HashProofProvider`
+接缝），替代三个独立证明（~35s），且 admission 只验一个哈希证明。
+
+| 组件 | prove | verify | 证明尺寸 |
+| --- | --- | --- | --- |
+| lifecycle 批次（11 行，canonical STARK） | **0.62 s** | 0.22 s | 1.18 MB |
+| hand 批次（11 行，canonical STARK） | **0.62 s** | 0.21 s | 1.14 MB |
+| hand openings（合并 lookup-Blake2b STARK） | 5.0 s | 1.05 s | 1.23 MB |
+| 完整 host-zero 捆绑（+2×SMT，517 语句） | **21.8 s** | **10.4 s** | 9.41 MB |
+| canonical 双批流水线并行 | 0.84 s（原 1.25 s 串行） | — | — |
+| **整手合计（不含 SMT）** | **≈ 6.2 s** | **≈ 1.5 s** | **3.55 MB** |
+| **整手合计（完整 host-zero 含 SMT）** | **≈ 22.6 s** | **≈ 10.9 s** | **11.7 MB** |
+
+两个结构性事实：
+
+1. **批内行数在 1..=256 内不影响证明成本**（trace 域下限 log 8 = 256 行）：
+   11 行与 4 行批次的 prove/verify 完全相同（~0.62 s / ~0.21 s）。一张表在
+   256 行以内追加任意多行动都不增加证明开销——“每表一证”的边际成本恒定。
+2. **Blake2b lookup 开销与消息块数基本无关**（76 B 规则 ≈ 5.0 s vs
+   2×1711 B 状态像 ≈ 6.1 s 独立证明时）：瓶颈是每次证明固定的 2^16 XOR
+   表承诺 + FRI，不是哈希量。
+
+## 本轮优化（12.4 s → 6.2 s，2.0×）
+
+| 变更 | 效果 |
+| --- | --- |
+| 三个独立 Blake2b 证明（规则 + 首末状态像）合并为一个共享 lookup STARK（`prove_canonical_hand_openings`） | 开销证明 11.2 s → 6.1 s |
+| G 与 scheduler 两个子 STARK 用 `rayon::join` 并行证明 | 6.1 s → 4.9 s |
+| G 与 scheduler 验证同样并行 | 开销验证 1.32 s → 1.05 s |
+| 修复 canonical betting AIR 的 turn 回绕 bug：`(post_turn − seat)` 字段差为负时 advice 逆用 mod-16 残差，两人桌 seat 1 的一切下注行动此前不可证 | 解锁多人轮转手牌基准 |
+
+## 剩余热点与路线图（已按"哈希层迁移二元域"决策重排）
+
+架构分工：M31/stwo 承载 canonical 业务 AIR；Blake2b 哈希层（规则/状态像/SMT/reveal
+台账）迁移到二元域证明器（Binius/Flock 类，参考吞吐 82k Blake3 压缩/秒/单核，
+ePrint 2026/1329）；admission 并行验证双证明，归档接口保持递归无关。
+完整 host-zero 手牌（含 SMT 2×257 层）哈希层投影：当前 M31 lookup 栈 ~26s
+（固定 ~4.9s + 0.04s/块 × 543 块）→ 二元域 **~0.06s**。
+
+1. **哈希证明器抽象层**（已完成，`src/hash_prover.rs`）：`HashProofProvider`
+   trait + 统一归档 + 防拼接语句级验证；M31-lookup 为首个后端。
+   **二元域后端调研更新（2026-08，阻塞解除）**，三条可用路线按契合度排序：
+   - [succinctlabs/flock](https://github.com/succinctlabs/flock)（Bünz/Rothblum/Wang，
+     ePrint 2026/1329，Apache-2.0/MIT，git 依赖接入，未发 crates.io）：GF(2)-R1CS
+     zerocheck+lincheck PIOP + Ligerito 多线性承诺，**端到端内置 BLAKE3/SHA-256/
+     Keccak 哈希链与 Merkle 路径 prover/verifier**（flock_chain CLI 可直接跑），
+     Apple Silicon NEON 优化——与我们 517 语句哈希栈（statement 链 + SMT 路径）
+     形态几乎完全对口；缺 Blake2b 编码器（可自写 R1CS 编码或顺势把链哈希切到
+     已内置支持的 BLAKE3，后者与此前 blake2→blake3 评估结论一致）。研究级、
+     未 production-ready，但代码完整可用。
+   - [binius-zk/binius64](https://github.com/binius-zk/binius64)（Irreducible 后继，
+     活跃 1.6k commits，Apache-2.0/MIT）：任意 64-bit 字非确定性电路 zk-SNARK，
+     SHA-512 64KB 消息 ~128ms 示例，Blake2b 可原生编码；接口较通用但无现成
+     哈希语句层，需自行搭 statement 绑定/防拼接。
+   - 原版 `binius-*` crates（crates.io 0.1.x，2025-05 发布，repo 已归档只读）：
+     代码真实但官方自述"含 bug、勿用于安全关键场景"，且无人维护——仅作参考，
+     不选。
+   接入路径：经 `HashProofProvider` 接缝新增 `FlockProvider`（首选），消费方零改动。
+   **本机实测（2026-08-23，Apple Silicon，flock_chain release 单线程）**：
+   256 与 1024 步 BLAKE3 链 prove_chain 均 **0.33s**（固定开销主导，边际压缩
+   ≈ 0），verify 恒定 **0.54s**，证明 **296KB**。对照当前 M31 lookup 栈
+   （~1057 次压缩投影 prove ~26s / verify ~4.4s / 9.4MB）：prove ~40×、
+   verify ~8×、证明 ~30× 缩小。编码器接口支持任意 preimage 块
+   （`blocks: &[Compression]`）+ 公开链端点折叠，与我们的 scope 绑定/防拼接
+   语义兼容。
+   **哈希选型结论：切 BLAKE3（已完成，2026-08-23）**。自写 Blake2b 编码器 =
+   仿 blake3.rs（2492 行）改 64-bit G（rot 32/24/16/63、新 IV/sigma/参数块），
+   工作量数千行级且失去上游基准与维护；BLAKE3 内置、已基准、性能同级。
+   **落地内容**：
+   - **vendor**：flock（commit 快照）入 `third_party/flock`（workspace 排除 +
+     清单内联化，path 依赖接入）。
+   - **BLAKE3 Merkle 胶水（fork 新增）**：blake3 witness 布局改造——`Z_CONST`
+     pin 移至尾部、`M_BASE` 对齐 512，使 slot 0..4 = [cv, out_lo, msg_lo,
+     msg_hi] 满足 merkle_path_common 的连续 4-slot 几何（与 sha2 编码器同法）；
+     新增 `MERKLE_LAYOUT` + `prove/verify_merkle_path` + 深度 256 roundtrip 与
+     周期位模式测试。flock 全套 61/61 + core 332/332 绿。**上游发现**：Ligerito
+     最小注册配置 m=22（256 块下限），小实例需补齐到 256 步；const-wire pin
+     不得落入 padding 零区（否则 lincheck sumcheck-final 失败）。
+   - **上游协议约定（重要）**：merkle shift 的 `b_bits[0]` 未被协议使用
+     （约定恒 0，路径起点必须位于 level-0 消息左半），leaf-on-right 是
+     fail-closed 而非可证。我们的 SMT 语义相应定义：level-1 消息恒
+     `(child, sibling)`，key 第 0 位由叶摘要 `H1(key||value)` 原生绑定
+     （叶消息哈希全部 64 字节公开输入），其余 255 位由协议方向位绑定。
+   - **FlockProvider**（`src/blake3_flock.rs`）：预映像语句 = flock 链证明
+     （cv_0=IV、cv_last=digest 公开端点，message 吸入 FS transcript 绑定
+     witness 消息块；长度块防 padding 歧义）；SMT 路径语句串 = 单个 flock
+     merkle 证明（leaf/root/方向位公开，sibling 为 witness，结构性识别：
+     每个父消息包含前一摘要素半侧）。防拼接：归档携带有序语句表 +
+     子证明分段重推导。
+   - **哈希层切换**：rules 域 bump v2、状态像域 bump v3（BLAKE3 padded
+     chain）、SMT 节点 = 单压缩 `H1(l||r)`（64 字节，leaf=`H1(key||value)`）；
+     `canonical_state_hash`/rules/hand-openings/hand-bundle 全部走
+     FlockProvider；`default_hash_provider()` 切换为 flock。M31 lookup 栈保留
+     为 Blake2b 回退（reconstruction-binding / state-opening / reveal-opening
+     等自洽 Blake2b 族不动）。
+   - **回归**：全量 lib 测试 **420/420 全绿**（2855s，`RUST_MIN_STACK=32MB`，
+     flock prove 在默认 2MB 测试线程栈上会溢出——测试运行需带该环境变量）；
+     canonical 模块 80/80（449s）；flock vendored 套件 61/61 + core 332/332
+     全绿。reconstruction-binding 族保持 Blake2b lookup 栈自洽（call context
+     改绑 Blake2b 语句摘要，`precompile_binding.rs`）。
+2. **Blake2b 压缩的二元域电路**：被上项取代（BLAKE3 内置编码器），关闭。
+3. **SMT 514 压缩批**（已完成）：2×257 语句 → 2 个 merkle 证明，见上。
+4. **M31 lookup 栈降级为回退路径**：原 A1（G/scheduler 合并）、A2（XOR
+   代数化）停止投入（被迁移取代）；栈保留 feature-gate 供过渡与小批场景。
+5. **canonical STARK 列瘦身（已完成）**：raked 家族 ~430 列 16-bit 范围位改为
+   共享 256 项 LogUp 范围表（仿 cairo-air range-check 组件）：56 字节对列 +
+   101 列 rake advice（原 476）+ 29 个 secure 交互列（单组件、配对分数、度界
+   log_size+1、平衡 claimed sum = 0），NUM_COLUMNS 2173 → 1675。关键上游结论：
+   **交互列必须按 bit-reversed 存储对齐**（MethodTrace 的 to_evaluations 对所有
+   承诺列做 bit-reverse，生成器按自然行序打包会导致 prover OODS 组合多项式
+   校验失败而行级断言全过——本仓库用 256 行最小 cairo 式组件复现并定位）；
+   其次 tamper 测试需无 panic 求值器（stwo 的 LogupAtRow Drop 断言会在约束
+   失败展开期间二次 panic 导致 abort）。落地回归：canonical 模块 **80/80 全绿**
+   （含 raked award 全链路 prove/verify 与全部篡改拒绝），bench 复测 canonical
+   批证明 0.63→0.60s、证明尺寸 1.18→1.11 MB；九座位 betting 块稀疏化（低优先）。
+6. **FRI/证明尺寸调优**：fold_step 上调可显著缩证明降 verify（全局配置，
+   需声音性复核与全量回归）。
+7. **Binius 证明尺寸监控**：若 admission 需要小证明，走最终 SNARK 包装
+   （业界主流上链模式），而非在 M31 里实现二元域验证器。
+8. **Ristretto 组合线 LogUp 列瘦身（已完成，2026-08-23）**：`FpProgramAir` 全部
+   per-limb 8-bit 位列与乘法 carry 16-bit 位列改为共享 256 项字节 LogUp 范围表
+   （复用 canonical 的 cairo-air 式单组件配对分数模式；域下限提到 256 行，
+   表值/多重性列随域条带化）。release 实测 104 行 reconstruction 批：
+   prove 33.3s→**13.9s**（2.4×）、证明 26.2MB→**12.3MB**（2.1×）、
+   verify 6.7→5.9s。全部 20 个 ristretto 模块 **103/103 全绿**（2311s，
+   含全部 splice 拒绝用例）。调试期关键发现：单程序 scope/trace 构建
+   只写前 2 行——域扩到 256 行后必须写满全域（padding 行复制末行程序）。
+   剩余优化空间：FRI 折叠参数、交互列 secure 打包、与 canonical 批合并。
+9. **showdown settlement AIR 前置（进行中，2026-08-24）**：VM 侧结算语义已用
+   `poker_l1/.../settlement_fixture.rs` 锁定（4 场景：三层 all-in 阶梯、
+   九座位九层满宽阶梯、rake+odd-chip 平分底池、run-it-twice 双 board 分胜；
+   每场景断言守恒/确定性/无争议层免抽水，期望值逐位锁定）；
+   `src/canonical_settlement_air_plan.rs` 固定列布局（9 座位/≤9 层/≤2 runout/
+   hand-rank 6 字节/award 8 字节/odd-chip 与 rake 分配 advice，全部字节列
+   走共享 256 项 LogUp 范围表，复用 raked-award 链）。
+   **AIR 本体已落地（2026-08-24，`src/canonical_settlement_air.rs`）**：结算
+   代数全约束（守恒/层平铺/逐 runout 平铺、runout 对半拆分按 runout 数与
+   争议位门控、odd-chip `award = winner·share + winner∧extra` 线性分解 +
+   `remainder < count` 借位链、winner⊆eligible、folded⇒不资格、无争议层
+   r0=net/r1=0/免抽水），单组件 16 行复制域、scope=公开计划字节、witness=
+   位/进位/借位/差值列（18677 列，读取宽度与求值消费宽度由专门测试锁定）。
+   四 VM fixture（三层/九层阶梯、rake+odd-chip、run-it-twice 分胜）全链路
+   prove/verify + 篡改拒绝 **10/10 绿**（≈15s debug）。单次 prove/verify 各
+   ~1s 级。**层切片推导已并入（2026-08-24）**：逐层 `level` 公开 advice
+   （尾部重复末水位保持非降），每座位三条借位链（`bet ≥ level`、
+   `bet > prev`、`min` 选择）+ 贡献减法链，`eligible = active·(1−folded)·gt`
+   一致性、`Σ active·contribution = gross` 加法器；11/11 绿（新增 bet 篡改
+   拒绝）。**总 rake 公式链已并入（2026-08-24）**：`contested_gross`（争议层 gross
+   加法器）×`bps`（school-mul 字节链）= product；`product = scaled×10⁴ +
+   remainder`（常量乘字节链 + 除法余数 `< 10⁴` 上界）；两级 min 借位链
+   （scaled vs cap、m1 vs contested_gross）+ rake_mode 门控后约束
+   `plan.total_rake`；12/12 绿（新增 rake 少收/超收篡改拒绝、oracle 公式
+   校验）。**rank↔winner 一致性已落地（2026-08-24）**：rank 以 24 位字典序值
+   （cat·2²⁰ + kickers nibble 打包，< 2²⁴、3 字节）入公开 scope（含 9 座位
+   底牌与双 board 牌字节）；逐 (层, runout) 以 8 级运行最大值选择链 + 9 组
+   双向借位链等式约束 `winner_mask = eligible ∧ (rank = max)`，runout-1 槽
+   按 `two_runouts ∧ contested` 门控。**7 张评估器电路（③-5b-2b）约束全部
+   实现并入活路径，但 wire 家族在行级断言下仍有违规，默认门控关闭（17
+   通过 + 1 ignore）**：本轮修复 base 绑定极性（[X≠0] vs [X==0]）、gt/lt
+   双位绑定（绝对差逆 + gt·lt=0 + gt+lt+eq=1）、kicker_eq 索引偏移、
+   cat1 coverage 重复计数；单段位掩码下 bit 10（flush 基数）、bit 13
+   （dropped·gt）仍失败于值 −1（手序 4/空座位的 flush total_slots 读出
+   gate=1 与四元计数矛盾——手读序探针与宽度常量测试均通过，指向全量
+   AIR 中手块读取前的错位尚未定位）。二分工具链（HAND_SECTIONS 20 段
+   位掩码、TRACE_AT/TRACE_TOTAL 逐约束计数、逐行顺序断言、OrderProbe、
+   空座位宽度/顺序探针）全部就绪并沉淀为代码。
+
+10. **瓶颈转移预警**：哈希层与 Ristretto 列瘦身完成后，端到端剩余瓶颈为
+   Ristretto 固定证明开销（~14s/批）与 state_root Poseidon252 AIR
+   （host 边界必须消除；可在二元域位分解、M31 limb 或 Flock 类中择优评估）。
+
+**完整一手牌实测（2026-08-23，Apple Silicon Mac15,7，BLAKE3/flock 后端）**：
+- lifecycle 批 verify 224.6ms / hand 批 verify 210.0ms（canonical AIR 不变）；
+  流水线双批 prove **0.89s**；
+- 完整 hand bundle（rules + 2 状态像 + 2 SMT 路径，517 语句 → 3 链证明 +
+  2 merkle 证明）：prove **2.75s** / verify **2.70s** / 证明 **1.45MB**；
+- **TOTAL：prove 3.64s / verify 3.14s / 3.62MB**。对照切换前 M31 lookup 栈
+  （bundle prove 21.7s / verify 10.0s / 9.4MB，总计 22.6s/10.9s）：bundle
+  prove **7.9×**、verify **3.7×**、证明尺寸 **6.5×** 改善；验证侧原
+  G/scheduler 热点（stwo 常量表承诺树重建）随迁移整体消失。
+- 后续压缩空间：5 个子证明各有 ~0.5s 级固定 verify 开销，可经 (a) 多链
+  并入单链/批 merkle（path_log>0），(b) slim/secure profile 与更小 m 的
+  Ligerito 配置注册，(c) 递归包装聚合，进一步逼近 ~1s/手。
+FRI fold_step 1→2 实验（canonical 侧）：证明尺寸 −1.5%、时间持平，收益不抵
+声音性复核成本，维持 1。
+
+## 方法说明
+
+- 计时为墙钟，单次冷启动（twiddle/列池缓存跨证明复用属正常生产路径）。
+- 两批次按真实发生顺序串行计入总计；openings 是一手牌一次的固定开销。
+- bench 驱动器（`hand-bench/src/main.rs`）本身通过全部 witness 校验与 AIR
+  证明/验证（含九座位轮转、加注重置 acted、终局 reset 投影），等价于一组
+  端到端正确性测试。

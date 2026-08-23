@@ -27,7 +27,6 @@ use std::ops::{Deref, DerefMut, Index, IndexMut};
 use borsh::{BorshDeserialize, BorshSerialize};
 use group::Group;
 
-#[cfg(test)]
 use blstrs::G1Projective;
 use poker_protocol::crypto::types::ECPoint;
 // 注：`ElGamalCiphertext` 通过下方 `pub use` 重导出，避免重复导入。
@@ -711,8 +710,7 @@ impl Seat {
 
     /// Test-fixture helper that installs or replaces the player identity without ever creating a
     /// partially occupied flat seat. Production transitions must use `occupied`/`replace_playing`.
-    #[cfg(test)]
-    pub(crate) fn fixture_set_player(&mut self, player: Address) {
+    pub fn fixture_set_player(&mut self, player: Address) {
         assert_ne!(player, EMPTY_PLAYER, "fixture player must be non-empty");
         match self {
             Self::Vacant { time_bank_ms } => {
@@ -756,8 +754,7 @@ impl Seat {
     }
 
     /// Test-fixture helper that promotes a waiting seat before installing a hand contribution.
-    #[cfg(test)]
-    pub(crate) fn fixture_set_total_bet(&mut self, total_bet: u64) {
+    pub fn fixture_set_total_bet(&mut self, total_bet: u64) {
         if matches!(self, Self::Waiting { .. }) {
             self.set_status(SeatStatus::Active);
         }
@@ -766,8 +763,7 @@ impl Seat {
     }
 
     /// Test-fixture helper that promotes a waiting seat before installing hole cards.
-    #[cfg(test)]
-    pub(crate) fn fixture_set_hand(&mut self, hand: HoleCards) {
+    pub fn fixture_set_hand(&mut self, hand: HoleCards) {
         if matches!(self, Self::Waiting { .. }) {
             self.set_status(SeatStatus::Active);
         }

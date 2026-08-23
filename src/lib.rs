@@ -83,13 +83,27 @@ pub mod blake2b_lookup_xor;
 pub mod blake2b_smt_air;
 /// Fixed-width Blake2b SMT compression witness ABI for the host-zero route.
 pub mod blake2b_smt_witness;
+/// Blake2b authentication of the canonical table-rules preimage and the
+/// fixed-width rake opening consumed by raked settlement terminals.
+pub mod canonical_rake_opening;
 /// No-replay scope binding for canonical Reconstruction V3 AIR requests.
 pub mod canonical_reconstruction_binding;
+/// Fixed-width, lookup-authenticated reveal-assignment ledger opening.
+pub mod canonical_settlement_air;
+pub mod canonical_settlement_air_plan;
+pub mod canonical_reveal_opening;
 /// Lookup-backed authentication of canonical state-image byte preimages.
 pub mod canonical_state_hash;
 /// Public-proof composition that binds canonical Texas transitions to L1
 /// fixed-width Blake2b state-object openings.
 pub mod canonical_state_opening;
+/// Binary-field BLAKE3 (flock) hash-proving backend.
+pub mod blake3_flock;
+/// Backend-agnostic Blake2b statement proving seam shared by the M31 lookup
+/// stack and the binary-field flock backend.
+pub mod hash_prover;
+/// Bounded, non-terminal reveal-timeout kick cascade scope.
+pub mod reveal_timeout_cascade;
 #[cfg(test)]
 mod ristretto_degree_util;
 /// Composed host-zero extended-Edwards point-addition proofs.
@@ -130,6 +144,9 @@ pub mod ristretto_scalar_add_air;
 pub mod ristretto_scalar_air;
 /// Canonical Ristretto255 scalar 4-bit window AIR.
 pub mod ristretto_scalar_windows_air;
+/// Statement-level projection of L1 sparse-Merkle openings onto the shared
+/// hash-prover seam.
+pub mod smt_statements;
 
 /// Canonical tagged-seat fixture operations, available only to tests and debug test helpers.
 #[cfg(any(test, feature = "test-helpers"))]
