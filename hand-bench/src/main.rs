@@ -459,6 +459,20 @@ fn slot_or_deep_batch() {
     };
 
     let aggregate_pk = g * scalar(11);
+    let pk = aggregate_pk;
+    // Per slot: real branch 0 carries the contribution randomness witness;
+    // branch 1 is simulated so both OR equations close algebraically.
+    let cards: Vec<_> = (0..SLOT_COUNT)
+        .map(|slot| g * scalar(100 + slot as u64))
+        .collect();
+    let contributions: Vec<_> = (0..SLOT_COUNT)
+        .map(|slot| {
+            let randomness = scalar(200 + slot as u64);
+            let c1 = g * randomness;
+            let c2 = -cards[slot] + pk * randomness;
+            (c1, c2)
+        })
+        .collect();
     let mut request = ReconstructionV3VerifyRequest {
         curve: CurveId::Ristretto255,
         proof_system: ReconstructionProofSystem::RistrettoAirV1,
@@ -471,17 +485,19 @@ fn slot_or_deep_batch() {
         prior_state_digest: [2; 32],
         aggregate_pk: point_bytes(aggregate_pk),
         owner_pk: vec![4; 32],
-        cards: (0..SLOT_COUNT)
-            .map(|index| point_bytes(g * scalar(100 + index as u64)))
+        cards: cards
+            .iter()
+            .map(|point| point_bytes(*point))
             .collect(),
         user_readable_cards: vec![
             EncodedCiphertext { c1: vec![6; 32], c2: vec![7; 32] };
             RISTRETTO_RECONSTRUCTION_READABLE_CARDS
         ],
-        contributions: (0..SLOT_COUNT)
-            .map(|index| EncodedCiphertext {
-                c1: point_bytes(g * scalar(200 + index as u64)),
-                c2: point_bytes(g * scalar(300 + index as u64)),
+        contributions: contributions
+            .iter()
+            .map(|(c1, c2)| EncodedCiphertext {
+                c1: point_bytes(*c1),
+                c2: point_bytes(*c2),
             })
             .collect(),
         proof: vec![1],
@@ -495,17 +511,26 @@ fn slot_or_deep_batch() {
         .map(|(slot, global)| {
             let share0 = scalar(5);
             let share1 = *global - share0;
+            let (c1, c2) = contributions[slot];
+            let randomness = scalar(200 + slot as u64);
+            let nonce = scalar(50 + slot as u64);
+            let response0 = nonce + share0 * randomness;
+            // Real branch closes via `response0 = nonce + ch0 * randomness`.
+            let commitment_g_real = g * response0 - c1 * share0;
+            let commitment_pk_real = pk * response0 - c2 * share0;
+            // Simulated branch closes by construction.
+            let response_sim = scalar(900 + slot as u64);
+            let target1 = c2 + cards[slot];
+            let commitment_g_sim = g * response_sim - c1 * share1;
+            let commitment_pk_sim = pk * response_sim - target1 * share1;
             RistrettoSlotOrProofWire {
-                commitment_g: [
-                    compressed(g * scalar(400 + slot as u64)),
-                    compressed(g * scalar(500 + slot as u64)),
-                ],
+                commitment_g: [compressed(commitment_g_real), compressed(commitment_g_sim)],
                 commitment_pk: [
-                    compressed(aggregate_pk * scalar(600 + slot as u64)),
-                    compressed(aggregate_pk * scalar(700 + slot as u64)),
+                    compressed(commitment_pk_real),
+                    compressed(commitment_pk_sim),
                 ],
                 challenges: [scalar_bytes(share0), scalar_bytes(share1)],
-                responses: [scalar_bytes(scalar(800 + slot as u64)); 2],
+                responses: [scalar_bytes(response0), scalar_bytes(response_sim)],
             }
         })
         .collect();
