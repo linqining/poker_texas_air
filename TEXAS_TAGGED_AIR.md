@@ -180,7 +180,7 @@ table, hand, or sequence slot. The scope is still a public projected relation:
 a future full transition circuit must bind these values to authenticated state
 openings and enforce every row's full state transition.
 
-The required Aleo/Varuna migration is documented in
+The required no-replay trust-model migration is documented in
 `TRUST_MODEL_NO_TRANSACTION_REPLAY.md`: immutable transition receipts, complete
 pre/post public statements, authority and manifest binding, historical
 state-root/receipt inclusion proofs, and coordinator admission from an

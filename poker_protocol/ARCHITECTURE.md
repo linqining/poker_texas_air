@@ -22,7 +22,7 @@ poker_protocol              compatibility facade, poker state machine and
                             client operations
         ^
         |
-texas / client-wasm / client-wasm-aleo
+texas / client-wasm
 ```
 
 ## Dependency rules
@@ -54,7 +54,7 @@ texas / client-wasm / client-wasm-aleo
 
 All entries above are defined in `poker-protocol-proofs`. The old
 `poker_protocol::zk_shuffle::<module>` paths remain source-compatible re-export
-paths for the product gateway and WASM clients during the Aleo migration.
+paths for the product gateway and WASM clients during the migration.
 
 ## M31 and BLS12-377
 

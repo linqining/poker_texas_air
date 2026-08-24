@@ -2,7 +2,7 @@
 //!
 //! These values are deliberately small, self-contained verifier inputs. They
 //! are not a chain transaction ABI: Texas still derives the caller and seat
-//! from the authenticated Aleo session before constructing a VM command.
+//! from the authenticated client session before constructing a VM command.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 

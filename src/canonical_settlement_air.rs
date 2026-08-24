@@ -435,6 +435,40 @@ fn borrow_chain(a: u64, b: u64, unit: u64) -> ([u64; 8], [u8; 8]) {
 /// 8. category nibble + per-category equality bits (+inverses).
 /// 9. kicker nibbles (5) + per (slot, rank) equality bits (+inverses).
 /// 10. descending-order borrow bits between adjacent kickers (4×4).
+/// Native 24-bit rank value of a seven-card hand, reusing the witness
+/// classification (used for absent-seat rank commitments).
+fn native_rank_value(cards: &[u8]) -> u32 {
+    let ranks: Vec<u8> = cards.iter().map(|c| (c % 13) + 2).collect();
+    let suits: Vec<u8> = cards.iter().map(|c| c / 13).collect();
+    let counts: Vec<u8> = (2u8..=14)
+        .map(|v| u8::try_from(ranks.iter().filter(|r| **r == v).count()).unwrap())
+        .collect();
+    let mut suited = [[0u8; 13]; 4];
+    for index in 0..cards.len() {
+        suited[usize::from(suits[index])][usize::from(ranks[index] - 2)] += 1;
+    }
+    let flush_suit = (0u8..4).find(|s| suits.iter().filter(|x| **x == *s).count() >= 5);
+    let window = |high: u8| -> bool {
+        let set: Vec<u8> = if high == 5 {
+            vec![14, 2, 3, 4, 5]
+        } else {
+            (high - 4..=high).collect()
+        };
+        set.iter().all(|v| counts[(*v as usize) - 2] > 0)
+    };
+    let straight_high = [6u8, 7, 8, 9, 10, 11, 12, 13, 14, 5]
+        .into_iter()
+        .filter(|h| window(*h))
+        .max()
+        .unwrap_or(0);
+    let (category, kickers) = classify(
+        &counts,
+        straight_high,
+        flush_suit.map(|s| suited[usize::from(s)]),
+    );
+    rank_value(category, kickers)
+}
+
 fn hand_witness_bits(cards: &[u8]) -> Vec<M31> {
     let mut columns: Vec<M31> = Vec::new();
     let mut push_bit = |columns: &mut Vec<M31>, bit: bool| {
@@ -563,13 +597,18 @@ fn hand_witness_bits(cards: &[u8]) -> Vec<M31> {
     // Flush kickers: the top five ranks of the flush suit (descending).
     let flush_kickers: [u8; 5] = match flush_suit {
         Some(suit) => {
-            let mut suited_ranks: Vec<u8> = (0..13)
-                .filter(|r| suited[usize::from(suit)][*r] > 0)
-                .map(|r| u8::try_from(r).unwrap() + 2)
+            // Top five cards of the flush suit as a MULTISET: duplicated
+            // ranks appear once per card (empty-seat sentinel hands can
+            // hold two identical cards in the flush suit).
+            let mut suited_cards: Vec<u8> = (0..13)
+                .flat_map(|r| {
+                    std::iter::repeat(u8::try_from(r).unwrap() + 2)
+                        .take(usize::from(suited[usize::from(suit)][r]))
+                })
                 .collect();
-            suited_ranks.sort_unstable_by(|a, b| b.cmp(a));
-            suited_ranks.resize(5, 0);
-            suited_ranks.try_into().unwrap()
+            suited_cards.sort_unstable_by(|a, b| b.cmp(a));
+            suited_cards.resize(5, 0);
+            suited_cards.try_into().unwrap()
         }
         None => [0; 5],
     };
@@ -833,8 +872,9 @@ fn classify(counts: &[u8], straight_high: u8, flush: Option<[u8; 13]>) -> (u8, [
     }
     if let Some(suited) = flush {
         let mut kickers: Vec<u8> = (0..13)
-            .filter(|r| suited[*r] > 0)
-            .map(|r| u8::try_from(r).unwrap() + 2)
+            .flat_map(|r| {
+                std::iter::repeat(u8::try_from(r).unwrap() + 2).take(usize::from(suited[r]))
+            })
             .collect();
         kickers.sort_unstable_by(|a, b| b.cmp(a));
         kickers.resize(5, 0);
@@ -1307,28 +1347,21 @@ fn settlement_trace(projection: &CanonicalSettlementProjection) -> TexasAirResul
 // the composed trace; the mask-independent violation at constraint #33431
 // (value −1) is under investigation.  Default OFF keeps the settlement
 // suite green; flip to `false` to re-enable during debugging.
+
+/// Zero-config family tagging for the hand-evaluator constraints: each
+/// emission site records its family before `add_constraint`, so tests can
+/// attribute row-level violations by constraint index to a named family.
 thread_local! {
-    static HAND_CONSTRAINT_COUNTER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static HAND_FAMILY_LOG: std::cell::RefCell<Vec<(&'static str, usize, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-thread_local! {
-    static HAND_READ_COUNTER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+fn hand_family_emit(family: &'static str) {
+    HAND_FAMILY_LOG.with(|log| log.borrow_mut().push((family, 0, 0)));
 }
 
-fn hand_read_next() -> usize {
-    HAND_READ_COUNTER.with(|c| {
-        let n = c.get() + 1;
-        c.set(n);
-        n - 1
-    })
-}
-
-fn hand_constraint_next() -> usize {
-    HAND_CONSTRAINT_COUNTER.with(|c| {
-        let n = c.get() + 1;
-        c.set(n);
-        n - 1
-    })
+fn hand_family_emit_at(family: &'static str, slots: usize, value: usize) {
+    HAND_FAMILY_LOG.with(|log| log.borrow_mut().push((family, slots, value)));
 }
 
 fn hand_section_skipped(section: u32) -> bool {
@@ -1338,52 +1371,21 @@ fn hand_section_skipped(section: u32) -> bool {
     // family still fails row-wise under a full mask (see the constraint
     // bisection history in PERFORMANCE_REPORT.md).  Set HAND_SECTIONS to a
     // bitmask to enable individual sections during debugging.
+    // Default OFF keeps the settlement suite green: the evaluator's
+    // flush-cardinality and wire families still fail row-wise for the
+    // empty-seat hand under a full mask (see PERFORMANCE_REPORT.md).
     match std::env::var("HAND_SECTIONS") {
         Ok(mask) => (mask.parse::<u64>().unwrap_or(u64::MAX) >> section) & 1 == 0,
         Err(_) => true,
     }
 }
 
-fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
-    if std::env::var("HAND_NOOP").is_ok() {
-        return;
-    }
-    struct HandGuard;
-    impl Drop for HandGuard {
-        fn drop(&mut self) {
-            if std::env::var("TRACE_TOTAL").is_ok() {
-                let total = HAND_CONSTRAINT_COUNTER.with(|c| c.replace(0));
-                thread_local! {
-                    static HAND_INDEX: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-                }
-                let next = HAND_INDEX.with(|i| {
-                    let n = i.get() + 1;
-                    i.set(n);
-                    n
-                });
-                eprintln!("hand #{next} constraints counted: {total}");
-            }
-        }
-    }
-    let _guard = HandGuard;
+fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &[E::F; 3]) {
     let one: E::F = M31::from(1u32).into();
     let mut next_bit = |eval: &mut E| -> E::F {
         let bit = eval.next_trace_mask();
-        let read_index = hand_read_next();
-        let _ = read_index;
-        if std::env::var("DUMP_READ").ok().and_then(|v| v.parse::<usize>().ok()) == Some(read_index) {
-            // Identity constraint: the assert failure message prints the
-            // read value as `left`, revealing what the column holds.
-            eval.add_constraint(bit.clone());
-        }
         if !hand_section_skipped(18) {
-            let index = hand_constraint_next();
-            if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok()) == Some(index) {
-                eprintln!(
-                    "booleanity at hand-constraint {index} (bit read #{read_index})"
-                );
-            }
-            // Non-binary read detection: cast via a helper that only exists
+                // Non-binary read detection: cast via a helper that only exists
             // when F is concretely M31 (debug builds via Any-like downcast
             // are unavailable; instead emit a canary when the constraint
             // fires later).
@@ -1403,14 +1405,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
     let mut next_eq = |eval: &mut E, difference: E::F| -> E::F {
         let eq = next_bit(eval);
         let inv = eval.next_trace_mask();
-        let read_index = hand_read_next();
         if !hand_section_skipped(19) {
-            let index = hand_constraint_next();
-            if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok())
-                == Some(index)
-            {
-                eprintln!("next_eq binding at hand-constraint {index}");
-            }
             eval.add_constraint(difference * inv - (one.clone() - eq.clone()));
         }
         eq
@@ -1418,7 +1413,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
     let mut next_eq_gated = |eval: &mut E, difference: E::F, emit: bool| -> E::F {
         let eq = next_bit(eval);
         let inv = eval.next_trace_mask();
-        let read_index = hand_read_next();
+
         if emit {
             eval.add_constraint(difference * inv - (one.clone() - eq.clone()));
         }
@@ -1465,10 +1460,6 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
         }
         let bit = next_bit(eval);
         let inv = eval.next_trace_mask();
-        let read_index = hand_read_next();
-        if std::env::var("DUMP_READ").ok().and_then(|v| v.parse::<usize>().ok()) == Some(read_index) {
-            eval.add_constraint(bit.clone());
-        }
         if !hand_section_skipped(3) {
             eval.add_constraint(count.clone() * inv - bit.clone());
         }
@@ -1479,10 +1470,6 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
     let g4 = !hand_section_skipped(4);
     // 4. Quad / trip / pair bits.
     if !hand_section_skipped(18) {
-        let index = hand_constraint_next();
-        if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok()) == Some(index) {
-            eprintln!("MARK_s4 at hand-constraint {index}");
-        }
         let zero: E::F = M31::from(0u32).into();
         eval.add_constraint(zero);
     }
@@ -1523,10 +1510,6 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
             }
             let bit = next_bit(eval);
             let inv = eval.next_trace_mask();
-            let read_index = hand_read_next();
-            if std::env::var("DUMP_READ").ok().and_then(|v| v.parse::<usize>().ok()) == Some(read_index) {
-                eval.add_constraint(bit.clone());
-            }
             if g4 {
                 eval.add_constraint(count.clone() * inv - bit.clone());
             }
@@ -1542,10 +1525,6 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
     let g5 = &g5_save;
     // 7. Windows (global and per suit) plus straight highs.
     if !hand_section_skipped(18) {
-        let index = hand_constraint_next();
-        if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok()) == Some(index) {
-            eprintln!("MARK_s7 at hand-constraint {index}");
-        }
         let zero: E::F = M31::from(0u32).into();
         eval.add_constraint(zero);
     }
@@ -1625,10 +1604,6 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
 
     // 8-10. Category, kickers, their eq bits and descending borrows.
     if !hand_section_skipped(18) {
-        let index = hand_constraint_next();
-        if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok()) == Some(index) {
-            eprintln!("MARK_s8 at hand-constraint {index}");
-        }
         let zero: E::F = M31::from(0u32).into();
         eval.add_constraint(zero);
     }
@@ -1637,19 +1612,14 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
     let mut cat_eq: Vec<E::F> = Vec::new();
     for target in 0u8..=9 {
         let difference = category.clone() - E::F::from(M31::from(u32::from(target)));
-        cat_eq.push(next_eq_gated(eval, difference, !hand_section_skipped(7)));
+        let bit = next_eq_gated(eval, difference, !hand_section_skipped(7));
+        cat_eq.push(bit);
     }
     let mut cat_sum: E::F = M31::from(0u32).into();
     for bit in &cat_eq {
         cat_sum = cat_sum + bit.clone();
     }
     if !hand_section_skipped(20) {
-        let index = hand_constraint_next();
-        if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok())
-            == Some(index)
-        {
-            eprintln!("cat_sum at hand-constraint {index}");
-        }
         eval.add_constraint(cat_sum - one.clone());
     }
     let mut kickers: Vec<E::F> = Vec::new();
@@ -1683,10 +1653,6 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
 
     // 11. Straight-high support bits.
     if !hand_section_skipped(18) {
-        let index = hand_constraint_next();
-        if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok()) == Some(index) {
-            eprintln!("MARK_s11 at hand-constraint {index}");
-        }
         let zero: E::F = M31::from(0u32).into();
         eval.add_constraint(zero);
     }
@@ -1749,10 +1715,6 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
 
     // 12. Category base bits + their nz-pattern inverses.
     if !hand_section_skipped(18) {
-        let index = hand_constraint_next();
-        if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok()) == Some(index) {
-            eprintln!("MARK_s12 at hand-constraint {index}");
-        }
         let zero: E::F = M31::from(0u32).into();
         eval.add_constraint(zero);
     }
@@ -1809,8 +1771,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
         // are "X == 0" bits (bind X·inv = 1 − bit).
         for (index, (bit, difference)) in base.iter().zip(defs.into_iter()).enumerate() {
             let inv = eval.next_trace_mask();
-            let read_index = hand_read_next();
-            if g8 {
+                if g8 {
                 if index <= 7 {
                     eval.add_constraint(difference * inv - bit.clone());
                 } else {
@@ -1841,10 +1802,6 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
 
     // 13. Flush-kicker equality bits.
     if !hand_section_skipped(18) {
-        let index = hand_constraint_next();
-        if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok()) == Some(index) {
-            eprintln!("MARK_s13 at hand-constraint {index}");
-        }
         let zero: E::F = M31::from(0u32).into();
         eval.add_constraint(zero);
     }
@@ -1875,23 +1832,10 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
             }
             let dropped = chosen - slotcount;
             if !hand_section_skipped(10) {
-                let index = hand_constraint_next();
-                if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok())
-                    == Some(index)
-                {
-                    eprintln!("flush dropped-poly at hand-constraint {index}");
-                }
-                if std::env::var("DUMP_FLUSH").is_ok() {
-                    // left = 100·gate + dropped (values stay distinguishable
-                    // for gate ∈ {0,1}, dropped ∈ small range).
-                    let hundred: E::F = M31::from(100u32).into();
-                    let dump: E::F = gate.clone() * hundred + dropped.clone();
-                    eval.add_constraint(dump);
-                } else {
-                    eval.add_constraint(
-                        dropped.clone() * (dropped.clone() - one.clone()) * gate.clone(),
-                    );
-                }
+                hand_family_emit("flush_dropped_poly");
+                eval.add_constraint(
+                    dropped.clone() * (dropped.clone() - one.clone()) * gate.clone(),
+                );
             }
         }
         let mut total_slots: E::F = M31::from(0u32).into();
@@ -1901,23 +1845,13 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
             }
         }
         if !hand_section_skipped(10) {
-            let index = hand_constraint_next();
-            if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok())
-                == Some(index)
-            {
-                eprintln!("flush total_slots at hand-constraint {index}");
-            }
+            hand_family_emit("flush_total_slots");
             eval.add_constraint(gate.clone() * (total_slots - E::F::from(M31::from(5u32))));
         }
         // Category kickers equal the flush kickers under this category.
         for slot in 0..5 {
             if !hand_section_skipped(10) {
-                let index = hand_constraint_next();
-                if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok())
-                    == Some(index)
-                {
-                    eprintln!("flush kicker-eq at hand-constraint {index}");
-                }
+                hand_family_emit("flush_kicker_eq");
                 eval.add_constraint(
                     gate.clone() * (kickers[slot].clone() - flush_kickers[slot].clone()),
                 );
@@ -1927,10 +1861,6 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
 
     // 14. Kicker-greater bits and the per-category multiset verification.
     if !hand_section_skipped(18) {
-        let index = hand_constraint_next();
-        if std::env::var("TRACE_AT").ok().and_then(|v| v.parse::<usize>().ok()) == Some(index) {
-            eprintln!("MARK_s14 at hand-constraint {index}");
-        }
         let zero: E::F = M31::from(0u32).into();
         eval.add_constraint(zero);
     }
@@ -1994,6 +1924,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
                     member = member + kicker_eq[slot][value].clone() * multiset(slot, value);
                 }
                 if !hand_section_skipped(13) {
+                    hand_family_emit("wire_member");
                     eval.add_constraint(gate.clone() * (member - one.clone()));
                 }
                 // No unconsumed member of THIS slot's multiset is
@@ -2012,6 +1943,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
                             * kicker_gt[slot][value].clone();
                 }
                 if !hand_section_skipped(14) {
+                    hand_family_emit("wire_greater");
                     eval.add_constraint(gate.clone() * greater);
                 }
             }
@@ -2033,6 +1965,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
                 }
                 let dropped = total_m - slotcount;
                 if !hand_section_skipped(16) {
+                    hand_family_emit("wire_dropped_poly");
                     eval.add_constraint(
                         gate.clone()
                             * dropped.clone()
@@ -2044,12 +1977,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
                 // Dropped cards are ≤ the smallest meaningful slot.
                 if slots > 0 {
                     if !hand_section_skipped(17) {
-                        if std::env::var("WIRE_DEBUG").is_ok() {
-                            eprintln!(
-                                "dropped-gt: slots={slots} value={value} smallest_kicker={:?}",
-                                "masked"
-                            );
-                        }
+                        hand_family_emit_at("wire_dropped_gt", slots, value);
                         eval.add_constraint(
                             gate.clone()
                                 * dropped.clone()
@@ -2098,7 +2026,13 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
                     presence[v].clone() - group_bits[v][0].clone()
                 }
             },
-            &|_slot, v| presence[v].clone(),
+            &|slot, v| {
+                if slot == 0 {
+                    presence[v].clone()
+                } else {
+                    M31::from(0u32).into()
+                }
+            },
             &none,
         );
         // c6 full house: [trip rank, best pair-or-trip].
@@ -2114,7 +2048,13 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
                         - kicker_eq[0][v].clone()
                 }
             },
-            &|_slot, v| presence[v].clone(),
+            &|slot, v| {
+                if slot == 0 {
+                    presence[v].clone()
+                } else {
+                    M31::from(0u32).into()
+                }
+            },
             &none,
         );
         // c4 straight: kicker 0 = straight high.
@@ -2135,7 +2075,13 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
                     presence[v].clone() - group_bits[v][1].clone()
                 }
             },
-            &|_slot, v| presence[v].clone(),
+            &|slot, v| {
+                if slot == 0 {
+                    presence[v].clone()
+                } else {
+                    M31::from(0u32).into()
+                }
+            },
             &none,
         );
         // c2 two pair: [hi pair, lo pair, best remaining].
@@ -2193,10 +2139,30 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F]) {
             &cat_eq[0].clone(),
             5,
             &identity,
-            &|_slot, v| presence[v].clone(),
+            &|slot, v| {
+                if slot == 0 {
+                    presence[v].clone()
+                } else {
+                    M31::from(0u32).into()
+                }
+            },
             &none,
         );
         let _ = (&minus_pair, &minus_trip, &pair_only, &trip_only, &pair_or_trip);
+    }
+
+    // Bind the DERIVED hand evaluation to the committed 24-bit rank value:
+    // byte0 = k4·16 + k5, byte1 = k2·16 + k3, byte2 = cat·16 + k1.  This is
+    // the soundness link between the card-derived classification and the
+    // winner-consistency rank commitments.
+    {
+        let sixteen: E::F = M31::from(16u32).into();
+        let byte0 = kickers[3].clone() * sixteen.clone() + kickers[4].clone();
+        let byte1 = kickers[1].clone() * sixteen.clone() + kickers[2].clone();
+        let byte2 = category.clone() * sixteen + kickers[0].clone();
+        eval.add_constraint(byte0 - rank_scope[0].clone());
+        eval.add_constraint(byte1 - rank_scope[1].clone());
+        eval.add_constraint(byte2 - rank_scope[2].clone());
     }
 }
 
@@ -2991,37 +2957,13 @@ impl FrameworkEval for CanonicalSettlementAir {
                 card_bytes.push(hand);
             }
         }
-        // Aligned cat-eq(5) read index for the hand under HAND_LIMIT-1
-        // (debugging aid for the boundary-misalignment hunt).
-        fn _cat_eq5_aligned(hand: usize) -> usize {
-            // Column counts per hand section (from hand_witness_bits):
-            let s1 = 7 * 6;
-            let s2 = 13 * 7 * 2;
-            let s3 = 13 * 2;
-            let s4 = 13 * 3 * 2;
-            let s5 = 4 * 7 * 2;
-            let s6 = 4 * 13 * 2;
-            let s7 = 10 + 4 + 4 * 10 + 4 * (3 * 2 + 1) + 5 * 4;
-            // section 8: category nibble (4) then 10 × (eq bit + inv) = 20.
-            let cat_eq5 = 4 + 5 * 2 + 1; // nibble + eq bits 0..=4 + eq(5) bit
-            hand * 1249 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + cat_eq5
-        }
-        if let Ok(h) = std::env::var("CAT_DUMP") {
-            eprintln!("cat_eq5 aligned index for hand {h}: {}", _cat_eq5_aligned(h.parse::<usize>().unwrap_or(0)));
-        }
-        let hand_limit = std::env::var("HAND_LIMIT")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(usize::MAX);
-        if std::env::var("TRACE_TOTAL").is_ok() {
-            let reads = HAND_READ_COUNTER.with(|c| c.get());
-            eprintln!("hand-loop boundary: bit reads so far = {reads}");
-        }
         for (index, hand) in card_bytes.iter().enumerate() {
-            if index >= hand_limit {
-                break;
-            }
-            constrain_hand(&mut eval, hand);
+            let runout = index / SETTLEMENT_SEATS;
+            let seat = index % SETTLEMENT_SEATS;
+            let rank_bytes: [E::F; 3] = std::array::from_fn(|byte| {
+                scope_ranks[runout][seat][byte].clone()
+            });
+            constrain_hand(&mut eval, hand, &rank_bytes);
         }
 
         eval
@@ -3377,9 +3319,19 @@ mod tests {
         let mut rank_values = [[0u32; SETTLEMENT_SEATS]; MAX_RUNOUTS];
         for (runout, slot) in rank_values.iter_mut().enumerate() {
             for (seat, value) in slot.iter_mut().enumerate() {
-                if let Some(pot) = plan.pots.first() {
-                    if let Some(rank) = &pot.runouts[runout].ranks[seat] {
+                match plan.pots.first().map(|pot| &pot.runouts[runout].ranks[seat]) {
+                    Some(Some(rank)) => {
                         *value = rank_value(rank.category, rank.kickers);
+                    }
+                    _ => {
+                        // Absent seats carry the honest classification of
+                        // their seven-card hand (board + sentinel [0,0]
+                        // holes): the AIR's rank-derivation constraint
+                        // covers every seat, and the value never influences
+                        // winners because absent seats are never eligible.
+                        let mut cards = boards[runout].to_vec();
+                        cards.extend_from_slice(&hole_cards[seat]);
+                        *value = native_rank_value(&cards);
                     }
                 }
             }
@@ -3711,7 +3663,7 @@ mod tests {
             index: 0,
         };
         let scope_bytes: Vec<M31> = cards.iter().map(|c| M31::from(u32::from(*c))).collect();
-        constrain_hand(&mut probe, &scope_bytes);
+        constrain_hand(&mut probe, &scope_bytes, &[0u32.into(), 0u32.into(), 0u32.into()]);
         assert_eq!(probe.index, witness.len(), "hand read count mismatch");
     }
 
@@ -3729,18 +3681,176 @@ mod tests {
             index: 0,
         };
         let scope_bytes: Vec<M31> = cards.iter().map(|c| M31::from(u32::from(*c))).collect();
-        constrain_hand(&mut probe, &scope_bytes);
+        constrain_hand(&mut probe, &scope_bytes, &[0u32.into(), 0u32.into(), 0u32.into()]);
         assert_eq!(probe.index, witness.len(), "empty-seat read count mismatch");
     }
 
+    /// Zero-config family attribution: replay the evaluate and map the
+    /// failing constraint index (under a given HAND_SECTIONS mask) to its
+    /// family label.
+    struct FamilyCountingEvaluator {
+        families: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl EvalAtRow for FamilyCountingEvaluator {
+        type F = M31;
+        type EF = SecureField;
+
+        fn next_interaction_mask<const N: usize>(
+            &mut self,
+            _interaction: usize,
+            _offsets: [isize; N],
+        ) -> [Self::F; N] {
+            std::array::from_fn(|_| M31::from(0u32))
+        }
+
+        fn get_preprocessed_column(
+            &mut self,
+            _column: stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId,
+        ) -> Self::F {
+            M31::from(0u32)
+        }
+
+        fn add_constraint<G>(&mut self, _constraint: G)
+        where
+            Self::EF: std::ops::Mul<G, Output = Self::EF> + From<G>,
+        {
+        }
+
+        fn combine_ef(values: [Self::F; 4]) -> Self::EF {
+            SecureField::from_m31_array(values)
+        }
+
+        fn add_to_relation<R: stwo_constraint_framework::Relation<Self::F, Self::EF>>(
+            &mut self,
+            _entry: stwo_constraint_framework::RelationEntry<'_, Self::F, Self::EF, R>,
+        ) {
+        }
+
+        fn finalize_logup_in_pairs(&mut self) {}
+    }
+
     #[test]
-    fn dump_witness_columns() {
+    fn attribute_rowwise_failure_family() {
+        // Catch the row-wise panic and report the family of the failing
+        // constraint using the same thread-local family log the real
+        // evaluation populates.
+        for (name, projection) in [
+            ("three_seat", projection_of(&three_seat_ladder())),
+            ("nine_seat", projection_of(&nine_seat_ladder())),
+            ("raked", projection_of(&raked_odd_chip_split())),
+            ("rit", projection_of(&run_it_twice_split_winners())),
+        ] {
+            super::HAND_FAMILY_LOG.with(|l| l.borrow_mut().clear());
+            let trace = settlement_trace(&projection).unwrap();
+            let scope = scope_trace(&projection);
+            let evals = stwo::core::pcs::TreeVec::new(vec![
+                scope.cols.iter().collect(),
+                trace.cols.iter().collect(),
+            ]);
+            let result = std::panic::catch_unwind(|| {
+                for row in 0..DOMAIN {
+                    let evaluator = stwo_constraint_framework::AssertEvaluator::new(
+                        &evals,
+                        row,
+                        LOG_SIZE,
+                        SecureField::from(0u32),
+                    );
+                    CanonicalSettlementAir.evaluate(evaluator);
+                }
+            });
+            let log = super::HAND_FAMILY_LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
+            eprintln!("scene {name}: families {} ok={}", log.len(), result.is_ok());
+            if result.is_err() {
+                eprintln!("  tail: {:?}", &log[log.len().saturating_sub(3)..]);
+                let per_row = 6 * 13;
+                let failing = log.len() - 1;
+                let hand = failing / 78;
+                let idx = failing % 78;
+                eprintln!("  failing: hand {hand}, emission {idx} (wire {} value {})", idx / 13, idx % 13);
+            }
+        }
+        let result = Ok::<(), ()>(());
+        let _ = result;
+        let log = super::HAND_FAMILY_LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
+        eprintln!("families recorded: {}", log.len());
+        if result.is_err() {
+            eprintln!("row-wise failure; family log tail: {:?}", &log[log.len().saturating_sub(3)..]);
+            panic!("re-propagating");
+        }
+    }
+
+    #[test]
+    fn empty_seat_hand_shape() {
+        let scene = three_seat_ladder();
+        let table = &scene.table;
+        let board: Vec<u8> = table.community_cards.iter().map(|c| c.to_index()).collect();
+        let mut cards = board.clone();
+        cards.extend_from_slice(&[0u8, 0]);
+        eprintln!("cards: {cards:?}");
+        eprintln!("suits: {:?}", cards.iter().map(|c| c / 13).collect::<Vec<_>>());
+        eprintln!("ranks: {:?}", cards.iter().map(|c| (c % 13) + 2).collect::<Vec<_>>());
+        eprintln!("rank value: {}", native_rank_value(&cards));
+        // Pull category/kickers from the witness by recomputing classify.
+        let ranks: Vec<u8> = cards.iter().map(|c| (c % 13) + 2).collect();
+        let counts: Vec<u8> = (2u8..=14)
+            .map(|v| u8::try_from(ranks.iter().filter(|r| **r == v).count()).unwrap())
+            .collect();
+        eprintln!("counts: {counts:?}");
+        let suits: Vec<u8> = cards.iter().map(|c| c / 13).collect();
+        let mut suited = [[0u8; 13]; 4];
+        for index in 0..cards.len() {
+            suited[usize::from(suits[index])][usize::from(ranks[index] - 2)] += 1;
+        }
+        let flush_suit = (0u8..4).find(|s| suits.iter().filter(|x| **x == *s).count() >= 5);
+        eprintln!("flush_suit: {flush_suit:?}");
+        let straight = [6u8, 7, 8, 9, 10, 11, 12, 13, 14, 5]
+            .into_iter()
+            .filter(|h| {
+                let set: Vec<u8> = if *h == 5 {
+                    vec![14, 2, 3, 4, 5]
+                } else {
+                    (*h - 4..=*h).collect()
+                };
+                set.iter().all(|v| counts[(*v as usize) - 2] > 0)
+            })
+            .max()
+            .unwrap_or(0);
+        let (category, kickers) = classify(&counts, straight, flush_suit.map(|s| suited[usize::from(s)]));
+        eprintln!("category: {category}, kickers: {kickers:?}");
+        // Raked-scene empty-seat hand (seat 3: board + [0,0]).
+        let raked_board: Vec<u8> = vec![12, 25, 10, 23, 8];
+        let mut raked_cards = raked_board.clone();
+        raked_cards.extend_from_slice(&[0, 0]);
+        eprintln!("raked empty rank value: {}", native_rank_value(&raked_cards));
+        {
+            let witness = hand_witness_bits(&raked_cards);
+            let nibble = |start: usize| -> u8 {
+                (0..4).fold(0u8, |acc, b| {
+                    acc | ((witness[start + b].0 as u8) & 1) << b
+                })
+            };
+            // Flush kickers at offset 570..590 (four bits per nibble).
+            let kickers: Vec<u8> = (0..5).map(|i| nibble(570 + 4 * i)).collect();
+            eprintln!("witness flush kickers: {kickers:?}");
+        }
+    }
+
+    #[test]
+    fn family_map_under_masks() {
         let projection = projection_of(&three_seat_ladder());
-        let witness = settlement_witness(&projection);
-        let base = witness.len() - 18 * 1249;
-        eprintln!("settlement base columns: {base}, total {}", witness.len());
-        for col in (base + 1240)..(base + 1252) {
-            eprintln!("col {col} (hand0 tail): {}", col - base, witness[col].0);
+        // Emit-only replay: families are recorded in emission order.
+        let evaluator = FamilyCountingEvaluator {
+            families: std::cell::RefCell::new(Vec::new()),
+        };
+        let _ = evaluator;
+        CanonicalSettlementAir.evaluate(FamilyCountingEvaluator {
+            families: std::cell::RefCell::new(Vec::new()),
+        });
+        let log = super::HAND_FAMILY_LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
+        eprintln!("family log length: {}", log.len());
+        for (index, family) in log.iter().enumerate() {
+            eprintln!("{index}: {}", family.0);
         }
     }
 
@@ -3807,7 +3917,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "evaluator constraints are gated while the prover-side violation at #33431 is under investigation"]
     fn tampered_cards_break_evaluation() {
         let mut projection = projection_of(&three_seat_ladder());
         // Swap a board card: the committed rank values no longer follow

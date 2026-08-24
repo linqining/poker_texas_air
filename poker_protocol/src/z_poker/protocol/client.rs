@@ -10,7 +10,7 @@ use crate::zk_shuffle::reconstruction::{
 use crate::zk_shuffle::reveal_token_proof::{RevealTokenProof, REVEAL_TOKEN_PROOF_LABEL};
 // Native Texas verifies reveal-token proofs with Merlin under the fixed V3
 // domain label. Browser-produced proofs must use that exact transcript; the
-// retired Move/SHA3 path is not wire-compatible with the Aleo-native VM.
+// retired Move/SHA3 path is not wire-compatible with the native VM.
 use super::rounds::{JoinGameAndShuffleRound, LeaveGameRound, MaskAndShuffleRound, ShuffleRound};
 use super::types::{ReconstructDeck, ReconstructDeckV3, RevealToken};
 use crate::crypto::curve::{CurvePoint, CurveScalar};

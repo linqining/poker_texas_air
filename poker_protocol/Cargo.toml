@@ -11,16 +11,10 @@ required-features = ["legacy-bls381", "borsh"]
 name = "verify_reconstruction_v3_borsh"
 required-features = ["legacy-bls381", "borsh"]
 
-[[bin]]
-name = "verify_aleo_protocol_borsh"
-required-features = ["aleo-native"]
-
 [features]
 default = ["legacy-bls381"]
 # Retained temporarily for the original client while its BLS12-381 / Move
-# protocol is removed. Aleo-only consumers must opt out of this feature: it
-# pulls `blstrs` and its C-backed `blst` dependency, which is not part of the
-# native BLS12-377 protocol.
+# protocol is removed.
 legacy-bls381 = [
     "dep:poker-protocol-core",
     "dep:poker-protocol-proofs",
@@ -40,15 +34,7 @@ legacy-bls381 = [
     "dep:group",
     "dep:ff",
 ]
-borsh = ["dep:borsh", "dep:snarkvm-console"]
-# Native Aleo type conversion used by the proving service and non-WASM clients.
-# Keep this separate from the target-specific console WASM mode: enabling that
-# mode globally makes native snarkvm synthesizer test dependencies select an
-# incompatible proving-key API.
-aleo-native = ["borsh"]
-# Browser consumers opt in explicitly so their target still selects snarkvm's
-# WASM implementation without contaminating native workspace builds.
-aleo-wasm = ["aleo-native", "snarkvm-console/wasm"]
+borsh = ["dep:borsh"]
 [dependencies]
 poker-protocol-core = { path = "../poker-protocol-core", optional = true }
 poker-protocol-proofs = { path = "../poker-protocol-proofs", optional = true }
@@ -70,8 +56,3 @@ blstrs = { version = "0.7", optional = true }
 group = { version = "0.13", optional = true }
 ff = { version = "0.13", optional = true }
 borsh = { version = "1.5", features = ["derive"], optional = true }
-# The Aleo-native mental-poker path uses the exact public `group` and `scalar`
-# types consumed by the Varuna settlement circuit. These are the prime-order
-# Edwards subgroup over Aleo's BLS12-377 environment, not a byte adapter for
-# the legacy BLS12-381 protocol.
-snarkvm-console = { version = "=4.7.3", default-features = false, features = ["network", "types"], optional = true }

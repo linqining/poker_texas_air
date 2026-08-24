@@ -125,7 +125,7 @@ pub enum AdvanceDeadlineOutcome {
 ///
 /// The state machine normalizes deterministic work both before inspecting the
 /// active deadline and after applying an expired-deadline transition.  Keeping
-/// both reports prevents an Aleo-native prover from inferring an outcome only
+/// both reports prevents a native prover from inferring an outcome only
 /// from the final table image and accidentally accepting a mixed cascade under
 /// a narrower relation identity.
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -2634,7 +2634,7 @@ pub fn advance_deadline(
 }
 
 /// Consume the current deadline and retain the exact deterministic stages
-/// surrounding it for Aleo-native relation selection.
+/// surrounding it for native relation selection.
 pub fn advance_deadline_with_report(
     table: &mut TexasPokerTable,
     now_ms: u64,

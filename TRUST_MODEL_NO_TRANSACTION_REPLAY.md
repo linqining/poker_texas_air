@@ -1,6 +1,6 @@
 # 不依赖交易回放的信任模型
 
-本文针对 `zgame_aleo` 当前 Varuna/Aleo-native 流程，说明如何把“host
+本文针对本项目当前 STARK proving 流程，说明如何把“host
 回放交易后才接受证明”的信任边界，改成“不回放交易，但仍能验证状态迁移”的边界。
 这里的“不回放”是指服务端不再重新执行交易 payload 来推导 post-state；它不等于
 不验证交易的共识包含性，也不等于信任 RPC 返回的任意 mapping。
@@ -90,7 +90,7 @@ Ristretto 方程，也不重算 deck/reveal commitment。
 | reveal timeout | kick 全部 reveal pending；0/1 active 时 reset/award；preflop reset，其他 street start reconstruct | 已覆盖 preflop reset、非 preflop reconstruct 与 sole-survivor award 三个终局：单一 pending reset、固定宽度、升序的多 pending `RevealTimeoutKick…Kick→RevealTimeoutReset`（reset endpoint 允许任意数量的 retained active seats，AIR 约束每一 kick 的 custody/lifecycle delta、终局 `Out` 保留、refund/deadline，并由 ZR4 固定宽度 assignment opening 认证 pending union/reveal commitment）；`RevealTimeoutKick…Kick→RevealTimeoutReconstruct`（kick 行按 3-bit 分解约束 street ∈ {1..=5} 且 `subtag == street`；terminal 行约束 `Revealing→Reconstructing/Collecting` 头、`height + reconstruct_timeout` 武装的 deadline、板/牌组/suspended reveal/run-it-twice 不变、非零且变化的 reconstruction commitment（平方和乘积逆证明）、终局 kick 的 stack/bet/addon 清零与 total/time-bank 保留、`amount = stack + addon`、`pot += bet`、`chip_pool −= refund`、acted/leave 掩码按 `pre × (1 − selector)` 清位、post pending mask 由完整 post 座位像推导，并以 `live_count × (live_count − 1)` 的逆证明至少两名 live 玩家）；以及 `RevealTimeoutKick…Kick→RevealTimeoutAward` 零抽水单人 award（VM 侧 `on_reveal_timeout` 改用 raw kick，使 kick 级联不再于循环中提前 reset 偷走 pot——与 VM 自身对 betting 轮同一漏洞的修复注释一致；AIR 约束 `Revealing→Waiting` reset 头、`live == 2` 与 credit/selector 对 live 集的划分、winner stack 精确 `+= pre_pot`（pot 非零逆证明）、被踢与既有 `Out` 座位以 vacated 指示清空、retained 座位 Active 化、time-bank cap、identity/key 保留与 hole 清零、`amount = stack + addon`、`chip_pool −= refund`，以及全部 reset 掩码/承诺清零）。sidecar AIR 还约束完整 assignment 字段、typed/连续 padding、canonical target order、card `<52`/唯一性、pending/submitted mask 的 bit/range/disjoint/union 关系，以及按 seat mask 的确定性 kick schedule。真实 VM fixture 锁定 union→kick→reset/reconstruct/award 语义 | 0-survivor 且 pot > 0 的终点在 VM 内清空 pot 后违反 canonical custody 守恒（筹码滞留 vault 无归属），需要 VM 先决定退款/运营者提取政策才能给出 AIR 关系，保持 fail-closed；rake > 0 的单人 award 已由 `RevealTimeoutRakedAward` 覆盖：新增 `canonical_rake_opening` 以共享 lookup-backed Blake2b STARK 证明完整 `Borsh(TableRules)` 预像哈希到 pre `rules_commitment`（域分隔 `zchain.texas.rules.v1`），公开三元组（mode/bps/cap）进入 Fiat--Shamir scope 与 6 列预处理公共 scope；AIR 以加权场恒等式与 16-bit 肢范围分解精确证明 `rake = min(floor(pot × bps / 10_000), cap, pot)`（pot 截断 32 位，除法余数 14-bit 分解，cap 比较用借位链），winner 精确记 `pot − rake`、`chip_pool −= refund + rake`，缺少/不匹配规则证明均 fail-closed；真实 VM fixture 锁定 rake 公式；完整 deck commitment derivation 与更一般的 reset/assignment ledger 组合仍需专用关系 |
 | betting, time bank > 0 | 消耗 `min(time_bank, betting_timeout)`，延长 deadline | `AdvanceDeadline` 已覆盖 | 已有，保持为单一非级联 row |
 | betting, time bank = 0 | auto fold，再由 normalization 收池、round advance、single-winner award/reset 或下一 reveal | 只覆盖非终局 `AutoFold` suffix | 将 fold 与后续 bounded normalization 分成显式 `Collect/Advance/Award/Reset` 微步骤；不得让 AutoFold 隐含它们 |
-| showdown display timeout | derive side pots/rake/runout/winners，award，reset | 部分覆盖（`src/canonical_settlement_air.rs`：结算代数 AIR——守恒/层平铺、runout 对半拆分、odd-chip 线性分解、winner⊆eligible、无争议层免抽水，四 VM fixture 全链路 prove/verify + 篡改拒绝 10/10；层切片推导/rake 公式链/hand-rank 由牌面派生（7 张评估器电路）仍待补；已落地：层切片由 bet 向量推导（eligible/gross 借位链），总 rake 公式链（school-mul/除法/min 借位链 + mode 门控），以及 rank↔winner 一致性——rank 以 24 位字典序值（category/kickers nibble 打包）入 scope，逐 (层,runout) 以运行最大值选择链 + 双向借位链等式约束 winner_mask = eligible ∧ (rank = max)，runout-1 槽按 two_runouts∧contested 门控） | 9-seat/≤9-side-pot/≤2-runout settlement plan、hand-rank、odd-chip、rake、custody 和 reset 关系 |
+| showdown display timeout | derive side pots/rake/runout/winners，award，reset | 部分覆盖（`src/canonical_settlement_air.rs`：结算代数 AIR——守恒/层平铺、runout 对半拆分、odd-chip 线性分解、winner⊆eligible、无争议层免抽水，四 VM fixture 全链路 prove/verify + 篡改拒绝 10/10；层切片推导/rake 公式链/hand-rank 派生已闭环：7 张评估器电路（直方图/顺子含轮子/同花/kicker 多重集排序/category 优先级/派生↔承诺 24 位绑定）全部在 AIR 内约束，空座位哨兵手按真实分类承诺；层切片由 bet 向量推导（eligible/gross 借位链），总 rake 公式链（school-mul/除法/min 借位链 + mode 门控），rank↔winner 一致性（运行最大值选择链 + 双向借位链等式，runout-1 槽按 two_runouts∧contested 门控）；settlement 套件 21/21 含四场景全链路 prove/verify 与牌面/底牌/rake/层级篡改拒绝） | 9-seat/≤9-side-pot/≤2-runout settlement plan、hand-rank、odd-chip、rake、custody 和 reset 关系 |
 
 每个 deadline branch 都会先运行最多 `MAX_NORMALIZATION_STEPS` 次 pre-normalization；该循环可被
 展开为有界 selector batch，但每一个 `CompleteReconstruct`、`AdvanceShuffle`、
@@ -235,10 +235,10 @@ mapping value 固定为 statement-bound `receipt_value` 的 32 字节编码。�
 
 | 组件 | 当前信任内容 | 证明能否独立排除伪造 |
 | --- | --- | --- |
-| `aleo-varuna` R1CS/Varuna | 固定 circuit、VK、manifest，以及 prover 提供的 witness | 只能证明 circuit 约束；不能证明 witness 对应某笔 Aleo 交易 |
-| Leo state kernel | `table_head` CAS、seq/hand、nullifier、authority、deadline、链上 `snark.verify` | 能约束已提交 effect；不认证 host 传入的外部交易来源 |
+| `poker_texas_air` STARK/AIR | 固定 AIR、VK、manifest，以及 prover 提供的 witness | 只能证明 AIR 约束；不能证明 witness 对应某笔 L1 交易 |
+| L1 state kernel | `table_head` CAS、seq/hand、nullifier、authority、deadline、链上 proof 验证 | 能约束已提交 effect；不认证 host 传入的外部交易来源 |
 | coordinator | job、tentative/confirmed head、exact signed transaction sidecar | 负责持久化和顺序，不是共识证明 |
-| `aleo-runtime` finality observer | 交易所在 canonical block、执行状态、同高度 `table_head` 写入 | 目前还检查 transaction/function/transition body；这属于 replay/transaction-shape 依赖 |
+| runtime finality observer | 交易所在 canonical block、执行状态、同高度 `table_head` 写入 | 目前还检查 transaction/function/transition body；这属于 replay/transaction-shape 依赖 |
 | native witness builder | 从游戏状态生成 opening、plan digest 和 public inputs | 如果 AIR 没有重算对应算法，builder 仍是信任边界 |
 
 因此，当前的“proof verified”不能直接解释为“这笔链上交易按预期改变了状态”。
@@ -249,19 +249,19 @@ mapping value 固定为 statement-bound `receipt_value` 的 32 字节编码。�
 
 ```text
 固定部署 manifest/VK
-  -> Varuna proof 约束完整 pre/post transition
-  -> Aleo program 在 finalize 中验证 proof 并写 authenticated receipt
+  -> STARK proof 约束完整 pre/post transition
+  -> 链上 settlement program 在最终确认时验证 proof 并写 authenticated receipt
   -> 共识最终确认 block + state root + receipt mapping
   -> runtime 只验证 receipt 的包含性和字段等式
 ```
 
-安全性依赖 Aleo 共识正确执行已认证的 program，而不依赖服务端重新解释交易参数。
+安全性依赖 L1 共识正确执行已认证的 program，而不依赖服务端重新解释交易参数。
 服务端仍然必须验证 canonical block、确认深度和历史 state root；移除的是业务语义 replay，
 不是共识 finality 验证。
 
 ## 必须修改的部分
 
-### 1. Leo state kernel：写入不可变 transition receipt
+### 1. 链上 state kernel：写入不可变 transition receipt
 
 新增 `transition_receipt_v1` 及按唯一 key 存储的 mapping。receipt 至少应包含：
 
@@ -332,8 +332,8 @@ object。仅将 host 计算的 object digest/root 写入 public input 不满足�
 
 ### 4. Finality observer：从 transaction replay 改为 receipt inclusion proof
 
-`aleo-runtime` 应停止把 `validate_execution_target`、transition body shape 或重新解析
-交易参数当成业务认证来源。新的 `AleoFinalityObservation` 应返回并校验：
+runtime 应停止把 `validate_execution_target`、transition body shape 或重新解析
+交易参数当成业务认证来源。新的 `L1FinalityObservation` 应返回并校验：
 
 - transaction ID、canonical block hash/height、确认深度、历史 state root；
 - `transition_receipt` 的历史 mapping value；
@@ -363,7 +363,7 @@ exact signed bytes、broadcast retry、unknown 状态回查和冻结逻辑仍必
 
 ### 6. 授权与部署
 
-- actor signature 必须绑定到 proof statement；outer Aleo transaction signer 只负责执行/付费，
+- actor signature 必须绑定到 proof statement；outer L1 transaction signer 只负责执行/付费，
   不能被当成玩家 authority；
 - relation registry、VK、program digest、manifest digest 必须 immutable 且版本化；
 - authority policy（actor/operator/permissionless）必须由 state kernel 按 effect 固定检查；

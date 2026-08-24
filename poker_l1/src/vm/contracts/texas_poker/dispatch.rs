@@ -45,7 +45,7 @@ use crate::vm::contracts::dispatch::{DispatchContext, DispatchResult};
 /// 方法选择器长度（32 字节 = blake2b_256 输出）。
 pub const METHOD_SELECTOR_LEN: usize = 32;
 
-/// Host-side canonical trace retained for Aleo-native relation selection.
+/// Host-side canonical trace retained for native relation selection.
 ///
 /// This is not a proof ABI and contains no relation selector. The command is
 /// already fixed by the dispatch entrypoint; the trace only records semantic
@@ -715,7 +715,7 @@ pub fn dispatch(
     dispatch_with_execution_trace(context, table, selector, args).map(|(result, _)| result)
 }
 
-/// Execute the canonical VM transition and return its exact Aleo-native trace.
+/// Execute the canonical VM transition and return its exact native execution trace.
 ///
 /// The serialized `DispatchOutput` remains unchanged for legacy proof/archive
 /// compatibility. New native proving code consumes this out-of-band typed
