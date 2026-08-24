@@ -318,6 +318,10 @@ fn main() {
         ristretto_timing();
         return;
     }
+    if std::env::args().any(|arg| arg == "slot-or-deep-batch") {
+        slot_or_deep_batch();
+        return;
+    }
     println!("=== poker_texas_air complete-hand proving benchmark ===");
     println!("host: {} / {}", std::env::consts::ARCH, sysctl_model());
     let lifecycle = lifecycle_batch();
@@ -423,6 +427,131 @@ fn main() {
     println!(
         "\nTOTAL: prove {total_prove:?}, verify {total_verify:?}, tagged proof bytes {total_bytes}"
     );
+}
+
+fn slot_or_deep_batch() {
+    use poker_protocol::crypto::curve::{Curve, CurveScalar, RistrettoCurve};
+    use poker_protocol::precompile_abi::{
+        CurveId, EncodedCiphertext, ReconstructionProofSystem, ReconstructionV3VerifyRequest,
+        TranscriptId,
+    };
+    use poker_texas_air::ristretto_reconstruction_proof_wire::{
+        RistrettoBayerGrothShuffleProofWire, RistrettoCiphertextProofWire,
+        RistrettoCrossKeyProofWire, RistrettoReconstructionProofEnvelope, RistrettoSlotOrProofWire,
+        RISTRETTO_RECONSTRUCTION_READABLE_CARDS,
+    };
+    use poker_texas_air::ristretto_reconstruction_slot_or_air::{
+        RistrettoSlotOrTranscriptChallenges, prove_ristretto_reconstruction_slot_or_batch,
+        verify_ristretto_reconstruction_slot_or_batch,
+    };
+
+    const SLOT_COUNT: usize = 52;
+    const LIMBS: usize = 32;
+    let scalar = <RistrettoCurve as Curve>::Scalar::from_u64;
+    let g = RistrettoCurve::base_g();
+    let compressed = |point: <RistrettoCurve as Curve>::Point| *point.compress().as_bytes();
+    let point_bytes =
+        |point: <RistrettoCurve as Curve>::Point| point.compress().as_bytes().to_vec();
+    let scalar_bytes = |value: <RistrettoCurve as Curve>::Scalar| {
+        let mut out = [0u8; LIMBS];
+        out.copy_from_slice(value.as_bytes());
+        out
+    };
+
+    let aggregate_pk = g * scalar(11);
+    let mut request = ReconstructionV3VerifyRequest {
+        curve: CurveId::Ristretto255,
+        proof_system: ReconstructionProofSystem::RistrettoAirV1,
+        transcript: TranscriptId::Poseidon252,
+        context: b"zk_reconstruct_proof_v3".to_vec(),
+        call_context: vec![7; 32],
+        statement_version: 3,
+        context_digest: [1; 32],
+        reconstruction_epoch: 9,
+        prior_state_digest: [2; 32],
+        aggregate_pk: point_bytes(aggregate_pk),
+        owner_pk: vec![4; 32],
+        cards: (0..SLOT_COUNT)
+            .map(|index| point_bytes(g * scalar(100 + index as u64)))
+            .collect(),
+        user_readable_cards: vec![
+            EncodedCiphertext { c1: vec![6; 32], c2: vec![7; 32] };
+            RISTRETTO_RECONSTRUCTION_READABLE_CARDS
+        ],
+        contributions: (0..SLOT_COUNT)
+            .map(|index| EncodedCiphertext {
+                c1: point_bytes(g * scalar(200 + index as u64)),
+                c2: point_bytes(g * scalar(300 + index as u64)),
+            })
+            .collect(),
+        proof: vec![1],
+    };
+    let global_challenges: Vec<_> = (0..SLOT_COUNT)
+        .map(|slot| scalar(37 + slot as u64))
+        .collect();
+    let slot_wires: Vec<RistrettoSlotOrProofWire> = global_challenges
+        .iter()
+        .enumerate()
+        .map(|(slot, global)| {
+            let share0 = scalar(5);
+            let share1 = *global - share0;
+            RistrettoSlotOrProofWire {
+                commitment_g: [
+                    compressed(g * scalar(400 + slot as u64)),
+                    compressed(g * scalar(500 + slot as u64)),
+                ],
+                commitment_pk: [
+                    compressed(aggregate_pk * scalar(600 + slot as u64)),
+                    compressed(aggregate_pk * scalar(700 + slot as u64)),
+                ],
+                challenges: [scalar_bytes(share0), scalar_bytes(share1)],
+                responses: [scalar_bytes(scalar(800 + slot as u64)); 2],
+            }
+        })
+        .collect();
+    let envelope = RistrettoReconstructionProofEnvelope::from_components(
+        &request,
+        [RistrettoCiphertextProofWire { c1: [0xA0; 32], c2: [0xA1; 32] };
+            RISTRETTO_RECONSTRUCTION_READABLE_CARDS],
+        RistrettoBayerGrothShuffleProofWire::default(),
+        [RistrettoCrossKeyProofWire {
+            commitment_owner_key: [0xB0; 32],
+            commitment_contribution_c1: [0xB1; 32],
+            commitment_joint_c2: [0xB2; 32],
+            response_owner_sk: [0x0B; 32],
+            response_contribution_randomness: [0x0C; 32],
+        }; RISTRETTO_RECONSTRUCTION_READABLE_CARDS],
+        slot_wires.try_into().unwrap(),
+    )
+    .unwrap();
+    request.proof = envelope.encode_wire().unwrap();
+    let challenges = RistrettoSlotOrTranscriptChallenges {
+        statement_digest: envelope.statement_digest,
+        global_challenges: global_challenges
+            .into_iter()
+            .map(scalar_bytes)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap(),
+    };
+
+    let t = std::time::Instant::now();
+    let archive = prove_ristretto_reconstruction_slot_or_batch(&request, &challenges)
+        .expect("deep slot-OR batch prove");
+    println!("deep slot-OR batch prove: {:.2}s", t.elapsed().as_secs_f64());
+    let t = std::time::Instant::now();
+    verify_ristretto_reconstruction_slot_or_batch(&request, &challenges, &archive)
+        .expect("deep slot-OR batch verify");
+    println!("deep slot-OR batch verify: {:.2}s", t.elapsed().as_secs_f64());
+    println!(
+        "proof bytes: {}",
+        borsh::to_vec(&archive).map(|v| v.len()).unwrap_or(0)
+    );
+
+    let mut spliced = archive;
+    spliced.additions.programs[3].values[2][0] ^= 1;
+    assert!(verify_ristretto_reconstruction_slot_or_batch(&request, &challenges, &spliced).is_err());
+    println!("tampered point-addition row rejected");
 }
 
 fn sysctl_model() -> String {
