@@ -219,7 +219,7 @@ impl FrameworkEval for CreateTableAir {
         // The full name remains in the canonical post-state preimage; this projection prevents
         // the trace columns from becoming free witnesses.
         let expected_name_hash =
-            field_to_m31_limbs(crate::state_root::table_name_commitment(&self.input.name).field());
+            field_to_m31_limbs(crate::state_root::table_name_commitment(&self.input.name));
         for (actual, expected) in [
             input_name_hash_0.clone(),
             input_name_hash_1.clone(),
@@ -277,7 +277,7 @@ impl CreateTableRow {
         post_version: u64,
     ) -> Self {
         let name_hash_m31 =
-            field_to_m31_limbs(crate::state_root::table_name_commitment(&input.name).field());
+            field_to_m31_limbs(crate::state_root::table_name_commitment(&input.name));
 
         Self {
             common: CommonRow::active(
@@ -606,7 +606,7 @@ mod tests {
         assert_eq!(v[cols::INPUT_BIG_BLIND_BASE], M31::from(20u32));
         assert_eq!(
             row.input_name_hash,
-            field_to_m31_limbs(crate::state_root::table_name_commitment("test").field())
+            field_to_m31_limbs(crate::state_root::table_name_commitment("test"))
         );
         assert_eq!(v[cols::OUTPUT_BUTTON], ZERO);
         assert_eq!(v[cols::OUTPUT_ROUND_STATE], ZERO);
@@ -614,8 +614,8 @@ mod tests {
 
     #[test]
     fn table_name_projection_is_not_a_constant_placeholder() {
-        let alpha = field_to_m31_limbs(crate::state_root::table_name_commitment("alpha").field());
-        let beta = field_to_m31_limbs(crate::state_root::table_name_commitment("beta").field());
+        let alpha = field_to_m31_limbs(crate::state_root::table_name_commitment("alpha"));
+        let beta = field_to_m31_limbs(crate::state_root::table_name_commitment("beta"));
         assert_ne!(alpha, [ZERO; 4]);
         assert_ne!(alpha, beta);
     }

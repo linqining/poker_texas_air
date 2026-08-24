@@ -8,6 +8,7 @@
 
 use bincode::Options;
 use borsh::{BorshDeserialize, BorshSerialize};
+use rayon::prelude::*;
 use stwo::core::channel::{Channel, Poseidon252Channel};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
@@ -461,8 +462,10 @@ pub fn prove_ristretto_scalar_addition_batch(
     }
     let log_size = batch_log_size(inputs.len());
     let trace = trace_columns_batch(inputs)?;
+    // Three independent canonical micro-STARKs per row; prove them in
+    // parallel instead of paying their PoW/FRI wall clocks sequentially.
     let rows = inputs
-        .iter()
+        .par_iter()
         .map(|(a, b)| {
             let (c, reduced, _) = add_witness(a, b)?;
             let canonical = [

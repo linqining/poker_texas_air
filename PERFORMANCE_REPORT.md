@@ -319,6 +319,37 @@ ePrint 2026/1329）；admission 并行验证双证明，归档接口保持递归
       定点乘批 + N−1 行压缩点加法串行累加批——零新 AIR；验证器逐行确定性
       重建、窗口↔标量↔基点↔累加链四重绑定，空批/单对带累加等边角全部
       fail-closed。MSM N=4：prove 15.7s / verify 2.3s / 归档 22.3MB。
+13. **按审计顺序的性能与信任边界轮（已完成，2026-08-25）**：
+    - **slot-OR 微 STARK 并行化**：`prove_ristretto_scalar_windows_batch` 与
+      `prove_ristretto_scalar_addition_batch` 内嵌的每标量 canonical 微 STARK
+      从串行 `iter()` 改 `par_iter()`（52 槽深批原 572 个串行 PoW+FRI）。
+      实测深批 prove 1365.7→**1176.3s**（−14%，含同期编译抢核干扰，干净
+      机器下更好），归档 1.27→1.246GB。
+    - **flock Ligerito Slim profile**：四处 `Blake3Setup` 从 Fast（rate 1）
+      切换 Slim（rate 2）。实测 hand bundle 证明 **1.45MB→0.76MB（−48%）**、
+      全手牌 tagged 证明 **3.62→2.93MB（−19%）**，prove/verify 时间持平
+      （3.49s/3.08s）。另：flock witness 在 debug 深递归会爆 2MB 测试线程栈，
+      prove 现运行于专用 64MB 栈 rayon 池（`flock_pool().install`）。
+    - **state_root host 重算移除（信任边界消除）**：root 定义改为
+      `BLAKE3("zchain.texas_poker.state_root.v1" || hot-v30 bytes)`（与
+      flock 链同函数；ObjectDb-absence 占位表用固定哨兵 preimage 仍有可证
+      明语句）。`verify_roots` 不再由 host 重算 Poseidon252，改为要求
+      `ArchivedStateRootBindingProof`（`state_root_binding.rs`）：flock 证明
+      恰好覆盖 `(pre, post)` 两个 `(domain||hot bytes, root)` 语句，验证器
+      从 transcript 绑定的 image 确定性导出端点后交给哈希证明，任何拼接/
+      乱序/替换 fail-closed。绑定证明随 `CreateTableProof`/`MethodProof`、
+      `ArchivedMethodProof`、`DualProofBundle`（信封升 v2，新增 root-binding
+      段）、`ArchivedComponentProof` 全链路携带；同输入绑定有确定性缓存。
+      生产 release guard 保留：`cfg(test)` 豁免 release 测试 harness，
+      `RUSTFLAGS='--cfg=texas_release_tests'` 显式豁免 release 集成测试。
+    - **BigUint 见证削减**：`modulus()` 改返回 `&'static BigUint`（免每调
+      clone），builder 与 witness 的乘法商/余改单次 `div_rem`（除法减半）。
+    - **测试加速（release 化）**：移除自引用 dev-dependency（集成测试改
+      `--features test-helpers` 显式开启）后，`cargo test --release --lib`
+      **450/450 全绿仅 482s**（debug 全量 >2h）；release 集成测试
+      `RUSTFLAGS='--cfg=texas_release_tests' cargo test --release
+      --features test-helpers --tests` 全部通过（含 dual-proof v2 信封
+      7/7、outer aggregate 4/4 修复两处 root 字节解码）。
       同标量多基（批量解密 sk·C1ᵢ）可复用同一窗口分解见证再省一份。
     - 回归：`ristretto_fp_program_air` 35/35、MSM 3/3、ristretto 全模块套件全绿。
 

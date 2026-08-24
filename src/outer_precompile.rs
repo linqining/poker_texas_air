@@ -880,8 +880,8 @@ fn encode_anchor(anchor: &ExpectedChainAnchor) -> TexasAirResult<Vec<u8>> {
     out.extend_from_slice(&anchor.first_call_seq().to_le_bytes());
     out.extend_from_slice(&anchor.pre_version().to_le_bytes());
     out.extend_from_slice(&anchor.post_version().to_le_bytes());
-    out.extend_from_slice(&anchor.pre_state_root().field().to_bytes_be());
-    out.extend_from_slice(&anchor.post_state_root().field().to_bytes_be());
+    out.extend_from_slice(&anchor.pre_state_root().bytes());
+    out.extend_from_slice(&anchor.post_state_root().bytes());
     debug_assert_eq!(out.len(), ANCHOR_HEADER_LEN);
     for digest in anchor.dispatch_call_digests() {
         out.extend_from_slice(digest);
@@ -941,9 +941,7 @@ fn decode_root(bytes: &[u8]) -> TexasAirResult<StateRoot> {
     let root_bytes: &[u8; 32] = bytes
         .try_into()
         .map_err(|_| wire_error("state root must contain 32 bytes"))?;
-    let field = FieldElement::from_bytes_be(root_bytes)
-        .map_err(|_| wire_error("state root is not a canonical field element"))?;
-    Ok(StateRoot::from_field(field))
+    Ok(StateRoot::from_bytes(*root_bytes))
 }
 
 fn validate_task_count(count: usize) -> TexasAirResult<()> {

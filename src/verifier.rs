@@ -50,7 +50,7 @@ fn verify_create_table_inner(
     validate_canonical_state: bool,
 ) -> TexasAirResult<()> {
     let config = crate::prover_context::protocol_pcs_config();
-    expected_public_inputs.verify_roots()?;
+    expected_public_inputs.verify_roots(&proof.root_binding)?;
     expected_public_inputs.verify_air_statement(&expected_air.statement())?;
     if validate_canonical_state {
         expected_air.validate_public_inputs(expected_public_inputs)?;
@@ -173,7 +173,7 @@ where
             statement.kind.method_name()
         )));
     }
-    expected_public_inputs.verify_roots()?;
+    expected_public_inputs.verify_roots(&proof.root_binding)?;
     expected_public_inputs.verify_air_statement(&statement)?;
     if validate_canonical_state {
         expected_air.validate_public_inputs(expected_public_inputs)?;

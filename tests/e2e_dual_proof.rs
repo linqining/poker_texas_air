@@ -35,7 +35,7 @@ use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use poker_texas_air::test_support as seat_fixture;
 use rand::rngs::OsRng;
 
-const HEADER_LEN: usize = 20;
+const HEADER_LEN: usize = 24;
 const FIXTURE_TIMESTAMP_MS: u64 = 1_900_000;
 
 fn context(caller: poker_l1::Address) -> DispatchContext {
@@ -410,6 +410,7 @@ fn reveal_task(nonce: u64) -> ProveTask {
 }
 
 fn rebuild_wire(template: &DualProofBundle, proof_bytes: &[u8], request_bytes: &[u8]) -> Vec<u8> {
+    let root_binding_bytes = borsh::to_vec(template.root_binding()).expect("binding serializes");
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&DUAL_PROOF_MAGIC);
     bytes.extend_from_slice(&[
@@ -420,8 +421,10 @@ fn rebuild_wire(template: &DualProofBundle, proof_bytes: &[u8], request_bytes: &
     ]);
     bytes.extend_from_slice(&(proof_bytes.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&(request_bytes.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&(root_binding_bytes.len() as u32).to_le_bytes());
     bytes.extend_from_slice(proof_bytes);
     bytes.extend_from_slice(request_bytes);
+    bytes.extend_from_slice(&root_binding_bytes);
     bytes
 }
 
@@ -610,7 +613,10 @@ fn strict_envelope_rejects_unknown_routes_missing_halves_and_bad_lengths() {
     let encoded = bundle.encode().unwrap();
     assert_eq!(
         encoded.len(),
-        HEADER_LEN + bundle.stark_proof_bytes().len() + bundle.crypto_request_bytes().len()
+        HEADER_LEN
+            + bundle.stark_proof_bytes().len()
+            + bundle.crypto_request_bytes().len()
+            + bundle.root_binding().len()
     );
 
     let mut unknown_version = encoded.clone();

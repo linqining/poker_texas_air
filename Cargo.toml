@@ -92,6 +92,7 @@ flock-prover = { path = "third_party/flock/crates/flock-prover" }
 tracing = { workspace = true }
 rayon = { workspace = true }
 num-bigint = "0.4.8"
+num-integer = "0.1.47"
 num-traits = "0.2"
 # BLS12-381（密码学方法 AIR 用）
 blstrs = { workspace = true }
@@ -103,4 +104,7 @@ pairing = { workspace = true }
 proptest = { workspace = true }
 rand = { workspace = true }
 secp256k1 = { workspace = true }
-poker_texas_air = { path = ".", features = ["test-helpers"] }
+
+# Integration tests opt into untrusted PoC entry points explicitly via
+# `cargo test --features test-helpers` (debug only; the release guard in
+# lib.rs rejects the feature outside the test harness).

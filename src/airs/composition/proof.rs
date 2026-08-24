@@ -69,6 +69,7 @@ pub struct ArchivedComponentProof {
     log_size: u32,
     num_columns: u32,
     stark_proof_bytes: Vec<u8>,
+    root_binding: crate::state_root_binding::ArchivedStateRootBindingProof,
 }
 
 impl ArchivedComponentProof {
@@ -92,6 +93,7 @@ impl ArchivedComponentProof {
         log_size: u32,
         num_columns: usize,
         proof: &StarkProof<Poseidon252MerkleHasher>,
+        root_binding: crate::state_root_binding::ArchivedStateRootBindingProof,
     ) -> TexasAirResult<Self> {
         let num_columns = u32::try_from(num_columns).map_err(|_| {
             TexasAirError::SerializationError("component column count exceeds u32".into())
@@ -106,6 +108,7 @@ impl ArchivedComponentProof {
             log_size,
             num_columns,
             stark_proof_bytes,
+            root_binding,
         };
         archive.validate()?;
         Ok(archive)
@@ -620,6 +623,7 @@ fn prove_stage<A: ComponentTexasAir>(
         proof.log_size,
         proof.num_columns,
         &proof.stark_proof,
+        proof.root_binding.clone(),
     )?;
     verify_method_against(proof, air, &public_inputs)?;
     Ok(archive)
@@ -647,6 +651,7 @@ fn verify_stage<A: ComponentTexasAir>(
         air: air.clone(),
         log_size: air.log_size(),
         num_columns: row.len(),
+        root_binding: archive.root_binding.clone(),
         public_inputs: public_inputs.clone(),
     };
     verify_method_against(proof, air, &public_inputs)
@@ -1109,12 +1114,20 @@ fn bincode_options() -> impl Options {
 mod tests {
     use super::*;
 
+    fn test_root_binding() -> crate::state_root_binding::ArchivedStateRootBindingProof {
+        use crate::state_root_binding::StateRootEndpointStatement;
+        let endpoint = StateRootEndpointStatement::from_preimage(vec![1, 2, 3]);
+        crate::state_root_binding::prove_state_root_binding(endpoint.clone(), endpoint)
+            .expect("test binding proves")
+    }
+
     fn stage(stage_kind: StageKind, num_columns: usize) -> ArchivedComponentProof {
         ArchivedComponentProof {
             stage_kind,
             log_size: SINGLE_METHOD_LOG_SIZE,
             num_columns: u32::try_from(num_columns).unwrap(),
             stark_proof_bytes: vec![1],
+            root_binding: test_root_binding(),
         }
     }
 

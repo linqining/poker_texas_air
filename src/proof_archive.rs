@@ -30,6 +30,7 @@ pub struct ArchivedMethodProof {
     log_size: u32,
     num_columns: u32,
     stark_proof_bytes: Vec<u8>,
+    root_binding_bytes: Vec<u8>,
 }
 
 impl ArchivedMethodProof {
@@ -39,6 +40,7 @@ impl ArchivedMethodProof {
         log_size: u32,
         num_columns: usize,
         stark_proof: &StarkProof<Poseidon252MerkleHasher>,
+        root_binding: &crate::state_root_binding::ArchivedStateRootBindingProof,
     ) -> TexasAirResult<Self> {
         let num_columns = u32::try_from(num_columns).map_err(|_| {
             TexasAirError::SerializationError("method proof column count exceeds u32".into())
@@ -48,12 +50,18 @@ impl ArchivedMethodProof {
                 "Stwo method proof serialization failed: {error}"
             ))
         })?;
+        let root_binding_bytes = borsh::to_vec(root_binding).map_err(|error| {
+            TexasAirError::SerializationError(format!(
+                "state-root binding serialization failed: {error}"
+            ))
+        })?;
         let archive = Self {
             version: METHOD_PROOF_ARCHIVE_VERSION,
             method_kind,
             log_size,
             num_columns,
             stark_proof_bytes,
+            root_binding_bytes,
         };
         archive.validate()?;
         Ok(archive)
@@ -103,6 +111,19 @@ impl ArchivedMethodProof {
             TexasAirError::SerializationError(
                 "archived method proof column count does not fit usize".into(),
             )
+        })
+    }
+
+    /// Deserialize the proven state-root binding carried alongside the
+    /// method proof.
+    pub(crate) fn decode_root_binding(
+        &self,
+    ) -> TexasAirResult<crate::state_root_binding::ArchivedStateRootBindingProof> {
+        self.validate()?;
+        borsh::from_slice(&self.root_binding_bytes).map_err(|error| {
+            TexasAirError::SerializationError(format!(
+                "archived state-root binding decoding failed: {error}"
+            ))
         })
     }
 
@@ -171,6 +192,7 @@ mod tests {
             log_size: 10,
             num_columns: 1,
             stark_proof_bytes: proof_bytes,
+            root_binding_bytes: Vec::new(),
         }
     }
 

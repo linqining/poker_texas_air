@@ -129,8 +129,8 @@ impl AdminAuthorizationBinding {
         request.extend_from_slice(&call_seq.to_le_bytes());
         request.extend_from_slice(&pre_version.to_le_bytes());
         request.extend_from_slice(&post_version.to_le_bytes());
-        request.extend_from_slice(&pre_state_root.field().to_bytes_be());
-        request.extend_from_slice(&post_state_root.field().to_bytes_be());
+        request.extend_from_slice(&pre_state_root.bytes());
+        request.extend_from_slice(&post_state_root.bytes());
         request.extend_from_slice(&actual_dispatch_digest);
 
         let request_digest = hash256(b"zchain.texas_poker.admin_auth.request.v1", &request);

@@ -1,4 +1,4 @@
-//! State root 计算 — Poseidon252 over ObjectDb hot-v30 projection。
+//! State root 计算 — BLAKE3 over ObjectDb hot-v30 projection。
 //!
 //! ## 设计
 //!
@@ -7,12 +7,14 @@
 //! governance 通过三个固定宽度 opening digest 进入 hot state，而不是在每个 hand-local
 //! transition 中重复展开低频字段。
 //!
-//! ## AIR 内验证
+//! ## 根绑定（host 重算已移除）
 //!
-//! 当前由可信 host 使用 `starknet_crypto::poseidon_hash_many` 重算，并把完整 preimage、
-//! full-width root 与 AIR trace-row 绑定一起混入 Fiat–Shamir transcript。method AIR 只承载
-//! root 的域分隔 M31 投影，尚未嵌入 Poseidon AIR；因此这是 host trust boundary，不能
-//! 表述为“电路内证明了 Borsh preimage 的 Poseidon 哈希”。
+//! root 定义为 `BLAKE3("zchain.texas_poker.state_root.v1" || hot-v30 bytes)`，与
+//! flock 证明链所验证的压缩函数完全一致。`root = H(preimage)` 的绑定不再由可信
+//! host 在验证器里重算 Poseidon252 建立，而是由
+//! [`crate::state_root_binding`] 里的 flock 预证明语句覆盖：验证器把确定性导出的
+//! hot bytes 与公开 root 组装成 statement，交给已验证的哈希证明，host 不再做任何
+//! 哈希重算判定。
 //!
 //! ## 递归证明中的角色
 //!
@@ -37,30 +39,70 @@ use poker_l1::vm::contracts::texas_poker::types::{
     DeckState, ReconstructState, RevealTokenState, ShuffleState, TimeoutConfig,
 };
 
-/// 表台状态根（Starknet Fr 元素）。
+/// 表台状态根（32 字节 BLAKE3 摘要）。
 ///
-/// 实际上是 `Poseidon252(preimage)` 的结果，作为 method AIR 的公开输入。
+/// 实际上是 [`compute_state_root`] 的结果，作为 method AIR 的公开输入；其与
+/// preimage 的绑定由 flock 哈希证明承载（见 [`crate::state_root_binding`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StateRoot(pub FieldElement);
+pub struct StateRoot(pub [u8; 32]);
 
 impl StateRoot {
     /// 零状态根（用于初始化场景）。
     #[must_use]
     pub fn zero() -> Self {
-        Self(FieldElement::ZERO)
+        Self([0u8; 32])
     }
 
-    /// 从字段构造。
+    /// 从 32 字节摘要构造。
     #[must_use]
-    pub const fn from_field(f: FieldElement) -> Self {
-        Self(f)
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 
-    /// 返回内部字段。
+    /// Compatibility constructor from a field-element representation of a
+    /// root (wire/legacy fixtures).  The 32-byte big-endian encoding is the
+    /// canonical in-memory form.
     #[must_use]
-    pub const fn field(self) -> FieldElement {
+    pub fn from_field(f: FieldElement) -> Self {
+        Self(f.to_bytes_be())
+    }
+
+    /// 返回内部摘要字节。
+    #[must_use]
+    pub const fn bytes(self) -> [u8; 32] {
         self.0
     }
+}
+
+/// Domain-separation tag prefixed to the hot-v30 bytes before the BLAKE3
+/// root digest; the tag is part of the proven statement preimage.
+pub const STATE_ROOT_DOMAIN: &[u8] = b"zchain.texas_poker.state_root.v1";
+
+/// Root digest over domain-separated canonical bytes, using the exact
+/// BLAKE3 chain function the flock backend proves.
+#[must_use]
+pub fn state_root_digest(preimage: &[u8]) -> [u8; 32] {
+    let mut message = STATE_ROOT_DOMAIN.to_vec();
+    message.extend_from_slice(preimage);
+    crate::blake3_flock::blake3_chain_digest(&message)
+}
+
+/// 把 32 字节 root 分解为 8 个大端 u32 字，供 Fiat–Shamir channel 的
+/// `mix_u32s` 无损吸收。
+#[must_use]
+pub fn state_root_to_u32_words(root: StateRoot) -> [u32; 8] {
+    let bytes = root.bytes();
+    let mut words = [0u32; 8];
+    for (i, word) in words.iter_mut().enumerate() {
+        let offset = 4 * i;
+        *word = u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]);
+    }
+    words
 }
 
 /// Project the full Poseidon252 root into the four M31 limbs used by the current
@@ -70,7 +112,7 @@ impl StateRoot {
 #[must_use]
 pub fn state_root_to_air_limbs(root: StateRoot) -> [M31; 4] {
     let mut material = b"zchain.texas_poker.air_state_root.v1".to_vec();
-    material.extend_from_slice(&root.field().to_bytes_be());
+    material.extend_from_slice(&root.bytes());
     let digest = blake2b_256(&material);
     let mut limbs = [M31::from(0u32); 4];
     for (i, limb) in limbs.iter_mut().enumerate() {
@@ -88,12 +130,11 @@ pub fn state_root_to_air_limbs(root: StateRoot) -> [M31; 4] {
 
 /// Compute the domain-separated commitment used for a table name.
 ///
-/// The full-width value is included in the canonical table-state preimage.
-/// Method AIRs with only four M31 columns bind its domain-separated projection
-/// through [`state_root_to_air_limbs`].
+/// The full-width value is included in the canonical table-state preimage
+/// and consumed directly by lifecycle AIR trace construction.
 #[must_use]
-pub fn table_name_commitment(name: &str) -> StateRoot {
-    StateRoot(poseidon_string(name))
+pub fn table_name_commitment(name: &str) -> FieldElement {
+    poseidon_string(name)
 }
 
 /// 把 u64 编码为 Starknet `FieldElement`。
@@ -163,22 +204,60 @@ pub fn hot_table_state_preimage(
 
 /// Compute the ObjectDb-compatible hot-v30 state root.
 ///
+/// The root is the domain-separated BLAKE3 chain digest over the exact hot
+/// bytes; its binding to the transcript preimage is carried by a flock
+/// proof ([`crate::state_root_binding`]), never by host recomputation on
+/// the verification path.
+///
+/// # Errors
+///
+/// 当字段编码失败（如 ObjectID 序列化异常）时返回错误。
+/// Fixed sentinel preimage for the ObjectDb-absence placeholder table (the
+/// hot-v30 codec rejects its empty governance creator, so it cannot be
+/// encoded as ordinary hot bytes).  The absence root is still a uniform,
+/// provable `BLAKE3(domain || sentinel)` statement.
+pub const ABSENT_TABLE_PREIMAGE: &[u8] = b"zchain.texas_poker.absent.v1";
+
+/// Whether `table` is the exact in-memory ObjectDb-absence placeholder that
+/// `create_table` proves a transition from.
+pub fn is_absent_table(
+    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+) -> bool {
+    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+    let absent = TexasPokerTable::new(table.id, String::new(), EMPTY_PLAYER, 2, 1, 1);
+    table == &absent
+}
+
+/// Compute the ObjectDb-compatible hot-v30 state root.
+///
+/// The root is the domain-separated BLAKE3 chain digest over the exact hot
+/// bytes (or the fixed absence sentinel); its binding to the transcript
+/// preimage is carried by a flock proof ([]),
+/// never by host recomputation on the verification path.
+///
 /// # Errors
 ///
 /// 当字段编码失败（如 ObjectID 序列化异常）时返回错误。
 pub fn compute_state_root(
     table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<StateRoot> {
-    // `create_table` proves transition from ObjectDb absence.  The VM represents that absence
-    // with one exact in-memory placeholder; it has no governance opening and therefore maps to
-    // the distinguished zero root rather than a hot-v30 object commitment.
-    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
-    let absent = TexasPokerTable::new(table.id, String::new(), EMPTY_PLAYER, 2, 1, 1);
-    if table == &absent {
-        return Ok(StateRoot::zero());
+    if is_absent_table(table) {
+        return Ok(StateRoot(state_root_digest(ABSENT_TABLE_PREIMAGE)));
     }
-    let preimage = hot_table_state_preimage(table)?;
-    Ok(StateRoot(poseidon_hash_many(&preimage)))
+    let bytes = hot_table_state_bytes(table)?;
+    Ok(StateRoot(state_root_digest(&bytes)))
+}
+
+/// Canonical hot-v30 bytes underlying the state-root statement.
+///
+/// Both the prover (statement construction) and the verifier (deterministic
+/// derivation from the transcript-bound preimage) use this exact encoding,
+/// so the flock statement's public preimage is never ambiguous.
+pub fn hot_table_state_bytes(
+    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+) -> TexasAirResult<Vec<u8>> {
+    poker_l1::vm::contracts::texas_poker::state_codec::encode_hot_table_state(table)
+        .map_err(|e| TexasAirError::StateRootError(format!("encode Texas hot table: {e}")))
 }
 
 /// 计算 seats 的 Merkle root。
@@ -480,7 +559,7 @@ mod tests {
 
     #[test]
     fn test_state_root_zero() {
-        assert_eq!(StateRoot::zero().field(), FieldElement::ZERO);
+        assert_eq!(StateRoot::zero().bytes(), [0u8; 32]);
     }
 
     #[test]

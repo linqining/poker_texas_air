@@ -14,7 +14,9 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::PrecompileCallBinding;
 use crate::prove_task::dispatch_call_digest;
-use crate::state_root::{StateRoot, field_element_to_u32_words, state_root_to_air_limbs};
+use crate::state_root::{
+    StateRoot, field_element_to_u32_words, state_root_to_air_limbs, state_root_to_u32_words,
+};
 
 /// Exact VM dispatch call whose digest is part of a method statement.
 ///
@@ -137,7 +139,7 @@ impl TexasPublicInputs {
     /// 用显式 preimage 构造，并**自动重算** state_root 使其与 image 一致。
     ///
     /// 适用于机制测试（构造合成 trace 但无真实 table）：传入任意 24 元素 image，
-    /// root 由 `Poseidon252(image)` 重算，确保 `verify_roots()` 通过。
+    /// root 由域分隔 BLAKE3 over image 字节编码重算，确保配套的 proven binding 通过。
     #[must_use]
     pub fn with_consistent_roots(
         pre_image: Vec<FieldElement>,
@@ -147,8 +149,13 @@ impl TexasPublicInputs {
         hand_id: u32,
         call_seq: u32,
     ) -> Self {
-        let pre_state_root = StateRoot(starknet_crypto::poseidon_hash_many(&pre_image));
-        let post_state_root = StateRoot(starknet_crypto::poseidon_hash_many(&post_image));
+        let synthetic_root = |image: &[FieldElement]| {
+            StateRoot(crate::state_root::state_root_digest(
+                &crate::state_root_binding::synthetic_image_message(image),
+            ))
+        };
+        let pre_state_root = synthetic_root(&pre_image);
+        let post_state_root = synthetic_root(&post_image);
         Self {
             pre_image,
             post_image,
@@ -346,8 +353,8 @@ impl TexasPublicInputs {
 
         // 3-4. pre/post state_root（各 8 u32 word）。
         let mut roots_u32: Vec<u32> = Vec::with_capacity(16);
-        roots_u32.extend_from_slice(&field_element_to_u32_words(self.pre_state_root.field()));
-        roots_u32.extend_from_slice(&field_element_to_u32_words(self.post_state_root.field()));
+        roots_u32.extend_from_slice(&state_root_to_u32_words(self.pre_state_root));
+        roots_u32.extend_from_slice(&state_root_to_u32_words(self.post_state_root));
         channel.mix_u32s(&roots_u32);
 
         // 5. 完整业务 trace 行。长度与 presence tag 都进入 transcript，
@@ -420,48 +427,81 @@ impl TexasPublicInputs {
         channel.mix_u64(self.post_version);
     }
 
-    /// 验证方从完整 resolved-v29 image 解码 table，再按 ObjectDb hot-v30 projection 重算 root。
-    ///
-    /// 这是 state_root 绑定的「验证」半边（mix_into 是「承诺」半边）。
-    /// 验证方拿到公开输入后，用被审计的 Starknet Poseidon252 重算哈希，确保公开输入
-    /// 与承诺的 root 自洽。canonical table 解码由需要业务语义绑定的 verifier hook
-    /// 或 Orchestrator 完整 dispatch replay 完成。仅没有 dispatch call 的 synthetic mechanism
-    /// tests 保留 arbitrary-image 的直接 Poseidon fallback。
-    ///
-    /// # Errors
-    ///
-    /// 当 pre/post_image 为空，或重算的 root 与公开的 root 不符时返回错误。
-    pub fn verify_roots(&self) -> TexasAirResult<()> {
+    /// Derive both endpoint statements deterministically from the public
+    /// inputs: real tables encode through the hot-v30 projection; synthetic
+    /// mechanism-test images (no dispatch call) use the canonical image-byte
+    /// encoding.  Prover and verifier share this derivation, so the flock
+    /// binding statement is never ambiguous.
+    pub fn root_endpoint_statements(
+        &self,
+    ) -> TexasAirResult<(
+        crate::state_root_binding::StateRootEndpointStatement,
+        crate::state_root_binding::StateRootEndpointStatement,
+    )> {
         use crate::error::TexasAirError;
         if self.pre_image.is_empty() || self.post_image.is_empty() {
             return Err(TexasAirError::StateRootError(
                 "state-root preimage must not be empty".into(),
             ));
         }
-        let recompute = |image: &[FieldElement], label: &str| -> TexasAirResult<StateRoot> {
-            match crate::state_root::table_from_state_preimage(image) {
-                Ok(table) => crate::state_root::compute_state_root(&table),
-                Err(_) if self.dispatch_call.is_none() => {
-                    Ok(StateRoot(starknet_crypto::poseidon_hash_many(image)))
+        let endpoint = |image: &[FieldElement],
+                        root: StateRoot,
+                        label: &str|
+         -> TexasAirResult<crate::state_root_binding::StateRootEndpointStatement> {
+            let preimage = match crate::state_root::table_from_state_preimage(image) {
+                Ok(table) if crate::state_root::is_absent_table(&table) => {
+                    crate::state_root::ABSENT_TABLE_PREIMAGE.to_vec()
                 }
-                Err(error) => Err(TexasAirError::StateRootError(format!(
-                    "{label} state image is not a canonical resolved Texas table: {error}"
-                ))),
+                Ok(table) => crate::state_root::hot_table_state_bytes(&table).map_err(|error| {
+                    TexasAirError::StateRootError(format!(
+                        "{label} state image hot projection failed: {error}"
+                    ))
+                })?,
+                Err(_) if self.dispatch_call.is_none() => {
+                    crate::state_root_binding::synthetic_image_message(image)
+                }
+                Err(error) => {
+                    return Err(TexasAirError::StateRootError(format!(
+                        "{label} state image is not a canonical resolved Texas table: {error}"
+                    )))
+                }
+            };
+            // The endpoint statement message is the domain-prefixed preimage,
+            // matching `compute_state_root` and the flock chain exactly.
+            let endpoint =
+                crate::state_root_binding::StateRootEndpointStatement::from_preimage(preimage);
+            if endpoint.root != root.bytes() {
+                return Err(TexasAirError::StateRootError(format!(
+                    "{label} claimed state root does not match the derived preimage"
+                )));
             }
+            Ok(endpoint)
         };
-        let pre_recomputed = recompute(&self.pre_image, "pre")?;
-        let post_recomputed = recompute(&self.post_image, "post")?;
-        if pre_recomputed != self.pre_state_root {
-            return Err(TexasAirError::StateRootError(
-                "pre_state_root 与 pre_image 重算不符（state_root 绑定失败）".into(),
-            ));
-        }
-        if post_recomputed != self.post_state_root {
-            return Err(TexasAirError::StateRootError(
-                "post_state_root 与 post_image 重算不符（state_root 绑定失败）".into(),
-            ));
-        }
-        Ok(())
+        let pre = endpoint(&self.pre_image, self.pre_state_root, "pre")?;
+        let post = endpoint(&self.post_image, self.post_state_root, "post")?;
+        Ok((pre, post))
+    }
+
+    /// 验证方建立 `root = H(preimage)` 绑定——host 哈希重算已移除。
+    ///
+    /// 这是 state_root 绑定的「验证」半边（mix_into 是「承诺」半边）。
+    /// 验证方从 transcript 携带的 image 确定性导出两端点 statement
+    /// （真实 table 走 hot-v30 编码，无 dispatch call 的 synthetic mechanism
+    /// 测试走 image 字节编码），然后要求一个 flock 哈希证明恰好覆盖这两个
+    /// `(message, root)` 语句——`root = BLAKE3(message)` 由证明承载，host
+    /// 不再重算任何哈希。canonical table 解码失败且非 synthetic 场景时
+    /// fail-closed。
+    ///
+    /// # Errors
+    ///
+    /// 当 pre/post_image 为空、image 不是 canonical table（且非 synthetic
+    /// 场景）、或证明未恰好覆盖两个端点语句时返回错误。
+    pub fn verify_roots(
+        &self,
+        binding: &crate::state_root_binding::ArchivedStateRootBindingProof,
+    ) -> TexasAirResult<()> {
+        let (pre_endpoint, post_endpoint) = self.root_endpoint_statements()?;
+        crate::state_root_binding::verify_state_root_binding(binding, &pre_endpoint, &post_endpoint)
     }
 
     /// Check that an independently reconstructed AIR compiles exactly this
@@ -493,32 +533,45 @@ mod tests {
 
     // ===== 阶段 2：state_root 绑定测试（soundness 关键）=====
 
+    fn proven_binding(
+        pi: &TexasPublicInputs,
+    ) -> crate::state_root_binding::ArchivedStateRootBindingProof {
+        crate::state_root_binding::prove_state_root_binding_for_inputs(pi)
+            .expect("consistent synthetic inputs should prove")
+    }
+
     #[test]
     fn test_verify_roots_accepts_consistent() {
-        // with_consistent_roots 自动重算 root，verify_roots 必通过。
+        // 自洽 PI + 覆盖两端点的 flock 绑定证明 → verify_roots 必通过。
         let pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
-        assert!(pi.verify_roots().is_ok(), "自洽 PI 的 verify_roots 应通过");
+        let binding = proven_binding(&pi);
+        assert!(
+            pi.verify_roots(&binding).is_ok(),
+            "自洽 PI 的 verify_roots 应通过"
+        );
     }
 
     #[test]
     fn test_verify_roots_rejects_tampered_root() {
-        // 篡改 pre_state_root（不改 image）→ 重算不符 → verify_roots 失败。
-        // 这验证了「验证方重算 Poseidon252(image) 并比对 root」这条绑定生效。
+        // 篡改 pre_state_root（不改 image、不改证明）→ 端点语句与证明脱钩 → 失败。
+        // 这验证了「root = BLAKE3(preimage) 由证明承载」这条绑定生效。
         let mut pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
+        let binding = proven_binding(&pi);
         pi.pre_state_root = StateRoot::from_field(FieldElement::ONE);
         assert!(
-            pi.verify_roots().is_err(),
+            pi.verify_roots(&binding).is_err(),
             "篡改 root 后 verify_roots 应失败"
         );
     }
 
     #[test]
     fn test_verify_roots_rejects_tampered_image() {
-        // 篡改 image（不改 root）→ 重算不符 → verify_roots 失败。
+        // 篡改 image（不改 root、不改证明）→ 端点语句与证明脱钩 → 失败。
         let mut pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
+        let binding = proven_binding(&pi);
         pi.pre_image[0] = FieldElement::from(12345u64);
         assert!(
-            pi.verify_roots().is_err(),
+            pi.verify_roots(&binding).is_err(),
             "篡改 image 后 verify_roots 应失败"
         );
     }
@@ -542,7 +595,18 @@ mod tests {
             expected_trace_row: None,
             component: None,
         };
-        assert!(pi.verify_roots().is_err(), "empty image must fail");
+        // The endpoint derivation must reject the empty image before any
+        // binding is consulted; use an arbitrary valid binding.
+        let endpoint = crate::state_root_binding::StateRootEndpointStatement::from_preimage(
+            Vec::new(),
+        );
+        let binding =
+            crate::state_root_binding::prove_state_root_binding(endpoint.clone(), endpoint)
+                .expect("dummy binding proves");
+        assert!(
+            pi.verify_roots(&binding).is_err(),
+            "empty image must fail"
+        );
     }
 
     #[test]

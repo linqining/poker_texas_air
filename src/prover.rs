@@ -33,6 +33,8 @@ pub struct CreateTableProof {
     pub air: CreateTableAir,
     /// trace log_size。
     pub log_size: u32,
+    /// Flock-proven `root = BLAKE3(hot bytes)` binding for both endpoints.
+    pub root_binding: crate::state_root_binding::ArchivedStateRootBindingProof,
     /// Prover-declared public inputs (diagnostic/test transport only).
     /// Production verification must supply an independent expected value.
     pub public_inputs: TexasPublicInputs,
@@ -51,6 +53,8 @@ pub struct MethodProof<A: TexasAir> {
     pub log_size: u32,
     /// trace 列数（用于 verifier 重建 commitment）。
     pub num_columns: usize,
+    /// Flock-proven `root = BLAKE3(hot bytes)` binding for both endpoints.
+    pub root_binding: crate::state_root_binding::ArchivedStateRootBindingProof,
     /// Prover-declared public inputs (diagnostic/test transport only).
     /// Production verification must supply an independent expected value.
     pub public_inputs: TexasPublicInputs,
@@ -77,7 +81,8 @@ pub fn prove_create_table(
         &trace.trace,
         CreateTableAir::num_columns(),
     )?;
-    public_inputs.verify_roots()?;
+    let root_binding = crate::state_root_binding::prove_state_root_binding_for_inputs(&public_inputs)?;
+    public_inputs.verify_roots(&root_binding)?;
     public_inputs.verify_air_statement(&trace.air.statement())?;
     let expected_trace_row =
         public_inputs.require_expected_trace_row(CreateTableAir::num_columns())?;
@@ -131,6 +136,7 @@ pub fn prove_create_table(
         stark_proof,
         air: trace.air.clone(),
         log_size,
+        root_binding,
         public_inputs,
     })
 }
@@ -190,7 +196,8 @@ where
         )));
     }
     let public_inputs = prepare_public_inputs_for_trace(public_inputs, trace, num_columns)?;
-    public_inputs.verify_roots()?;
+    let root_binding = crate::state_root_binding::prove_state_root_binding_for_inputs(&public_inputs)?;
+    public_inputs.verify_roots(&root_binding)?;
     public_inputs.verify_air_statement(&statement)?;
     let expected_trace_row = public_inputs.require_expected_trace_row(num_columns)?;
 
@@ -251,6 +258,7 @@ where
         air,
         log_size,
         num_columns,
+        root_binding,
         public_inputs,
     })
 }

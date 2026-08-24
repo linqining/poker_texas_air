@@ -57,13 +57,14 @@ use crate::verified_chain::{VerificationReceipt, verify_method_against_and_issue
 /// Wire-format magic for a stage-3 dual proof package.
 pub const DUAL_PROOF_MAGIC: [u8; 8] = *b"ZPDUAL03";
 /// Current dual-proof envelope version.
-pub const DUAL_PROOF_VERSION: u8 = 1;
+pub const DUAL_PROOF_VERSION: u8 = 2;
 /// Maximum accepted serialized Stwo proof size.
 pub const MAX_STARK_PROOF_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum accepted canonical poker-precompile request size.
 pub const MAX_CRYPTO_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
-const HEADER_LEN: usize = 8 + 4 + 4 + 4;
+const HEADER_LEN: usize = 8 + 4 + 4 + 4 + 4;
+const MAX_ROOT_BINDING_BYTES: usize = 4 * 1024 * 1024;
 
 /// Untrusted transport envelope containing both proof halves.
 ///
@@ -77,6 +78,7 @@ pub struct DualProofBundle {
     abi_version: u8,
     stark_proof_bytes: Vec<u8>,
     crypto_request_bytes: Vec<u8>,
+    root_binding_bytes: Vec<u8>,
 }
 
 impl DualProofBundle {
@@ -110,6 +112,12 @@ impl DualProofBundle {
         &self.stark_proof_bytes
     }
 
+    /// Serialized proven state-root binding bytes.
+    #[must_use]
+    pub fn root_binding(&self) -> &[u8] {
+        &self.root_binding_bytes
+    }
+
     /// Complete canonical poker-precompile request bytes.
     #[must_use]
     pub fn crypto_request_bytes(&self) -> &[u8] {
@@ -132,8 +140,14 @@ impl DualProofBundle {
         let request_len = u32::try_from(self.crypto_request_bytes.len()).map_err(|_| {
             TexasAirError::SerializationError("crypto request length exceeds u32".into())
         })?;
+        let binding_len = u32::try_from(self.root_binding_bytes.len()).map_err(|_| {
+            TexasAirError::SerializationError("root binding length exceeds u32".into())
+        })?;
         let mut out = Vec::with_capacity(
-            HEADER_LEN + self.stark_proof_bytes.len() + self.crypto_request_bytes.len(),
+            HEADER_LEN
+                + self.stark_proof_bytes.len()
+                + self.crypto_request_bytes.len()
+                + self.root_binding_bytes.len(),
         );
         out.extend_from_slice(&DUAL_PROOF_MAGIC);
         out.extend_from_slice(&[
@@ -144,8 +158,10 @@ impl DualProofBundle {
         ]);
         out.extend_from_slice(&proof_len.to_le_bytes());
         out.extend_from_slice(&request_len.to_le_bytes());
+        out.extend_from_slice(&binding_len.to_le_bytes());
         out.extend_from_slice(&self.stark_proof_bytes);
         out.extend_from_slice(&self.crypto_request_bytes);
+        out.extend_from_slice(&self.root_binding_bytes);
         Ok(out)
     }
 
@@ -184,10 +200,16 @@ impl DualProofBundle {
         let proof_len = u32::from_le_bytes(bytes[12..16].try_into().expect("fixed slice")) as usize;
         let request_len =
             u32::from_le_bytes(bytes[16..20].try_into().expect("fixed slice")) as usize;
+        let binding_len =
+            u32::from_le_bytes(bytes[20..24].try_into().expect("fixed slice")) as usize;
         validate_lengths(proof_len, request_len)?;
+        if binding_len > MAX_ROOT_BINDING_BYTES {
+            return Err(wire_error("dual proof root binding length is invalid"));
+        }
         let expected_len = HEADER_LEN
             .checked_add(proof_len)
             .and_then(|len| len.checked_add(request_len))
+            .and_then(|len| len.checked_add(binding_len))
             .ok_or_else(|| wire_error("dual proof total length overflow"))?;
         if bytes.len() != expected_len {
             return Err(wire_error(format!(
@@ -196,13 +218,15 @@ impl DualProofBundle {
             )));
         }
         let proof_end = HEADER_LEN + proof_len;
+        let request_end = proof_end + request_len;
         Ok(Self {
             version,
             method_kind,
             precompile_id,
             abi_version,
             stark_proof_bytes: bytes[HEADER_LEN..proof_end].to_vec(),
-            crypto_request_bytes: bytes[proof_end..].to_vec(),
+            crypto_request_bytes: bytes[proof_end..request_end].to_vec(),
+            root_binding_bytes: bytes[request_end..].to_vec(),
         })
     }
 }
@@ -268,6 +292,7 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
                 SHUFFLE_ABI_VERSION,
                 &proof.stark_proof,
                 request_bytes,
+                &proof.root_binding,
             )
         }
         PreparedMethod::Reconstruction {
@@ -296,6 +321,7 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
                 RECONSTRUCTION_V3_ABI_VERSION,
                 &proof.stark_proof,
                 request_bytes,
+                &proof.root_binding,
             )
         }
         PreparedMethod::Fold {
@@ -319,6 +345,7 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
                 LEAVE_DLEQ_ABI_VERSION,
                 &proof.stark_proof,
                 request_bytes,
+                &proof.root_binding,
             )
         }
         PreparedMethod::Reveal {
@@ -347,6 +374,7 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
                 REVEAL_TOKEN_ABI_VERSION,
                 &proof.stark_proof,
                 request_bytes,
+                &proof.root_binding,
             )
         }
     }
@@ -417,12 +445,14 @@ pub fn dual_proof_from_archived(
         ));
     }
     let stark = archive.decode_stark()?;
+    let root_binding = archive.decode_root_binding()?;
     bundle_from_stark(
         method_kind,
         precompile_id,
         abi_version,
         &stark,
         request_bytes,
+        &root_binding,
     )
 }
 
@@ -461,11 +491,13 @@ pub fn verify_dual_proof(
             let row_values = row.to_vec();
             public_inputs.bind_expected_trace_row(&row_values)?;
             let stark_proof = decode_stark(&bundle.stark_proof_bytes)?;
+            let root_binding = decode_root_binding(&bundle.root_binding_bytes)?;
             let proof = MethodProof {
                 stark_proof,
                 air: air.clone(),
                 log_size: air.log_size,
                 num_columns: SubmitShuffleV2Air::num_columns(),
+                root_binding,
                 public_inputs: public_inputs.clone(),
             };
             let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
@@ -484,11 +516,13 @@ pub fn verify_dual_proof(
             let row_values = row.to_vec();
             public_inputs.bind_expected_trace_row(&row_values)?;
             let stark_proof = decode_stark(&bundle.stark_proof_bytes)?;
+            let root_binding = decode_root_binding(&bundle.root_binding_bytes)?;
             let proof = MethodProof {
                 stark_proof,
                 air: air.clone(),
                 log_size: air.log_size,
                 num_columns: SubmitReconstructDeckAir::num_columns(),
+                root_binding,
                 public_inputs: public_inputs.clone(),
             };
             let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
@@ -507,11 +541,13 @@ pub fn verify_dual_proof(
             let row_values = row.to_vec();
             public_inputs.bind_expected_trace_row(&row_values)?;
             let stark_proof = decode_stark(&bundle.stark_proof_bytes)?;
+            let root_binding = decode_root_binding(&bundle.root_binding_bytes)?;
             let proof = MethodProof {
                 stark_proof,
                 air: air.clone(),
                 log_size: air.log_size,
                 num_columns: FoldWithProofAir::num_columns(),
+                root_binding,
                 public_inputs: public_inputs.clone(),
             };
             let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
@@ -530,11 +566,13 @@ pub fn verify_dual_proof(
             let row_values = row.to_vec();
             public_inputs.bind_expected_trace_row(&row_values)?;
             let stark_proof = decode_stark(&bundle.stark_proof_bytes)?;
+            let root_binding = decode_root_binding(&bundle.root_binding_bytes)?;
             let proof = MethodProof {
                 stark_proof,
                 air: air.clone(),
                 log_size: air.log_size,
                 num_columns: SubmitPlayerRevealTokensAir::num_columns(),
+                root_binding,
                 public_inputs: public_inputs.clone(),
             };
             let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
@@ -989,11 +1027,14 @@ fn bundle_from_stark(
     abi_version: u8,
     stark_proof: &StarkProof<Poseidon252MerkleHasher>,
     crypto_request_bytes: Vec<u8>,
+    root_binding: &crate::state_root_binding::ArchivedStateRootBindingProof,
 ) -> TexasAirResult<DualProofBundle> {
     let stark_proof_bytes = bincode_options()
         .serialize(stark_proof)
         .map_err(|error| wire_error(format!("Stwo proof serialization failed: {error}")))?;
     validate_lengths(stark_proof_bytes.len(), crypto_request_bytes.len())?;
+    let root_binding_bytes = borsh::to_vec(root_binding)
+        .map_err(|error| wire_error(format!("root binding serialization failed: {error}")))?;
     Ok(DualProofBundle {
         version: DUAL_PROOF_VERSION,
         method_kind,
@@ -1001,6 +1042,15 @@ fn bundle_from_stark(
         abi_version,
         stark_proof_bytes,
         crypto_request_bytes,
+        root_binding_bytes,
+    })
+}
+
+fn decode_root_binding(
+    bytes: &[u8],
+) -> TexasAirResult<crate::state_root_binding::ArchivedStateRootBindingProof> {
+    borsh::from_slice(bytes).map_err(|error| {
+        wire_error(format!("dual proof root binding decoding failed: {error}"))
     })
 }
 

@@ -2546,6 +2546,7 @@ impl MethodBackend for NativeMethodProofBackend {
             proof.log_size,
             proof.num_columns,
             &proof.stark_proof,
+            &proof.root_binding,
         )?;
         let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
         Ok(NativeMethodProofOutput { receipt, archive })
@@ -2593,6 +2594,7 @@ impl MethodBackend for ArchivedVerificationBackend<'_> {
             air: air.clone(),
             log_size: air.log_size(),
             num_columns,
+            root_binding: self.archive.decode_root_binding()?,
             public_inputs: public_inputs.clone(),
         };
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

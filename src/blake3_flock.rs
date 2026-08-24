@@ -265,23 +265,12 @@ impl HashProofProvider for FlockProvider {
                 "hash proof batch must not be empty".into(),
             ));
         }
-        let mut chains = Vec::new();
-        let mut merkles = Vec::new();
-        let mut i = 0usize;
-        while i < statements.len() {
-            if let Some(run) = recognize_path_run(statements, i) {
-                merkles.push(prove_merkle_run(statements, &run)?);
-                i += run.len;
-                continue;
-            }
-            chains.push(prove_chain_statement(&statements[i], i as u32)?);
-            i += 1;
-        }
-        Ok(ArchivedHashProof::Flock(ArchivedFlockHashesProof {
-            statements: statements.to_vec(),
-            chains,
-            merkles,
-        }))
+        // Witness generation over the padded chain/merkle schedules uses
+        // deep stacks (and nested rayon workers) in debug builds; run it
+        // inside a dedicated large-stack thread pool so callers on default
+        // test/rayon stacks never overflow.
+        let statements = statements.to_vec();
+        flock_pool().install(|| prove_statements_on_stack(&statements))
     }
 
     fn verify_proof(&self, proof: &ArchivedHashProof) -> TexasAirResult<()> {
@@ -341,6 +330,39 @@ impl HashProofProvider for FlockProvider {
     }
 }
 
+static FLOCK_POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+
+fn flock_pool() -> &'static rayon::ThreadPool {
+    FLOCK_POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .stack_size(64 * 1024 * 1024)
+            .build()
+            .expect("flock prover thread pool builds")
+    })
+}
+
+fn prove_statements_on_stack(
+    statements: &[Blake2bStatement],
+) -> TexasAirResult<ArchivedHashProof> {
+    let mut chains = Vec::new();
+    let mut merkles = Vec::new();
+    let mut i = 0usize;
+    while i < statements.len() {
+        if let Some(run) = recognize_path_run(statements, i) {
+            merkles.push(prove_merkle_run(statements, &run)?);
+            i += run.len;
+            continue;
+        }
+        chains.push(prove_chain_statement(&statements[i], i as u32)?);
+        i += 1;
+    }
+    Ok(ArchivedHashProof::Flock(ArchivedFlockHashesProof {
+        statements: statements.to_vec(),
+        chains,
+        merkles,
+    }))
+}
+
 fn prove_chain_statement(
     statement: &Blake2bStatement,
     index: u32,
@@ -359,7 +381,10 @@ fn prove_chain_statement(
             "preimage statement digest does not match the blake3 chain".into(),
         ));
     }
-    let setup = Blake3Setup::new(blocks.len());
+    let setup = Blake3Setup::with_profile(
+        blocks.len(),
+        flock_core::pcs::ligerito::LigeritoProfile::Slim,
+    );
     let mut ch = FsChallenger::new(FLOCK_CHAIN_DOMAIN);
     absorb_statement(&mut ch, statement);
     let (proof, commitment) = setup.prove_chain(&blocks, &mut ch);
@@ -382,7 +407,10 @@ fn verify_chain_statement(
     }
     let steps = blake3_chain_blocks(&statement.message).len();
     let bundle = unpack_chain(&archived.bundle)?;
-    let setup = Blake3Setup::new(steps);
+    let setup = Blake3Setup::with_profile(
+        steps,
+        flock_core::pcs::ligerito::LigeritoProfile::Slim,
+    );
     let mut ch = FsChallenger::new(FLOCK_CHAIN_DOMAIN);
     absorb_statement(&mut ch, statement);
     setup
@@ -424,7 +452,10 @@ fn prove_merkle_run(
     }
     let leaf = statements[run.start].digest;
     let root = statements[run.start + run.len - 1].digest;
-    let setup = Blake3Setup::new(nodes);
+    let setup = Blake3Setup::with_profile(
+        nodes,
+        flock_core::pcs::ligerito::LigeritoProfile::Slim,
+    );
     let mut ch = FsChallenger::new(FLOCK_MERKLE_DOMAIN);
     absorb_statement(&mut ch, &statements[run.start]);
     ch.observe_bytes(&root);
@@ -453,7 +484,10 @@ fn verify_merkle_run(
     }
     let nodes = run.len - 1;
     let bundle = unpack_merkle(&archived.bundle)?;
-    let setup = Blake3Setup::new(nodes);
+    let setup = Blake3Setup::with_profile(
+        nodes,
+        flock_core::pcs::ligerito::LigeritoProfile::Slim,
+    );
     let b_bits: Vec<bool> = run.b_bits.clone();
     let mut ch = FsChallenger::new(FLOCK_MERKLE_DOMAIN);
     absorb_statement(&mut ch, &statements[run.start]);

@@ -154,8 +154,8 @@ impl OuterAggregateBundle {
         out.extend_from_slice(&self.first_call_seq.to_le_bytes());
         out.extend_from_slice(&self.pre_version.to_le_bytes());
         out.extend_from_slice(&self.post_version.to_le_bytes());
-        out.extend_from_slice(&self.pre_state_root.field().to_bytes_be());
-        out.extend_from_slice(&self.post_state_root.field().to_bytes_be());
+        out.extend_from_slice(&self.pre_state_root.bytes());
+        out.extend_from_slice(&self.post_state_root.bytes());
         out.extend_from_slice(&self.aggregate_digest);
         debug_assert_eq!(out.len(), HEADER_LEN);
         for child in encoded_children {
@@ -464,8 +464,8 @@ fn aggregate_digest(
     material.extend_from_slice(&bundle.first_call_seq.to_le_bytes());
     material.extend_from_slice(&bundle.pre_version.to_le_bytes());
     material.extend_from_slice(&bundle.post_version.to_le_bytes());
-    material.extend_from_slice(&bundle.pre_state_root.field().to_bytes_be());
-    material.extend_from_slice(&bundle.post_state_root.field().to_bytes_be());
+    material.extend_from_slice(&bundle.pre_state_root.bytes());
+    material.extend_from_slice(&bundle.post_state_root.bytes());
 
     for (index, ((child, receipt), binding)) in bundle
         .children
@@ -503,8 +503,8 @@ fn append_receipt(material: &mut Vec<u8>, receipt: &VerificationReceipt) {
     material.extend_from_slice(&receipt.call_seq().to_le_bytes());
     material.extend_from_slice(&receipt.pre_version().to_le_bytes());
     material.extend_from_slice(&receipt.post_version().to_le_bytes());
-    material.extend_from_slice(&receipt.pre_state_root().field().to_bytes_be());
-    material.extend_from_slice(&receipt.post_state_root().field().to_bytes_be());
+    material.extend_from_slice(&receipt.pre_state_root().bytes());
+    material.extend_from_slice(&receipt.post_state_root().bytes());
     material.extend_from_slice(&receipt.dispatch_call_digest());
     material.extend_from_slice(&receipt.log_size().to_le_bytes());
     material.extend_from_slice(&(receipt.num_columns() as u64).to_le_bytes());
@@ -551,9 +551,7 @@ fn decode_root(bytes: &[u8]) -> TexasAirResult<StateRoot> {
     let root_bytes: &[u8; 32] = bytes
         .try_into()
         .map_err(|_| wire_error("state root must contain 32 bytes"))?;
-    let field = FieldElement::from_bytes_be(root_bytes)
-        .map_err(|_| wire_error("state root is not a canonical field element"))?;
-    Ok(StateRoot::from_field(field))
+    Ok(StateRoot::from_bytes(*root_bytes))
 }
 
 fn hash256(domain: &[u8], payload: &[u8]) -> [u8; 32] {

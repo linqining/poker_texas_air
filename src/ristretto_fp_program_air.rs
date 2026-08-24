@@ -11,6 +11,7 @@
 use bincode::Options;
 use borsh::{BorshDeserialize, BorshSerialize};
 use num_bigint::BigUint;
+use num_integer::Integer;
 use num_traits::{One, Zero};
 use rayon::prelude::*;
 use stwo::core::channel::Channel;
@@ -511,8 +512,7 @@ impl RistrettoFpProgramBuilder {
     /// Append `a*b`, including the committed quotient value.
     pub fn multiply(&mut self, a: u16, b: u16) -> TexasAirResult<u16> {
         let product = big_uint(&self.value(a)?) * big_uint(&self.value(b)?);
-        let quotient = &product / modulus();
-        let remainder = &product % modulus();
+        let (quotient, remainder) = product.div_rem(modulus());
         let q = self.push_value(limbs(&quotient))?;
         let out = self.push_value(limbs(&remainder))?;
         self.ops
@@ -543,7 +543,7 @@ impl RistrettoFpProgramBuilder {
                 "Fp program exceeds its maximum value count".into(),
             ));
         }
-        if big_uint(&value) >= modulus() {
+        if big_uint(&value) >= *modulus() {
             return Err(TexasAirError::SpecViolation(
                 "Fp program value is noncanonical".into(),
             ));
@@ -638,10 +638,8 @@ fn carry_table_stripes(log_size: u32) -> usize {
 
 static MODULUS: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
 
-fn modulus() -> BigUint {
-    MODULUS
-        .get_or_init(|| (BigUint::one() << 255u32) - BigUint::from(19u32))
-        .clone()
+fn modulus() -> &'static BigUint {
+    MODULUS.get_or_init(|| (BigUint::one() << 255u32) - BigUint::from(19u32))
 }
 
 fn big_uint(value: &[u8; LIMBS]) -> BigUint {
@@ -819,7 +817,7 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
         .collect::<Vec<_>>();
     let mut canonicity_witnesses = Vec::with_capacity(program.values.len());
     for (value_index, value) in program.values.iter().enumerate() {
-        if big_uint(value) >= modulus() {
+        if big_uint(value) >= *modulus() {
             return Err(TexasAirError::SpecViolation(
                 "Fp program value is noncanonical".into(),
             ));
@@ -865,7 +863,7 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
                 let (k_negative, k_magnitude) = if subtract {
                     (a_int < b_int, a_int < b_int)
                 } else {
-                    (false, a_int + b_int >= modulus())
+                    (false, a_int + b_int >= *modulus())
                 };
                 let mut carry_in: i64 = 0;
                 let mut carries = Vec::with_capacity(LIMB_COUNT);
@@ -926,8 +924,7 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
                     TexasAirError::SpecViolation("Fp program quotient is out of bounds".into())
                 })?;
                 let product = &big_uint(a_value) * &big_uint(b_value);
-                let expected_q = &product / modulus();
-                let expected_out = &product % modulus();
+                let (expected_q, expected_out) = product.div_rem(modulus());
                 if limbs(&expected_q) != *q_value || limbs(&expected_out) != *out_value {
                     return Err(TexasAirError::SpecViolation(
                         "Fp program multiplication relation is invalid".into(),
@@ -994,7 +991,7 @@ static SQRT_M1: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
 fn sqrt_m1() -> BigUint {
     SQRT_M1
         .get_or_init(|| {
-            BigUint::from(2u32).modpow(&((&modulus() - BigUint::one()) >> 2u32), &modulus())
+            BigUint::from(2u32).modpow(&((modulus() - BigUint::one()) >> 2u32), modulus())
         })
         .clone()
 }
@@ -1004,7 +1001,7 @@ fn nonnegative_sqrt(value: &BigUint) -> Option<BigUint> {
         return Some(BigUint::from(0u32));
     }
     let p = modulus();
-    let mut root = value.modpow(&((&p + BigUint::from(3u32)) >> 3u32), &p);
+    let mut root = value.modpow(&((p + BigUint::from(3u32)) >> 3u32), p);
     if multiply_big(&root, &root) != *value {
         root = multiply_big(&root, &sqrt_m1());
     }
@@ -1012,7 +1009,7 @@ fn nonnegative_sqrt(value: &BigUint) -> Option<BigUint> {
         return None;
     }
     Some(if (&root & BigUint::one()) == BigUint::one() {
-        &p - root
+        p - &root
     } else {
         root
     })
@@ -2146,7 +2143,7 @@ pub fn prove_ristretto_fp_program_sqrt_ratio(
     let p = modulus();
     let u_value = big_uint(u);
     let v_value = big_uint(v);
-    if u_value >= p || v_value >= p {
+    if u_value >= *p || v_value >= *p {
         return Err(TexasAirError::SpecViolation(
             "Ristretto sqrt_ratio program inputs must be canonical".into(),
         ));
@@ -2157,7 +2154,7 @@ pub fn prove_ristretto_fp_program_sqrt_ratio(
     } else if v_value.is_zero() {
         (false, BigUint::from(0u32))
     } else {
-        let ratio = multiply_big(&u_value, &v_value.modpow(&(&p - BigUint::from(2u32)), &p));
+        let ratio = multiply_big(&u_value, &v_value.modpow(&(p - BigUint::from(2u32)), p));
         if let Some(root) = nonnegative_sqrt(&ratio) {
             (true, root)
         } else {
@@ -2275,7 +2272,7 @@ fn negative_edwards_d() -> [u8; LIMBS] {
 fn canonical_decode_inverse_sqrt(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
     let p = modulus();
     let s = big_uint(encoding);
-    if s >= p {
+    if s >= *p {
         return Err(TexasAirError::SpecViolation(
             "Ristretto point encoding is noncanonical".into(),
         ));
@@ -2299,9 +2296,9 @@ fn canonical_decode_inverse_sqrt(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; 
     let root = nonnegative_sqrt(&target).ok_or_else(|| {
         TexasAirError::SpecViolation("Ristretto decode inverse square root does not exist".into())
     })?;
-    let mut inverse_sqrt = root.modpow(&(&p - BigUint::from(2u32)), &p);
+    let mut inverse_sqrt = root.modpow(&(p - BigUint::from(2u32)), p);
     if (&inverse_sqrt & BigUint::one()) == BigUint::one() {
-        inverse_sqrt = &p - inverse_sqrt;
+        inverse_sqrt = p - &inverse_sqrt;
     }
     Ok(limbs(&inverse_sqrt))
 }

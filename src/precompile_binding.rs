@@ -643,8 +643,8 @@ pub fn precompile_call_context(
     context.extend_from_slice(&call_seq.to_le_bytes());
     context.extend_from_slice(&pre_version.to_le_bytes());
     context.extend_from_slice(&post_version.to_le_bytes());
-    context.extend_from_slice(&pre_state_root.field().to_bytes_be());
-    context.extend_from_slice(&post_state_root.field().to_bytes_be());
+    context.extend_from_slice(&pre_state_root.bytes());
+    context.extend_from_slice(&post_state_root.bytes());
     context.extend_from_slice(&dispatch_call_digest);
     context
 }

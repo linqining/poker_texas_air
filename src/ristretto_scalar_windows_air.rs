@@ -6,6 +6,7 @@
 
 use bincode::Options;
 use borsh::{BorshDeserialize, BorshSerialize};
+use rayon::prelude::*;
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
@@ -416,8 +417,10 @@ pub fn prove_ristretto_scalar_windows_batch(
     }
     let log_size = batch_log_size(scalars.len());
     let trace = trace_columns_batch(scalars);
+    // Per-scalar canonical proofs are independent micro-STARKs; prove them in
+    // parallel instead of paying their PoW/FRI wall clocks sequentially.
     let rows = scalars
-        .iter()
+        .par_iter()
         .map(|scalar| {
             Ok(ArchivedRistrettoScalarWindowsRow {
                 scalar: *scalar,

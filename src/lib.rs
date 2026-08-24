@@ -21,13 +21,19 @@
 //!   混入 Fiat–Shamir；当前 method AIR 内没有嵌入 Poseidon verifier 组件
 //! - 直接复用 `poker_l1::vm::contracts::texas_poker::types::TexasPokerTable`（业务类型）
 
+#![cfg_attr(texas_release_tests, allow(unexpected_cfgs))]
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
 // Integration tests use this feature to exercise deliberately untrusted PoC
 // entry points. Refuse release artifacts that accidentally enable it through
 // `--all-features`; checked production APIs remain available without it.
-#[cfg(all(feature = "test-helpers", not(debug_assertions)))]
+// `cfg(test)` exempts the release *test harness* (`cargo test --release --lib`),
+// and the custom `texas_release_tests` cfg — set explicitly via
+// `RUSTFLAGS='--cfg=texas_release_tests'` — exempts deliberate release
+// integration-test runs. Both are test artifacts, not shippable builds.
+#[cfg(all(feature = "test-helpers", not(debug_assertions), not(test)))]
+#[cfg(not(texas_release_tests))]
 compile_error!("poker_texas_air/test-helpers must not be enabled in release builds");
 
 // ===== Layer 0: Method AIRs =====
@@ -49,6 +55,8 @@ mod prover_context;
 pub mod public_inputs;
 pub mod settlement_binding;
 pub mod state_root;
+/// Flock-proven state-root binding replacing host hash recomputation.
+pub mod state_root_binding;
 pub mod tagged_method;
 /// Fixed-width canonical state and selector ABI for the complete Texas VM surface.
 pub mod texas_canonical;

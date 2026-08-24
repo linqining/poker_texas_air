@@ -555,13 +555,11 @@ impl MethodBatchV2 {
         hasher.update(&last.call_seq.to_le_bytes());
         hasher.update(
             &crate::state_root::compute_state_root(&self.initial_table)?
-                .field()
-                .to_bytes_be(),
+                .bytes(),
         );
         hasher.update(
             &crate::state_root::compute_state_root(&self.final_table)?
-                .field()
-                .to_bytes_be(),
+                .bytes(),
         );
         for task in tasks {
             let command =
@@ -715,11 +713,9 @@ impl MethodPayloadV2 {
             pre_call_seq: task.pre_table.call_seq,
             post_call_seq: task.post_table.call_seq,
             pre_state_root: crate::state_root::compute_state_root(&task.pre_table)?
-                .field()
-                .to_bytes_be(),
+                .bytes(),
             post_state_root: crate::state_root::compute_state_root(&task.post_table)?
-                .field()
-                .to_bytes_be(),
+                .bytes(),
             canonical_command_digest: dispatch_call_digest(
                 &task.context,
                 &task.selector(),
