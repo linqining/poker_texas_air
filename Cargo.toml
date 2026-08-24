@@ -94,6 +94,11 @@ rayon = { workspace = true }
 num-bigint = "0.4.8"
 num-integer = "0.1.47"
 num-traits = "0.2"
+# curve25519 域算术后端：fiat-crypto 形式化验证的 u64 原语（与 halo2curves
+# 同源同版本）。curve25519-dalek 4.x 的 FieldElement 是 pub(crate) 无法导入，
+# 故在其后端之上实现 dalek 的单链 sqrt_ratio_i / invert 幂链，仅用于 host
+# 侧 witness 计算，AIR 约束不依赖。
+fiat-crypto = "0.2"
 # BLS12-381（密码学方法 AIR 用）
 blstrs = { workspace = true }
 ff = { workspace = true }

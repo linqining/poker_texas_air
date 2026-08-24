@@ -83,8 +83,22 @@ pub fn blake3_hash64(message: &[u8; 64]) -> [u8; 32] {
 /// is exactly the relation the flock chain statement proves.
 #[must_use]
 pub fn blake3_chain_blocks(message: &[u8]) -> Vec<Compression> {
+    blake3_chain_blocks_with_cv(message).0
+}
+
+/// Number of chain steps for a message of the given length: a pure function
+/// of the padded schedule above, shared by prove and verify so the two sides
+/// cannot drift apart.
+fn chain_steps(message_len: usize) -> usize {
+    let n_chunks = message_len.div_ceil(64);
+    MIN_CHAIN_STEPS.max(n_chunks.saturating_add(1).next_power_of_two())
+}
+
+/// [`blake3_chain_blocks`] plus the terminal chaining value it already
+/// computes, so prove paths need not re-compress the block vector.
+fn blake3_chain_blocks_with_cv(message: &[u8]) -> (Vec<Compression>, [u32; 8]) {
     let n_chunks = message.len().div_ceil(64);
-    let steps = MIN_CHAIN_STEPS.max(n_chunks.saturating_add(1).next_power_of_two());
+    let steps = chain_steps(message.len());
     let mut blocks: Vec<Compression> = Vec::with_capacity(steps.max(n_chunks + 1));
     let mut cv = BLAKE3_IV;
     let mut push = |cv: [u32; 8],
@@ -111,20 +125,38 @@ pub fn blake3_chain_blocks(message: &[u8]) -> Vec<Compression> {
     while blocks.len() < steps {
         cv = push(cv, [0u8; 64], 0, &mut blocks);
     }
-    blocks
+    (blocks, cv)
 }
 
-/// The digest of a preimage statement: the terminal chaining value of
-/// [`blake3_chain_blocks`].  Native evaluation is prover-side only; the
+/// The digest of a preimage statement: the terminal chaining value of the
+/// padded chain.  Computed streaming — each block's compression already
+/// yields the next chaining value, so the last one is the digest and no
+/// block vector is materialized.  Native evaluation is prover-side only; the
 /// verify path authenticates it through the flock chain proof.
 #[must_use]
 pub fn blake3_chain_digest(message: &[u8]) -> [u8; 32] {
-    let blocks = blake3_chain_blocks(message);
-    let last = blocks.last().expect("chain is never empty");
-    let state = blake3_compress(&last.0, &last.1, last.2, last.3, last.4);
-    let mut lo = [0u32; 8];
-    lo.copy_from_slice(&state[0..8]);
-    bytes32(&lo)
+    let n_chunks = message.len().div_ceil(64);
+    let steps = chain_steps(message.len());
+    let mut cv = BLAKE3_IV;
+    let mut advance = |cv: [u32; 8], block: [u8; 64], blen: u32| {
+        let state = blake3_compress(&cv, &words64(&block), 0, blen, 0);
+        let mut lo = [0u32; 8];
+        lo.copy_from_slice(&state[0..8]);
+        lo
+    };
+    for chunk in 0..n_chunks {
+        let mut block = [0u8; 64];
+        let hi = (64 * (chunk + 1)).min(message.len());
+        block[..hi - 64 * chunk].copy_from_slice(&message[64 * chunk..hi]);
+        cv = advance(cv, block, (hi - 64 * chunk) as u32);
+    }
+    let mut len_block = [0u8; 64];
+    len_block[..8].copy_from_slice(&(message.len() as u64).to_le_bytes());
+    cv = advance(cv, len_block, 64);
+    for _ in n_chunks + 1..steps {
+        cv = advance(cv, [0u8; 64], 0);
+    }
+    bytes32(&cv)
 }
 
 /// A proved preimage chain.
@@ -367,14 +399,7 @@ fn prove_chain_statement(
     statement: &Blake2bStatement,
     index: u32,
 ) -> TexasAirResult<ArchivedFlockChain> {
-    let blocks = blake3_chain_blocks(&statement.message);
-    let mut cv = BLAKE3_IV;
-    for (_, m, counter, blen, flags) in &blocks {
-        let state = blake3_compress(&cv, m, *counter, *blen, *flags);
-        let mut lo = [0u32; 8];
-        lo.copy_from_slice(&state[0..8]);
-        cv = lo;
-    }
+    let (blocks, cv) = blake3_chain_blocks_with_cv(&statement.message);
     let cv_last = bytes32(&cv);
     if cv_last != statement.digest {
         return Err(TexasAirError::ConstraintUnsatisfied(
@@ -405,7 +430,7 @@ fn verify_chain_statement(
             "flock chain sub-proof has an unexpected initial chaining value".into(),
         ));
     }
-    let steps = blake3_chain_blocks(&statement.message).len();
+    let steps = chain_steps(statement.message.len());
     let bundle = unpack_chain(&archived.bundle)?;
     let setup = Blake3Setup::with_profile(
         steps,

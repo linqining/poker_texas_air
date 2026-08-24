@@ -8,12 +8,14 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
+use std::sync::OnceLock;
 
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::ristretto_fp_mul_air::{
     ArchivedRistrettoFpMultiplicationProof, prove_ristretto_fp_multiplication,
     verify_ristretto_fp_multiplication,
 };
+use crate::ristretto_fp_program_air::fp25519;
 
 const LIMBS: usize = 32;
 
@@ -51,8 +53,10 @@ pub struct ArchivedRistrettoFpSqrtRatioProof {
     pub i_times_u_multiplication: ArchivedRistrettoFpMultiplicationProof,
 }
 
-fn modulus() -> BigUint {
-    (BigUint::one() << 255u32) - BigUint::from(19u32)
+static MODULUS: OnceLock<BigUint> = OnceLock::new();
+
+fn modulus() -> &'static BigUint {
+    MODULUS.get_or_init(|| (BigUint::one() << 255u32) - BigUint::from(19u32))
 }
 
 fn big_uint(value: &[u8; LIMBS]) -> BigUint {
@@ -71,28 +75,15 @@ fn multiply(left: &BigUint, right: &BigUint) -> BigUint {
     left * right % modulus()
 }
 
-fn sqrt_m1() -> BigUint {
-    let p = modulus();
-    BigUint::from(2u32).modpow(&((&p - BigUint::one()) >> 2u32), &p)
-}
+static SQRT_M1: OnceLock<BigUint> = OnceLock::new();
 
-/// Return the unique nonnegative square root, or `None` for a nonsquare.
-fn nonnegative_sqrt(value: &BigUint) -> Option<BigUint> {
-    if value.is_zero() {
-        return Some(BigUint::zero());
-    }
-    let p = modulus();
-    let mut root = value.modpow(&((&p + BigUint::from(3u32)) >> 3u32), &p);
-    if multiply(&root, &root) != *value {
-        root = multiply(&root, &sqrt_m1());
-    }
-    if multiply(&root, &root) != *value {
-        return None;
-    }
-    if (&root & BigUint::one()) == BigUint::one() {
-        root = &p - root;
-    }
-    Some(root)
+fn sqrt_m1() -> BigUint {
+    SQRT_M1
+        .get_or_init(|| {
+            let p = modulus();
+            BigUint::from(2u32).modpow(&((p - BigUint::one()) >> 2u32), p)
+        })
+        .clone()
 }
 
 /// Prove the exact field-only behavior of curve25519-dalek's
@@ -108,7 +99,7 @@ pub fn prove_ristretto_fp_sqrt_ratio(
     let p = modulus();
     let u_value = big_uint(u);
     let v_value = big_uint(v);
-    if u_value >= p || v_value >= p {
+    if u_value >= *p || v_value >= *p {
         return Err(TexasAirError::SpecViolation(
             "Ristretto sqrt_ratio inputs must be canonical".into(),
         ));
@@ -119,17 +110,38 @@ pub fn prove_ristretto_fp_sqrt_ratio(
     } else if v_value.is_zero() {
         (false, BigUint::zero())
     } else {
-        let ratio = multiply(&u_value, &v_value.modpow(&(&p - BigUint::from(2u32)), &p));
-        if let Some(root) = nonnegative_sqrt(&ratio) {
-            (true, root)
+        // dalek single-chain root: r = (u·v³)·(u·v⁷)^((p−5)/8) computed in
+        // one exponentiation, replacing the two-pass BigUint `(p+3)/8`
+        // chain with its `sqrt(-1)` retry.
+        let u_fe = fp25519::Fe::from_bytes(u);
+        let v_fe = fp25519::Fe::from_bytes(v);
+        let i_fe = fp25519::Fe::from_bytes(&SQRT_M1_BYTES);
+        let mut root = fp25519::Fe::sqrt_ratio_i(&u_fe, &v_fe);
+        if root.to_bytes()[0] & 1 == 1 {
+            root = root.neg();
+        }
+        let mut check = v_fe.mul(&root.square()).to_bytes();
+        let neg_u = u_fe.neg().to_bytes();
+        let neg_i_u = i_fe.mul(&u_fe).neg().to_bytes();
+        if check == neg_u || check == neg_i_u {
+            // The raw chain landed in the negated class; multiplying by
+            // sqrt(-1) flips `v·r²` into {u, i·u} without changing which
+            // witness class (square vs i-square) the root represents.
+            root = i_fe.mul(&root);
+            if root.to_bytes()[0] & 1 == 1 {
+                root = root.neg();
+            }
+            check = v_fe.mul(&root.square()).to_bytes();
+        }
+        let r_bytes = root.to_bytes();
+        if check == *u {
+            (true, BigUint::from_bytes_le(&r_bytes))
+        } else if check == i_fe.mul(&u_fe).to_bytes() {
+            (false, BigUint::from_bytes_le(&r_bytes))
         } else {
-            let non_square_target = multiply(&sqrt_m1(), &ratio);
-            let root = nonnegative_sqrt(&non_square_target).ok_or_else(|| {
-                TexasAirError::SpecViolation(
-                    "Ristretto sqrt_ratio witness is neither square nor i-square".into(),
-                )
-            })?;
-            (false, root)
+            return Err(TexasAirError::SpecViolation(
+                "Ristretto sqrt_ratio witness is neither square nor i-square".into(),
+            ));
         }
     };
 
@@ -292,26 +304,54 @@ mod tests {
 
     #[test]
     fn witness_matches_dalek_sqrt_ratio_semantics() {
-        let i = sqrt_m1();
-        for (u_value, v_value) in [(4u32, 1u32), (2, 1), (1, 4), (5, 7)] {
-            let u = field(&BigUint::from(u_value));
-            let v = field(&BigUint::from(v_value));
+        // Cross-check the fiat-backed single-chain witness against a
+        // BigUint re-implementation of the legacy two-chain algorithm
+        // (dalek semantics: even root of u/v when square, of i·u/v
+        // otherwise).  dalek 4.x keeps FieldElement private, so this
+        // reference oracle pins the exact legacy witness bytes instead.
+        fn reference_sqrt_ratio(u: &[u8; LIMBS], v: &[u8; LIMBS]) -> (bool, [u8; LIMBS]) {
+            let p = modulus();
+            let ratio = multiply(&big_uint(u), &big_uint(v).modpow(&(p - BigUint::from(2u32)), p));
+            let mut root = ratio.modpow(&((p + BigUint::from(3u32)) >> 3u32), p);
+            if multiply(&root, &root) != ratio {
+                root = multiply(&root, &sqrt_m1());
+            }
+            if multiply(&root, &root) == ratio {
+                if (&root & BigUint::one()).is_one() {
+                    root = p - root;
+                }
+                (true, limbs(&root))
+            } else {
+                let target = multiply(&sqrt_m1(), &ratio);
+                let mut root = target.modpow(&((p + BigUint::from(3u32)) >> 3u32), p);
+                assert_eq!(multiply(&root, &root), target);
+                if (&root & BigUint::one()).is_one() {
+                    root = p - root;
+                }
+                (false, limbs(&root))
+            }
+        }
+
+        let mut cases = [(4u32, 1u32), (2, 1), (1, 4), (5, 7)]
+            .iter()
+            .map(|(u, v)| (field(&BigUint::from(*u)), field(&BigUint::from(*v))))
+            .collect::<Vec<_>>();
+        // Zero numerator and zero denominator edge cases.
+        cases.push(([0u8; LIMBS], field(&BigUint::from(7u32))));
+        cases.push((field(&BigUint::from(3u32)), [0u8; LIMBS]));
+        for (u, v) in cases {
             let archive = prove_ristretto_fp_sqrt_ratio(&u, &v).unwrap();
             verify_ristretto_fp_sqrt_ratio(&archive).unwrap();
 
-            let ratio = multiply(
-                &big_uint(&u),
-                &big_uint(&v).modpow(&(&modulus() - BigUint::from(2u32)), &modulus()),
-            );
-            let target = if archive.was_square {
-                ratio
+            let u_is_zero = big_uint(&u).is_zero();
+            let v_is_zero = big_uint(&v).is_zero();
+            let (was_square, r) = if u_is_zero || v_is_zero {
+                (u_is_zero, [0u8; LIMBS])
             } else {
-                multiply(&i, &ratio)
+                reference_sqrt_ratio(&u, &v)
             };
-            assert_eq!(
-                multiply(&big_uint(&archive.r), &big_uint(&archive.r)),
-                target
-            );
+            assert_eq!(archive.was_square, was_square, "u={u:?} v={v:?}");
+            assert_eq!(archive.r, r, "witness root bytes diverged for u={u:?} v={v:?}");
             assert_eq!(archive.r[0] & 1, 0);
         }
     }

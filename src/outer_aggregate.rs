@@ -16,7 +16,7 @@ use blake2::digest::{Update, VariableOutput};
 use starknet_ff::FieldElement;
 
 use crate::dual_proof::{
-    DualProofBundle, MAX_CRYPTO_REQUEST_BYTES, MAX_STARK_PROOF_BYTES, prove_dual_proof,
+    DualProofBundle, MAX_CRYPTO_REQUEST_BYTES, MAX_STARK_PROOF_BYTES, prove_dual_proof_verified,
     verify_dual_proof,
 };
 use crate::error::{TexasAirError, TexasAirResult};
@@ -304,11 +304,23 @@ impl VerifiedOuterAggregate {
 /// continuity, or aggregate construction step fails.
 pub fn prove_outer_aggregate(tasks: &[ProveTask]) -> TexasAirResult<OuterAggregateBundle> {
     validate_child_count(tasks.len())?;
+    // Fast path: every child was proved and natively verified in this process
+    // against the same independently reconstructed task material that
+    // `verify_dual_proof` would use, so receipts and precompile bindings are
+    // carried in memory instead of re-decoding and re-verifying the fresh
+    // packages. Children arriving from bytes still take the full
+    // `aggregate_dual_proofs` path.
     let mut children = Vec::with_capacity(tasks.len());
+    let mut receipts = Vec::with_capacity(tasks.len());
+    let mut bindings = Vec::with_capacity(tasks.len());
     for task in tasks {
-        children.push(prove_dual_proof(task)?);
+        let proven = prove_dual_proof_verified(task)?;
+        receipts.push(proven.receipt.clone());
+        bindings.push(proven.binding.clone());
+        children.push(proven.bundle);
     }
-    aggregate_dual_proofs(tasks, children)
+    let chain = VerifiedChain::try_from_receipts(receipts)?;
+    build_bundle(children, &chain, &bindings)
 }
 
 /// Verify and aggregate an existing ordered list of stage-3 child packages.
@@ -325,7 +337,7 @@ pub fn aggregate_dual_proofs(
     children: Vec<DualProofBundle>,
 ) -> TexasAirResult<OuterAggregateBundle> {
     let verified = verify_children(tasks, &children)?;
-    build_bundle(&children, &verified.chain, &verified.precompile_bindings)
+    build_bundle(children, &verified.chain, &verified.precompile_bindings)
 }
 
 /// Verify every child, the ordered continuity chain, all envelope metadata,
@@ -389,7 +401,7 @@ fn verify_children(
 }
 
 fn build_bundle(
-    children: &[DualProofBundle],
+    children: Vec<DualProofBundle>,
     chain: &VerifiedChain,
     bindings: &[PrecompileCallBinding],
 ) -> TexasAirResult<OuterAggregateBundle> {
@@ -411,11 +423,25 @@ fn build_bundle(
         pre_state_root: first.pre_state_root(),
         post_state_root: last.post_state_root(),
         aggregate_digest: [0; 32],
-        children: children.to_vec(),
+        children,
     };
     bundle.aggregate_digest = aggregate_digest(&bundle, chain, bindings)?;
-    // Exercise the same size bounds as transport before returning a package.
-    let _ = bundle.encode()?;
+    // Enforce the same transport size bounds as `encode` without re-serializing
+    // the (already child-wise encoded) megabyte-scale payloads.
+    let mut total_len = HEADER_LEN;
+    for child in &bundle.children {
+        let child_len = child.encoded_len()?;
+        if child_len > MAX_OUTER_CHILD_BYTES {
+            return Err(wire_error("encoded child exceeds outer child limit"));
+        }
+        total_len = total_len
+            .checked_add(4)
+            .and_then(|value| value.checked_add(child_len))
+            .ok_or_else(|| wire_error("outer aggregate length overflow"))?;
+    }
+    if total_len > MAX_OUTER_AGGREGATE_BYTES {
+        return Err(wire_error("outer aggregate exceeds total size limit"));
+    }
     Ok(bundle)
 }
 

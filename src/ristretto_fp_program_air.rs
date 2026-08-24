@@ -584,6 +584,11 @@ struct ProgramWitness {
     /// Per witnessed value: the 11-bit limbs of `value + (2^256 − p)` and
     /// their boolean carries, all `< 2^256` exactly when `value < p`.
     canonicity: Vec<Option<([u16; LIMB_COUNT], [u16; LIMB_COUNT])>>,
+    /// The per-value canonicity classification already derived while
+    /// building this witness, so callers do not recompute it.
+    value_canonicity: Vec<ValueCanonicity>,
+    /// The per-value 11-bit limb decomposition, reused by trace generation.
+    value_limbs: Vec<[u16; LIMB_COUNT]>,
     op_witnesses: Vec<OpWitness>,
 }
 
@@ -972,6 +977,8 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
     }
     Ok(ProgramWitness {
         canonicity: canonicity_witnesses,
+        value_canonicity: canonicity,
+        value_limbs,
         op_witnesses,
     })
 }
@@ -996,23 +1003,39 @@ fn sqrt_m1() -> BigUint {
         .clone()
 }
 
+/// Even-root square root on `curve25519_dalek` field elements.
+///
+/// Uses dalek's single-chain `sqrt_ratio_i(value, 1)` (one `(p-5)/8`
+/// exponentiation) instead of a BigUint `(p+3)/8` chain with a `sqrt(-1)`
+/// retry.  The returned root satisfies `root * root == value` exactly when
+/// `value` is a square, and its canonical bytes are always even, matching the
+/// previous BigUint witness byte for byte.
+fn nonnegative_sqrt_fe(value: &fp25519::Fe) -> Option<fp25519::Fe> {
+    if value.is_zero() {
+        return Some(*value);
+    }
+    let sqrt_m1 = fp25519::Fe::from_bytes(&SQRT_M1_BYTES);
+    let mut root = fp25519::Fe::sqrt_ratio_i(value, &fp25519::Fe::one());
+    if root.square().to_bytes() != value.to_bytes() {
+        // The raw chain landed on `sqrt(-value)`; retry with `sqrt(-1)`,
+        // exactly like the legacy two-chain fallback.
+        root = root.mul(&sqrt_m1);
+        if root.square().to_bytes() != value.to_bytes() {
+            return None;
+        }
+    }
+    if root.to_bytes()[0] & 1 == 1 {
+        root = root.neg();
+    }
+    Some(root)
+}
+
 fn nonnegative_sqrt(value: &BigUint) -> Option<BigUint> {
     if value.is_zero() {
         return Some(BigUint::from(0u32));
     }
-    let p = modulus();
-    let mut root = value.modpow(&((p + BigUint::from(3u32)) >> 3u32), p);
-    if multiply_big(&root, &root) != *value {
-        root = multiply_big(&root, &sqrt_m1());
-    }
-    if multiply_big(&root, &root) != *value {
-        return None;
-    }
-    Some(if (&root & BigUint::one()) == BigUint::one() {
-        p - &root
-    } else {
-        root
-    })
+    let root = nonnegative_sqrt_fe(&fp25519::Fe::from_bytes(&limbs(value)))?;
+    Some(BigUint::from_bytes_le(&root.to_bytes()))
 }
 
 fn append_limb(row: &mut Vec<M31>, limb: u16) {
@@ -1035,13 +1058,11 @@ fn trace_row_with_limbs(
         append_limb(row, limb);
     };
     let witness = program_witness(program)?;
-    let canonicity = program_canonicity(program)?;
-    for (value_index, value) in program.values.iter().enumerate() {
-        let value_limbs = to_limbs(value);
-        for limb in value_limbs {
+    for (value_index, value_limbs) in witness.value_limbs.iter().enumerate() {
+        for &limb in value_limbs {
             track_limb(&mut row, &mut limb_columns, limb);
         }
-        if canonicity[value_index] == ValueCanonicity::Witnessed {
+        if witness.value_canonicity[value_index] == ValueCanonicity::Witnessed {
             let (sum, carries) = witness.canonicity[value_index]
                 .expect("witnessed values carry a canonicity limb witness");
             for limb in sum {
@@ -1222,7 +1243,9 @@ fn validate_program_batch_shape(programs: &[RistrettoFpProgram]) -> TexasAirResu
 /// Tracked LogUp column indices (singles, then carry pairs) shared by every
 /// row of an equal-shape batch; recomputed from the template shape.
 fn trace_tracked_columns(program: &RistrettoFpProgram) -> (Vec<usize>, Vec<[usize; 2]>) {
-    let (_, limb_columns, carry_pair_columns) = trace_row_with_limbs(program)
+    // Shape-only derivation: `trace_layout` mirrors the column indices of
+    // `trace_row_with_limbs` without materializing any BigUint witness.
+    let (_, limb_columns, carry_pair_columns) = trace_layout(program)
         .expect("program shape was validated before trace generation");
     (limb_columns, carry_pair_columns)
 }
@@ -2265,11 +2288,172 @@ pub fn verify_ristretto_fp_program_sqrt_ratio(
     Ok(())
 }
 
-fn negative_edwards_d() -> [u8; LIMBS] {
-    limbs(&subtract_big(&modulus(), &big_uint(&EDWARDS_D_BYTES)))
+/// Host-side Curve25519 field arithmetic for witness generation.
+///
+/// Built on fiat-crypto's formally verified u64 primitives — the exact
+/// backend curve25519-dalek 4.x compiles internally (its `FieldElement` is
+/// `pub(crate)` and cannot be imported).  Only the two exponentiation chains
+/// the witness calculators need are layered on top: inversion by `p - 2`
+/// (identical to BigUint `modpow(p-2)`, including `0⁻¹ = 0`) and dalek's
+/// single-chain `sqrt_ratio_i(u, v) = (u·v³)·(u·v⁷)^((p−5)/8)` schedule.
+pub(crate) mod fp25519 {
+    use fiat_crypto::curve25519_64 as fiat;
+
+    const LIMBS: usize = 32;
+
+    /// `p - 2` little-endian (square-and-multiply inversion exponent).
+    const INVERT_EXPONENT: [u8; LIMBS] = [
+        0xeb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x7f,
+    ];
+
+    /// `(p - 5) / 8 = 2^252 - 3` little-endian (dalek `pow_p58` exponent).
+    const SQRT_P58_EXPONENT: [u8; LIMBS] = [
+        0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x0f,
+    ];
+
+    /// A fully carried (tight) Curve25519 field element.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Fe(fiat::fiat_25519_tight_field_element);
+
+    impl Fe {
+        pub(crate) fn zero() -> Fe {
+            Fe(fiat::fiat_25519_tight_field_element([0u64; 5]))
+        }
+
+        pub(crate) fn one() -> Fe {
+            let mut bytes = [0u8; LIMBS];
+            bytes[0] = 1;
+            Fe::from_bytes(&bytes)
+        }
+
+        /// Interprets the (canonical, `< p`) little-endian bytes exactly.
+        pub(crate) fn from_bytes(bytes: &[u8; LIMBS]) -> Fe {
+            let mut out = fiat::fiat_25519_tight_field_element([0u64; 5]);
+            fiat::fiat_25519_from_bytes(&mut out, bytes);
+            Fe(out)
+        }
+
+        /// Fully reduced canonical little-endian bytes.
+        pub(crate) fn to_bytes(&self) -> [u8; LIMBS] {
+            let mut out = [0u8; LIMBS];
+            fiat::fiat_25519_to_bytes(&mut out, &self.0);
+            out
+        }
+
+        pub(crate) fn is_zero(&self) -> bool {
+            self.to_bytes() == [0u8; LIMBS]
+        }
+
+        pub(crate) fn add(&self, other: &Fe) -> Fe {
+            let mut loose = fiat::fiat_25519_loose_field_element([0u64; 5]);
+            fiat::fiat_25519_add(&mut loose, &self.0, &other.0);
+            Fe::carry(loose)
+        }
+
+        pub(crate) fn sub(&self, other: &Fe) -> Fe {
+            let mut loose = fiat::fiat_25519_loose_field_element([0u64; 5]);
+            fiat::fiat_25519_sub(&mut loose, &self.0, &other.0);
+            Fe::carry(loose)
+        }
+
+        pub(crate) fn neg(&self) -> Fe {
+            let mut loose = fiat::fiat_25519_loose_field_element([0u64; 5]);
+            fiat::fiat_25519_opp(&mut loose, &self.0);
+            Fe::carry(loose)
+        }
+
+        fn carry(loose: fiat::fiat_25519_loose_field_element) -> Fe {
+            let mut tight = fiat::fiat_25519_tight_field_element([0u64; 5]);
+            fiat::fiat_25519_carry(&mut tight, &loose);
+            Fe(tight)
+        }
+
+        pub(crate) fn mul(&self, other: &Fe) -> Fe {
+            let mut left = fiat::fiat_25519_loose_field_element([0u64; 5]);
+            let mut right = fiat::fiat_25519_loose_field_element([0u64; 5]);
+            fiat::fiat_25519_relax(&mut left, &self.0);
+            fiat::fiat_25519_relax(&mut right, &other.0);
+            let mut out = fiat::fiat_25519_tight_field_element([0u64; 5]);
+            fiat::fiat_25519_carry_mul(&mut out, &left, &right);
+            Fe(out)
+        }
+
+        pub(crate) fn square(&self) -> Fe {
+            let mut loose = fiat::fiat_25519_loose_field_element([0u64; 5]);
+            fiat::fiat_25519_relax(&mut loose, &self.0);
+            let mut out = fiat::fiat_25519_tight_field_element([0u64; 5]);
+            fiat::fiat_25519_carry_square(&mut out, &loose);
+            Fe(out)
+        }
+
+        /// Square-and-multiply over a little-endian exponent.
+        fn pow_bytes(&self, exponent: &[u8; LIMBS]) -> Fe {
+            let mut acc = Fe::one();
+            for byte_index in (0..LIMBS).rev() {
+                for bit in (0..8).rev() {
+                    acc = acc.square();
+                    if (exponent[byte_index] >> bit) & 1 == 1 {
+                        acc = acc.mul(self);
+                    }
+                }
+            }
+            acc
+        }
+
+        /// Field inverse; the inverse of zero is zero, matching
+        /// `modpow(p - 2)`.
+        pub(crate) fn invert(&self) -> Fe {
+            self.pow_bytes(&INVERT_EXPONENT)
+        }
+
+        /// dalek's single-chain `sqrt_ratio_i` root
+        /// `r = (u·v³)·(u·v⁷)^((p−5)/8)`, left unclassified and possibly
+        /// odd; callers derive `v·r² ∈ {±u, ±i·u}` and normalize the sign
+        /// themselves.
+        pub(crate) fn sqrt_ratio_i(u: &Fe, v: &Fe) -> Fe {
+            let v3 = v.square().mul(v);
+            let v7 = v3.square().mul(v);
+            u.mul(&v3).mul(&u.mul(&v7).pow_bytes(&SQRT_P58_EXPONENT))
+        }
+    }
 }
 
+static NEGATIVE_EDWARDS_D: std::sync::OnceLock<[u8; LIMBS]> = std::sync::OnceLock::new();
+
+fn negative_edwards_d() -> [u8; LIMBS] {
+    *NEGATIVE_EDWARDS_D.get_or_init(|| {
+        limbs(&subtract_big(&modulus(), &big_uint(&EDWARDS_D_BYTES)))
+    })
+}
+
+/// Memoized successful results of [`canonical_decode_inverse_sqrt`].  The
+/// function is pure (bytes in, bytes out), so caching is safe; failed decodes
+/// are not cached.  Fixed-window scalar multiplication decodes the same base
+/// and identity encodings hundreds of times per proof.
+static CANONICAL_DECODE_INVERSE_SQRT_MEMO: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<[u8; LIMBS], [u8; LIMBS]>>,
+> = std::sync::OnceLock::new();
+
 fn canonical_decode_inverse_sqrt(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
+    let memo = CANONICAL_DECODE_INVERSE_SQRT_MEMO
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(cached) = memo.lock() {
+        if let Some(value) = cached.get(encoding) {
+            return Ok(*value);
+        }
+    }
+    let computed = canonical_decode_inverse_sqrt_uncached(encoding)?;
+    if let Ok(mut cached) = memo.lock() {
+        cached.insert(*encoding, computed);
+    }
+    Ok(computed)
+}
+
+fn canonical_decode_inverse_sqrt_uncached(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
     let p = modulus();
     let s = big_uint(encoding);
     if s >= *p {
@@ -2283,55 +2467,55 @@ fn canonical_decode_inverse_sqrt(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; 
         ));
     }
 
-    let one = BigUint::one();
-    let ss = multiply_big(&s, &s);
-    let u1 = subtract_big(&one, &ss);
-    let u2 = add_big(&one, &ss);
-    let u2sq = multiply_big(&u2, &u2);
-    let u1sq = multiply_big(&u1, &u1);
-    let negative_d = subtract_big(&p, &big_uint(&EDWARDS_D_BYTES));
-    let neg_d_u1sq = multiply_big(&negative_d, &u1sq);
-    let v = subtract_big(&neg_d_u1sq, &u2sq);
-    let target = multiply_big(&v, &u2sq);
-    let root = nonnegative_sqrt(&target).ok_or_else(|| {
+    let s = fp25519::Fe::from_bytes(encoding);
+    let one = fp25519::Fe::one();
+    let ss = s.square();
+    let u1 = one.sub(&ss);
+    let u2 = one.add(&ss);
+    let u2sq = u2.square();
+    let u1sq = u1.square();
+    let negative_d = fp25519::Fe::from_bytes(&negative_edwards_d());
+    let v = negative_d.mul(&u1sq).sub(&u2sq);
+    let target = v.mul(&u2sq);
+    let root = nonnegative_sqrt_fe(&target).ok_or_else(|| {
         TexasAirError::SpecViolation("Ristretto decode inverse square root does not exist".into())
     })?;
-    let mut inverse_sqrt = root.modpow(&(p - BigUint::from(2u32)), p);
-    if (&inverse_sqrt & BigUint::one()) == BigUint::one() {
-        inverse_sqrt = p - &inverse_sqrt;
+    let mut inverse_sqrt = root.invert();
+    if inverse_sqrt.to_bytes()[0] & 1 == 1 {
+        inverse_sqrt = inverse_sqrt.neg();
     }
-    Ok(limbs(&inverse_sqrt))
+    Ok(inverse_sqrt.to_bytes())
 }
 
 fn projective_encode_inverse_sqrt(point: &[[u8; LIMBS]; 4]) -> TexasAirResult<[u8; LIMBS]> {
-    let x_value = big_uint(&point[0]);
-    let y_value = big_uint(&point[1]);
-    let z_value = big_uint(&point[2]);
-    let z_plus_y = add_big(&z_value, &y_value);
-    let z_minus_y = subtract_big(&z_value, &y_value);
-    let u1 = multiply_big(&z_plus_y, &z_minus_y);
-    let u2 = multiply_big(&x_value, &y_value);
-    let u2_squared = multiply_big(&u2, &u2);
-    let v = multiply_big(&u1, &u2_squared);
+    let x = fp25519::Fe::from_bytes(&point[0]);
+    let y = fp25519::Fe::from_bytes(&point[1]);
+    let z = fp25519::Fe::from_bytes(&point[2]);
+    let z_plus_y = z.add(&y);
+    let z_minus_y = z.sub(&y);
+    let u1 = z_plus_y.mul(&z_minus_y);
+    let u2 = x.mul(&y);
+    let u2_squared = u2.square();
+    let v = u1.mul(&u2_squared);
     let mut inverse_sqrt = if v.is_zero() {
-        BigUint::from(0u32)
+        fp25519::Fe::zero()
     } else {
-        let root = nonnegative_sqrt(&v).ok_or_else(|| {
+        let root = nonnegative_sqrt_fe(&v).ok_or_else(|| {
             TexasAirError::SpecViolation(
                 "projective Ristretto encode square root does not exist".into(),
             )
         })?;
-        let inverse = root.modpow(&(modulus() - BigUint::from(2u32)), &modulus());
-        if (&inverse & BigUint::one()) == BigUint::one() {
-            modulus() - inverse
+        let inverse = root.invert();
+        if inverse.to_bytes()[0] & 1 == 1 {
+            inverse.neg()
         } else {
             inverse
         }
     };
-    if (&inverse_sqrt & BigUint::one()) == BigUint::one() {
-        inverse_sqrt = modulus() - inverse_sqrt;
+    if inverse_sqrt.to_bytes()[0] & 1 == 1 {
+        inverse_sqrt = inverse_sqrt.neg();
     }
-    Ok(limbs(&inverse_sqrt))
+    Ok(inverse_sqrt.to_bytes())
 }
 
 fn expected_decode_ops(x_index: u16) -> Vec<RistrettoFpProgramOp> {
@@ -2688,7 +2872,9 @@ fn expected_encode_ops(
 pub fn prove_ristretto_fp_program_point_encode(
     point: ArchivedRistrettoFpProgramPointDecodeProof,
 ) -> TexasAirResult<ArchivedRistrettoFpProgramPointEncodeProof> {
-    verify_ristretto_fp_program_point_decode(&point)?;
+    if ristretto_self_verify_enabled() {
+        verify_ristretto_fp_program_point_decode(&point)?;
+    }
     let x_value = big_uint(&point.x);
     let y_value = big_uint(&point.y);
     let one = BigUint::one();
@@ -2929,8 +3115,10 @@ pub fn prove_ristretto_fp_program_edwards_addition(
     left: ArchivedRistrettoFpProgramPointDecodeProof,
     right: ArchivedRistrettoFpProgramPointDecodeProof,
 ) -> TexasAirResult<ArchivedRistrettoFpProgramEdwardsAdditionProof> {
-    verify_ristretto_fp_program_point_decode(&left)?;
-    verify_ristretto_fp_program_point_decode(&right)?;
+    if ristretto_self_verify_enabled() {
+        verify_ristretto_fp_program_point_decode(&left)?;
+        verify_ristretto_fp_program_point_decode(&right)?;
+    }
     let mut builder =
         RistrettoFpProgramBuilder::new(&[left.x, left.y, left.t, right.x, right.y, right.t]);
     builder.constant(&TWO_BYTES)?;
@@ -3324,7 +3512,9 @@ fn expected_projective_encode_ops(
 pub fn prove_ristretto_fp_program_projective_point_encode(
     point: ArchivedRistrettoFpProgramProjectivePoint,
 ) -> TexasAirResult<ArchivedRistrettoFpProgramProjectivePointEncodeProof> {
-    verify_ristretto_fp_program_projective_point(&point)?;
+    if ristretto_self_verify_enabled() {
+        verify_ristretto_fp_program_projective_point(&point)?;
+    }
     let inverse_sqrt = projective_encode_inverse_sqrt(&[point.x, point.y, point.z, point.t])?;
 
     let mut builder =
@@ -3457,8 +3647,10 @@ pub fn prove_ristretto_fp_program_projective_addition(
     left: ArchivedRistrettoFpProgramProjectivePoint,
     right: ArchivedRistrettoFpProgramProjectivePoint,
 ) -> TexasAirResult<ArchivedRistrettoFpProgramProjectiveAdditionProof> {
-    verify_ristretto_fp_program_projective_point(&left)?;
-    verify_ristretto_fp_program_projective_point(&right)?;
+    if ristretto_self_verify_enabled() {
+        verify_ristretto_fp_program_projective_point(&left)?;
+        verify_ristretto_fp_program_projective_point(&right)?;
+    }
     let mut builder = RistrettoFpProgramBuilder::new(&[
         left.x, left.y, left.z, left.t, right.x, right.y, right.z, right.t,
     ]);
@@ -3603,7 +3795,9 @@ pub fn prove_ristretto_fp_program_projective_addition_batch(
         output: output.to_vec(),
         additions,
     };
-    verify_ristretto_fp_program_projective_addition_batch(&archive)?;
+    if ristretto_self_verify_enabled() {
+        verify_ristretto_fp_program_projective_addition_batch(&archive)?;
+    }
     Ok(archive)
 }
 
@@ -3797,7 +3991,9 @@ fn expected_point_table_layout() -> (Vec<RistrettoFpProgramOp>, Vec<u16>, usize)
 pub fn prove_ristretto_fp_program_point_table(
     base: ArchivedRistrettoFpProgramProjectivePoint,
 ) -> TexasAirResult<ArchivedRistrettoFpProgramPointTableProof> {
-    verify_ristretto_fp_program_projective_point(&base)?;
+    if ristretto_self_verify_enabled() {
+        verify_ristretto_fp_program_projective_point(&base)?;
+    }
     let mut builder = RistrettoFpProgramBuilder::new(&[
         ZERO_BYTES, ONE_BYTES, ONE_BYTES, ZERO_BYTES, base.x, base.y, base.z, base.t,
     ]);
@@ -4171,7 +4367,13 @@ pub fn build_ristretto_fp_program_compressed_point_addition(
     right_encoding: &[u8; LIMBS],
 ) -> TexasAirResult<(RistrettoFpProgram, [u8; LIMBS])> {
     let left_inverse_sqrt = canonical_decode_inverse_sqrt(left_encoding)?;
-    let right_inverse_sqrt = canonical_decode_inverse_sqrt(right_encoding)?;
+    // Doubling rows (accumulator squaring in the Horner ladder) decode the
+    // same encoding twice; the function is pure, so reuse the left result.
+    let right_inverse_sqrt = if left_encoding == right_encoding {
+        left_inverse_sqrt
+    } else {
+        canonical_decode_inverse_sqrt(right_encoding)?
+    };
     let mut builder = RistrettoFpProgramBuilder::new(&[*left_encoding, *right_encoding]);
     let one = builder.constant(&ONE_BYTES)?;
     let negative_d = builder.constant(&negative_edwards_d())?;

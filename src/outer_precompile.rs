@@ -120,53 +120,7 @@ impl OuterAggregatePrecompileRequest {
     /// Returns an error for invalid counts, oversized components, or encoding
     /// failure.
     pub fn encode(&self) -> TexasAirResult<Vec<u8>> {
-        validate_task_count(self.tasks.len())?;
-        if self.tasks.len() != self.bundle.children().len() {
-            return Err(wire_error("outer precompile task/child count mismatch"));
-        }
-        let anchor_bytes = encode_anchor(&self.anchor)?;
-        let bundle_bytes = self.bundle.encode()?;
-        if bundle_bytes.len() > MAX_OUTER_AGGREGATE_BYTES {
-            return Err(wire_error("outer aggregate exceeds request limit"));
-        }
-        let mut task_bytes = Vec::with_capacity(self.tasks.len());
-        let mut total_len = REQUEST_HEADER_LEN
-            .checked_add(anchor_bytes.len())
-            .and_then(|value| value.checked_add(bundle_bytes.len()))
-            .ok_or_else(|| wire_error("outer precompile request length overflow"))?;
-        for task in &self.tasks {
-            let encoded = borsh::to_vec(task)
-                .map_err(|error| wire_error(format!("outer task borsh encode: {error}")))?;
-            if encoded.is_empty() || encoded.len() > MAX_OUTER_TASK_BYTES {
-                return Err(wire_error("outer task size is outside the accepted range"));
-            }
-            total_len = total_len
-                .checked_add(4)
-                .and_then(|value| value.checked_add(encoded.len()))
-                .ok_or_else(|| wire_error("outer precompile task length overflow"))?;
-            task_bytes.push(encoded);
-        }
-        if total_len > MAX_OUTER_PRECOMPILE_REQUEST_BYTES {
-            return Err(wire_error(
-                "outer precompile request exceeds total size limit",
-            ));
-        }
-
-        let mut out = Vec::with_capacity(total_len);
-        out.extend_from_slice(&OUTER_PRECOMPILE_REQUEST_MAGIC);
-        out.extend_from_slice(&[OUTER_PRECOMPILE_ABI_VERSION, 0]);
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&(self.tasks.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(anchor_bytes.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(bundle_bytes.len() as u32).to_le_bytes());
-        out.extend_from_slice(&anchor_bytes);
-        out.extend_from_slice(&bundle_bytes);
-        for task in task_bytes {
-            out.extend_from_slice(&(task.len() as u32).to_le_bytes());
-            out.extend_from_slice(&task);
-        }
-        debug_assert_eq!(out.len(), total_len);
-        Ok(out)
+        encode_request(&self.tasks, &self.bundle, &self.anchor)
     }
 
     /// Strictly decode a canonical request.
@@ -391,11 +345,100 @@ pub fn verify_outer_precompile_request(
     verified_aggregate.verify_against_anchor(expected_anchor)?;
 
     let request_bytes = request.encode()?;
-    let request_digest = hash256(b"zchain.poker.outer_precompile.request.v1", &request_bytes);
-    let anchor_digest = hash256(b"zchain.poker.outer_precompile.anchor.v1", &carried_anchor);
-    let aggregate_digest = verified_aggregate.aggregate_digest();
-    let child_count = u32::try_from(request.tasks.len())
+    let binding = outer_call_binding(
+        verified_aggregate.aggregate_digest(),
+        &carried_anchor,
+        &request_bytes,
+        request.tasks.len(),
+    )?;
+    Ok(VerifiedOuterAggregateCall {
+        verified_aggregate,
+        binding,
+    })
+}
+
+/// Canonical request encoding shared by the request object and the prove path.
+///
+/// Produces byte-identical output to [`OuterAggregatePrecompileRequest::encode`]
+/// without requiring an owned copy of the tasks.
+///
+/// # Errors
+///
+/// Returns an error for invalid counts, oversized components, or encoding
+/// failure.
+fn encode_request(
+    tasks: &[ProveTask],
+    bundle: &OuterAggregateBundle,
+    anchor: &ExpectedChainAnchor,
+) -> TexasAirResult<Vec<u8>> {
+    validate_task_count(tasks.len())?;
+    if tasks.len() != bundle.children().len() {
+        return Err(wire_error("outer precompile task/child count mismatch"));
+    }
+    let anchor_bytes = encode_anchor(anchor)?;
+    let bundle_bytes = bundle.encode()?;
+    if bundle_bytes.len() > MAX_OUTER_AGGREGATE_BYTES {
+        return Err(wire_error("outer aggregate exceeds request limit"));
+    }
+    let mut task_bytes = Vec::with_capacity(tasks.len());
+    let mut total_len = REQUEST_HEADER_LEN
+        .checked_add(anchor_bytes.len())
+        .and_then(|value| value.checked_add(bundle_bytes.len()))
+        .ok_or_else(|| wire_error("outer precompile request length overflow"))?;
+    for task in tasks {
+        let encoded = borsh::to_vec(task)
+            .map_err(|error| wire_error(format!("outer task borsh encode: {error}")))?;
+        if encoded.is_empty() || encoded.len() > MAX_OUTER_TASK_BYTES {
+            return Err(wire_error("outer task size is outside the accepted range"));
+        }
+        total_len = total_len
+            .checked_add(4)
+            .and_then(|value| value.checked_add(encoded.len()))
+            .ok_or_else(|| wire_error("outer precompile task length overflow"))?;
+        task_bytes.push(encoded);
+    }
+    if total_len > MAX_OUTER_PRECOMPILE_REQUEST_BYTES {
+        return Err(wire_error(
+            "outer precompile request exceeds total size limit",
+        ));
+    }
+
+    let mut out = Vec::with_capacity(total_len);
+    out.extend_from_slice(&OUTER_PRECOMPILE_REQUEST_MAGIC);
+    out.extend_from_slice(&[OUTER_PRECOMPILE_ABI_VERSION, 0]);
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(tasks.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(anchor_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(bundle_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&anchor_bytes);
+    out.extend_from_slice(&bundle_bytes);
+    for task in task_bytes {
+        out.extend_from_slice(&(task.len() as u32).to_le_bytes());
+        out.extend_from_slice(&task);
+    }
+    debug_assert_eq!(out.len(), total_len);
+    Ok(out)
+}
+
+/// Derive the native precompile binding from accepted verification material.
+///
+/// `anchor_bytes` must be the canonical encoding of the accepted anchor and
+/// `request_bytes` the canonical encoding of the accepted request, so digest
+/// inputs are identical to [`verify_outer_precompile_request`].
+///
+/// # Errors
+///
+/// Returns an error if the child count exceeds u32.
+fn outer_call_binding(
+    aggregate_digest: [u8; 32],
+    anchor_bytes: &[u8],
+    request_bytes: &[u8],
+    child_count: usize,
+) -> TexasAirResult<OuterAggregateCallBinding> {
+    let child_count = u32::try_from(child_count)
         .map_err(|_| wire_error("outer precompile child count exceeds u32"))?;
+    let request_digest = hash256(b"zchain.poker.outer_precompile.request.v1", request_bytes);
+    let anchor_digest = hash256(b"zchain.poker.outer_precompile.anchor.v1", anchor_bytes);
     let mut receipt = Vec::with_capacity(4 + 4 + 32 * 3);
     receipt.extend_from_slice(&[
         OUTER_PRECOMPILE_ID,
@@ -408,15 +451,12 @@ pub fn verify_outer_precompile_request(
     receipt.extend_from_slice(&aggregate_digest);
     receipt.extend_from_slice(&anchor_digest);
     let receipt_digest = hash256(b"zchain.poker.outer_precompile.receipt.v1", &receipt);
-    Ok(VerifiedOuterAggregateCall {
-        verified_aggregate,
-        binding: OuterAggregateCallBinding {
-            request_digest,
-            aggregate_digest,
-            anchor_digest,
-            receipt_digest,
-            child_count,
-        },
+    Ok(OuterAggregateCallBinding {
+        request_digest,
+        aggregate_digest,
+        anchor_digest,
+        receipt_digest,
+        child_count,
     })
 }
 
@@ -728,13 +768,25 @@ pub fn prove_host_verified_outer_aggregate_from_bundle(
     bundle: OuterAggregateBundle,
     anchor: &ExpectedChainAnchor,
 ) -> TexasAirResult<HostVerifiedOuterAggregateProof> {
-    let request =
-        OuterAggregatePrecompileRequest::new(tasks.to_vec(), bundle, clone_anchor(anchor)?);
-    let verified = verify_outer_precompile_request(&request, anchor)?;
-    let request_bytes = request.encode()?;
+    // The bundle is an externally supplied in-memory object of unknown
+    // provenance, so full O(N) child verification is a required trust boundary
+    // and is intentionally kept. Only redundant canonical re-encodings of
+    // already in-memory material are avoided: the request bytes are encoded
+    // once and reused for both the request digest and the package payload,
+    // without deep-copying the tasks or round-tripping the anchor.
+    let verified = verify_outer_aggregate(tasks, &bundle)?;
+    verified.verify_against_anchor(anchor)?;
+    let anchor_bytes = encode_anchor(anchor)?;
+    let request_bytes = encode_request(tasks, &bundle, anchor)?;
+    let binding = outer_call_binding(
+        verified.aggregate_digest(),
+        &anchor_bytes,
+        &request_bytes,
+        tasks.len(),
+    )?;
     let air = OuterAggregatePrecompileAir {
         log_size: SINGLE_METHOD_LOG_SIZE,
-        binding: verified.binding.air_binding(),
+        binding: binding.air_binding(),
     };
     let row = OuterAggregatePrecompileRow::new(&air.binding).to_vec();
     let trace = gen_method_trace(cols::NUM_COLUMNS, &row, &row)?;
@@ -742,12 +794,13 @@ pub fn prove_host_verified_outer_aggregate_from_bundle(
     let stark_proof_bytes = bincode_options()
         .serialize(&stark_proof)
         .map_err(|error| wire_error(format!("outer AIR proof serialization: {error}")))?;
-    let package = HostVerifiedOuterAggregateProof {
+    // Enforce the same transport size bounds as `encode` without re-copying
+    // the request bytes into another full package buffer.
+    validate_package_lengths(request_bytes.len(), stark_proof_bytes.len())?;
+    Ok(HostVerifiedOuterAggregateProof {
         request_bytes,
         stark_proof_bytes,
-    };
-    let _ = package.encode()?;
-    Ok(package)
+    })
 }
 
 /// Verify the complete transferable stage-4 precompile package.
@@ -931,10 +984,6 @@ fn decode_anchor(bytes: &[u8]) -> TexasAirResult<ExpectedChainAnchor> {
         post_version,
         dispatch_call_digests,
     )
-}
-
-fn clone_anchor(anchor: &ExpectedChainAnchor) -> TexasAirResult<ExpectedChainAnchor> {
-    decode_anchor(&encode_anchor(anchor)?)
 }
 
 fn decode_root(bytes: &[u8]) -> TexasAirResult<StateRoot> {

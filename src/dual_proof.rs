@@ -165,6 +165,36 @@ impl DualProofBundle {
         Ok(out)
     }
 
+    /// Exact encoded length of [`DualProofBundle::encode`] without building
+    /// the wire bytes.
+    ///
+    /// Applies the same length validation as `encode` so callers can enforce
+    /// transport size bounds on freshly proved packages without re-serializing
+    /// megabyte-scale proof payloads.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a payload exceeding the configured proof or request limit.
+    pub(crate) fn encoded_len(&self) -> TexasAirResult<usize> {
+        validate_lengths(
+            self.stark_proof_bytes.len(),
+            self.crypto_request_bytes.len(),
+        )?;
+        let proof_len = u32::try_from(self.stark_proof_bytes.len()).map_err(|_| {
+            TexasAirError::SerializationError("dual proof length exceeds u32".into())
+        })?;
+        let request_len = u32::try_from(self.crypto_request_bytes.len()).map_err(|_| {
+            TexasAirError::SerializationError("crypto request length exceeds u32".into())
+        })?;
+        let binding_len = u32::try_from(self.root_binding_bytes.len()).map_err(|_| {
+            TexasAirError::SerializationError("root binding length exceeds u32".into())
+        })?;
+        Ok(HEADER_LEN
+            + proof_len as usize
+            + request_len as usize
+            + binding_len as usize)
+    }
+
     /// Strictly decode a dual-proof envelope.
     ///
     /// Unknown versions/selectors, invalid method/precompile combinations,
@@ -265,13 +295,62 @@ impl VerifiedDualProof {
 /// Returns an error when VM replay, crypto verification, trace generation,
 /// Stwo proving, or serialization fails.
 pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
+    Ok(prove_dual_proof_inner(task, false)?.bundle)
+}
+
+/// A freshly proved stage-3 package together with its in-memory acceptance
+/// artifacts.
+///
+/// The receipt and binding are produced by the same `prepare` pass that built
+/// the proof, so downstream in-process aggregation does not need to re-run
+/// crypto precompile verification or re-deserialize the Stwo proof. This value
+/// must never cross a serialization boundary; external consumers only see the
+/// [`DualProofBundle`] and must use [`verify_dual_proof`].
+pub(crate) struct ProvenDualProof {
+    /// Freshly encoded stage-3 transport bundle.
+    pub(crate) bundle: DualProofBundle,
+    /// Receipt issued by the single native verification of the fresh proof.
+    pub(crate) receipt: VerificationReceipt,
+    /// Precompile binding accepted during the prove-side `prepare` pass.
+    pub(crate) binding: PrecompileCallBinding,
+}
+
+/// Internal prove result before optional receipt issuance.
+struct ProvenDualParts {
+    bundle: DualProofBundle,
+    receipt: Option<VerificationReceipt>,
+    binding: PrecompileCallBinding,
+}
+
+/// Prove a stage-3 package and verify it exactly once in-process.
+///
+/// This is the internal aggregation fast path: `prepare` already verified the
+/// canonical crypto request, so the freshly proved Stwo method proof is
+/// verified once (against the same independently reconstructed AIR and public
+/// inputs used by [`verify_dual_proof`]) purely to issue its receipt. No
+/// serialized proof is ever decoded back.
+pub(crate) fn prove_dual_proof_verified(task: &ProveTask) -> TexasAirResult<ProvenDualProof> {
+    let parts = prove_dual_proof_inner(task, true)?;
+    Ok(ProvenDualProof {
+        bundle: parts.bundle,
+        receipt: parts
+            .receipt
+            .expect("receipt issuance was requested"),
+        binding: parts.binding,
+    })
+}
+
+fn prove_dual_proof_inner(
+    task: &ProveTask,
+    issue_receipt: bool,
+) -> TexasAirResult<ProvenDualParts> {
     match prepare(task, None)? {
         PreparedMethod::Shuffle {
             air,
             mut public_inputs,
             row,
+            binding,
             request_bytes,
-            ..
         } => {
             let row_values = row.to_vec();
             public_inputs.bind_expected_trace_row(&row_values)?;
@@ -280,27 +359,37 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
                 &row_values,
                 &SubmitShuffleV2Row::padding().to_vec(),
             )?;
+            let expected_air = air.clone();
+            let expected_inputs = public_inputs.clone();
             let proof = prove_method(
                 &trace,
                 air,
                 SubmitShuffleV2Air::num_columns(),
                 public_inputs,
             )?;
-            bundle_from_stark(
+            let bundle = bundle_from_stark(
                 MethodKind::SubmitShuffleV2,
                 PokerPrecompileId::Shuffle,
                 SHUFFLE_ABI_VERSION,
                 &proof.stark_proof,
                 request_bytes,
                 &proof.root_binding,
-            )
+            )?;
+            let receipt = issue_receipt
+                .then(|| verify_method_against_and_issue_receipt(proof, expected_air, &expected_inputs))
+                .transpose()?;
+            Ok(ProvenDualParts {
+                bundle,
+                receipt,
+                binding,
+            })
         }
         PreparedMethod::Reconstruction {
             air,
             mut public_inputs,
             row,
+            binding,
             request_bytes,
-            ..
         } => {
             let row_values = row.to_vec();
             public_inputs.bind_expected_trace_row(&row_values)?;
@@ -309,27 +398,37 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
                 &row_values,
                 &SubmitReconstructDeckRow::padding().to_vec(),
             )?;
+            let expected_air = air.clone();
+            let expected_inputs = public_inputs.clone();
             let proof = prove_method(
                 &trace,
                 air,
                 SubmitReconstructDeckAir::num_columns(),
                 public_inputs,
             )?;
-            bundle_from_stark(
+            let bundle = bundle_from_stark(
                 MethodKind::SubmitReconstructDeck,
                 PokerPrecompileId::ReconstructionV3,
                 RECONSTRUCTION_V3_ABI_VERSION,
                 &proof.stark_proof,
                 request_bytes,
                 &proof.root_binding,
-            )
+            )?;
+            let receipt = issue_receipt
+                .then(|| verify_method_against_and_issue_receipt(proof, expected_air, &expected_inputs))
+                .transpose()?;
+            Ok(ProvenDualParts {
+                bundle,
+                receipt,
+                binding,
+            })
         }
         PreparedMethod::Fold {
             air,
             mut public_inputs,
             row,
+            binding,
             request_bytes,
-            ..
         } => {
             let row_values = row.to_vec();
             public_inputs.bind_expected_trace_row(&row_values)?;
@@ -338,22 +437,32 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
                 &row_values,
                 &FoldWithProofRow::padding().to_vec(),
             )?;
+            let expected_air = air.clone();
+            let expected_inputs = public_inputs.clone();
             let proof = prove_method(&trace, air, FoldWithProofAir::num_columns(), public_inputs)?;
-            bundle_from_stark(
+            let bundle = bundle_from_stark(
                 MethodKind::FoldWithProof,
                 PokerPrecompileId::DleqLeave,
                 LEAVE_DLEQ_ABI_VERSION,
                 &proof.stark_proof,
                 request_bytes,
                 &proof.root_binding,
-            )
+            )?;
+            let receipt = issue_receipt
+                .then(|| verify_method_against_and_issue_receipt(proof, expected_air, &expected_inputs))
+                .transpose()?;
+            Ok(ProvenDualParts {
+                bundle,
+                receipt,
+                binding,
+            })
         }
         PreparedMethod::Reveal {
             air,
             mut public_inputs,
             row,
+            binding,
             request_bytes,
-            ..
         } => {
             let row_values = row.to_vec();
             public_inputs.bind_expected_trace_row(&row_values)?;
@@ -362,20 +471,30 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
                 &row_values,
                 &SubmitPlayerRevealTokensRow::padding().to_vec(),
             )?;
+            let expected_air = air.clone();
+            let expected_inputs = public_inputs.clone();
             let proof = prove_method(
                 &trace,
                 air,
                 SubmitPlayerRevealTokensAir::num_columns(),
                 public_inputs,
             )?;
-            bundle_from_stark(
+            let bundle = bundle_from_stark(
                 MethodKind::SubmitPlayerRevealTokens,
                 PokerPrecompileId::RevealToken,
                 REVEAL_TOKEN_ABI_VERSION,
                 &proof.stark_proof,
                 request_bytes,
                 &proof.root_binding,
-            )
+            )?;
+            let receipt = issue_receipt
+                .then(|| verify_method_against_and_issue_receipt(proof, expected_air, &expected_inputs))
+                .transpose()?;
+            Ok(ProvenDualParts {
+                bundle,
+                receipt,
+                binding,
+            })
         }
     }
 }

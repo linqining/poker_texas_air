@@ -1523,6 +1523,7 @@ dependencies = [
  "blstrs",
  "borsh",
  "ff",
+ "fiat-crypto",
  "flock-core",
  "flock-prover",
  "group",
