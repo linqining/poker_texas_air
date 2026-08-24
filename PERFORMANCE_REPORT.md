@@ -147,8 +147,61 @@ ePrint 2026/1329）；admission 并行验证双证明，归档接口保持递归
    verify 6.7→5.9s。全部 20 个 ristretto 模块 **103/103 全绿**（2311s，
    含全部 splice 拒绝用例）。调试期关键发现：单程序 scope/trace 构建
    只写前 2 行——域扩到 256 行后必须写满全域（padding 行复制末行程序）。
-   剩余优化空间：FRI 折叠参数、交互列 secure 打包、与 canonical 批合并。
-9. **showdown settlement AIR 前置（进行中，2026-08-24）**：VM 侧结算语义已用
+9. **Ristretto 二轮+三轮优化（已完成，2026-08-24）**：prove **13.9→1.84s（7.6×）**、
+   verify **5.9→1.04s（5.7×）**、证明 12.3→9.55–10.0MB（域缩小后 FRI 每层
+   揭示略增，尺寸持平），debug 全量 ristretto 套件 2311→~1900s。改动：
+   - **prove 内嵌自验证门控**：`prove_ristretto_reconstruction_deck_accumulator`
+     等尾部整 Archive 重验证改为 `TEXAS_RISTRETTO_SELF_VERIFY=1` opt-in（admission
+     本就独立验证；prove 侧逐卡输出校验保留）。
+   - **见证生成并行化**：104 个点加法程序构建、`trace_columns_batch`/`scope_
+     columns_batch` 行映射、`fp_range_interaction` bitrev 列、scalar-mul 批语句
+     构建全部 rayon 化；`modulus()`/`sqrt_m1()` BigUint 常量 OnceLock 缓存
+     （此前每次调用重做 modpow）。
+   - **列瘦身第二轮**（16-bit limb 因 M31 域阶 2^31−1 下 limb 乘积回绕不可行，
+     改走加法等价方案）：值 `< p` 见证从 `p−value` 差 + 64 个 per-limb
+     非零/逆旗标（129 列/值）改为 `value + (2^256−p)` 进位加法器（64 列/值，
+     溢出即拒绝）；乘法 carry 删除冗余 magnitude 列（4→3 列，符号位直接
+     与 lo/hi 字节组合）；scope 预处理列 3 字节/列打包（5280→1760 列/行）。
+   - **verify 去见证重承诺**：`verify_ristretto_fp_program{,_batch}` 不再重建
+     trace 见证与重承诺 trace 树比对根（该绑定由约束 + scope 树根承载），
+     只保留 scope 树重建（语句绑定）；trace 宽度经免见证的 `trace_layout`
+     从程序形状推导。
+   - **三轮：域下限 256→128 行**（prove 再 −45%）：原 256 行下限只是"LogUp
+     生成器需一条 SIMD 向量行 + 单列范围表"的历史假设——条纹化表机制早已
+     支持小域，真实 SIMD 下限为 16 行。**声音性审查**：FRI 有效安全
+     ≈ pow + E[唯一查询位]×log_blowup，30 查询在 LDE 域 D 的期望唯一位
+     D(1−e^(−30/D))：D=512→29.0、D=256→28.3、D=32→19.5（**log 4 下限会把
+     有效安全压到 ~30 bits，否决**）；定 log 7（104 行批 → 128 行域，与原
+     log 8 同档），单程序与小批同样受益。
+   - **三轮：语句摘要吸收**：`mix_program` 从逐 limb 吸收（104 程序 ≈19 万
+     u32，verify 侧 0.48s）改为语句规范编码的 Blake2b-512 摘要（16 u32，
+     碰撞抗性绑定，两侧各省 ~0.4–0.5s）。
+   - **四轮：LogUp 字节配对（已完成，2026-08-24）**：relation arity 1→2
+     （`FpRange16`），use 条目两两配对（value limb 对/sum limb 对/carry
+     lo-hi 对——所有 tracked 块均为偶数长且邻接，配对=扁平列表 chunk 2），
+     范围表换 65536 项 16-bit 条目（每条纹 3 列 mult/lo/hi，128 行域 =
+     512 条纹）。交互列 8.05k→4.3k secure（32.2k→~17k base 列）。实测
+     prove 1.84→**1.30s**、verify 1.04→**0.75s**、证明 10.0→**7.34MB**。
+     代数平衡测试改用真实 arity-2 combine 原生验证。
+   - **四轮：slot-OR/cross-key 线并行化（已完成）**：52 槽 prove/verify 全部
+     rayon 并行（槽间独立）；槽内 8 个 scalar-window STARK 并行构建；
+     `prove_ristretto_slot_or`/cross-key/批的尾部自验证全部门控。
+   - **四轮：FRI fold_step 1→2 实测否决**：局部配置实测证明 7.34→7.52MB
+     （+2.4%），与 canonical 侧旧实验（−1.5% 名义）方向一致——该配置下
+     折叠层数本就少（log 7 域 + blowup 2），折叠省不掉多少 auth path，
+     反而每层揭示变宽。已回退，协议配置维持 fold_step=1。
+   回归：ristretto 全量 **104/104 绿**（二轮 1943s；三轮 1073s；四轮 1005s，
+   均含 104 行 splice 拒绝）。release 复测演进：13.9/5.9/12.3MB →
+   3.90/1.57/9.55MB（二轮）→ 1.84/1.04/10.0MB（三轮）→
+   **1.28s / 0.84s / 7.34MB**（四轮；累计 prove 10.9×、verify 7.0×、
+   证明 −40%）。
+   修复：`proves_reconstruction_deck_in_one_ordered_batch_stark` 测试属性损坏
+   （重复 `#[test]` 吞掉了属性），此前未在跑。
+   **剩余机会**：slot-OR 深度批化（52 个 nonzero/标量加法小 STARK 跨槽并入
+   共享批，需改 archive ABI）；常量出 trace（~3%）；verify 剩余 ≈0.5s FRI
+   查询揭示，受总承诺列宽约束，下一杠杆为 trace 树见证列（mul carry 11.2k
+   列）的结构性压缩。
+10. **showdown settlement AIR 前置（进行中，2026-08-24）**：VM 侧结算语义已用
    `poker_l1/.../settlement_fixture.rs` 锁定（4 场景：三层 all-in 阶梯、
    九座位九层满宽阶梯、rake+odd-chip 平分底池、run-it-twice 双 board 分胜；
    每场景断言守恒/确定性/无争议层免抽水，期望值逐位锁定）；
@@ -218,8 +271,8 @@ ePrint 2026/1329）；admission 并行验证双证明，归档接口保持递归
    tampered\_cards），HAND\_SECTIONS 默认全开（保留为二分工具），
    tampered\_cards\_break\_evaluation 已恢复。showdown 结算线的牌面派生
    评估器电路就此闭环。
-10. **瓶颈转移预警**：哈希层与 Ristretto 列瘦身完成后，端到端剩余瓶颈为
-    Ristretto 固定证明开销（\~14s/批）与 state\_root Poseidon252 AIR
+11. **瓶颈转移预警**：哈希层与 Ristretto 二轮优化完成后，端到端剩余瓶颈为
+    Ristretto 固定证明开销（\~1.3s/批）与 state\_root Poseidon252 AIR
     （host 边界必须消除；可在二元域位分解、M31 limb 或 Flock 类中择优评估）。
 
 **完整一手牌实测（2026-08-23，Apple Silicon Mac15,7，BLAKE3/flock 后端）**：

@@ -16,6 +16,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
 
+use rayon::prelude::*;
+
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::ristretto_fp_program_air::{
     ArchivedRistrettoFpProgramBatchProof,
@@ -36,12 +38,15 @@ use crate::ristretto_reconstruction_transcript::{
     RistrettoPoseidonTranscriptChallenges, RistrettoTranscriptChallengeKind,
 };
 use crate::ristretto_scalar_add_air::{
-    ArchivedRistrettoScalarAdditionProof, prove_ristretto_scalar_addition,
-    verify_ristretto_scalar_addition,
+    ArchivedRistrettoScalarAdditionBatchProof, ArchivedRistrettoScalarAdditionProof,
+    prove_ristretto_scalar_addition, prove_ristretto_scalar_addition_batch,
+    verify_ristretto_scalar_addition, verify_ristretto_scalar_addition_batch,
 };
 use crate::ristretto_scalar_air::GROUP_ORDER_BYTES;
 use crate::ristretto_scalar_windows_air::{
-    prove_ristretto_scalar_windows, verify_ristretto_scalar_windows,
+    ArchivedRistrettoScalarWindowsBatchProof, ArchivedRistrettoScalarWindowsProof,
+    prove_ristretto_scalar_windows, prove_ristretto_scalar_windows_batch,
+    verify_ristretto_scalar_windows, verify_ristretto_scalar_windows_batch,
 };
 use poker_protocol::precompile_abi::ReconstructionV3VerifyRequest;
 
@@ -76,6 +81,9 @@ pub struct ArchivedRistrettoSlotOrProof {
     pub statement: RistrettoSlotOrStatement,
     pub challenge_nonzero: ArchivedRistrettoFpProgramProof,
     pub challenge_addition: ArchivedRistrettoScalarAdditionProof,
+    /// One window-decomposition proof per scalar-multiplication input; the
+    /// shared batch references only `(scalar, windows)` statement data.
+    pub scalar_windows: Vec<ArchivedRistrettoScalarWindowsProof>,
     pub scalar_multiplications: ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof,
     pub additions: ArchivedRistrettoFpProgramBatchProof,
 }
@@ -116,13 +124,29 @@ impl RistrettoSlotOrTranscriptChallenges {
     }
 }
 
+/// Deep-batched 52-slot slot-OR archive: the per-slot small STARKs are
+/// folded into shared row batches instead of one proof per slot.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ArchivedRistrettoReconstructionSlotOrBatchProof {
     pub statement_digest: [u8; 32],
-    /// Exactly 52 archives in canonical card-slot order.  This is a `Vec` so
-    /// serialized relation bundles can remain heap-backed; the verifier
+    /// Exactly 52 statements in canonical card-slot order.  This is a `Vec`
+    /// so serialized relation bundles can remain heap-backed; the verifier
     /// rejects every other length before inspecting any equation.
-    pub slots: Vec<ArchivedRistrettoSlotOrProof>,
+    pub statements: Vec<RistrettoSlotOrStatement>,
+    /// One 52-row Fp-program batch: the `challenge_nonzero` program of every
+    /// slot, in slot order.
+    pub challenge_nonzero: ArchivedRistrettoFpProgramBatchProof,
+    /// One 52-row scalar-addition batch: each slot's challenge shares sum to
+    /// its global challenge.
+    pub challenge_additions: ArchivedRistrettoScalarAdditionBatchProof,
+    /// One 416-row scalar-window batch covering every scalar-multiplication
+    /// input in slot-major order (`slot * 8 + input`).
+    pub scalar_windows: ArchivedRistrettoScalarWindowsBatchProof,
+    /// Per-slot 2680-row compressed scalar-multiplication batches.
+    pub scalar_multiplications:
+        Vec<ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof>,
+    /// One 260-row point-addition batch: five rows per slot in slot order.
+    pub additions: ArchivedRistrettoFpProgramBatchProof,
 }
 
 fn scalar_modulus() -> BigUint {
@@ -238,6 +262,13 @@ fn nonzero_program(
     Ok(program)
 }
 
+fn prove_window_matches_statement(
+    proof: &ArchivedRistrettoScalarWindowsProof,
+    statement: &crate::ristretto_fp_program_air::RistrettoCompressedFixedWindowScalarMulStatement,
+) -> bool {
+    proof.windows == statement.windows
+}
+
 fn scalar_inputs(
     statement: &RistrettoSlotOrStatement,
 ) -> TexasAirResult<Vec<([u8; LIMBS], [u8; LIMBS])>> {
@@ -324,14 +355,17 @@ pub fn prove_ristretto_slot_or(
     }
     let inputs = scalar_inputs(&statement)?;
     let scalar_windows = inputs
-        .iter()
+        .par_iter()
         .map(|(scalar, _)| prove_ristretto_scalar_windows(scalar))
         .collect::<TexasAirResult<Vec<_>>>()?;
     let scalar_multiplications =
         prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
             scalar_windows
-                .into_iter()
+                .iter()
                 .zip(inputs.iter().map(|(_, base)| *base))
+                .map(|(window_proof, base)| {
+                    (window_proof.scalar, window_proof.windows, base)
+                })
                 .collect(),
         )?;
     let outputs = scalar_outputs(&scalar_multiplications)?;
@@ -340,10 +374,13 @@ pub fn prove_ristretto_slot_or(
         statement,
         challenge_nonzero,
         challenge_addition,
+        scalar_windows,
         scalar_multiplications,
         additions,
     };
-    verify_ristretto_slot_or(&archive)?;
+    if crate::ristretto_fp_program_air::ristretto_self_verify_enabled() {
+        verify_ristretto_slot_or(&archive)?;
+    }
     Ok(archive)
 }
 
@@ -381,18 +418,39 @@ pub fn verify_ristretto_slot_or(archive: &ArchivedRistrettoSlotOrProof) -> Texas
             "slot-OR scalar multiplication count mismatch".into(),
         ));
     }
+    if archive.scalar_windows.len() != SCALAR_MUL_COUNT {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "slot-OR scalar window proof count mismatch".into(),
+        ));
+    }
+    for (window_proof, (scalar, _)) in archive.scalar_windows.iter().zip(inputs.iter()) {
+        if window_proof.scalar != *scalar {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "slot-OR scalar window proof is detached".into(),
+            ));
+        }
+        verify_ristretto_scalar_windows(window_proof)?;
+    }
     for (actual, (scalar, base)) in archive
         .scalar_multiplications
         .statements
         .iter()
         .zip(inputs.iter())
     {
-        if actual.scalar_windows.scalar != *scalar || actual.base != *base {
+        if actual.scalar != *scalar || actual.base != *base {
             return Err(TexasAirError::ConstraintUnsatisfied(
                 "slot-OR scalar multiplication statement is detached".into(),
             ));
         }
-        verify_ristretto_scalar_windows(&actual.scalar_windows)?;
+        let matching = archive
+            .scalar_windows
+            .iter()
+            .find(|proof| proof.scalar == *scalar);
+        if !matches!(matching, Some(proof) if prove_window_matches_statement(proof, actual)) {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "slot-OR scalar window decomposition is detached from its statement".into(),
+            ));
+        }
     }
     verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
         &archive.scalar_multiplications,
@@ -457,16 +515,98 @@ pub fn prove_ristretto_reconstruction_slot_or_batch(
     challenges: &RistrettoSlotOrTranscriptChallenges,
 ) -> TexasAirResult<ArchivedRistrettoReconstructionSlotOrBatchProof> {
     let envelope = validate_ristretto_reconstruction_proof_wire(request)?;
-    let slots = (0..SLOT_COUNT)
-        .map(|slot| {
-            prove_ristretto_slot_or(expected_statement(request, &envelope, challenges, slot)?)
+    let statements = (0..SLOT_COUNT)
+        .into_par_iter()
+        .map(|slot| expected_statement(request, &envelope, challenges, slot))
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    statements.par_iter().try_for_each(validate_statement)?;
+    statements.par_iter().try_for_each(|statement| {
+        let inverse = field_inverse(&statement.global_challenge)?;
+        if inverse != statement.global_challenge_inverse {
+            return Err(TexasAirError::SpecViolation(
+                "slot-OR global challenge inverse is detached".into(),
+            ));
+        }
+        Ok(())
+    })?;
+
+    let nonzero_programs = statements
+        .par_iter()
+        .map(|statement| {
+            nonzero_program(
+                &statement.global_challenge,
+                &statement.global_challenge_inverse,
+            )
         })
         .collect::<TexasAirResult<Vec<_>>>()?;
+    let challenge_nonzero = prove_ristretto_fp_program_batch(&nonzero_programs)?;
+
+    let challenge_additions = prove_ristretto_scalar_addition_batch(
+        &statements
+            .iter()
+            .map(|statement| (statement.proof.challenges[0], statement.proof.challenges[1]))
+            .collect::<Vec<_>>(),
+    )?;
+    for (row, statement) in challenge_additions.rows.iter().zip(statements.iter()) {
+        if row.c != statement.global_challenge {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "slot-OR challenge shares do not sum to global challenge".into(),
+            ));
+        }
+    }
+
+    let inputs_per_slot = statements
+        .par_iter()
+        .map(scalar_inputs)
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    let all_scalars = inputs_per_slot
+        .iter()
+        .flat_map(|inputs| inputs.iter().map(|(scalar, _)| *scalar))
+        .collect::<Vec<_>>();
+    let scalar_windows = prove_ristretto_scalar_windows_batch(&all_scalars)?;
+
+    let scalar_multiplications = (0..SLOT_COUNT)
+        .into_par_iter()
+        .map(|slot| {
+            let inputs = &inputs_per_slot[slot];
+            let windows = (0..SCALAR_MUL_COUNT)
+                .map(|index| {
+                    let row = &scalar_windows.rows[slot * SCALAR_MUL_COUNT + index];
+                    debug_assert_eq!(row.scalar, inputs[index].0);
+                    (row.scalar, row.windows, inputs[index].1)
+                })
+                .collect();
+            prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(windows)
+        })
+        .collect::<TexasAirResult<Vec<_>>>()?;
+
+    let outputs_per_slot = scalar_multiplications
+        .iter()
+        .map(scalar_outputs)
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    let addition_programs = statements
+        .par_iter()
+        .zip(outputs_per_slot.par_iter())
+        .map(|(statement, outputs)| expected_additions(statement, outputs))
+        .collect::<TexasAirResult<Vec<Vec<_>>>>()?;
+    let flat_additions = addition_programs
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let additions = prove_ristretto_fp_program_batch(&flat_additions)?;
+
     let archive = ArchivedRistrettoReconstructionSlotOrBatchProof {
         statement_digest: envelope.statement_digest,
-        slots,
+        statements,
+        challenge_nonzero,
+        challenge_additions,
+        scalar_windows,
+        scalar_multiplications,
+        additions,
     };
-    verify_ristretto_reconstruction_slot_or_batch(request, challenges, &archive)?;
+    if crate::ristretto_fp_program_air::ristretto_self_verify_enabled() {
+        verify_ristretto_reconstruction_slot_or_batch(request, challenges, &archive)?;
+    }
     Ok(archive)
 }
 
@@ -489,8 +629,8 @@ fn validate_slot_or_batch_statement_binding(
         .map_err(|_| {
             TexasAirError::ConstraintUnsatisfied("slot-OR statement count is not fixed".into())
         })?;
-    for (actual, expected_statement) in archive.slots.iter().zip(expected.iter()) {
-        if actual.statement != *expected_statement {
+    for (actual, expected_statement) in archive.statements.iter().zip(expected.iter()) {
+        if *actual != *expected_statement {
             return Err(TexasAirError::ConstraintUnsatisfied(
                 "slot-OR archive is detached from request, envelope, or transcript order".into(),
             ));
@@ -502,7 +642,12 @@ fn validate_slot_or_batch_statement_binding(
 fn validate_slot_or_batch_cardinality(
     archive: &ArchivedRistrettoReconstructionSlotOrBatchProof,
 ) -> TexasAirResult<()> {
-    if archive.slots.len() != SLOT_COUNT {
+    if archive.statements.len() != SLOT_COUNT
+        || archive.challenge_nonzero.programs.len() != SLOT_COUNT
+        || archive.challenge_additions.rows.len() != SLOT_COUNT
+        || archive.scalar_multiplications.len() != SLOT_COUNT
+        || archive.additions.programs.len() != SLOT_COUNT * ADDITION_COUNT
+    {
         return Err(TexasAirError::ConstraintUnsatisfied(
             "slot-OR batch archive count is not fixed".into(),
         ));
@@ -515,11 +660,113 @@ pub fn verify_ristretto_reconstruction_slot_or_batch(
     challenges: &RistrettoSlotOrTranscriptChallenges,
     archive: &ArchivedRistrettoReconstructionSlotOrBatchProof,
 ) -> TexasAirResult<()> {
-    validate_slot_or_batch_statement_binding(request, challenges, archive)?;
-    for actual in &archive.slots {
-        verify_ristretto_slot_or(actual)?;
+    let expected = validate_slot_or_batch_statement_binding(request, challenges, archive)?;
+
+    // Per-statement shape checks in parallel.
+    expected.par_iter().try_for_each(|statement| {
+        validate_statement(statement)?;
+        let inverse = field_inverse(&statement.global_challenge)?;
+        if inverse != statement.global_challenge_inverse {
+            return Err(TexasAirError::SpecViolation(
+                "slot-OR global challenge inverse is detached".into(),
+            ));
+        }
+        Ok(())
+    })?;
+
+    // Nonzero batch rows bind to the statements in slot order.
+    for (program, statement) in archive
+        .challenge_nonzero
+        .programs
+        .iter()
+        .zip(expected.iter())
+    {
+        let expected_program = nonzero_program(
+            &statement.global_challenge,
+            &statement.global_challenge_inverse,
+        )?;
+        if program != &expected_program {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "slot-OR non-zero challenge program is detached".into(),
+            ));
+        }
     }
-    Ok(())
+    verify_ristretto_fp_program_batch(&archive.challenge_nonzero)?;
+
+    // Challenge-share additions bind to each slot's shares and global sum.
+    for (row, statement) in archive.challenge_additions.rows.iter().zip(expected.iter()) {
+        if row.a != statement.proof.challenges[0]
+            || row.b != statement.proof.challenges[1]
+            || row.c != statement.global_challenge
+        {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "slot-OR scalar challenge-addition statement is detached".into(),
+            ));
+        }
+    }
+    verify_ristretto_scalar_addition_batch(&archive.challenge_additions)?;
+
+    verify_ristretto_scalar_windows_batch(&archive.scalar_windows)?;
+
+    // Scalar-multiplication statements bind to per-slot inputs and to the
+    // shared window batch rows at `slot * 8 + input`.
+    let inputs_per_slot = expected
+        .par_iter()
+        .map(scalar_inputs)
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    if archive.scalar_windows.rows.len() != SLOT_COUNT * SCALAR_MUL_COUNT {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "slot-OR scalar window batch count is not fixed".into(),
+        ));
+    }
+    for (slot, (batch, inputs)) in archive
+        .scalar_multiplications
+        .iter()
+        .zip(inputs_per_slot.iter())
+        .enumerate()
+    {
+        if batch.statements.len() != SCALAR_MUL_COUNT {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "slot-OR scalar multiplication count mismatch".into(),
+            ));
+        }
+        for (index, (actual, (scalar, base))) in batch
+            .statements
+            .iter()
+            .zip(inputs.iter())
+            .enumerate()
+        {
+            let window_row = &archive.scalar_windows.rows[slot * SCALAR_MUL_COUNT + index];
+            if actual.scalar != *scalar
+                || actual.base != *base
+                || window_row.scalar != *scalar
+                || window_row.windows != actual.windows
+            {
+                return Err(TexasAirError::ConstraintUnsatisfied(
+                    "slot-OR scalar multiplication statement is detached".into(),
+                ));
+            }
+        }
+        verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(batch)?;
+    }
+
+    // The merged point-addition batch binds to five rows per slot.
+    let outputs_per_slot = archive
+        .scalar_multiplications
+        .iter()
+        .map(scalar_outputs)
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    for (slot, (statement, outputs)) in expected.iter().zip(outputs_per_slot.iter()).enumerate() {
+        let programs = expected_additions(statement, outputs)?;
+        let start = slot * ADDITION_COUNT;
+        let end = start + ADDITION_COUNT;
+        if archive.additions.programs[start..end] != programs[..] {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "slot-OR point-addition rows are detached".into(),
+            ));
+        }
+    }
+    verify_ristretto_fp_program_batch(&archive.additions)
 }
 
 #[cfg(test)]
@@ -534,6 +781,8 @@ mod tests {
     fn fixture() -> RistrettoSlotOrStatement {
         let scalar = <RistrettoCurve as Curve>::Scalar::from_u64;
         let g = RistrettoCurve::base_g();
+        let point_bytes =
+            |point: <RistrettoCurve as Curve>::Point| point.compress().as_bytes().to_vec();
         let aggregate_secret = scalar(11);
         let card = g * scalar(19);
         let randomness = scalar(17);
@@ -599,6 +848,8 @@ mod tests {
 
         let scalar = <RistrettoCurve as Curve>::Scalar::from_u64;
         let g = RistrettoCurve::base_g();
+        let point_bytes =
+            |point: <RistrettoCurve as Curve>::Point| point.compress().as_bytes().to_vec();
         let aggregate_pk = g * scalar(11);
         let card = g * scalar(19);
         let randomness = scalar(17);
@@ -630,6 +881,8 @@ mod tests {
         let statement = fixture();
         let scalar = <RistrettoCurve as Curve>::Scalar::from_u64;
         let g = RistrettoCurve::base_g();
+        let point_bytes =
+            |point: <RistrettoCurve as Curve>::Point| point.compress().as_bytes().to_vec();
         let aggregate_pk = g * scalar(11);
         let card = g * scalar(19);
         let randomness = scalar(17);
@@ -671,11 +924,278 @@ mod tests {
         );
     }
 
+    fn scalar_bytes(value: u8) -> [u8; LIMBS] {
+        let mut out = [0u8; LIMBS];
+        out[0] = value;
+        out
+    }
+
+    #[test]
+    fn deep_batch_statement_binding_rejects_slot_order_splice() {
+        use crate::ristretto_reconstruction_proof_wire::{
+            RistrettoBayerGrothShuffleProofWire, RistrettoCiphertextProofWire,
+            RistrettoReconstructionProofEnvelope, RistrettoSlotOrProofWire,
+        };
+        use poker_protocol::precompile_abi::{EncodedCiphertext, ReconstructionV3VerifyRequest};
+
+        let mut request = ReconstructionV3VerifyRequest {
+            curve: poker_protocol::precompile_abi::CurveId::Ristretto255,
+            proof_system: poker_protocol::precompile_abi::ReconstructionProofSystem::RistrettoAirV1,
+            transcript: poker_protocol::precompile_abi::TranscriptId::Poseidon252,
+            context: b"zk_reconstruct_proof_v3".to_vec(),
+            call_context: vec![7; 32],
+            statement_version: 3,
+            context_digest: [1; 32],
+            reconstruction_epoch: 9,
+            prior_state_digest: [2; 32],
+            aggregate_pk: vec![3; 32],
+            owner_pk: vec![4; 32],
+            cards: vec![vec![5; 32]; SLOT_COUNT],
+            user_readable_cards: vec![
+                EncodedCiphertext { c1: vec![6; 32], c2: vec![7; 32] };
+                crate::ristretto_reconstruction_proof_wire::RISTRETTO_RECONSTRUCTION_READABLE_CARDS
+            ],
+            contributions: vec![
+                EncodedCiphertext { c1: vec![8; 32], c2: vec![9; 32] };
+                SLOT_COUNT
+            ],
+            proof: vec![1],
+        };
+        let envelope = RistrettoReconstructionProofEnvelope::from_components(
+            &request,
+            [RistrettoCiphertextProofWire { c1: [0xA0; 32], c2: [0xA1; 32] };
+                crate::ristretto_reconstruction_proof_wire::RISTRETTO_RECONSTRUCTION_READABLE_CARDS],
+            RistrettoBayerGrothShuffleProofWire::default(),
+            [crate::ristretto_reconstruction_proof_wire::RistrettoCrossKeyProofWire {
+                commitment_owner_key: [0xB0; 32],
+                commitment_contribution_c1: [0xB1; 32],
+                commitment_joint_c2: [0xB2; 32],
+                response_owner_sk: [0x0B; 32],
+                response_contribution_randomness: [0x0C; 32],
+            };
+                crate::ristretto_reconstruction_proof_wire::RISTRETTO_RECONSTRUCTION_READABLE_CARDS],
+            [RistrettoSlotOrProofWire::default(); SLOT_COUNT],
+        )
+        .unwrap();
+        request.proof = envelope.encode_wire().unwrap();
+        let challenges = RistrettoSlotOrTranscriptChallenges {
+            statement_digest: envelope.statement_digest,
+            global_challenges: std::array::from_fn(|index| scalar_bytes(37 + index as u8)),
+        };
+        let statements = (0..SLOT_COUNT)
+            .map(|slot| expected_statement(&request, &envelope, &challenges, slot))
+            .collect::<TexasAirResult<Vec<_>>>()
+            .unwrap();
+        let dummy_program = crate::ristretto_fp_program_air::RistrettoFpProgram {
+            values: vec![[0u8; LIMBS]],
+            ops: vec![],
+            outputs: vec![0],
+        };
+        let archive = ArchivedRistrettoReconstructionSlotOrBatchProof {
+            statement_digest: envelope.statement_digest,
+            statements: statements.clone(),
+            challenge_nonzero: ArchivedRistrettoFpProgramBatchProof {
+                programs: vec![dummy_program.clone(); SLOT_COUNT],
+                stark_proof_bytes: Vec::new(),
+                range_claimed_sum: [0, 0, 0, 0],
+            },
+            challenge_additions: ArchivedRistrettoScalarAdditionBatchProof {
+                rows: (0..SLOT_COUNT)
+                    .map(|_| crate::ristretto_scalar_add_air::ArchivedRistrettoScalarAdditionRow {
+                        a: [0; LIMBS],
+                        b: [0; LIMBS],
+                        c: [0; LIMBS],
+                        reduced: false,
+                        canonical: std::array::from_fn(|_| crate::ristretto_scalar_air::ArchivedRistrettoScalarCanonicalProof {
+                            value: [0; LIMBS],
+                            stark_proof_bytes: Vec::new(),
+                        }),
+                    })
+                    .collect(),
+                stark_proof_bytes: Vec::new(),
+            },
+            scalar_windows: ArchivedRistrettoScalarWindowsBatchProof {
+                rows: Vec::new(),
+                stark_proof_bytes: Vec::new(),
+            },
+            scalar_multiplications: (0..SLOT_COUNT)
+                .map(|_| crate::ristretto_fp_program_air::ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof {
+                    statements: Vec::new(),
+                    additions: ArchivedRistrettoFpProgramBatchProof {
+                        programs: Vec::new(),
+                        stark_proof_bytes: Vec::new(),
+                        range_claimed_sum: [0, 0, 0, 0],
+                    },
+                })
+                .collect(),
+            additions: ArchivedRistrettoFpProgramBatchProof {
+                programs: vec![dummy_program.clone(); SLOT_COUNT * ADDITION_COUNT],
+                stark_proof_bytes: Vec::new(),
+                range_claimed_sum: [0, 0, 0, 0],
+            },
+        };
+        // Correct order reaches the (empty) sub-proof checks and fails there.
+        let err = verify_ristretto_reconstruction_slot_or_batch(
+            &request,
+            &challenges,
+            &archive,
+        )
+        .unwrap_err();
+        assert!(!err
+            .to_string()
+            .contains("slot-OR archive is detached from request, envelope, or transcript order"));
+
+        // A slot-order splice is rejected by the statement binding itself.
+        let mut spliced = archive;
+        spliced.statements.swap(0, 1);
+        let err = verify_ristretto_reconstruction_slot_or_batch(
+            &request,
+            &challenges,
+            &spliced,
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("slot-OR archive is detached from request, envelope, or transcript order"));
+    }
+
+    #[test]
+    #[ignore = "expensive deep-batch end-to-end probe (minutes in debug)"]
+    fn deep_slot_or_batch_proves_and_verifies_end_to_end() {
+        use crate::ristretto_reconstruction_proof_wire::{
+            RistrettoBayerGrothShuffleProofWire, RistrettoCiphertextProofWire,
+            RistrettoReconstructionProofEnvelope,
+        };
+        use poker_protocol::crypto::curve::{Curve, CurveScalar, RistrettoCurve};
+        use poker_protocol::precompile_abi::{EncodedCiphertext, ReconstructionV3VerifyRequest};
+
+        let scalar = <RistrettoCurve as Curve>::Scalar::from_u64;
+        let g = RistrettoCurve::base_g();
+        let point_bytes =
+            |point: <RistrettoCurve as Curve>::Point| point.compress().as_bytes().to_vec();
+        let aggregate_pk = g * scalar(11);
+        let mut request = ReconstructionV3VerifyRequest {
+            curve: poker_protocol::precompile_abi::CurveId::Ristretto255,
+            proof_system: poker_protocol::precompile_abi::ReconstructionProofSystem::RistrettoAirV1,
+            transcript: poker_protocol::precompile_abi::TranscriptId::Poseidon252,
+            context: b"zk_reconstruct_proof_v3".to_vec(),
+            call_context: vec![7; 32],
+            statement_version: 3,
+            context_digest: [1; 32],
+            reconstruction_epoch: 9,
+            prior_state_digest: [2; 32],
+            aggregate_pk: point_bytes(aggregate_pk),
+            owner_pk: vec![4; 32],
+            cards: (0..SLOT_COUNT)
+                .map(|index| point_bytes(g * scalar(100 + index as u64)))
+                .collect(),
+            user_readable_cards: vec![
+                EncodedCiphertext { c1: vec![6; 32], c2: vec![7; 32] };
+                crate::ristretto_reconstruction_proof_wire::RISTRETTO_RECONSTRUCTION_READABLE_CARDS
+            ],
+            contributions: (0..SLOT_COUNT)
+                .map(|index| EncodedCiphertext {
+                    c1: point_bytes(g * scalar(200 + index as u64)),
+                    c2: point_bytes(g * scalar(300 + index as u64)),
+                })
+                .collect(),
+            proof: vec![1],
+        };
+        let global_challenges: Vec<_> = (0..SLOT_COUNT)
+            .map(|slot| {
+                    scalar(37 + slot as u64)
+            })
+            .collect();
+        let slot_wires: Vec<_> = global_challenges
+            .iter()
+            .enumerate()
+            .map(|(slot, global)| {
+                let share0 = scalar(5);
+                let share1 = *global - share0;
+                let mut share_bytes = |value: <RistrettoCurve as Curve>::Scalar| {
+                    let mut out = [0u8; LIMBS];
+                    out.copy_from_slice(value.as_bytes());
+                    out
+                };
+                crate::ristretto_reconstruction_proof_wire::RistrettoSlotOrProofWire {
+                    commitment_g: [
+                        compressed(g * scalar(400 + slot as u64)),
+                        compressed(g * scalar(500 + slot as u64)),
+                    ],
+                    commitment_pk: [
+                        compressed(aggregate_pk * scalar(600 + slot as u64)),
+                        compressed(aggregate_pk * scalar(700 + slot as u64)),
+                    ],
+                    challenges: [share_bytes(share0), share_bytes(share1)],
+                    responses: [share_bytes(scalar(800 + slot as u64)); 2],
+                }
+            })
+            .collect();
+        let envelope = RistrettoReconstructionProofEnvelope::from_components(
+            &request,
+            [RistrettoCiphertextProofWire { c1: [0xA0; 32], c2: [0xA1; 32] };
+                crate::ristretto_reconstruction_proof_wire::RISTRETTO_RECONSTRUCTION_READABLE_CARDS],
+            RistrettoBayerGrothShuffleProofWire::default(),
+            [crate::ristretto_reconstruction_proof_wire::RistrettoCrossKeyProofWire {
+                commitment_owner_key: [0xB0; 32],
+                commitment_contribution_c1: [0xB1; 32],
+                commitment_joint_c2: [0xB2; 32],
+                response_owner_sk: [0x0B; 32],
+                response_contribution_randomness: [0x0C; 32],
+            };
+                crate::ristretto_reconstruction_proof_wire::RISTRETTO_RECONSTRUCTION_READABLE_CARDS],
+            slot_wires.try_into().unwrap(),
+        )
+        .unwrap();
+        request.proof = envelope.encode_wire().unwrap();
+        let challenges = RistrettoSlotOrTranscriptChallenges {
+            statement_digest: envelope.statement_digest,
+            global_challenges: global_challenges
+                .into_iter()
+                .map(|value| {
+                    let mut out = [0u8; LIMBS];
+                    out.copy_from_slice(value.as_bytes());
+                    out
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        };
+
+        let archive =
+            prove_ristretto_reconstruction_slot_or_batch(&request, &challenges).unwrap();
+        verify_ristretto_reconstruction_slot_or_batch(&request, &challenges, &archive).unwrap();
+
+        // A single tampered point-addition row must break the shared batch.
+        let mut spliced = archive;
+        spliced.additions.programs[3].values[2][0] ^= 1;
+        assert!(verify_ristretto_reconstruction_slot_or_batch(&request, &challenges, &spliced).is_err());
+    }
+
     #[test]
     fn batch_rejects_any_slot_count_other_than_52() {
         let archive = ArchivedRistrettoReconstructionSlotOrBatchProof {
             statement_digest: [0; 32],
-            slots: Vec::new(),
+            statements: Vec::new(),
+            challenge_nonzero: ArchivedRistrettoFpProgramBatchProof {
+                programs: Vec::new(),
+                stark_proof_bytes: Vec::new(),
+                range_claimed_sum: [0, 0, 0, 0],
+            },
+            challenge_additions: ArchivedRistrettoScalarAdditionBatchProof {
+                rows: Vec::new(),
+                stark_proof_bytes: Vec::new(),
+            },
+            scalar_windows: ArchivedRistrettoScalarWindowsBatchProof {
+                rows: Vec::new(),
+                stark_proof_bytes: Vec::new(),
+            },
+            scalar_multiplications: Vec::new(),
+            additions: ArchivedRistrettoFpProgramBatchProof {
+                programs: Vec::new(),
+                stark_proof_bytes: Vec::new(),
+                range_claimed_sum: [0, 0, 0, 0],
+            },
         };
         assert!(validate_slot_or_batch_cardinality(&archive).is_err());
     }

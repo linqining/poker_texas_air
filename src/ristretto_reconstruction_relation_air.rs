@@ -76,6 +76,9 @@ pub struct RistrettoCrossKeyEquationStatement {
 pub struct ArchivedRistrettoCrossKeyEquationProof {
     pub statement: RistrettoCrossKeyEquationStatement,
     pub challenge_nonzero: ArchivedRistrettoFpProgramProof,
+    /// One window-decomposition proof per scalar-multiplication input; the
+    /// shared batch references only `(scalar, windows)` statement data.
+    pub scalar_windows: Vec<crate::ristretto_scalar_windows_air::ArchivedRistrettoScalarWindowsProof>,
     /// Rows, in fixed order:
     /// `response_owner*G`, `challenge*owner_pk`,
     /// `response_randomness*G`, `challenge*negative.c1`,
@@ -398,8 +401,9 @@ pub fn prove_ristretto_cross_key_equation(
     let scalar_multiplications =
         prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
             scalar_windows
-                .into_iter()
+                .iter()
                 .zip(scalar_inputs(&statement).into_iter().map(|(_, base)| base))
+                .map(|(window_proof, base)| (window_proof.scalar, window_proof.windows, base))
                 .collect(),
         )?;
     let outputs = scalar_outputs(&scalar_multiplications)?;
@@ -408,10 +412,13 @@ pub fn prove_ristretto_cross_key_equation(
     let archive = ArchivedRistrettoCrossKeyEquationProof {
         statement,
         challenge_nonzero,
+        scalar_windows,
         scalar_multiplications,
         additions,
     };
-    verify_ristretto_cross_key_equation(&archive)?;
+    if crate::ristretto_fp_program_air::ristretto_self_verify_enabled() {
+        verify_ristretto_cross_key_equation(&archive)?;
+    }
     Ok(archive)
 }
 
@@ -471,20 +478,39 @@ pub fn verify_ristretto_cross_key_equation(
             "cross-key scalar multiplication count mismatch".into(),
         ));
     }
+    if archive.scalar_windows.len() != SCALAR_MUL_COUNT {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "cross-key scalar window proof count mismatch".into(),
+        ));
+    }
+    for (window_proof, (scalar, _)) in archive.scalar_windows.iter().zip(expected_inputs.iter()) {
+        if window_proof.scalar != *scalar {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "cross-key scalar window proof is detached".into(),
+            ));
+        }
+        verify_ristretto_scalar_windows(window_proof)?;
+    }
     for (actual, (scalar, base)) in archive
         .scalar_multiplications
         .statements
         .iter()
         .zip(expected_inputs)
     {
-        if actual.scalar_windows.scalar != scalar || actual.base != base {
+        if actual.scalar != scalar || actual.base != base {
             return Err(TexasAirError::ConstraintUnsatisfied(
                 "cross-key scalar multiplication statement is detached".into(),
             ));
         }
-    }
-    for statement in &archive.scalar_multiplications.statements {
-        verify_ristretto_scalar_windows(&statement.scalar_windows)?;
+        let matching = archive
+            .scalar_windows
+            .iter()
+            .find(|proof| proof.scalar == scalar);
+        if !matches!(matching, Some(proof) if proof.windows == actual.windows) {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "cross-key scalar window decomposition is detached from its statement".into(),
+            ));
+        }
     }
     verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
         &archive.scalar_multiplications,
@@ -771,6 +797,7 @@ mod tests {
             statement_digest: envelope.statement_digest,
             equations: std::array::from_fn(|index| ArchivedRistrettoCrossKeyEquationProof {
                 statement: statements[index].clone(),
+                scalar_windows: Vec::new(),
                 challenge_nonzero: ArchivedRistrettoFpProgramProof {
                     program: build_nonzero_challenge_program(
                         &statements[index].challenge,

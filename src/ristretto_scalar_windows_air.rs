@@ -320,6 +320,219 @@ pub fn verify_ristretto_scalar_windows(
         .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))
 }
 
+/// One row of a batched scalar-window archive.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedRistrettoScalarWindowsRow {
+    /// Canonical little-endian scalar bytes.
+    pub scalar: [u8; LIMBS],
+    /// Sixty-four little-endian 4-bit windows.
+    pub windows: [u8; WINDOWS],
+    /// Independent strict `scalar < l` proof.
+    pub canonical: ArchivedRistrettoScalarCanonicalProof,
+}
+
+/// Many scalar/window decompositions proven as rows of one STARK.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedRistrettoScalarWindowsBatchProof {
+    /// Public rows in canonical caller-defined order.
+    pub rows: Vec<ArchivedRistrettoScalarWindowsRow>,
+    /// Serialized Stwo proof for the complete batch.
+    pub stark_proof_bytes: Vec<u8>,
+}
+
+fn batch_log_size(row_count: usize) -> u32 {
+    row_count.max(2).next_power_of_two().ilog2()
+}
+
+fn trace_columns_batch(scalars: &[[u8; LIMBS]]) -> MethodTrace {
+    let log_size = batch_log_size(scalars.len());
+    let domain_rows = 1usize << log_size;
+    let mut trace = MethodTrace::new(log_size, NUM_COLUMNS);
+    for row_index in 0..domain_rows {
+        let scalar = scalars[row_index.min(scalars.len() - 1)];
+        let scalar_windows = windows(&scalar);
+        let mut row = Vec::with_capacity(NUM_COLUMNS);
+        row.extend(scalar.iter().map(|limb| M31::from(u32::from(*limb))));
+        for limb in &scalar {
+            for bit in 0..8 {
+                row.push(M31::from(u32::from((limb >> bit) & 1)));
+            }
+        }
+        row.extend(
+            scalar_windows
+                .iter()
+                .map(|window| M31::from(u32::from(*window))),
+        );
+        for window in scalar_windows {
+            for bit in 0..4 {
+                row.push(M31::from(u32::from((window >> bit) & 1)));
+            }
+        }
+        trace
+            .write_row(row_index, &row)
+            .expect("fixed scalar-window width");
+    }
+    trace
+}
+
+fn scope_columns_batch(rows: &[ArchivedRistrettoScalarWindowsRow]) -> MethodTrace {
+    let log_size = batch_log_size(rows.len());
+    let domain_rows = 1usize << log_size;
+    let mut trace = MethodTrace::new(log_size, PREPROCESSED_COLUMNS);
+    for row_index in 0..domain_rows {
+        let source = &rows[row_index.min(rows.len() - 1)];
+        let row: Vec<M31> = source
+            .scalar
+            .iter()
+            .map(|limb| M31::from(u32::from(*limb)))
+            .collect();
+        trace
+            .write_row(row_index, &row)
+            .expect("fixed scalar scope width");
+    }
+    trace
+}
+
+fn mix_scope_batch(
+    channel: &mut impl Channel,
+    rows: &[ArchivedRistrettoScalarWindowsRow],
+) {
+    channel.mix_u64(0x7363_7769_6e62_6174);
+    channel.mix_u64(rows.len() as u64);
+    for row in rows {
+        mix_scope(channel, &row.scalar, &row.windows);
+    }
+}
+
+/// Prove many canonical scalar/window decompositions as rows of one STARK.
+pub fn prove_ristretto_scalar_windows_batch(
+    scalars: &[[u8; LIMBS]],
+) -> TexasAirResult<ArchivedRistrettoScalarWindowsBatchProof> {
+    if scalars.is_empty() {
+        return Err(TexasAirError::SpecViolation(
+            "scalar-window batch cannot be empty".into(),
+        ));
+    }
+    let log_size = batch_log_size(scalars.len());
+    let trace = trace_columns_batch(scalars);
+    let rows = scalars
+        .iter()
+        .map(|scalar| {
+            Ok(ArchivedRistrettoScalarWindowsRow {
+                scalar: *scalar,
+                windows: windows(scalar),
+                canonical: prove_ristretto_scalar_canonical(scalar)?,
+            })
+        })
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    let scope = scope_columns_batch(&rows);
+    let config = crate::prover_context::protocol_pcs_config();
+    let twiddles =
+        crate::prover_context::simd_twiddles(log_size + config.fri_config.log_blowup_factor);
+    let mut channel = stwo::core::channel::Poseidon252Channel::default();
+    mix_scope_batch(&mut channel, &rows);
+    let mut scheme =
+        CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::with_memory_pool(
+            config,
+            &twiddles,
+            crate::prover_context::simd_base_column_pool(),
+        );
+    {
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(scope.to_evaluations());
+        tree.commit(&mut channel);
+    }
+    {
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(trace.to_evaluations());
+        tree.commit(&mut channel);
+    }
+    let ids = preprocessed_ids();
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let component = FrameworkComponent::new(
+        &mut allocator,
+        ScalarWindowsAir { log_size },
+        SecureField::from(0u32),
+    );
+    let proof = prove(&[&component], &mut channel, scheme)
+        .map_err(|error| TexasAirError::StwoProverError(error.to_string()))?;
+    let stark_proof_bytes = options()
+        .serialize(&proof)
+        .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+    Ok(ArchivedRistrettoScalarWindowsBatchProof {
+        rows,
+        stark_proof_bytes,
+    })
+}
+
+/// Verify a batched scalar-window archive.
+pub fn verify_ristretto_scalar_windows_batch(
+    archive: &ArchivedRistrettoScalarWindowsBatchProof,
+) -> TexasAirResult<()> {
+    if archive.rows.is_empty() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "scalar-window batch cannot be empty".into(),
+        ));
+    }
+    for row in &archive.rows {
+        verify_ristretto_scalar_canonical(&row.canonical)?;
+        if row.canonical.value != row.scalar {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "Ristretto scalar-window batch canonical proof is detached".into(),
+            ));
+        }
+    }
+    type Proof = StarkProof<Poseidon252MerkleHasher>;
+    let proof: Proof = options()
+        .deserialize(&archive.stark_proof_bytes)
+        .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+    let log_size = batch_log_size(archive.rows.len());
+    let scope = scope_columns_batch(&archive.rows);
+    let config = crate::prover_context::protocol_pcs_config();
+    let twiddles =
+        crate::prover_context::simd_twiddles(log_size + config.fri_config.log_blowup_factor);
+    let mut trusted =
+        CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::with_memory_pool(
+            config,
+            &twiddles,
+            crate::prover_context::simd_base_column_pool(),
+        );
+    let mut scope_channel = stwo::core::channel::Poseidon252Channel::default();
+    {
+        let mut tree = trusted.tree_builder();
+        tree.extend_evals(scope.to_evaluations());
+        tree.commit(&mut scope_channel);
+    }
+    if proof.commitments.first().copied() != trusted.roots().first().copied() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "Ristretto scalar-window batch scope commitment mismatch".into(),
+        ));
+    }
+    let mut channel = stwo::core::channel::Poseidon252Channel::default();
+    mix_scope_batch(&mut channel, &archive.rows);
+    let mut scheme =
+        stwo::core::pcs::CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
+    scheme.commit(
+        proof.commitments[0],
+        &vec![log_size; PREPROCESSED_COLUMNS],
+        &mut channel,
+    );
+    scheme.commit(
+        proof.commitments[1],
+        &vec![log_size; NUM_COLUMNS],
+        &mut channel,
+    );
+    let ids = preprocessed_ids();
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let component = FrameworkComponent::new(
+        &mut allocator,
+        ScalarWindowsAir { log_size },
+        SecureField::from(0u32),
+    );
+    stwo::core::verifier::verify(&[&component], &mut channel, &mut scheme, proof)
+        .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +567,26 @@ mod tests {
         scalar[0] += 1;
         assert!(prove_ristretto_scalar_windows(&scalar).is_err());
         assert!(prove_ristretto_scalar_canonical(&scalar).is_err());
+    }
+
+    #[test]
+    fn batch_proves_and_rejects_row_splices() {
+        let mut a = crate::ristretto_scalar_air::GROUP_ORDER_BYTES;
+        a[0] -= 1;
+        let mut b = [0u8; LIMBS];
+        b[0] = 7;
+        let mut c = [0u8; LIMBS];
+        c[31] = 3;
+        let archive = prove_ristretto_scalar_windows_batch(&[a, b, c]).unwrap();
+        assert_eq!(archive.rows.len(), 3);
+        verify_ristretto_scalar_windows_batch(&archive).unwrap();
+
+        let mut spliced = archive.clone();
+        spliced.rows[1].windows[0] ^= 1;
+        assert!(verify_ristretto_scalar_windows_batch(&spliced).is_err());
+
+        let mut spliced = archive;
+        spliced.rows[2].scalar[0] ^= 1;
+        assert!(verify_ristretto_scalar_windows_batch(&spliced).is_err());
     }
 }

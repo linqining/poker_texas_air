@@ -8,6 +8,7 @@
 //! shuffle, transcript, or final rebuilt-deck relations.
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use rayon::prelude::*;
 
 use crate::canonical_reconstruction_binding::{
     ArchivedCanonicalReconstructionStateBindingProof, CANONICAL_RECONSTRUCTION_CARDS,
@@ -125,7 +126,9 @@ pub fn prove_ristretto_canonical_base_deck(
         deck,
         additions,
     };
-    verify_ristretto_canonical_base_deck(&archive)?;
+    if crate::ristretto_fp_program_air::ristretto_self_verify_enabled() {
+        verify_ristretto_canonical_base_deck(&archive)?;
+    }
     Ok(archive)
 }
 
@@ -167,30 +170,32 @@ pub fn prove_ristretto_reconstruction_deck_accumulator(
     contributions: [CanonicalRistrettoCiphertext; CANONICAL_RECONSTRUCTION_CARDS],
     post: [CanonicalRistrettoCiphertext; CANONICAL_RECONSTRUCTION_CARDS],
 ) -> TexasAirResult<ArchivedRistrettoReconstructionDeckAccumulatorProof> {
-    let mut programs = Vec::with_capacity(RECONSTRUCTION_ADDITION_ROWS);
-    for index in 0..CANONICAL_RECONSTRUCTION_CARDS {
-        let (c1, c1_output) = build_ristretto_fp_program_compressed_point_addition(
-            &prior[index].c1,
-            &contributions[index].c1,
-        )?;
-        if c1_output != post[index].c1 {
-            return Err(TexasAirError::SpecViolation(
-                "reconstruction card c1 post encoding is not prior plus contribution".into(),
-            ));
-        }
-        programs.push(c1);
-
-        let (c2, c2_output) = build_ristretto_fp_program_compressed_point_addition(
-            &prior[index].c2,
-            &contributions[index].c2,
-        )?;
-        if c2_output != post[index].c2 {
-            return Err(TexasAirError::SpecViolation(
-                "reconstruction card c2 post encoding is not prior plus contribution".into(),
-            ));
-        }
-        programs.push(c2);
-    }
+    // Cards are independent equations; build all 104 programs in parallel.
+    let rows = (0..CANONICAL_RECONSTRUCTION_CARDS)
+        .into_par_iter()
+        .map(|index| {
+            let (c1, c1_output) = build_ristretto_fp_program_compressed_point_addition(
+                &prior[index].c1,
+                &contributions[index].c1,
+            )?;
+            if c1_output != post[index].c1 {
+                return Err(TexasAirError::SpecViolation(
+                    "reconstruction card c1 post encoding is not prior plus contribution".into(),
+                ));
+            }
+            let (c2, c2_output) = build_ristretto_fp_program_compressed_point_addition(
+                &prior[index].c2,
+                &contributions[index].c2,
+            )?;
+            if c2_output != post[index].c2 {
+                return Err(TexasAirError::SpecViolation(
+                    "reconstruction card c2 post encoding is not prior plus contribution".into(),
+                ));
+            }
+            Ok([c1, c2])
+        })
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    let programs = rows.into_iter().flatten().collect::<Vec<_>>();
     let additions = prove_ristretto_fp_program_batch(&programs)?;
     let archive = ArchivedRistrettoReconstructionDeckAccumulatorProof {
         prior,
@@ -198,7 +203,9 @@ pub fn prove_ristretto_reconstruction_deck_accumulator(
         post,
         additions,
     };
-    verify_ristretto_reconstruction_deck_accumulator(&archive)?;
+    if crate::ristretto_fp_program_air::ristretto_self_verify_enabled() {
+        verify_ristretto_reconstruction_deck_accumulator(&archive)?;
+    }
     Ok(archive)
 }
 
@@ -212,7 +219,7 @@ pub fn verify_ristretto_reconstruction_deck_accumulator(
         )));
     }
     verify_ristretto_fp_program_batch(&archive.additions)?;
-    for index in 0..CANONICAL_RECONSTRUCTION_CARDS {
+    (0..CANONICAL_RECONSTRUCTION_CARDS).into_par_iter().try_for_each(|index| {
         verify_ristretto_fp_program_compressed_point_addition_row(
             &archive.additions.programs[index * 2],
             &archive.prior[index].c1,
@@ -224,9 +231,8 @@ pub fn verify_ristretto_reconstruction_deck_accumulator(
             &archive.prior[index].c2,
             &archive.contributions[index].c2,
             &archive.post[index].c2,
-        )?;
-    }
-    Ok(())
+        )
+    })
 }
 
 fn canonical_ciphertext(value: &EncodedCiphertext) -> TexasAirResult<CanonicalRistrettoCiphertext> {
@@ -610,7 +616,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     #[ignore = "timing probe for step-2 optimization"]
     fn timing_single_reconstruction_batch() {
         let prior = CanonicalRistrettoCiphertext { c1: [0; 32], c2: [0; 32] };
@@ -635,6 +640,7 @@ mod tests {
         eprintln!("proof bytes: {bytes}");
     }
 
+    #[test]
     fn proves_reconstruction_deck_in_one_ordered_batch_stark() {
         let prior = CanonicalRistrettoCiphertext {
             c1: [0; 32],

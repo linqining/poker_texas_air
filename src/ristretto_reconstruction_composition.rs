@@ -202,9 +202,9 @@ pub fn validate_ristretto_reconstruction_relation_bundle_scope(
             )));
         }
     }
-    for (index, slot) in bundle.slot_or.slots.iter().enumerate() {
-        if slot.statement.statement_digest != envelope.statement_digest
-            || usize::from(slot.statement.slot_index) != index
+    for (index, statement) in bundle.slot_or.statements.iter().enumerate() {
+        if statement.statement_digest != envelope.statement_digest
+            || usize::from(statement.slot_index) != index
         {
             return Err(TexasAirError::ConstraintUnsatisfied(format!(
                 "slot-OR equation {index} is detached from the common statement or order"
