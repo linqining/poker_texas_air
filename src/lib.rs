@@ -122,6 +122,8 @@ pub mod ristretto_fp_program_air;
 pub mod ristretto_fp_sqrt_ratio_air;
 /// Composed Ristretto255 modular-subtraction proofs.
 pub mod ristretto_fp_sub_air;
+/// Variable-base Ristretto255 multi-scalar multiplication over batched STARKs.
+pub mod ristretto_msm_air;
 /// Composed host-zero Ristretto255 point-decode proofs.
 pub mod ristretto_point_decode_air;
 /// Composed host-zero Ristretto255 point-encode proofs.

@@ -190,16 +190,33 @@ ePrint 2026/1329）；admission 并行验证双证明，归档接口保持递归
      （+2.4%），与 canonical 侧旧实验（−1.5% 名义）方向一致——该配置下
      折叠层数本就少（log 7 域 + blowup 2），折叠省不掉多少 auth path，
      反而每层揭示变宽。已回退，协议配置维持 fold_step=1。
-   回归：ristretto 全量 **104/104 绿**（二轮 1943s；三轮 1073s；四轮 1005s，
+   - **五轮：slot-OR 深度批化（已完成，2026-08-24）**：52 槽的小 STARK
+     层从"每槽独立证明"折叠为跨槽共享批——`ArchivedRistrettoReconstruction
+     SlotOrBatchProof` 重构为：52-行 nonzero FpProgram 批 + 52-行标量加法
+     批（新 `prove/verify_ristretto_scalar_addition_batch`）+ 416-行
+     scalar-windows 批（新 `prove/verify_ristretto_scalar_windows_batch`）
+     + 260-行合并 point-addition 批 + 每槽 2680-行 scalar-mul 批（52 个）。
+     STARK 数 52×20≈1040 → 56。mul 语句 ABI 轻量化（内嵌窗口证明改为
+     `(scalar, windows)` 数据，窗口证明归调用方/共享批持有），单槽
+     slot-OR 与 cross-key archive 相应增加 `scalar_windows` 字段。
+     **release E2E 实测**（`poker-hand-bench slot-or-deep-batch`，真/模拟
+     分支代数闭合 fixture）：prove 1365.7s / verify 118.3s / 证明 1.27GB，
+     含篡改 point-addition 行拒绝。**结论**：该线成本由 52×2680-行的
+     全 FpProgram scalar-mul 批主导（每行 ~25k 列），小 STARK 批化消除的
+     是次要项；下一杠杆为 mul 批合并或专用窗口/倍点 AIR。E2E 探针保留为
+     bench 子命令（debug 测试版已删除——debug 下需 4–8 小时不可用）。
+   回归：ristretto 全量 **104/104 绿**（二轮 1943s；三轮 1073s；四轮 1005s；
+   五轮 107/107，973s，新增 scalar-add 批/scalar-windows 批/深度批绑定三测，
    均含 104 行 splice 拒绝）。release 复测演进：13.9/5.9/12.3MB →
    3.90/1.57/9.55MB（二轮）→ 1.84/1.04/10.0MB（三轮）→
    **1.28s / 0.84s / 7.34MB**（四轮；累计 prove 10.9×、verify 7.0×、
    证明 −40%）。
    修复：`proves_reconstruction_deck_in_one_ordered_batch_stark` 测试属性损坏
    （重复 `#[test]` 吞掉了属性），此前未在跑。
-   **剩余机会**：slot-OR 深度批化（52 个 nonzero/标量加法小 STARK 跨槽并入
-   共享批，需改 archive ABI）；常量出 trace（~3%）；verify 剩余 ≈0.5s FRI
-   查询揭示，受总承诺列宽约束，下一杠杆为 trace 树见证列（mul carry 11.2k
+   **剩余机会**：slot-OR 线的 52 个 2680-行 scalar-mul 批合并为共享域或
+   专用窗口/倍点 AIR（E2E 显示该层占 1366s 证明的绝大部分，且归档内嵌
+   全部程序字节导致 1.27GB 证明）；常量出 trace（~3%）；verify 剩余 ≈0.5s
+   FRI 查询揭示，受总承诺列宽约束，下一杠杆为 trace 树见证列（mul carry 11.2k
    列）的结构性压缩。
 10. **showdown settlement AIR 前置（进行中，2026-08-24）**：VM 侧结算语义已用
    `poker_l1/.../settlement_fixture.rs` 锁定（4 场景：三层 all-in 阶梯、
@@ -274,6 +291,36 @@ ePrint 2026/1329）；admission 并行验证双证明，归档接口保持递归
 11. **瓶颈转移预警**：哈希层与 Ristretto 二轮优化完成后，端到端剩余瓶颈为
     Ristretto 固定证明开销（\~1.3s/批）与 state\_root Poseidon252 AIR
     （host 边界必须消除；可在二元域位分解、M31 limb 或 Flock 类中择优评估）。
+12. **Ristretto 11-bit limb + 变基 MSM（已完成，2026-08-24）**：
+    - **11-bit limb（`FpProgramAir` 内部基数 32×8-bit 字节 → 24×11-bit，
+      264≥256 bit 覆盖）**：canonicity 进位加法器新增 3-bit 顶约束（顶 limb < 8
+      把 264-bit limb 和钉死在 2²⁵⁶ 以下）；加/减进位在 2048 基数下仍归纳于
+      {−1,0,1}；乘法 carry 界 <2¹⁷（2·24·2047²/2048 ≈ 98304），拆
+      `(lo<2048, hi<64)` 双查表：值/和 limb 走 **2048 项单查表**（128 行域 =
+      16 条纹 × 2 列，替代原 65536 项字节对表的 512×3=1536 列），carry 对走
+      **131,072 项 arity-2 配对表**（每乘 47 条目，条带列随批域翻倍减半）。
+      M31 环绕安全余量：乘法关系整数界 ≈2²⁸·⁶ << 2³¹−1（11-bit 是单行全和
+      约束下的安全上限内最优，13-bit 起需要拆约束）。scope 打包改 2 limb/列
+      （<2²²）。公共 ABI（32 字节值）不变，仅证明内部格式换代。
+    - **v1 教训（已否决）**：值与 carry 全走单查表时，乘法 carry 94 条目/乘、
+      值 24 单条目/值，交互层条目反超 8-bit 基线（值 16 对、carry 63 条目），
+      乘密集负载实测 prove +5–8%、证明 +2–5%；仅轻负载小程序大胜
+      （证明 −57%）。v2 把 carry 配对成 47 条目/乘后翻正。
+    - **实测（release、空闲机、顺序单跑，`ristretto_perf` 基准，
+      8-bit 基线经独立 worktree 同机测得）**：压缩定点标量乘批
+      N=2/4 prove 7.9→**7.5s**/14.9→**14.6s**、证明 11.19→**10.71MB**
+      /15.43→**14.93MB**；MSM N=2/4 prove 9.3→**8.7s**/16.7→**15.7s**；
+      单程序压缩点加法 prove 1.2→1.3s、证明 +4%（131k 表在 128 行单程序域
+      条纹列最多，批域下随行数减半）；小 add/mul/sub 程序证明 +55%
+      （单个乘法承担固定表列，非生产路径）。生产路径（reconstruction 批、
+      标量乘批、MSM——全部 ≥128 行批域）净收益 −2…−6% prove、−3…−4% 证明。
+    - **变基 MSM（新能力，`ristretto_msm_air.rs`）**：`prove_ristretto_msm`
+      纯组合三层既有批 STARK——标量 4-bit 窗口分解批 + 每标量 335 行压缩
+      定点乘批 + N−1 行压缩点加法串行累加批——零新 AIR；验证器逐行确定性
+      重建、窗口↔标量↔基点↔累加链四重绑定，空批/单对带累加等边角全部
+      fail-closed。MSM N=4：prove 15.7s / verify 2.3s / 归档 22.3MB。
+      同标量多基（批量解密 sk·C1ᵢ）可复用同一窗口分解见证再省一份。
+    - 回归：`ristretto_fp_program_air` 35/35、MSM 3/3、ristretto 全模块套件全绿。
 
 **完整一手牌实测（2026-08-23，Apple Silicon Mac15,7，BLAKE3/flock 后端）**：
 

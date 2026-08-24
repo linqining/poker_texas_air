@@ -35,14 +35,18 @@ use crate::ristretto_scalar_windows_air::{
 use crate::trace_gen::MethodTrace;
 
 const LIMBS: usize = 32;
-const PRODUCT_LIMBS: usize = 2 * LIMBS;
-const BASE: u32 = 256;
+/// Internal witness radix: each canonical value is proven as twenty-four
+/// 11-bit limbs (`LIMB_COUNT * LIMB_BITS = 264 ≥ 256` bits).
+const LIMB_COUNT: usize = 24;
+const LIMB_BITS: u32 = 11;
+const BASE: u32 = 1 << LIMB_BITS;
+const PRODUCT_LIMBS: usize = 2 * LIMB_COUNT;
 /// Domain floor for every program STARK.  The LogUp interaction generator
-/// needs one SIMD vector row (`LOG_N_LANES = 4`) and the 256-entry range
-/// table stripes across `256 >> log_size` column pairs below log 8, so small
-/// domains are structurally supported.  The floor is pinned at 128 rows for
-/// FRI soundness: with `log_blowup = 1`, 30 queries only carry their nominal
-/// weight while the LDE domain comfortably exceeds the query count
+/// needs one SIMD vector row (`LOG_N_LANES = 4`) and the 2048-entry range
+/// table stripes across `2048 >> log_size` column pairs below log 11, so
+/// small domains are structurally supported.  The floor is pinned at 128 rows
+/// for FRI soundness: with `log_blowup = 1`, 30 queries only carry their
+/// nominal weight while the LDE domain comfortably exceeds the query count
 /// (domain 256 → ~28 distinct positions vs ~29 at the old 256-row trace
 /// floor); a 16-row floor would cap effective FRI security near 30 bits.
 const LOG_SIZE: u32 = 7;
@@ -83,6 +87,41 @@ const CANONICITY_COMPLEMENT_BYTES: [u8; LIMBS] = {
     bytes[31] = 0x80;
     bytes
 };
+
+/// Split a 32-byte little-endian value into `LIMB_COUNT` 11-bit limbs.
+const fn base_limbs(bytes: &[u8; LIMBS]) -> [u16; LIMB_COUNT] {
+    let mut out = [0u16; LIMB_COUNT];
+    let mut limb_index = 0usize;
+    while limb_index < LIMB_COUNT {
+        let mut limb = 0u16;
+        let mut bit = 0u32;
+        while bit < LIMB_BITS {
+            let global_bit = limb_index * LIMB_BITS as usize + bit as usize;
+            let byte = global_bit / 8;
+            if byte < LIMBS && (bytes[byte] >> (global_bit % 8)) & 1 == 1 {
+                limb |= 1 << bit;
+            }
+            bit += 1;
+        }
+        out[limb_index] = limb;
+        limb_index += 1;
+    }
+    out
+}
+
+fn to_limbs(value: &[u8; LIMBS]) -> [u16; LIMB_COUNT] {
+    base_limbs(value)
+}
+
+/// `p = 2^255 − 19` as twenty-four 11-bit limbs.
+const P_BASE_LIMBS: [u16; LIMB_COUNT] = base_limbs(&P_BYTES);
+/// `2^256 − p` as twenty-four 11-bit limbs.
+const CANONICITY_COMPLEMENT_LIMBS: [u16; LIMB_COUNT] =
+    base_limbs(&CANONICITY_COMPLEMENT_BYTES);
+/// Bound on a multiplication carry magnitude: `|carry| ≤ (2·L·(2^11−1)² +
+/// terms) / 2^11 < 2^17`, so every magnitude splits into two range-checked
+/// 11-bit limbs and every relation stays far below the M31 wraparound bound.
+const MAX_MUL_CARRY_MAGNITUDE: u32 = 1 << 17;
 
 const TWO_BYTES: [u8; LIMBS] = {
     let mut bytes = [0u8; LIMBS];
@@ -520,6 +559,14 @@ struct SignedMagnitude {
     magnitude: u16,
 }
 
+/// A multiplication carry: boolean sign plus a magnitude below
+/// `MAX_MUL_CARRY_MAGNITUDE`, witnessed as two 11-bit limbs.
+#[derive(Clone, Copy)]
+struct SignedLimbCarry {
+    negative: bool,
+    magnitude: u32,
+}
+
 #[derive(Clone)]
 enum OpWitness {
     Add {
@@ -528,46 +575,65 @@ enum OpWitness {
         carries: Vec<SignedMagnitude>,
     },
     Multiply {
-        carries: Vec<SignedMagnitude>,
+        carries: Vec<SignedLimbCarry>,
     },
 }
 
 #[derive(Clone)]
 struct ProgramWitness {
-    /// Per witnessed value: the limbs of `value + (2^256 − p)`, all `<
-    /// 2^256` exactly when `value < p`.
-    canonicity_sums: Vec<Option<[u8; LIMBS]>>,
+    /// Per witnessed value: the 11-bit limbs of `value + (2^256 − p)` and
+    /// their boolean carries, all `< 2^256` exactly when `value < p`.
+    canonicity: Vec<Option<([u16; LIMB_COUNT], [u16; LIMB_COUNT])>>,
     op_witnesses: Vec<OpWitness>,
 }
 
-/// Shared two-byte (16-bit) pair range table LogUp relation for Fp program
-/// limbs: each entry ranges an adjacent `(lo, hi)` byte-column pair over
-/// 65536 values, halving the interaction column count versus per-byte
-/// entries.
-relation!(FpRange16, 2);
+/// Shared single-limb (11-bit) range table LogUp relation for Fp program
+/// limbs: each entry ranges one limb column over the 2048 radix values,
+/// keeping one interaction entry per limb.
+relation!(FpRange11, 1);
+
+/// Paired (lo, hi) 11-bit-limb LogUp relation for multiplication carries:
+/// every magnitude below `2^17` splits as `lo + 2048·hi` with `lo < 2048`
+/// and `hi < 64`, so one arity-2 entry ranges the full carry against a
+/// 131,072-entry striped pair table.
+relation!(FpCarry17, 2);
 
 #[derive(Clone)]
 struct FpProgramAir {
     log_size: u32,
     program: RistrettoFpProgram,
-    range: FpRange16,
+    range: FpRange11,
+    carry: FpCarry17,
 }
 
 impl FpProgramAir {
-    /// Number of table stripes: the 65536-entry two-byte range table is
-    /// striped across `65536 >> log_size` stripes, one entry per row per
-    /// stripe (`t * 2^log_size + row`), each stripe holding one multiplicity
-    /// and one `(lo, hi)` value-column pair, with inert values (and zero
-    /// multiplicity) beyond 65535.
-    fn table_columns(&self) -> usize {
+    /// Number of table stripes: the 2048-entry limb range table is striped
+    /// across `2048 >> log_size` stripes, one entry per row per stripe
+    /// (`t * 2^log_size + row`), each stripe holding one multiplicity and
+    /// one limb value column, with inert values (and zero multiplicity)
+    /// beyond 2047.
+    fn table_stripes(&self) -> usize {
         range_table_stripes(self.log_size)
+    }
+
+    /// Number of pair-table stripes: the 131,072-entry carry table is striped
+    /// across `131072 >> log_size` stripes, each holding one multiplicity and
+    /// one `(lo, hi)` value-column pair.
+    fn carry_table_stripes(&self) -> usize {
+        carry_table_stripes(self.log_size)
     }
 }
 
-/// Number of `(multiplicity, lo, hi)` table stripes for a two-byte range
+/// Number of `(multiplicity, value)` table stripes for an 11-bit limb range
 /// table over a `2^log_size` row domain.
 fn range_table_stripes(log_size: u32) -> usize {
-    (65536usize >> log_size.min(16)).max(1)
+    (2048usize >> log_size.min(11)).max(1)
+}
+
+/// Number of `(multiplicity, lo, hi)` table stripes for the 17-bit carry
+/// pair table over a `2^log_size` row domain.
+fn carry_table_stripes(log_size: u32) -> usize {
+    (131_072usize >> log_size.min(17)).max(1)
 }
 
 static MODULUS: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
@@ -642,17 +708,22 @@ fn validate_indices(value_count: usize, op_count: usize, outputs: &[u16]) -> Tex
     Ok(())
 }
 
-fn canonicity_sum(value: &[u8; LIMBS]) -> [u8; LIMBS] {
-    let mut out = [0u8; LIMBS];
-    let mut carry = 0u16;
-    for index in 0..LIMBS {
-        let sum =
-            u16::from(value[index]) + u16::from(CANONICITY_COMPLEMENT_BYTES[index]) + carry;
-        out[index] = (sum & 0xff) as u8;
-        carry = sum >> 8;
+/// Limb-wise witness that `value < p`: the sum limbs and boolean carries of
+/// `value + (2^256 − p)`, which stays below `2^256` exactly when `value < p`.
+fn canonicity_witness(
+    value: &[u16; LIMB_COUNT],
+) -> ([u16; LIMB_COUNT], [u16; LIMB_COUNT]) {
+    let mut sum = [0u16; LIMB_COUNT];
+    let mut carries = [0u16; LIMB_COUNT];
+    let mut carry_in = 0u16;
+    for index in 0..LIMB_COUNT {
+        let total = value[index] + CANONICITY_COMPLEMENT_LIMBS[index] + carry_in;
+        sum[index] = total % BASE as u16;
+        carry_in = total / BASE as u16;
+        carries[index] = carry_in;
     }
-    debug_assert_eq!(carry, 0, "value < p plus its complement stays below 2^256");
-    out
+    debug_assert_eq!(carry_in, 0, "value < p plus its complement stays below 2^256");
+    (sum, carries)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -741,15 +812,20 @@ fn program_canonicity(program: &RistrettoFpProgram) -> TexasAirResult<Vec<ValueC
 fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitness> {
     validate_indices(program.values.len(), program.ops.len(), &program.outputs)?;
     let canonicity = program_canonicity(program)?;
-    let mut canonicity_sums = Vec::with_capacity(program.values.len());
+    let value_limbs = program
+        .values
+        .iter()
+        .map(|value| to_limbs(value))
+        .collect::<Vec<_>>();
+    let mut canonicity_witnesses = Vec::with_capacity(program.values.len());
     for (value_index, value) in program.values.iter().enumerate() {
         if big_uint(value) >= modulus() {
             return Err(TexasAirError::SpecViolation(
                 "Fp program value is noncanonical".into(),
             ));
         }
-        canonicity_sums.push(if canonicity[value_index] == ValueCanonicity::Witnessed {
-            Some(canonicity_sum(value))
+        canonicity_witnesses.push(if canonicity[value_index] == ValueCanonicity::Witnessed {
+            Some(canonicity_witness(&value_limbs[value_index]))
         } else {
             None
         });
@@ -781,6 +857,9 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
                     ));
                 }
 
+                let a_limbs = &value_limbs[usize::from(a)];
+                let b_limbs = &value_limbs[usize::from(b)];
+                let out_limbs = &value_limbs[usize::from(out)];
                 let a_int = big_uint(a_value);
                 let b_int = big_uint(b_value);
                 let (k_negative, k_magnitude) = if subtract {
@@ -789,12 +868,12 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
                     (false, a_int + b_int >= modulus())
                 };
                 let mut carry_in: i64 = 0;
-                let mut carries = Vec::with_capacity(LIMBS);
-                for index in 0..LIMBS {
+                let mut carries = Vec::with_capacity(LIMB_COUNT);
+                for index in 0..LIMB_COUNT {
                     let signed_b = if subtract {
-                        -i64::from(b_value[index])
+                        -i64::from(b_limbs[index])
                     } else {
-                        i64::from(b_value[index])
+                        i64::from(b_limbs[index])
                     };
                     let signed_k = if k_negative && k_magnitude {
                         -1i64
@@ -803,9 +882,9 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
                     } else {
                         0
                     };
-                    let difference = i64::from(a_value[index]) + signed_b + carry_in
-                        - i64::from(out_value[index])
-                        - signed_k * i64::from(P_BYTES[index]);
+                    let difference = i64::from(a_limbs[index]) + signed_b + carry_in
+                        - i64::from(out_limbs[index])
+                        - signed_k * i64::from(P_BASE_LIMBS[index]);
                     let carry_out = difference.div_euclid(i64::from(BASE));
                     if !(-1..=1).contains(&carry_out) {
                         return Err(TexasAirError::SpecViolation(
@@ -855,13 +934,15 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
                     ));
                 }
 
-                let product_limbs = convolution(a_value, b_value);
-                let quotient_prime_limbs = convolution(q_value, &P_BYTES);
+                let product_limbs = convolution(&value_limbs[usize::from(a)], &value_limbs[usize::from(b)]);
+                let quotient_prime_limbs =
+                    convolution(&value_limbs[usize::from(q)], &P_BASE_LIMBS);
+                let out_limbs = &value_limbs[usize::from(out)];
                 let mut carry_in: i64 = 0;
                 let mut carries = Vec::with_capacity(PRODUCT_LIMBS - 1);
                 for limb_index in 0..PRODUCT_LIMBS {
-                    let output_limb = if limb_index < LIMBS {
-                        i64::from(out_value[limb_index])
+                    let output_limb = if limb_index < LIMB_COUNT {
+                        i64::from(out_limbs[limb_index])
                     } else {
                         0
                     };
@@ -876,14 +957,14 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
                             ));
                         }
                     } else {
-                        if carry_out.unsigned_abs() > u16::MAX as u64 {
+                        if carry_out.unsigned_abs() > u64::from(MAX_MUL_CARRY_MAGNITUDE) {
                             return Err(TexasAirError::SpecViolation(
-                                "Fp multiplication carry does not fit in 16 bits".into(),
+                                "Fp multiplication carry exceeds its 17-bit bound".into(),
                             ));
                         }
-                        carries.push(SignedMagnitude {
+                        carries.push(SignedLimbCarry {
                             negative: carry_out < 0,
-                            magnitude: carry_out.unsigned_abs() as u16,
+                            magnitude: carry_out.unsigned_abs() as u32,
                         });
                         carry_in = carry_out;
                     }
@@ -893,12 +974,12 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
         }
     }
     Ok(ProgramWitness {
-        canonicity_sums,
+        canonicity: canonicity_witnesses,
         op_witnesses,
     })
 }
 
-fn convolution(left: &[u8; LIMBS], right: &[u8; LIMBS]) -> Vec<i64> {
+fn convolution(left: &[u16; LIMB_COUNT], right: &[u16; LIMB_COUNT]) -> Vec<i64> {
     let mut out = vec![0i64; PRODUCT_LIMBS];
     for (left_index, left_limb) in left.iter().enumerate() {
         for (right_index, right_limb) in right.iter().enumerate() {
@@ -937,45 +1018,47 @@ fn nonnegative_sqrt(value: &BigUint) -> Option<BigUint> {
     })
 }
 
-fn append_limb(row: &mut Vec<M31>, limb: u8) {
-    // Byte only: range membership is proven by the shared LogUp table.
+fn append_limb(row: &mut Vec<M31>, limb: u16) {
+    // 11-bit limb; range membership is proven by the shared LogUp table.
     row.push(M31::from(u32::from(limb)));
 }
 
-/// Column indices of every LogUp use byte in one program row, in the exact
-/// order the AIR emits the corresponding relation entries (value limbs,
-/// witnessed difference limbs, then per-mul-carry `[low, high]` bytes).
-fn trace_row_with_bytes(
+/// Column indices of every LogUp use entry in one program row, in the exact
+/// order the AIR emits the corresponding relation entries (value limbs and
+/// witnessed canonicity sum limbs as single-limb entries, then per-mul-carry
+/// `(low, high)` limb pairs).
+fn trace_row_with_limbs(
     program: &RistrettoFpProgram,
-) -> TexasAirResult<(Vec<M31>, Vec<usize>)> {
+) -> TexasAirResult<(Vec<M31>, Vec<usize>, Vec<[usize; 2]>)> {
     let mut row = Vec::new();
-    let mut bytes = Vec::new();
-    let mut track_limb = |row: &mut Vec<M31>, bytes: &mut Vec<usize>, limb: u8| {
-        bytes.push(row.len());
+    let mut limb_columns = Vec::new();
+    let mut carry_pair_columns = Vec::new();
+    let mut track_limb = |row: &mut Vec<M31>, limb_columns: &mut Vec<usize>, limb: u16| {
+        limb_columns.push(row.len());
         append_limb(row, limb);
     };
     let witness = program_witness(program)?;
     let canonicity = program_canonicity(program)?;
     for (value_index, value) in program.values.iter().enumerate() {
-        for limb in value {
-            track_limb(&mut row, &mut bytes, *limb);
+        let value_limbs = to_limbs(value);
+        for limb in value_limbs {
+            track_limb(&mut row, &mut limb_columns, limb);
         }
         if canonicity[value_index] == ValueCanonicity::Witnessed {
-            let sum = witness.canonicity_sums[value_index]
-                .expect("witnessed values carry a canonicity sum witness");
+            let (sum, carries) = witness.canonicity[value_index]
+                .expect("witnessed values carry a canonicity limb witness");
             for limb in sum {
-                track_limb(&mut row, &mut bytes, limb);
+                track_limb(&mut row, &mut limb_columns, limb);
             }
-            let mut carries = [0u8; LIMBS];
-            let mut carry_in = 0u16;
-            for index in 0..LIMBS {
-                let total =
-                    u16::from(value[index]) + u16::from(CANONICITY_COMPLEMENT_BYTES[index]) + carry_in;
-                carry_in = total >> 8;
-                carries[index] = carry_in as u8;
+            for carry in carries {
+                row.push(M31::from(u32::from(carry)));
             }
-            debug_assert_eq!(carry_in, 0);
-            row.extend(carries.iter().map(|carry| M31::from(u32::from(*carry))));
+            // Three boolean bits keep the top sum limb below eight, i.e. the
+            // 264-bit limb sum below `2^256`.
+            for bit in 0..3 {
+                let bit_value = (sum[LIMB_COUNT - 1] >> bit) & 1;
+                row.push(M31::from(u32::from(bit_value)));
+            }
         }
     }
     for op_witness in &witness.op_witnesses {
@@ -996,65 +1079,69 @@ fn trace_row_with_bytes(
             OpWitness::Multiply { carries } => {
                 for carry in carries {
                     row.push(M31::from(u32::from(carry.negative)));
-                    bytes.push(row.len());
-                    row.push(M31::from(u32::from(carry.magnitude & 0xff)));
-                    bytes.push(row.len());
-                    row.push(M31::from(u32::from(carry.magnitude >> 8)));
+                    let low_index = row.len();
+                    append_limb(&mut row, (carry.magnitude & (BASE - 1)) as u16);
+                    let high_index = row.len();
+                    append_limb(&mut row, (carry.magnitude >> LIMB_BITS) as u16);
+                    carry_pair_columns.push([low_index, high_index]);
                 }
             }
         }
     }
-    Ok((row, bytes))
+    Ok((row, limb_columns, carry_pair_columns))
 }
 
 fn trace_row(program: &RistrettoFpProgram) -> TexasAirResult<Vec<M31>> {
-    Ok(trace_row_with_bytes(program)?.0)
+    Ok(trace_row_with_limbs(program)?.0)
 }
 
-/// Shape-only mirror of [`trace_row_with_bytes`]: returns the program-row
-/// width and the LogUp byte-column indices without materializing any
-/// BigUint witness.  The layout depends only on the value count, the
-/// canonicity pattern, and the op list, so verifiers use it to size the
-/// trace commitment without re-deriving the (constraint-enforced) witness.
-fn trace_layout(program: &RistrettoFpProgram) -> TexasAirResult<(usize, Vec<usize>)> {
+/// Shape-only mirror of [`trace_row_with_limbs`]: returns the program-row
+/// width, the single-limb LogUp column indices, and the carry-pair column
+/// index pairs without materializing any BigUint witness.  The layout
+/// depends only on the value count, the canonicity pattern, and the op list,
+/// so verifiers use it to size the trace commitment without re-deriving the
+/// (constraint-enforced) witness.
+fn trace_layout(program: &RistrettoFpProgram) -> TexasAirResult<(usize, Vec<usize>, Vec<[usize; 2]>)> {
     validate_indices(program.values.len(), program.ops.len(), &program.outputs)?;
     let canonicity = program_canonicity(program)?;
     let mut width = 0usize;
-    let mut bytes = Vec::new();
+    let mut limb_columns = Vec::new();
+    let mut carry_pair_columns = Vec::new();
     for value_index in 0..program.values.len() {
-        for _ in 0..LIMBS {
-            bytes.push(width);
+        for _ in 0..LIMB_COUNT {
+            limb_columns.push(width);
             width += 1;
         }
         if canonicity[value_index] == ValueCanonicity::Witnessed {
-            for _ in 0..LIMBS {
-                bytes.push(width);
+            for _ in 0..LIMB_COUNT {
+                limb_columns.push(width);
                 width += 1;
             }
-            width += LIMBS;
+            width += LIMB_COUNT + 3;
         }
     }
     for op in &program.ops {
         match *op {
             RistrettoFpProgramOp::Add { .. } | RistrettoFpProgramOp::Subtract { .. } => {
-                width += 3 + 2 * LIMBS;
+                width += 3 + 2 * LIMB_COUNT;
             }
             RistrettoFpProgramOp::Multiply { .. } => {
                 for _ in 0..(PRODUCT_LIMBS - 1) {
                     width += 1;
-                    bytes.push(width);
+                    let low_index = width;
                     width += 1;
-                    bytes.push(width);
+                    let high_index = width;
                     width += 1;
+                    carry_pair_columns.push([low_index, high_index]);
                 }
             }
         }
     }
-    Ok((width, bytes))
+    Ok((width, limb_columns, carry_pair_columns))
 }
 
 fn trace_columns(program: &RistrettoFpProgram) -> TexasAirResult<MethodTrace> {
-    let (row, byte_columns) = trace_row_with_bytes(program)?;
+    let (row, limb_columns, carry_pair_columns) = trace_row_with_limbs(program)?;
     let program_width = row.len();
     let table_columns = range_table_column_count(LOG_SIZE);
     let mut trace = MethodTrace::new(LOG_SIZE, program_width + table_columns);
@@ -1063,25 +1150,25 @@ fn trace_columns(program: &RistrettoFpProgram) -> TexasAirResult<MethodTrace> {
     for row_index in 0..(1usize << LOG_SIZE) {
         trace.write_row(row_index, &padded)?;
     }
-    append_range_table_columns(&mut trace, LOG_SIZE, &byte_columns, program_width);
+    append_range_table_columns(
+        &mut trace,
+        LOG_SIZE,
+        &limb_columns,
+        &carry_pair_columns,
+        program_width,
+    );
     Ok(trace)
 }
 
-/// Scope columns pack three value bytes per M31 column (< 2^24), shrinking
-/// the preprocessed tree and the Fiat--Shamir absorption 3×.
-const SCOPE_BYTES_PER_COLUMN: usize = 3;
-const SCOPE_COLUMNS_PER_VALUE: usize = LIMBS.div_ceil(SCOPE_BYTES_PER_COLUMN);
+/// Scope columns pack two 11-bit limbs per M31 column (< 2^22), shrinking
+/// the preprocessed tree and the Fiat--Shamir absorption.
+const SCOPE_LIMBS_PER_COLUMN: usize = 2;
+const SCOPE_COLUMNS_PER_VALUE: usize = LIMB_COUNT / SCOPE_LIMBS_PER_COLUMN;
 
 fn scope_packed(value: &[u8; LIMBS]) -> Vec<u32> {
-    value
-        .chunks(SCOPE_BYTES_PER_COLUMN)
-        .map(|chunk| {
-            let mut packed = 0u32;
-            for (shift, byte) in chunk.iter().enumerate() {
-                packed |= u32::from(*byte) << (8 * shift);
-            }
-            packed
-        })
+    to_limbs(value)
+        .chunks(SCOPE_LIMBS_PER_COLUMN)
+        .map(|chunk| u32::from(chunk[0]) + BASE * u32::from(chunk[1]))
         .collect()
 }
 
@@ -1110,9 +1197,9 @@ fn batch_log_size(program_count: usize) -> TexasAirResult<u32> {
             "Fp program batch must not be empty".into(),
         ));
     }
-    // Floor of 256 rows: the LogUp trace generator needs at least one SIMD
-    // vector row, and the single-table layout assumes the full 256-entry
-    // range table fits one column.
+    // Floor of 128 rows: the LogUp trace generator needs at least one SIMD
+    // vector row, and the single-table layout assumes the full 2048-entry
+    // range table stripes cleanly across the domain.
     Ok(program_count.max(1 << LOG_SIZE).next_power_of_two().ilog2())
 }
 
@@ -1135,55 +1222,83 @@ fn validate_program_batch_shape(programs: &[RistrettoFpProgram]) -> TexasAirResu
     Ok(())
 }
 
-/// Byte-column indices (relative to the program-row prefix) shared by every
+/// Tracked LogUp column indices (singles, then carry pairs) shared by every
 /// row of an equal-shape batch; recomputed from the template shape.
-fn trace_byte_columns(program: &RistrettoFpProgram) -> Vec<usize> {
-    trace_row_with_bytes(program)
-        .expect("program shape was validated before trace generation")
-        .1
+fn trace_tracked_columns(program: &RistrettoFpProgram) -> (Vec<usize>, Vec<[usize; 2]>) {
+    let (_, limb_columns, carry_pair_columns) = trace_row_with_limbs(program)
+        .expect("program shape was validated before trace generation");
+    (limb_columns, carry_pair_columns)
 }
 
 fn range_table_column_count(log_size: u32) -> usize {
-    3 * range_table_stripes(log_size)
+    2 * range_table_stripes(log_size) + 3 * carry_table_stripes(log_size)
 }
 
-/// Append and fill the shared two-byte range-table columns: for each stripe
-/// `t`, one multiplicity column followed by `(lo, hi)` entry columns, entry
-/// `t · 2^log_size + row` while below 65536 (inert value and zero
-/// multiplicity beyond).  Multiplicities count byte-pair uses
-/// (`lo + 256·hi`) across every tracked byte-column pair.
+/// Append and fill the shared LogUp table columns: first the 2048-entry
+/// single-limb table (stripes of `(multiplicity, value)`), then the
+/// 131,072-entry carry pair table (stripes of `(multiplicity, lo, hi)`,
+/// entry `t · 2^log_size + row = lo + 2048·hi`).  Entries beyond each table
+/// size carry inert values and zero multiplicity.
 fn append_range_table_columns(
     trace: &mut MethodTrace,
     log_size: u32,
-    byte_columns: &[usize],
+    limb_columns: &[usize],
+    carry_pair_columns: &[[usize; 2]],
     program_width: usize,
 ) {
     let rows = 1usize << log_size;
     let stripes = range_table_stripes(log_size);
-    let mut multiplicities = vec![0u32; 65536];
-    for pair in byte_columns.chunks(2) {
-        let low = &trace.cols[pair[0]];
-        let high = &trace.cols[pair[1]];
+    let mut multiplicities = vec![0u32; 2048];
+    for column in limb_columns {
+        let values = &trace.cols[*column];
         for row in 0..rows {
-            let value = (u64::from(low[row].0) + 256 * u64::from(high[row].0)) as usize;
-            multiplicities[value] += 1;
+            multiplicities[u32::from(values[row].0) as usize] += 1;
         }
     }
     for t in 0..stripes {
-        let mult_index = program_width + 3 * t;
-        let low_index = program_width + 3 * t + 1;
-        let high_index = program_width + 3 * t + 2;
+        let mult_index = program_width + 2 * t;
+        let value_index = program_width + 2 * t + 1;
         for row in 0..rows {
             let entry = t * rows + row;
-            let (low, high, multiplicity) = if entry < 65536 {
+            // Inert entries carry value 2048 (outside the radix) and zero
+            // multiplicity, contributing nothing to the LogUp balance.
+            let (value, multiplicity) = if entry < 2048 {
+                (M31::from(entry as u32), M31::from(multiplicities[entry]))
+            } else {
+                (M31::from(BASE), M31::from(0u32))
+            };
+            trace.cols[value_index][row] = value;
+            trace.cols[mult_index][row] = multiplicity;
+        }
+    }
+
+    let carry_stripes = carry_table_stripes(log_size);
+    let carry_offset = program_width + 2 * stripes;
+    let mut carry_multiplicities = vec![0u32; 131_072];
+    for pair in carry_pair_columns {
+        let low = &trace.cols[pair[0]];
+        let high = &trace.cols[pair[1]];
+        for row in 0..rows {
+            let value =
+                u32::from(low[row].0) as usize + 2048 * u32::from(high[row].0) as usize;
+            carry_multiplicities[value] += 1;
+        }
+    }
+    for t in 0..carry_stripes {
+        let mult_index = carry_offset + 3 * t;
+        let low_index = carry_offset + 3 * t + 1;
+        let high_index = carry_offset + 3 * t + 2;
+        for row in 0..rows {
+            let entry = t * rows + row;
+            // Inert entries carry `hi = 2048` (outside its 0..64 range).
+            let (low, high, multiplicity) = if entry < 131_072 {
                 (
-                    M31::from((entry & 0xff) as u32),
-                    M31::from((entry >> 8) as u32),
-                    M31::from(multiplicities[entry]),
+                    M31::from((entry % 2048) as u32),
+                    M31::from((entry / 2048) as u32),
+                    M31::from(carry_multiplicities[entry]),
                 )
             } else {
-                // Inert entry: zero numerator contributes nothing.
-                (M31::from(0u32), M31::from(256u32), M31::from(0u32))
+                (M31::from(0u32), M31::from(BASE), M31::from(0u32))
             };
             trace.cols[low_index][row] = low;
             trace.cols[high_index][row] = high;
@@ -1196,7 +1311,7 @@ fn trace_columns_batch(programs: &[RistrettoFpProgram]) -> TexasAirResult<Method
     validate_program_batch_shape(programs)?;
     let log_size = batch_log_size(programs.len())?;
     let rows = 1usize << log_size;
-    let (template_row, byte_columns) = trace_row_with_bytes(&programs[0])?;
+    let (template_row, limb_columns, carry_pair_columns) = trace_row_with_limbs(&programs[0])?;
     let program_width = template_row.len();
     let program_rows = programs
         .par_iter()
@@ -1215,7 +1330,13 @@ fn trace_columns_batch(programs: &[RistrettoFpProgram]) -> TexasAirResult<Method
         padded.resize(program_width + table_columns, M31::from(0u32));
         trace.write_row(row_index, &padded)?;
     }
-    append_range_table_columns(&mut trace, log_size, &byte_columns, program_width);
+    append_range_table_columns(
+        &mut trace,
+        log_size,
+        &limb_columns,
+        &carry_pair_columns,
+        program_width,
+    );
     Ok(trace)
 }
 
@@ -1262,47 +1383,47 @@ impl FrameworkEval for FpProgramAir {
         let mut value_limbs = Vec::with_capacity(self.program.values.len());
 
         for value_index in 0..self.program.values.len() {
-            let mut value = Vec::with_capacity(LIMBS);
-            for _ in 0..LIMBS {
-                // Byte limb; pair-level range membership via the LogUp table.
+            let mut value = Vec::with_capacity(LIMB_COUNT);
+            for _ in 0..LIMB_COUNT {
+                // 11-bit limb; range membership via the shared LogUp table.
                 let limb = eval.next_trace_mask();
                 value.push(limb);
             }
-            for pair in value.chunks(2) {
+            for limb in &value {
                 eval.add_to_relation(RelationEntry::new(
                     &self.range,
                     E::EF::from(one.clone()),
-                    &[pair[0].clone(), pair[1].clone()],
+                    &[limb.clone()],
                 ));
             }
             if canonicity[value_index] == ValueCanonicity::Witnessed {
-                let mut sum = Vec::with_capacity(LIMBS);
-                for _ in 0..LIMBS {
+                let mut sum = Vec::with_capacity(LIMB_COUNT);
+                for _ in 0..LIMB_COUNT {
                     let limb = eval.next_trace_mask();
                     sum.push(limb);
                 }
-                for pair in sum.chunks(2) {
+                for limb in &sum {
                     eval.add_to_relation(RelationEntry::new(
                         &self.range,
                         E::EF::from(one.clone()),
-                        &[pair[0].clone(), pair[1].clone()],
+                        &[limb.clone()],
                     ));
                 }
 
-                let mut carries = Vec::with_capacity(LIMBS);
-                for _ in 0..LIMBS {
+                let mut carries = Vec::with_capacity(LIMB_COUNT);
+                for _ in 0..LIMB_COUNT {
                     let carry = eval.next_trace_mask();
                     eval.add_constraint(carry.clone() * (carry.clone() - one.clone()));
                     carries.push(carry);
                 }
-                eval.add_constraint(carries[LIMBS - 1].clone());
-                for index in 0..LIMBS {
+                eval.add_constraint(carries[LIMB_COUNT - 1].clone());
+                for index in 0..LIMB_COUNT {
                     let carry_in = if index == 0 {
                         M31::from(0u32).into()
                     } else {
                         carries[index - 1].clone()
                     };
-                    let carry_out = if index + 1 == LIMBS {
+                    let carry_out = if index + 1 == LIMB_COUNT {
                         M31::from(0u32).into()
                     } else {
                         carries[index].clone()
@@ -1310,24 +1431,39 @@ impl FrameworkEval for FpProgramAir {
                     eval.add_constraint(
                         value[index].clone()
                             + E::F::from(M31::from(u32::from(
-                                CANONICITY_COMPLEMENT_BYTES[index],
+                                CANONICITY_COMPLEMENT_LIMBS[index],
                             )))
                             + carry_in
                             - sum[index].clone()
                             - base.clone() * carry_out,
                     );
                 }
+
+                // The limb sum covers 264 bits, so canonicity additionally
+                // requires the top limb below `2^3`, pinning the sum below
+                // `2^256` and therefore the value below `p`.
+                let mut top_bits = Vec::with_capacity(3);
+                for _ in 0..3 {
+                    let bit = eval.next_trace_mask();
+                    eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
+                    top_bits.push(bit);
+                }
+                let mut top_reconstruction: E::F = M31::from(0u32).into();
+                for (bit_index, bit) in top_bits.iter().enumerate() {
+                    top_reconstruction +=
+                        bit.clone() * E::F::from(M31::from(1u32 << bit_index));
+                }
+                eval.add_constraint(sum[LIMB_COUNT - 1].clone() - top_reconstruction);
             }
 
-            for (group_index, group) in value.chunks(SCOPE_BYTES_PER_COLUMN).enumerate() {
+            for (group_index, group) in value.chunks(SCOPE_LIMBS_PER_COLUMN).enumerate() {
                 let scope = eval.get_preprocessed_column(
                     ids[value_index * SCOPE_COLUMNS_PER_VALUE + group_index].clone(),
                 );
                 let mut packed: E::F = scope;
                 for (shift, limb) in group.iter().enumerate() {
                     packed = packed
-                        - limb.clone()
-                            * E::F::from(M31::from(1u32 << (8 * shift as u32)));
+                        - limb.clone() * E::F::from(M31::from(BASE.pow(shift as u32)));
                 }
                 eval.add_constraint(packed);
             }
@@ -1356,8 +1492,8 @@ impl FrameworkEval for FpProgramAir {
                     let positive = one.clone() - k_negative.clone();
                     let signed_k = positive * k_magnitude.clone() - k_negative * k_magnitude;
 
-                    let mut signed_carries = Vec::with_capacity(LIMBS);
-                    for _ in 0..LIMBS {
+                    let mut signed_carries = Vec::with_capacity(LIMB_COUNT);
+                    for _ in 0..LIMB_COUNT {
                         let negative = eval.next_trace_mask();
                         let magnitude = eval.next_trace_mask();
                         eval.add_constraint(negative.clone() * (negative.clone() - one.clone()));
@@ -1365,14 +1501,14 @@ impl FrameworkEval for FpProgramAir {
                         let positive = one.clone() - negative.clone();
                         signed_carries.push(positive * magnitude.clone() - negative * magnitude);
                     }
-                    eval.add_constraint(signed_carries[LIMBS - 1].clone());
-                    for index in 0..LIMBS {
+                    eval.add_constraint(signed_carries[LIMB_COUNT - 1].clone());
+                    for index in 0..LIMB_COUNT {
                         let carry_in = if index == 0 {
                             M31::from(0u32).into()
                         } else {
                             signed_carries[index - 1].clone()
                         };
-                        let carry_out = if index + 1 == LIMBS {
+                        let carry_out = if index + 1 == LIMB_COUNT {
                             M31::from(0u32).into()
                         } else {
                             signed_carries[index].clone()
@@ -1383,7 +1519,7 @@ impl FrameworkEval for FpProgramAir {
                             value_limbs[usize::from(a)][index].clone() + signed_b + carry_in
                                 - value_limbs[usize::from(out)][index].clone()
                                 - signed_k.clone()
-                                    * E::F::from(M31::from(u32::from(P_BYTES[index])))
+                                    * E::F::from(M31::from(u32::from(P_BASE_LIMBS[index])))
                                 - base.clone() * carry_out,
                         );
                     }
@@ -1392,23 +1528,23 @@ impl FrameworkEval for FpProgramAir {
                     let mut signed_carries = Vec::with_capacity(PRODUCT_LIMBS - 1);
                     for _ in 0..(PRODUCT_LIMBS - 1) {
                         let negative = eval.next_trace_mask();
-                        let byte_low = eval.next_trace_mask();
-                        let byte_high = eval.next_trace_mask();
+                        let limb_low = eval.next_trace_mask();
+                        let limb_high = eval.next_trace_mask();
                         eval.add_constraint(negative.clone() * (negative.clone() - one.clone()));
                         eval.add_to_relation(RelationEntry::new(
-                            &self.range,
+                            &self.carry,
                             E::EF::from(one.clone()),
-                            &[byte_low.clone(), byte_high.clone()],
+                            &[limb_low.clone(), limb_high.clone()],
                         ));
-                        let magnitude = byte_low.clone() + base.clone() * byte_high.clone();
+                        let magnitude = limb_low.clone() + base.clone() * limb_high.clone();
                         let positive = one.clone() - negative.clone();
                         signed_carries
                             .push(positive * magnitude.clone() - negative * magnitude);
                     }
 
                     for limb_index in 0..PRODUCT_LIMBS {
-                        let start = limb_index.saturating_sub(LIMBS - 1);
-                        let end = limb_index.min(LIMBS - 1);
+                        let start = limb_index.saturating_sub(LIMB_COUNT - 1);
+                        let end = limb_index.min(LIMB_COUNT - 1);
                         let mut relation: E::F = M31::from(0u32).into();
                         for left_index in start..=end {
                             let right_index = limb_index - left_index;
@@ -1416,10 +1552,13 @@ impl FrameworkEval for FpProgramAir {
                                 * value_limbs[usize::from(b)][right_index].clone();
                             relation = relation
                                 - value_limbs[usize::from(q)][left_index].clone()
-                                    * E::F::from(M31::from(u32::from(P_BYTES[right_index])));
+                                    * E::F::from(M31::from(u32::from(
+                                        P_BASE_LIMBS[right_index],
+                                    )));
                         }
-                        if limb_index < LIMBS {
-                            relation = relation - value_limbs[usize::from(out)][limb_index].clone();
+                        if limb_index < LIMB_COUNT {
+                            relation = relation
+                                - value_limbs[usize::from(out)][limb_index].clone();
                         }
                         if limb_index > 0 {
                             relation += signed_carries[limb_index - 1].clone();
@@ -1433,17 +1572,28 @@ impl FrameworkEval for FpProgramAir {
             }
         }
 
-        // Table side of the shared range LogUp.  The last `table_columns()`
-        // stripes of three trace columns each hold `(multiplicity, lo, hi)`
-        // (entry `t * 2^log_size + row` while `< 65536`, inert beyond), so
-        // uses and table balance to zero inside this single component
-        // exactly like the cairo-air range-check pattern.
-        for _ in 0..self.table_columns() {
+        // Table side of the shared range LogUp.  The last table columns hold
+        // the 2048-entry limb table as `2 * table_stripes()` columns of
+        // `(multiplicity, value)` followed by the 131,072-entry carry pair
+        // table as `3 * carry_table_stripes()` columns of
+        // `(multiplicity, lo, hi)`, so uses and tables balance to zero inside
+        // this single component exactly like the cairo-air range-check
+        // pattern.
+        for _ in 0..self.table_stripes() {
+            let multiplicity = eval.next_trace_mask();
+            let entry = eval.next_trace_mask();
+            eval.add_to_relation(RelationEntry::new(
+                &self.range,
+                -E::EF::from(multiplicity.clone()),
+                &[entry.clone()],
+            ));
+        }
+        for _ in 0..self.carry_table_stripes() {
             let multiplicity = eval.next_trace_mask();
             let entry_low = eval.next_trace_mask();
             let entry_high = eval.next_trace_mask();
             eval.add_to_relation(RelationEntry::new(
-                &self.range,
+                &self.carry,
                 -E::EF::from(multiplicity.clone()),
                 &[entry_low.clone(), entry_high.clone()],
             ));
@@ -1505,18 +1655,21 @@ fn mix_program_batch(channel: &mut impl Channel, programs: &[RistrettoFpProgram]
 
 /// Prove all canonical values and field operations in one STARK.
 
-/// Build the paired LogUp interaction columns for the shared 256-entry
-/// range table, mirroring the AIR's relation-entry emission order: all use
-/// entries (one per LogUp byte column) followed by the table entries
-/// (negated multiplicity over the table value column).  Entries are paired
-/// consecutively (`finalize_logup_in_pairs` semantics); an odd total leaves
-/// the last fraction alone in its own column.  Source columns are
+/// Build the paired LogUp interaction columns for the shared range tables,
+/// mirroring the AIR's relation-entry emission order: all single-limb use
+/// entries, then the carry `(lo, hi)` pair entries, then both table sides
+/// (negated multiplicities over the table value columns).  Entries are
+/// paired consecutively (`finalize_logup_in_pairs` semantics); an odd total
+/// leaves the last fraction alone in its own column.  Source columns are
 /// bit-reversed first to match `MethodTrace::to_evaluations` storage.
+#[allow(clippy::too_many_arguments)]
 fn fp_range_interaction(
     trace: &MethodTrace,
     log_size: u32,
-    range: &FpRange16,
-    byte_columns: &[usize],
+    range: &FpRange11,
+    carry: &FpCarry17,
+    limb_columns: &[usize],
+    carry_pair_columns: &[[usize; 2]],
     program_width: usize,
 ) -> (
     Vec<
@@ -1558,52 +1711,80 @@ fn fp_range_interaction(
     };
 
     let stripes = range_table_stripes(log_size);
-    let use_den: Vec<Vec<M31>> = byte_columns
+    let carry_stripes = carry_table_stripes(log_size);
+    let carry_offset = program_width + 2 * stripes;
+    let use_den: Vec<Vec<M31>> = limb_columns
         .par_iter()
         .map(|column| bitrev(&trace.cols[*column]))
         .collect();
+    let carry_use_low: Vec<Vec<M31>> = carry_pair_columns
+        .par_iter()
+        .map(|pair| bitrev(&trace.cols[pair[0]]))
+        .collect();
+    let carry_use_high: Vec<Vec<M31>> = carry_pair_columns
+        .par_iter()
+        .map(|pair| bitrev(&trace.cols[pair[1]]))
+        .collect();
     let table_mult: Vec<Vec<M31>> = (0..stripes)
         .into_par_iter()
-        .map(|t| bitrev(&trace.cols[program_width + 3 * t]))
+        .map(|t| bitrev(&trace.cols[program_width + 2 * t]))
         .collect();
-    let table_den_low: Vec<Vec<M31>> = (0..stripes)
+    let table_den: Vec<Vec<M31>> = (0..stripes)
         .into_par_iter()
-        .map(|t| bitrev(&trace.cols[program_width + 3 * t + 1]))
+        .map(|t| bitrev(&trace.cols[program_width + 2 * t + 1]))
         .collect();
-    let table_den_high: Vec<Vec<M31>> = (0..stripes)
+    let carry_mult: Vec<Vec<M31>> = (0..carry_stripes)
         .into_par_iter()
-        .map(|t| bitrev(&trace.cols[program_width + 3 * t + 2]))
+        .map(|t| bitrev(&trace.cols[carry_offset + 3 * t]))
+        .collect();
+    let carry_den_low: Vec<Vec<M31>> = (0..carry_stripes)
+        .into_par_iter()
+        .map(|t| bitrev(&trace.cols[carry_offset + 3 * t + 1]))
+        .collect();
+    let carry_den_high: Vec<Vec<M31>> = (0..carry_stripes)
+        .into_par_iter()
+        .map(|t| bitrev(&trace.cols[carry_offset + 3 * t + 2]))
         .collect();
 
-    // Per-row entry (numerator, denominator) sources: uses first (one entry
-    // per adjacent byte-column pair, matching the AIR's pair emission), then
-    // the table entries — the exact emission order of `FpProgramAir::evaluate`.
+    // Per-row entry (numerator, denominator) sources in the AIR's emission
+    // order: limb uses, carry pair uses, then both table sides.
     enum Entry {
-        UsePair(usize),
+        Use(usize),
+        CarryUse(usize),
         Table(usize),
+        CarryTable(usize),
     }
-    let entries: Vec<Entry> = (0..byte_columns.len() / 2)
-        .map(Entry::UsePair)
+    let entries: Vec<Entry> = (0..limb_columns.len())
+        .map(Entry::Use)
+        .chain((0..carry_pair_columns.len()).map(Entry::CarryUse))
         .chain((0..stripes).map(Entry::Table))
+        .chain((0..carry_stripes).map(Entry::CarryTable))
         .collect();
 
     let one_packed = PackedSecureField::from(PackedBaseField::from(M31::from(1u32)));
     let den_of = |entry: &Entry, vector_row: usize| -> PackedSecureField {
         match entry {
-            Entry::UsePair(p) => range.combine(&[
-                pack_vec(&use_den[2 * p], vector_row),
-                pack_vec(&use_den[2 * p + 1], vector_row),
-            ]),
-            Entry::Table(t) => range.combine(&[
-                pack_vec(&table_den_low[*t], vector_row),
-                pack_vec(&table_den_high[*t], vector_row),
-            ]),
+            Entry::Use(index) => range.combine(&[pack_vec(&use_den[*index], vector_row)]),
+            Entry::CarryUse(index) => range_combine_pair(
+                carry,
+                &pack_vec(&carry_use_low[*index], vector_row),
+                &pack_vec(&carry_use_high[*index], vector_row),
+            ),
+            Entry::Table(t) => range.combine(&[pack_vec(&table_den[*t], vector_row)]),
+            Entry::CarryTable(t) => range_combine_pair(
+                carry,
+                &pack_vec(&carry_den_low[*t], vector_row),
+                &pack_vec(&carry_den_high[*t], vector_row),
+            ),
         }
     };
     let num_of = |entry: &Entry, vector_row: usize| -> PackedSecureField {
         match entry {
-            Entry::UsePair(_) => one_packed,
+            Entry::Use(_) | Entry::CarryUse(_) => one_packed,
             Entry::Table(t) => -PackedSecureField::from(pack_vec(&table_mult[*t], vector_row)),
+            Entry::CarryTable(t) => {
+                -PackedSecureField::from(pack_vec(&carry_mult[*t], vector_row))
+            }
         }
     };
 
@@ -1631,6 +1812,22 @@ fn fp_range_interaction(
         col.finalize_col();
     }
     generator.finalize_last()
+}
+
+/// Combine an arity-2 relation over a packed `(lo, hi)` pair without an
+/// intermediate slice, matching `Relation::combine` semantics.
+fn range_combine_pair(
+    carry: &FpCarry17,
+    low: &stwo::prover::backend::simd::m31::PackedBaseField,
+    high: &stwo::prover::backend::simd::m31::PackedBaseField,
+) -> stwo::prover::backend::simd::qm31::PackedSecureField {
+    use stwo::prover::backend::simd::qm31::PackedSecureField;
+    let combined: [stwo::prover::backend::simd::m31::PackedBaseField; 2] =
+        [low.clone(), high.clone()];
+    <FpCarry17 as stwo_constraint_framework::Relation<_, PackedSecureField>>::combine(
+        carry,
+        &combined,
+    )
 }
 
 /// Prove one fixed public Fp program in a single STARK with the shared
@@ -1661,11 +1858,19 @@ pub fn prove_ristretto_fp_program(
         tree.extend_evals(trace.to_evaluations());
         tree.commit(&mut channel);
     }
-    let byte_columns = trace_byte_columns(program);
+    let (limb_columns, carry_pair_columns) = trace_tracked_columns(program);
     let program_width = trace.cols.len() - range_table_column_count(LOG_SIZE);
-    let range = FpRange16::draw(&mut channel);
-    let (interaction, range_sum) =
-        fp_range_interaction(&trace, LOG_SIZE, &range, &byte_columns, program_width);
+    let range = FpRange11::draw(&mut channel);
+    let carry = FpCarry17::draw(&mut channel);
+    let (interaction, range_sum) = fp_range_interaction(
+        &trace,
+        LOG_SIZE,
+        &range,
+        &carry,
+        &limb_columns,
+        &carry_pair_columns,
+        program_width,
+    );
     channel.mix_felts(&[range_sum]);
     {
         let mut tree = scheme.tree_builder();
@@ -1680,6 +1885,7 @@ pub fn prove_ristretto_fp_program(
             log_size: LOG_SIZE,
             program: program.clone(),
             range,
+            carry,
         },
         range_sum,
     );
@@ -1703,7 +1909,7 @@ pub fn verify_ristretto_fp_program(
     let proof: Proof = options()
         .deserialize(&archive.stark_proof_bytes)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
-    let (program_width, byte_columns) = trace_layout(&archive.program)?;
+    let (program_width, limb_columns, carry_pair_columns) = trace_layout(&archive.program)?;
     let trace_width = program_width + range_table_column_count(LOG_SIZE);
     let scope = scope_columns(&archive.program);
     let config = crate::prover_context::protocol_pcs_config();
@@ -1741,13 +1947,17 @@ pub fn verify_ristretto_fp_program(
         &vec![LOG_SIZE; trace_width],
         &mut channel,
     );
-    let range = FpRange16::draw(&mut channel);
+    let range = FpRange11::draw(&mut channel);
+    let carry = FpCarry17::draw(&mut channel);
     let claimed = SecureField::from_m31_array(core::array::from_fn(|index| {
         M31::from(archive.range_claimed_sum[index])
     }));
     channel.mix_felts(&[claimed]);
-    let interaction_columns =
-        (byte_columns.len() / 2 + range_table_stripes(LOG_SIZE)).div_ceil(2);
+    let interaction_columns = (limb_columns.len()
+        + carry_pair_columns.len()
+        + range_table_stripes(LOG_SIZE)
+        + carry_table_stripes(LOG_SIZE))
+        .div_ceil(2);
     scheme.commit(
         proof.commitments[2],
         &vec![LOG_SIZE; interaction_columns * 4],
@@ -1761,6 +1971,7 @@ pub fn verify_ristretto_fp_program(
             log_size: LOG_SIZE,
             program: archive.program.clone(),
             range,
+            carry,
         },
         claimed,
     );
@@ -1798,11 +2009,19 @@ pub fn prove_ristretto_fp_program_batch(
         tree.commit(&mut channel);
     }
     let template = &programs[0];
-    let byte_columns = trace_byte_columns(template);
+    let (limb_columns, carry_pair_columns) = trace_tracked_columns(template);
     let program_width = trace.cols.len() - range_table_column_count(log_size);
-    let range = FpRange16::draw(&mut channel);
-    let (interaction, range_sum) =
-        fp_range_interaction(&trace, log_size, &range, &byte_columns, program_width);
+    let range = FpRange11::draw(&mut channel);
+    let carry = FpCarry17::draw(&mut channel);
+    let (interaction, range_sum) = fp_range_interaction(
+        &trace,
+        log_size,
+        &range,
+        &carry,
+        &limb_columns,
+        &carry_pair_columns,
+        program_width,
+    );
     channel.mix_felts(&[range_sum]);
     {
         let mut tree = scheme.tree_builder();
@@ -1817,6 +2036,7 @@ pub fn prove_ristretto_fp_program_batch(
             log_size,
             program: template.clone(),
             range,
+            carry,
         },
         range_sum,
     );
@@ -1842,7 +2062,8 @@ pub fn verify_ristretto_fp_program_batch(
     let proof: Proof = options()
         .deserialize(&archive.stark_proof_bytes)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
-    let (program_width, byte_columns) = trace_layout(&archive.programs[0])?;
+    let (program_width, limb_columns, carry_pair_columns) =
+        trace_layout(&archive.programs[0])?;
     let trace_width = program_width + range_table_column_count(log_size);
     let scope = scope_columns_batch(&archive.programs)?;
     let config = crate::prover_context::protocol_pcs_config();
@@ -1880,13 +2101,17 @@ pub fn verify_ristretto_fp_program_batch(
         &vec![log_size; trace_width],
         &mut channel,
     );
-    let range = FpRange16::draw(&mut channel);
+    let range = FpRange11::draw(&mut channel);
+    let carry = FpCarry17::draw(&mut channel);
     let claimed = SecureField::from_m31_array(core::array::from_fn(|index| {
         M31::from(archive.range_claimed_sum[index])
     }));
     channel.mix_felts(&[claimed]);
-    let interaction_columns =
-        (byte_columns.len() / 2 + range_table_stripes(log_size)).div_ceil(2);
+    let interaction_columns = (limb_columns.len()
+        + carry_pair_columns.len()
+        + range_table_stripes(log_size)
+        + carry_table_stripes(log_size))
+        .div_ceil(2);
     scheme.commit(
         proof.commitments[2],
         &vec![log_size; interaction_columns * 4],
@@ -1901,6 +2126,7 @@ pub fn verify_ristretto_fp_program_batch(
             log_size,
             program: template.clone(),
             range,
+            carry,
         },
         claimed,
     );
@@ -4470,27 +4696,42 @@ mod tests {
         let difference = builder.subtract(product, 0).unwrap();
         let program = builder.finish(&[sum, product, difference]).unwrap();
         let trace = trace_columns(&program).unwrap();
-        let byte_columns = trace_byte_columns(&program);
+        let (limb_columns, carry_pair_columns) = trace_tracked_columns(&program);
         let program_width = trace.cols.len() - range_table_column_count(trace.log_size);
         let rows = 1usize << trace.log_size;
-        let range = FpRange16::dummy();
-        let one = SecureField::from(1u32);
+        let range = FpRange11::dummy();
+        let carry = FpCarry17::dummy();
         use stwo::core::fields::FieldExpOps;
         let mut use_sum = SecureField::from(0u32);
-        for pair in byte_columns.chunks(2) {
+        for column in &limb_columns {
+            for row in 0..rows {
+                let limb = trace.cols[*column][row];
+                use_sum += <FpRange11 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(&range, &[limb]).inverse();
+            }
+        }
+        for pair in &carry_pair_columns {
             for row in 0..rows {
                 let low = trace.cols[pair[0]][row];
                 let high = trace.cols[pair[1]][row];
-                use_sum += <FpRange16 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(&range, &[low, high]).inverse();
+                use_sum += <FpCarry17 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(&carry, &[low, high]).inverse();
             }
         }
         let mut table_sum = SecureField::from(0u32);
         for t in 0..range_table_stripes(trace.log_size) {
             for row in 0..rows {
-                let mult: SecureField = trace.cols[program_width + 3 * t][row].into();
-                let low = trace.cols[program_width + 3 * t + 1][row];
-                let high = trace.cols[program_width + 3 * t + 2][row];
-                let den = <FpRange16 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(&range, &[low, high]).inverse();
+                let mult: SecureField = trace.cols[program_width + 2 * t][row].into();
+                let value = trace.cols[program_width + 2 * t + 1][row];
+                let den = <FpRange11 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(&range, &[value]).inverse();
+                table_sum += mult * den;
+            }
+        }
+        let carry_offset = program_width + 2 * range_table_stripes(trace.log_size);
+        for t in 0..carry_table_stripes(trace.log_size) {
+            for row in 0..rows {
+                let mult: SecureField = trace.cols[carry_offset + 3 * t][row].into();
+                let low = trace.cols[carry_offset + 3 * t + 1][row];
+                let high = trace.cols[carry_offset + 3 * t + 2][row];
+                let den = <FpCarry17 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(&carry, &[low, high]).inverse();
                 table_sum += mult * den;
             }
         }
@@ -4703,7 +4944,8 @@ mod tests {
             scope.cols.iter().collect(),
             trace.cols.iter().collect(),
         ]);
-        let range = FpRange16::draw(&mut stwo::core::channel::Poseidon252Channel::default());
+        let range = FpRange11::draw(&mut stwo::core::channel::Poseidon252Channel::default());
+        let carry = FpCarry17::draw(&mut stwo::core::channel::Poseidon252Channel::default());
         stwo_constraint_framework::assert_constraints_on_trace(
             &evals,
             LOG_SIZE,
@@ -4712,6 +4954,7 @@ mod tests {
                     log_size: LOG_SIZE,
                     program: program.clone(),
                     range: range.clone(),
+                    carry: carry.clone(),
                 }
                 .evaluate(NoLogupAssertEvaluator(eval));
             },
@@ -4731,7 +4974,8 @@ mod tests {
             .into_iter()
             .filter(|kind| *kind == ValueCanonicity::Witnessed)
             .count();
-        let op_witness_start = program.values.len() * LIMBS + strict_values * (2 * LIMBS);
+        let op_witness_start =
+            program.values.len() * LIMB_COUNT + strict_values * (2 * LIMB_COUNT + 3);
         assert_program_trace(&program, &trace);
         assert!(trace.cols.len() > op_witness_start);
         trace.cols[op_witness_start][0] = M31::from(1u32);
@@ -4750,7 +4994,8 @@ mod tests {
             .into_iter()
             .filter(|kind| *kind == ValueCanonicity::Witnessed)
             .count();
-        let op_witness_start = program.values.len() * LIMBS + strict_values * (2 * LIMBS);
+        let op_witness_start =
+            program.values.len() * LIMB_COUNT + strict_values * (2 * LIMB_COUNT + 3);
         assert_program_trace(&program, &trace);
         assert!(trace.cols.len() > op_witness_start + 2);
         trace.cols[op_witness_start + 2][0] = M31::from(1u32);
@@ -4766,7 +5011,8 @@ mod tests {
         evaluator = FpProgramAir {
             log_size: LOG_SIZE,
             program,
-            range: FpRange16::draw(&mut stwo::core::channel::Poseidon252Channel::default()),
+            range: FpRange11::draw(&mut stwo::core::channel::Poseidon252Channel::default()),
+            carry: FpCarry17::draw(&mut stwo::core::channel::Poseidon252Channel::default()),
         }
         .evaluate(evaluator);
         assert_eq!(evaluator.max, 2);

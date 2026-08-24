@@ -56,7 +56,8 @@ fn options() -> impl Options {
         .with_limit(16 * 1024 * 1024)
 }
 
-fn windows(scalar: &[u8; LIMBS]) -> [u8; WINDOWS] {
+/// Sixty-four little-endian 4-bit windows of a canonical scalar.
+pub(crate) fn windows(scalar: &[u8; LIMBS]) -> [u8; WINDOWS] {
     let mut out = [0u8; WINDOWS];
     for (limb_index, limb) in scalar.iter().enumerate() {
         out[limb_index * 2] = limb & 0x0f;
