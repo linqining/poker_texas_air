@@ -411,20 +411,31 @@ static FLOCK_POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock:
 /// fresh setup per sub-proof pays it once per statement on both prove and
 /// verify.  All real bundles use n_blocks = 256 (chains are padded to
 /// [`MIN_CHAIN_STEPS`], Merkle runs are depth-256), which hits the cache.
-static SETUP_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, Blake3Setup>>> =
+type SetupCache = std::collections::HashMap<usize, std::sync::Arc<Blake3Setup>>;
+
+static SETUP_CACHE: std::sync::OnceLock<std::sync::Mutex<SetupCache>> =
     std::sync::OnceLock::new();
 
-fn blake3_setup(n_blocks: usize) -> Blake3Setup {
-    let cache = SETUP_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let mut guard = cache.lock().expect("flock setup cache lock");
-    if let Some(setup) = guard.get(&n_blocks) {
-        return setup.clone();
+fn blake3_setup(n_blocks: usize) -> std::sync::Arc<Blake3Setup> {
+    let cache = SETUP_CACHE.get_or_init(|| std::sync::Mutex::new(SetupCache::new()));
+    {
+        let guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(setup) = guard.get(&n_blocks) {
+            return std::sync::Arc::clone(setup);
+        }
     }
-    let setup = Blake3Setup::with_profile(
+
+    // The CSC circuit construction is intentionally outside the mutex: a cold
+    // setup may be expensive, and unrelated block counts must not wait for it.
+    let setup = std::sync::Arc::new(Blake3Setup::with_profile(
         n_blocks,
         flock_core::pcs::ligerito::LigeritoProfile::Slim,
-    );
-    guard.insert(n_blocks, setup.clone());
+    ));
+    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = guard.get(&n_blocks) {
+        return std::sync::Arc::clone(existing);
+    }
+    guard.insert(n_blocks, std::sync::Arc::clone(&setup));
     setup
 }
 
@@ -614,7 +625,7 @@ fn verify_merkle_run(
     let nodes = run.len - 1;
     let bundle = unpack_merkle(&archived.bundle)?;
     let setup = blake3_setup(nodes);
-    let b_bits: Vec<bool> = run.b_bits.clone();
+    let b_bits = run.b_bits.as_slice();
     let mut ch = FsChallenger::new(FLOCK_MERKLE_DOMAIN);
     absorb_statement(&mut ch, &statements[run.start]);
     ch.observe_bytes(&archived.root);

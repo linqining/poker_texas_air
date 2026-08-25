@@ -211,7 +211,13 @@ pub struct ArchivedRistrettoFpProgramProof {
 }
 
 /// Multiple equal-shape field programs proven as rows of one STARK.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+///
+/// The in-memory representation intentionally keeps the existing `programs`
+/// field so downstream statement checks remain explicit. Its Borsh wire format
+/// is compact: the shared operation/output layout is serialized once, followed
+/// by each row's values. The versioned format prevents old archives from being
+/// silently interpreted as the compact representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchivedRistrettoFpProgramBatchProof {
     /// Public programs in canonical row order. All operation/output layouts
     /// are identical; only field values differ between rows.
@@ -220,6 +226,69 @@ pub struct ArchivedRistrettoFpProgramBatchProof {
     pub stark_proof_bytes: Vec<u8>,
     /// Public claimed sum of the shared range LogUp (4 M31 coordinates).
     pub range_claimed_sum: [u32; 4],
+}
+
+const FP_PROGRAM_BATCH_ARCHIVE_MAGIC: [u8; 4] = *b"RFPB";
+const FP_PROGRAM_BATCH_ARCHIVE_VERSION: u8 = 1;
+
+impl BorshSerialize for ArchivedRistrettoFpProgramBatchProof {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_all(&FP_PROGRAM_BATCH_ARCHIVE_MAGIC)?;
+        FP_PROGRAM_BATCH_ARCHIVE_VERSION.serialize(writer)?;
+        let (ops, outputs) = self
+            .programs
+            .first()
+            .map(|program| (program.ops.clone(), program.outputs.clone()))
+            .unwrap_or_default();
+        ops.serialize(writer)?;
+        outputs.serialize(writer)?;
+        let values: Vec<&Vec<[u8; LIMBS]>> = self
+            .programs
+            .iter()
+            .map(|program| &program.values)
+            .collect();
+        values.serialize(writer)?;
+        self.stark_proof_bytes.serialize(writer)?;
+        self.range_claimed_sum.serialize(writer)
+    }
+}
+
+impl BorshDeserialize for ArchivedRistrettoFpProgramBatchProof {
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let mut magic = [0u8; 4];
+        reader.read_exact(&mut magic)?;
+        if magic != FP_PROGRAM_BATCH_ARCHIVE_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported Ristretto Fp program batch archive format",
+            ));
+        }
+        let version = u8::deserialize_reader(reader)?;
+        if version != FP_PROGRAM_BATCH_ARCHIVE_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported Ristretto Fp program batch archive version {version}"),
+            ));
+        }
+        let ops = Vec::<RistrettoFpProgramOp>::deserialize_reader(reader)?;
+        let outputs = Vec::<u16>::deserialize_reader(reader)?;
+        let values = Vec::<Vec<[u8; LIMBS]>>::deserialize_reader(reader)?;
+        let stark_proof_bytes = Vec::<u8>::deserialize_reader(reader)?;
+        let range_claimed_sum = <[u32; 4]>::deserialize_reader(reader)?;
+        let programs = values
+            .into_iter()
+            .map(|values| RistrettoFpProgram {
+                values,
+                ops: ops.clone(),
+                outputs: outputs.clone(),
+            })
+            .collect();
+        Ok(Self {
+            programs,
+            stark_proof_bytes,
+            range_claimed_sum,
+        })
+    }
 }
 
 /// Public `sqrt_ratio_i` statement proven by one field-program STARK.
@@ -5068,6 +5137,22 @@ mod tests {
             .programs
             .push(padding_relabel.programs[2].clone());
         assert!(verify_ristretto_fp_program_batch(&padding_relabel).is_err());
+    }
+
+    #[test]
+    fn batch_archive_uses_versioned_compact_wire_format() {
+        let programs = vec![small_batch_program(2, 3), small_batch_program(5, 7)];
+        let archive = prove_ristretto_fp_program_batch(&programs).unwrap();
+        let bytes = borsh::to_vec(&archive).unwrap();
+        assert_eq!(&bytes[..4], b"RFPB");
+        assert_eq!(bytes[4], 1);
+        let decoded = ArchivedRistrettoFpProgramBatchProof::try_from_slice(&bytes).unwrap();
+        assert_eq!(decoded, archive);
+        verify_ristretto_fp_program_batch(&decoded).unwrap();
+
+        let mut legacy_like = bytes;
+        legacy_like[..4].copy_from_slice(b"OLD!");
+        assert!(ArchivedRistrettoFpProgramBatchProof::try_from_slice(&legacy_like).is_err());
     }
 
     #[test]

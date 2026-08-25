@@ -95,16 +95,26 @@ const BINDING_CACHE_CAPACITY: usize = 1024;
 
 #[derive(Default)]
 struct BindingCache {
-    entries: std::collections::HashMap<[u8; 64], ArchivedStateRootBindingProof>,
+    entries: std::collections::HashMap<
+        [u8; 64],
+        std::sync::Arc<ArchivedStateRootBindingProof>,
+    >,
     insertion_order: std::collections::VecDeque<[u8; 64]>,
 }
 
 impl BindingCache {
-    fn get(&self, key: &[u8; 64]) -> Option<&ArchivedStateRootBindingProof> {
-        self.entries.get(key)
+    fn get(
+        &self,
+        key: &[u8; 64],
+    ) -> Option<std::sync::Arc<ArchivedStateRootBindingProof>> {
+        self.entries.get(key).map(std::sync::Arc::clone)
     }
 
-    fn insert(&mut self, key: [u8; 64], proof: ArchivedStateRootBindingProof) {
+    fn insert(
+        &mut self,
+        key: [u8; 64],
+        proof: std::sync::Arc<ArchivedStateRootBindingProof>,
+    ) {
         if self.entries.len() >= BINDING_CACHE_CAPACITY {
             let evict = self.entries.len() - BINDING_CACHE_CAPACITY / 2;
             for _ in 0..evict {
@@ -141,17 +151,27 @@ pub fn prove_state_root_binding(
 ) -> TexasAirResult<ArchivedStateRootBindingProof> {
     let endpoints = [pre, post];
     let key = binding_cache_key(&endpoints);
-    if let Some(cached) = BINDING_CACHE.lock().unwrap().get(&key) {
+    let cached = {
+        let guard = BINDING_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.get(&key)
+    };
+    if let Some(cached) = cached {
         if cached.endpoints == endpoints {
-            return Ok(cached.clone());
+            return Ok((*cached).clone());
         }
     }
     let statements = provider_statements(&endpoints);
     let proof = crate::hash_prover::default_hash_provider()
         .prove_statements(&statements)?;
-    let archive = ArchivedStateRootBindingProof { endpoints, proof };
-    BINDING_CACHE.lock().unwrap().insert(key, archive.clone());
-    Ok(archive)
+    let archive = std::sync::Arc::new(ArchivedStateRootBindingProof { endpoints, proof });
+    let result = (*archive).clone();
+    BINDING_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, archive);
+    Ok(result)
 }
 
 /// Prove the binding for a complete method public-input statement by

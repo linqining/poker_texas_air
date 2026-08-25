@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fmt:
+    name: Diff whitespace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git diff --check
+
+  check:
+    name: Workspace check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-04-15
+      # `--all-targets` also builds the vendored flock benchmark, which is
+      # excluded from this workspace but is pulled in as a path dependency and
+      # currently targets an incompatible optional keccak API. Check production
+      # libraries and binaries here; run vendored benchmarks in their own CI.
+      - run: cargo check --release --workspace --lib --bins
+
+  test:
+    name: Workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-04-15
+      - run: cargo test --release --workspace
+
+  test-helpers:
+    name: Release integration tests with test helpers
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg=texas_release_tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-04-15
+      - run: cargo test -p poker_texas_air --release --features test-helpers --tests
+
+  release:
+    name: Release production build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-04-15
+      - run: cargo build --workspace --release
+
+  release-test-helpers:
+    name: Release integration tests
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg=texas_release_tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-04-15
+      - run: cargo test -p poker_texas_air --release --features test-helpers --tests
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-04-15
+          components: clippy
+      # Existing workspace crates still emit baseline warnings. Keep this job
+      # visible without turning the current warning backlog into a false-green
+      # or permanently failing merge gate; tighten to -D warnings incrementally.
+      - run: cargo clippy --workspace --all-targets --all-features
