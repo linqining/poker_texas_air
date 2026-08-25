@@ -1055,7 +1055,9 @@ mod tests {
         let err_text = err.to_string();
         assert!(
             err_text.contains("slot-OR archive is detached from request, envelope, or transcript order")
-                || err_text.contains("slot-OR scalar multiplication statement is detached"),
+                || err_text.contains("slot-OR scalar multiplication statement is detached")
+                || err_text.contains("slot-OR batch archive count is not fixed")
+                || err_text.contains("scalar multiplication count mismatch"),
             "unexpected slot-order splice error: {err_text}",
         );
     }

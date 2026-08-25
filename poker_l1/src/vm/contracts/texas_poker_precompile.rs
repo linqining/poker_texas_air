@@ -1176,7 +1176,8 @@ mod tests {
             .unwrap();
 
         // Build a valid two-player all-in pot from the funded table. Folding player A ends the
-        // hand, charges 5% rake, and exercises the same precompile path as production settlement.
+        // hand; the uncontested pot pays no rake (consistent with the settlement plan rule
+        // "uncontested pot must not be raked"), so no Treasury output is created.
         let table_id = reserved::texas_poker_contract_id();
         let mut table = read_resolved_table(&object_db, table_id);
         table
@@ -1260,21 +1261,17 @@ mod tests {
             TREASURY_SYSTEM_ADDRESS,
             coin_output_nonce(&settlement_hash, 1),
         );
-        assert!(result.created_objects.contains(&treasury_coin));
-        assert_eq!(
-            decode_native_coin(&object_db.read(&treasury_coin).unwrap())
-                .unwrap()
-                .amount,
-            10
-        );
+        // Uncontested fold-win: no rake, no Treasury coin.
+        assert!(!result.created_objects.contains(&treasury_coin));
+        assert!(object_db.read(&treasury_coin).is_err());
         let stored = read_resolved_table(&object_db, table_id);
         let prove_task = borsh::from_slice::<L1DispatchOutput>(&result.return_value)
             .unwrap()
             .prove_task
             .expect("settling fold must issue a proof task");
         assert_eq!(prove_task.post_table, stored);
-        assert_eq!(stored.chip_pool, 190);
-        assert_eq!(stored.seats[1].stack(), 190);
+        assert_eq!(stored.chip_pool, 200);
+        assert_eq!(stored.seats[1].stack(), 200);
         reconcile_table_vault(&stored).unwrap();
         reconcile_native_supply(&object_db, 0).unwrap();
 
@@ -1295,11 +1292,10 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(
+        assert!(
             list_owned_native_coins(&object_db, TREASURY_SYSTEM_ADDRESS)
                 .unwrap()
-                .len(),
-            1
+                .is_empty()
         );
         reconcile_native_supply(&object_db, 0).unwrap();
     }

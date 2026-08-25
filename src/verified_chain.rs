@@ -490,6 +490,51 @@ impl VerifiedChainBuilder {
     }
 }
 
+#[cfg(test)]
+impl VerifiedChain {
+    /// Test-only constructor that runs the same chain validation as
+    /// [`VerifiedChain::try_from_receipts`] but is reachable from sibling
+    /// test modules without going through the production verifier.
+    pub(crate) fn test_only_from_receipts(
+        receipts: Vec<VerificationReceipt>,
+    ) -> TexasAirResult<Self> {
+        Self::try_from_receipts(receipts)
+    }
+}
+
+#[cfg(test)]
+impl VerificationReceipt {
+    /// Test-only synthetic receipt factory.
+    ///
+    /// Production code must continue to obtain receipts only through
+    /// [`verify_method_against_and_issue_receipt`] /
+    /// [`issue_tagged_batch_receipt`] so the receipt fields remain bound to
+    /// the native verifier and the VM-replayed dispatch call.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn test_only_new(
+        table_id: u64,
+        hand_id: u32,
+        call_seq: u32,
+        pre: StateRoot,
+        post: StateRoot,
+    ) -> Self {
+        Self {
+            kind: MethodKind::Check,
+            pre_state_root: pre,
+            post_state_root: post,
+            table_id,
+            hand_id,
+            call_seq,
+            pre_version: u64::from(call_seq),
+            post_version: u64::from(call_seq) + 1,
+            dispatch_call_digest: [call_seq as u8; 32],
+            proof_commitments: vec![FieldElement::from(u64::from(call_seq) + 1)],
+            log_size: 10,
+            num_columns: 1,
+        }
+    }
+}
+
 fn validate_receipt_chain(receipts: &[VerificationReceipt]) -> TexasAirResult<()> {
     if receipts.is_empty() {
         return Err(TexasAirError::RecursionError(

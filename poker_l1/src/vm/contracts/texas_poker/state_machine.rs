@@ -2320,10 +2320,23 @@ pub fn apply_player_action(
         PlayerAction::RaiseTo(total_bet) => {
             let seat_bet = table.seats[seat_index as usize].bet();
             let seat_stack = table.seats[seat_index as usize].stack();
-            let round = table.active_betting_round_mut()?;
-            let prev_current_bet = round.current_bet;
-            let prev_min_raise = round.min_raise;
-            let needed = round.process_raise(total_bet, seat_bet, seat_stack)?;
+            let (prev_current_bet, prev_min_raise) = {
+                let round = table.active_betting_round_mut()?;
+                (round.current_bet, round.min_raise)
+            };
+            // 短 all-in（raise_amount < min_raise）不重新打开行动权（TDA #41）：
+            // 已行动过的玩家（acted 位仍置位，说明其后只发生过短 all-in）
+            // 面对 current_bet 只能 call 或 fold，不得再加注；
+            // 只有完整 raise 才会清除 acted 位并恢复加注权。
+            if table.seat_acted_this_round(seat_index) {
+                return Err(PokerL1Error::ContractExecutionFailed(
+                    "betting error: action not reopened for acted seat (call or fold only)"
+                        .into(),
+                ));
+            }
+            let needed = table
+                .active_betting_round_mut()?
+                .process_raise(total_bet, seat_bet, seat_stack)?;
             let seat = table.seats[seat_index as usize].playing_mut()?;
             seat.occupied.stack =
                 seat.occupied.stack.checked_sub(needed).ok_or_else(|| {
@@ -2996,21 +3009,9 @@ fn end_without_showdown(
         .map(|(i, _)| i as u8);
 
     if let Some(winner_seat) = winner {
-        // 抽水（在分配奖金之前）
-        let pot_before = table.pot;
-        let rake = collect_rake(table)?;
-        if rake > 0 {
-            events::emit_event(
-                events,
-                TexasPokerEvent::RakeCollected {
-                    table_id: table.id,
-                    pot_before,
-                    rake_amount: rake,
-                    pot_after: table.pot,
-                    rake_mode: table.rake_mode,
-                },
-            );
-        }
+        // 无竞争 pot（全员 fold，唯一幸存者直接获胜）不抽水，
+        // 与 showdown 路径对 uncontested 层的处理保持一致
+        // （SettlementPlan::validate: uncontested pot must not be raked）。
         let pot = table.pot;
         let post_stack = table.seats[winner_seat as usize]
             .stack()
@@ -4900,6 +4901,59 @@ mod tests {
         let round = table.betting_round().unwrap();
         assert_eq!(round.current_bet, 150);
         assert_eq!(round.min_raise, 100);
+    }
+
+    #[test]
+    fn test_acted_player_cannot_raise_after_short_all_in() {
+        // seat0 短 all-in 后，已行动的 seat1 只能 call 或 fold，不得再加注（TDA #41）。
+        let mut table = make_table();
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(150).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_bet(100);
+        table.set_seat_acted_this_round(1, true);
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .unwrap();
+        let mut events = vec![];
+
+        apply_raise(&mut table, 0, 150, &mut events).unwrap();
+        assert!(is_player_turn(&table, 1));
+        // seat1 加注被拒绝：短 all-in 没有重新打开其行动权。
+        assert!(apply_raise(&mut table, 1, 400, &mut events).is_err());
+        // call 到新水位仍然允许。
+        apply_call(&mut table, 1, &mut events).unwrap();
+        // 双方水位一致后本轮结束，bet 被收入 pot。
+        assert_eq!(table.seats[1].stack(), 950);
+        assert_eq!(table.pot, 300);
+    }
+
+    #[test]
+    fn test_end_without_showdown_does_not_rake_uncontested_pot() {
+        // 全员 fold、唯一幸存者直接获胜：无竞争 pot 不抽水，
+        // 赢家拿回全部底池（含自己未被跟注的部分）。
+        let mut table = make_table();
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
+        table.seats[1].set_status(SeatStatus::Folded);
+        table.pot = 300;
+        table.rake_mode = RAKE_MODE_PERCENTAGE;
+        table.rake_bps = 1_000;
+        table.rake_cap = u64::MAX;
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .unwrap();
+        let mut events = vec![];
+
+        end_without_showdown(&mut table, &mut events).unwrap();
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::RakeCollected { .. })));
+        assert_eq!(table.seats[0].stack(), 1300);
+        assert_eq!(table.pot, 0);
     }
 
     #[test]

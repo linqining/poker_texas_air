@@ -297,6 +297,20 @@ impl VerifiedOuterAggregate {
     }
 }
 
+#[cfg(test)]
+impl VerifiedOuterAggregate {
+    /// Test-only constructor that bypasses the proof verifier but keeps the
+    /// public surface identical so downstream code paths (calldata builders,
+    /// settlement adapters) can be exercised without driving a full proof run.
+    pub(crate) fn test_only_new(chain: VerifiedChain, aggregate_digest: [u8; 32]) -> Self {
+        Self {
+            chain,
+            precompile_bindings: Vec::new(),
+            aggregate_digest,
+        }
+    }
+}
+
 /// Generate every stage-3 child proof and construct a verified outer aggregate.
 ///
 /// # Errors
