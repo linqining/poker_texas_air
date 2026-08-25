@@ -258,10 +258,25 @@ impl BorshDeserialize for ArchivedRistrettoFpProgramBatchProof {
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
         if magic != FP_PROGRAM_BATCH_ARCHIVE_MAGIC {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "unsupported Ristretto Fp program batch archive format",
-            ));
+            // Decode the pre-versioned layout explicitly for existing nested
+            // archives. New encoders always emit the magic above; legacy data
+            // is accepted only through this separate, unambiguous path.
+            let program_count = u32::from_le_bytes(magic) as usize;
+            if program_count > 1_000_000 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "legacy Ristretto Fp program batch row count is unreasonable",
+                ));
+            }
+            let mut programs = Vec::with_capacity(program_count);
+            for _ in 0..program_count {
+                programs.push(RistrettoFpProgram::deserialize_reader(reader)?);
+            }
+            return Ok(Self {
+                programs,
+                stark_proof_bytes: Vec::<u8>::deserialize_reader(reader)?,
+                range_claimed_sum: <[u32; 4]>::deserialize_reader(reader)?,
+            });
         }
         let version = u8::deserialize_reader(reader)?;
         if version != FP_PROGRAM_BATCH_ARCHIVE_VERSION {
