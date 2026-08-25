@@ -1,2 +1,7 @@
 /target/
+/target-bench/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/*/crash-*
+coverage.lcov
 .DS_Store

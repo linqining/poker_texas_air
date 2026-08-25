@@ -16,6 +16,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -1975,6 +1976,7 @@ impl Node {
     /// 4. commit certificate 多签验证
     /// 5. 状态根重放比对：重新执行 tx，比对计算出的 state_root 与 header.state_root
     pub fn put_block(&self, block: &Block) -> PokerL1Result<Hash> {
+        let commit_started = Instant::now();
         let _commit_guard = self
             .block_commit_lock
             .lock()
@@ -2002,7 +2004,7 @@ impl Node {
         // This prevents a rejected block from changing objects or account nonces.
         let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
-        let (object_snapshot, account_snapshot, _, next_validator_set, bridge_snapshot) =
+        let (object_snapshot, account_snapshot, outcome, next_validator_set, bridge_snapshot) =
             self.prepare_block_execution(block, &object_db, &account_store)?;
         let staking_escrow = match next_validator_set.as_ref() {
             Some(next) => validator_bond_escrow(&object_snapshot, next, self.config.chain_id)?,
@@ -2144,6 +2146,10 @@ impl Node {
         if let Some(vkey) = &self.config.validator_key {
             self.sign_and_store_light_header(block, vkey);
         }
+        self.metrics.inc_tx(outcome.receipts.len() as u64);
+        self.metrics.inc_gas_used(outcome.total_gas_used);
+        self.metrics
+            .observe_block_time_ms(commit_started.elapsed().as_millis() as u64);
         Ok(hash)
     }
 
@@ -5003,6 +5009,9 @@ mod tests {
         let coins = backend.get_native_coins(&owner).unwrap();
         assert_eq!(coins.len(), 1);
         assert_eq!(coins[0].amount, 42);
+        let metrics = backend.export_metrics();
+        assert!(metrics.contains("# TYPE zchain_block_height gauge"));
+        assert!(metrics.contains("zchain_mempool_size 0"));
     }
 
     // ===== P0-3: validate_vertex 测试 =====

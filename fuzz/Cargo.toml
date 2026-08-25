@@ -1,0 +1,29 @@
+[workspace]
+
+[package]
+name = "poker-texas-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+poker_texas_air = { path = ".." }
+poker_l1 = { path = "../poker_l1" }
+
+[[bin]]
+name = "proof_wire"
+path = "fuzz_targets/proof_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tx_decode"
+path = "fuzz_targets/tx_decode.rs"
+test = false
+doc = false
+bench = false

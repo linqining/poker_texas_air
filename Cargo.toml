@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace]
 resolver = "2"
-exclude = ["third_party", "third_party/flock", "third_party/flock/crates/flock-core", "third_party/flock/crates/flock-prover", "third_party/flock/crates/flock-cuda-ffi"]
+exclude = ["third_party", "third_party/flock", "third_party/flock/crates/flock-core", "third_party/flock/crates/flock-prover", "third_party/flock/crates/flock-cuda-ffi", "fuzz"]
 members = [
     ".",
     "hand-bench",

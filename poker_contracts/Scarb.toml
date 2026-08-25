@@ -1,0 +1,27 @@
+[package]
+name = "poker_contracts"
+version = "0.1.0"
+edition = "2024_07"
+publish = false
+
+[dependencies]
+# OpenZeppelin contracts (ERC20/ERC721/access control) for Cairo
+openzeppelin = "0.16.0"
+
+# Starknet standard library
+starknet = "2.9.2"
+
+# snforge_std for testing (only used by tests)
+[dev-dependencies]
+snforge_std = "0.32.0"
+
+[cairo]
+sierra-release = true
+# Enable Starknet Foundry test runner
+# (needed when running `scarb test` with snforge)
+
+[lib]
+sierra-release = true
+
+[scripts]
+# Deployment and interaction scripts (run with `sncast`)

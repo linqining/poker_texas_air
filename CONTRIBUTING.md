@@ -39,8 +39,10 @@ configuration above is present.
 Short Criterion benchmarks are available with:
 
 ```bash
-cargo bench -p poker_l1 --bench task36_dag_consensus
-cargo bench -p poker_l1 --bench task36_bls_syscall
+CARGO_TARGET_DIR=target-bench cargo +nightly bench --release -p poker_l1 \
+  --bench task36_dag_consensus -- --noplot
+CARGO_TARGET_DIR=target-bench cargo +nightly bench --release -p poker_l1 \
+  --bench task36_bls_syscall -- --noplot
 ```
 
 The full hand proving benchmark is intentionally not part of the pull-request
