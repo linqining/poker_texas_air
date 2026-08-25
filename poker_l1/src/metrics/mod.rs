@@ -68,8 +68,8 @@ impl MetricsCollector {
 
     /// 记录一次出块耗时（毫秒）。
     pub fn observe_block_time_ms(&self, ms: u64) {
-        self.block_time_ms_sum.fetch_add(ms, Ordering::Relaxed);
-        self.block_time_ms_count.fetch_add(1, Ordering::Relaxed);
+        self.block_time_ms_sum.fetch_add(ms, Ordering::Release);
+        self.block_time_ms_count.fetch_add(1, Ordering::Release);
     }
 
     /// 更新 peer 数。
@@ -110,13 +110,13 @@ impl MetricsCollector {
         // zchain_block_time_ms (histogram summary: sum + count)
         out.push_str("# HELP zchain_block_time_ms Block production time in ms (sum/count).\n");
         out.push_str("# TYPE zchain_block_time_ms summary\n");
+        let block_time_count = self.block_time_ms_count.load(Ordering::Acquire);
+        let block_time_sum = self.block_time_ms_sum.load(Ordering::Acquire);
         out.push_str(&format!(
-            "zchain_block_time_ms_sum {}\n",
-            self.block_time_ms_sum.load(Ordering::Relaxed)
+            "zchain_block_time_ms_sum {block_time_sum}\n"
         ));
         out.push_str(&format!(
-            "zchain_block_time_ms_count {}\n",
-            self.block_time_ms_count.load(Ordering::Relaxed)
+            "zchain_block_time_ms_count {block_time_count}\n"
         ));
         // zchain_peer_count (gauge)
         out.push_str("# HELP zchain_peer_count Current P2P peer count.\n");
@@ -206,6 +206,37 @@ mod tests {
                 "缺少 TYPE for {name}"
             );
         }
+    }
+
+    #[test]
+    fn metrics_block_time_zero_observation() {
+        let m = MetricsCollector::new();
+        m.observe_block_time_ms(0);
+        let text = m.export();
+        assert!(text.contains("zchain_block_time_ms_sum 0"));
+        assert!(text.contains("zchain_block_time_ms_count 1"));
+    }
+
+    #[test]
+    fn metrics_block_time_concurrent_accumulation() {
+        let metrics = Arc::new(MetricsCollector::new());
+        let left = Arc::clone(&metrics);
+        let right = Arc::clone(&metrics);
+        let left_thread = std::thread::spawn(move || {
+            for _ in 0..1_000 {
+                left.observe_block_time_ms(100);
+            }
+        });
+        let right_thread = std::thread::spawn(move || {
+            for _ in 0..1_000 {
+                right.observe_block_time_ms(200);
+            }
+        });
+        left_thread.join().unwrap();
+        right_thread.join().unwrap();
+        let text = metrics.export();
+        assert!(text.contains("zchain_block_time_ms_sum 300000"));
+        assert!(text.contains("zchain_block_time_ms_count 2000"));
     }
 
     #[test]

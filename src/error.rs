@@ -66,5 +66,46 @@ pub enum TexasAirError {
     ConsensusAnchor(String),
 }
 
+/// Stable high-level category for telemetry and RPC error mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCategory {
+    /// The caller supplied an invalid statement, wire value, or transition.
+    ClientInput,
+    /// A proof or authenticated binding was rejected.
+    ProofRejection,
+    /// A dependency or transient resource failed.
+    Retryable,
+    /// An internal implementation or invariant failed.
+    Internal,
+}
+
+impl TexasAirError {
+    /// Classify an error without parsing its human-readable message.
+    #[must_use]
+    pub const fn category(&self) -> ErrorCategory {
+        match self {
+            Self::SpecViolation(_)
+            | Self::UnsupportedBettingTransition(_)
+            | Self::SerializationError(_)
+            | Self::UntrustedAggregationDisabled => ErrorCategory::ClientInput,
+            Self::ConstraintUnsatisfied(_)
+            | Self::ConsensusAnchor(_)
+            | Self::HostZeroAdmissionIncomplete(_) => ErrorCategory::ProofRejection,
+            Self::StateRootError(_) | Self::MerkleError(_) | Self::StwoProverError(_) => {
+                ErrorCategory::Retryable
+            }
+            Self::TraceGenError(_)
+            | Self::RecursionError(_)
+            | Self::NotImplemented(_) => ErrorCategory::Internal,
+        }
+    }
+
+    /// Whether retrying the same request may succeed without changing input.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self.category(), ErrorCategory::Retryable)
+    }
+}
+
 /// 主 Result 类型别名。
 pub type TexasAirResult<T> = Result<T, TexasAirError>;

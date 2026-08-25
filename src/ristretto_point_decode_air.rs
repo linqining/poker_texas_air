@@ -8,6 +8,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
+use std::sync::OnceLock;
 
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::ristretto_fp_add_air::{
@@ -111,8 +112,9 @@ pub struct ArchivedRistrettoPointDecodeProof {
     pub t_proof: ArchivedRistrettoFpMultiplicationProof,
 }
 
-fn modulus() -> BigUint {
-    (BigUint::one() << 255u32) - BigUint::from(19u32)
+fn modulus() -> &'static BigUint {
+    static MODULUS: OnceLock<BigUint> = OnceLock::new();
+    MODULUS.get_or_init(|| (BigUint::one() << 255u32) - BigUint::from(19u32))
 }
 
 fn big_uint(value: &[u8; LIMBS]) -> BigUint {
@@ -143,12 +145,15 @@ fn add(left: &BigUint, right: &BigUint) -> BigUint {
     (left + right) % modulus()
 }
 
-fn edwards_d() -> BigUint {
-    BigUint::parse_bytes(
-        b"37095705934669439343138083508754565189542113879843219016388785533085940283555",
-        10,
-    )
-    .expect("decimal Edwards d is valid")
+fn edwards_d() -> &'static BigUint {
+    static EDWARDS_D: OnceLock<BigUint> = OnceLock::new();
+    EDWARDS_D.get_or_init(|| {
+        BigUint::parse_bytes(
+            b"37095705934669439343138083508754565189542113879843219016388785533085940283555",
+            10,
+        )
+        .expect("decimal Edwards d is valid")
+    })
 }
 
 fn nonnegative(value: &BigUint) -> BigUint {
@@ -159,13 +164,18 @@ fn nonnegative(value: &BigUint) -> BigUint {
     }
 }
 
+fn negative_edwards_d_bytes() -> &'static [u8; LIMBS] {
+    static NEGATIVE_D: OnceLock<[u8; LIMBS]> = OnceLock::new();
+    NEGATIVE_D.get_or_init(|| limbs(&(modulus() - edwards_d())))
+}
+
 /// Prove canonical decoding of a Ristretto255 compressed point.
 pub fn prove_ristretto_point_decode(
     encoding: &[u8; LIMBS],
 ) -> TexasAirResult<ArchivedRistrettoPointDecodeProof> {
     let p = modulus();
     let s = big_uint(encoding);
-    if s >= p {
+    if s >= *p {
         return Err(TexasAirError::SpecViolation(
             "Ristretto point encoding is noncanonical".into(),
         ));
@@ -340,7 +350,7 @@ pub fn verify_ristretto_point_decode(
     verify_ristretto_fp_multiplication(&archive.y_proof)?;
     verify_ristretto_fp_multiplication(&archive.t_proof)?;
 
-    let negative_d = limbs(&subtract(&modulus(), &edwards_d()));
+    let negative_d = *negative_edwards_d_bytes();
     let bindings = [
         (
             "s_squared",

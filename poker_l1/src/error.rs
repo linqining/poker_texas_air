@@ -772,8 +772,128 @@ pub enum PokerL1Error {
     SignatureFormMismatch { scheme_id: u32 },
 }
 
+/// Stable category used by RPC and telemetry layers without parsing error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCategory {
+    /// The request or transaction supplied invalid input.
+    ClientInput,
+    /// An authenticated proof, signature, or consensus evidence was rejected.
+    ProofRejection,
+    /// A storage or network operation may succeed when retried.
+    Retryable,
+    /// An internal invariant or implementation failure occurred.
+    Internal,
+}
+
+impl PokerL1Error {
+    /// Classify an error without parsing its display string.
+    ///
+    /// The fallback is deliberately conservative: newly added variants are
+    /// treated as internal until their retry and trust semantics are reviewed.
+    #[must_use]
+    pub const fn category(&self) -> ErrorCategory {
+        match self {
+            Self::Rocksdb(_)
+            | Self::NetworkTransport(_)
+            | Self::SyncError(_)
+            | Self::MempoolBufferTimeout(_)
+            | Self::MultiReplicaBroadcastFailed { .. } => ErrorCategory::Retryable,
+            Self::InvalidZkProofFormat(_)
+            | Self::InvalidZkPublicIo(_)
+            | Self::InvalidBlsPoint(_)
+            | Self::InvalidBlsScalar(_)
+            | Self::InvalidVrfProof(_)
+            | Self::InvalidVertexSignature { .. }
+            | Self::InvalidCommitCertificateSignature { .. }
+            | Self::BridgeSignatureInvalid(_)
+            | Self::BurnProofInvalid(_)
+            | Self::InvalidRefuseAckEvidence(_)
+            | Self::InvalidAssignedValidatorFailureProof(_)
+            | Self::InvalidDelegatedEscapeAuthorization(_)
+            | Self::ForceCheckpointEvidenceFailed(_)
+            | Self::CrsFingerprintMismatch { .. }
+            | Self::Groth16VkNotRegistered(_)
+            | Self::SumcheckVerificationFailed
+            | Self::CrossLanguageClaimFailed
+            | Self::TranscriptMismatch
+            | Self::PcsVerificationFailed
+            | Self::ContinuityProofInvalid(_)
+            | Self::ProofKindMismatch { .. } => ErrorCategory::ProofRejection,
+            Self::UnknownScheme { .. }
+            | Self::InvalidPubkeyLength { .. }
+            | Self::CurveMismatch { .. }
+            | Self::InvalidSignature
+            | Self::InvalidSignatureLowS
+            | Self::InvalidSignatureCanonical
+            | Self::InvalidSignatureLength { .. }
+            | Self::WrongChainId { .. }
+            | Self::NonceTooLow { .. }
+            | Self::NonceTooHigh { .. }
+            | Self::GameTurnNonceMismatch { .. }
+            | Self::InvalidFallbackFlag
+            | Self::InsufficientBalance { .. }
+            | Self::GasExceedsBudget { .. }
+            | Self::Serialization(_)
+            | Self::InputTooLong { .. }
+            | Self::TxTooLarge { .. }
+            | Self::UnknownZkScheme(_)
+            | Self::UnknownContractMethod { .. }
+            | Self::ObjectIDCollision(_)
+            | Self::NotOwner(_)
+            | Self::ObjectImmutable(_)
+            | Self::ObjectVersionMismatch { .. }
+            | Self::WrongLane { .. }
+            | Self::NotAssignedValidator { .. }
+            | Self::NotYourTurn { .. }
+            | Self::NotEligibleSubmitter { .. }
+            | Self::InvalidBondAmount { .. }
+            | Self::InsufficientOperatorBond { .. }
+            | Self::ParamOutOfBounds { .. }
+            | Self::UnknownParameter(_)
+            | Self::ProposalChainIdMismatch { .. }
+            | Self::BridgeVerifyNotSignedByRecipient
+            | Self::MissingCriticalVulnerabilityProof
+            | Self::InvalidBytecode(_)
+            | Self::InvalidSyscallArgument(_)
+            | Self::InvalidSlot(_)
+            | Self::SignatureFormMismatch { .. } => ErrorCategory::ClientInput,
+            _ => ErrorCategory::Internal,
+        }
+    }
+
+    /// Whether retrying the same request may succeed without changing input.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self.category(), ErrorCategory::Retryable)
+    }
+
+    /// Whether the error is attributable to untrusted client input.
+    #[must_use]
+    pub const fn is_client_fault(&self) -> bool {
+        matches!(self.category(), ErrorCategory::ClientInput)
+    }
+}
+
 /// 库统一 Result 别名。
 pub type PokerL1Result<T> = Result<T, PokerL1Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_categories_are_stable_and_non_overlapping() {
+        assert!(PokerL1Error::InvalidSignature.is_client_fault());
+        assert_eq!(PokerL1Error::InvalidSignature.category(), ErrorCategory::ClientInput);
+        assert_eq!(PokerL1Error::InvalidVertexSignature { vertex_hash: [0; 32] }.category(), ErrorCategory::ProofRejection);
+        assert_eq!(PokerL1Error::InvalidZkProofFormat("bad".into()).category(), ErrorCategory::ProofRejection);
+        assert_eq!(PokerL1Error::InputTooLong { actual: 2, limit: 1 }.category(), ErrorCategory::ClientInput);
+        assert!(PokerL1Error::Rocksdb("io".into()).is_retryable());
+        assert!(PokerL1Error::SyncError("timeout".into()).is_retryable());
+        assert_eq!(PokerL1Error::Other("bug".into()).category(), ErrorCategory::Internal);
+        assert!(!PokerL1Error::Other("bug".into()).is_retryable());
+    }
+}
 
 impl From<borsh::io::Error> for PokerL1Error {
     fn from(e: borsh::io::Error) -> Self {

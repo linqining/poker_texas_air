@@ -127,18 +127,16 @@ impl OuterAggregateBundle {
     /// Returns an error for an invalid child count or any size overflow.
     pub fn encode(&self) -> TexasAirResult<Vec<u8>> {
         validate_child_count(self.children.len())?;
-        let mut encoded_children = Vec::with_capacity(self.children.len());
         let mut total_len = HEADER_LEN;
         for child in &self.children {
-            let bytes = child.encode()?;
-            if bytes.len() > MAX_OUTER_CHILD_BYTES {
+            let child_len = child.encoded_len()?;
+            if child_len > MAX_OUTER_CHILD_BYTES {
                 return Err(wire_error("encoded child exceeds outer child limit"));
             }
             total_len = total_len
                 .checked_add(4)
-                .and_then(|value| value.checked_add(bytes.len()))
+                .and_then(|value| value.checked_add(child_len))
                 .ok_or_else(|| wire_error("outer aggregate length overflow"))?;
-            encoded_children.push(bytes);
         }
         if total_len > MAX_OUTER_AGGREGATE_BYTES {
             return Err(wire_error("outer aggregate exceeds total size limit"));
@@ -159,12 +157,14 @@ impl OuterAggregateBundle {
         out.extend_from_slice(&self.post_state_root.bytes());
         out.extend_from_slice(&self.aggregate_digest);
         debug_assert_eq!(out.len(), HEADER_LEN);
-        for child in encoded_children {
-            let len = u32::try_from(child.len())
+        for child in &self.children {
+            let len = child.encoded_len()?;
+            let len = u32::try_from(len)
                 .map_err(|_| wire_error("outer child length exceeds u32"))?;
             out.extend_from_slice(&len.to_le_bytes());
-            out.extend_from_slice(&child);
+            child.encode_into(&mut out)?;
         }
+        debug_assert_eq!(out.len(), total_len);
         Ok(out)
     }
 
@@ -518,12 +518,16 @@ fn aggregate_digest(
         .children
         .par_iter()
         .map(|child| {
-            let child_bytes = child.encode()?;
-            let digest = hash256(
-                b"zchain.poker.outer_aggregate.child_bytes.v1",
-                &child_bytes,
-            );
-            Ok((child_bytes.len(), digest))
+            let payload_len = child.encoded_len()?;
+            let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+            hasher.update(b"zchain.poker.outer_aggregate.child_bytes.v1");
+            hasher.update(&(payload_len as u64).to_le_bytes());
+            child.update_hasher(&mut hasher)?;
+            let mut digest = [0u8; 32];
+            hasher
+                .finalize_variable(&mut digest)
+                .expect("32 <= 64");
+            Ok((payload_len, digest))
         })
         .collect::<TexasAirResult<Vec<_>>>()?;
 

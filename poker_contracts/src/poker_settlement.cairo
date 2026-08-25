@@ -3,35 +3,30 @@
 ///
 /// ## Design (lightweight verification)
 ///
-/// The heavy ZK verification (Stwo STARK proofs over the Texas AIR) happens
-/// off-chain. The Rust proving pipeline verifies each child method proof and
-/// each dual-proof package, then emits an outer aggregate with a canonical
-/// `aggregate_digest`. This contract:
+/// Heavy ZK verification (Stwo STARK proofs over the Texas AIR) happens
+/// off-chain. The Rust proving pipeline verifies every child method proof and
+/// dual-proof package, then emits an outer aggregate with a canonical
+/// `aggregate_digest` (BLAKE2b over the exact child proofs, dispatch digests,
+/// receipts, and chain continuity). This contract:
 ///
-/// 1. **Registers** the aggregate digest once, binding it to the canonical
-///    pre/post state roots and the ordered settlement results it commits to.
-///    Registration is explicit (the prover must be listed by the owner) and
-///    one-time per digest.
-/// 2. **Settles** a hand by reading the registered settlement bundle for that
-///    hand, re-computing the commitments, and applying chip deltas through
-///    the vault.
+/// 1. **Registers** the aggregate digest once (operator-only, one-time per
+///    digest), binding it to the canonical pre/post state roots and the
+///    ordered per-hand settlement commitments.
+/// 2. **Settles** a hand by having the caller re-assert the per-player chip
+///    deltas, recomputing the Poseidon settlement commitment, and requiring
+///    it to equal the commitment stored at registration. The chip deltas must
+///    be zero-sum.
 ///
-/// This is not a ZK-verifier in Cairo. It trusts the operator's off-chain
-/// verifier (Stwo) and enforces: digest uniqueness, monotonic hand/seq
-/// ordering, exact settlement-state commitment recomputation, and
+/// This is not a ZK verifier in Cairo. It enforces: operator authorization,
+/// digest uniqueness, monotonic hand ordering, exact settlement-state
+/// commitment recomputation, zero-sum accounting, replay protection, and
 /// vault accounting.
 use openzeppelin::access::ownable::OwnableComponent;
 use starknet::ContractAddress;
-use starknet::storage::{StorageMap, StoragePointerReadAccess, StoragePointerWriteAccess};
 
 #[starknet::interface]
 pub trait IPokerSettlement<TContractState> {
-    /// Register a verified outer aggregate digest (owner/prover only).
-    ///
-    /// `pre_state_root`/`post_state_root` are the canonical 32-byte (2 felt)
-    /// table state roots before/after the aggregate. `settlement_roots` is the
-    /// ordered list of per-hand settlement commitment roots settled in this
-    /// aggregate. The same digest cannot be registered twice.
+    /// Register a verified outer aggregate digest (authorized prover only).
     fn register_aggregate(
         ref self: TContractState,
         aggregate_digest: felt252,
@@ -42,39 +37,30 @@ pub trait IPokerSettlement<TContractState> {
         settlement_roots: Span<felt252>,
     );
 
-    /// Settle chips for one player for one hand, referencing a registered
-    /// aggregate and a settlement record keyed by (hand_id).
-    ///
-    /// `settlement_digest` is the exact commitment stored under `hand_id` in
-    /// the registered aggregate's range. `winners` lists the players who won
-    /// chips this hand; the contract credits them `amount` each and debits the
-    /// `loser` chip balance in aggregate.
-    ///
-    /// Reverts unless:
-    /// - the aggregate is registered, not already settled for this hand;
-    /// - the recomputed settlement digest matches the stored one;
-    /// - every winner/delta is consistent (sum of deltas == 0).
+    /// Settle chips for one hand, using a registered aggregate.
     fn settle_hand(
         ref self: TContractState,
         aggregate_digest: felt252,
         hand_id: u64,
-        settlement_digest: felt252,
-        winners: Span<ContractAddress>,
-        amounts: Span<u256>,
-        loser: ContractAddress,
+        players: Span<ContractAddress>,
+        deltas: Span<i128>,
     );
 
     /// Authorize an operator (prover) to register aggregates (owner only).
     fn set_prover(ref self: TContractState, prover: ContractAddress);
-    /// Is `prover` authorized to register aggregates?
+    /// Deauthorize an operator (owner only).
+    fn remove_prover(ref self: TContractState, prover: ContractAddress);
+    /// Whether `prover` is authorized.
     fn is_prover(self: @TContractState, prover: ContractAddress) -> bool;
-    /// Aggregate registration record.
+    /// Aggregate registration range for `aggregate_digest`.
+    /// Returns (first_hand_id, last_hand_id, pre_root_hi, pre_root_lo, post_root_hi, post_root_lo).
+    /// All zero if not registered.
     fn aggregate(
         self: @TContractState, aggregate_digest: felt252,
     ) -> (u64, u64, felt252, felt252, felt252, felt252);
-    /// Per-hand settlement digest recorded from a registered aggregate.
+    /// Per-hand settlement commitment recorded at registration.
     fn settlement_digest(self: @TContractState, hand_id: u64) -> felt252;
-    /// Whether a hand has been settled.
+    /// Whether a hand has been settled (replay protection).
     fn hand_settled(self: @TContractState, hand_id: u64) -> bool;
     /// The vault address.
     fn vault(self: @TContractState) -> ContractAddress;
@@ -84,7 +70,13 @@ pub trait IPokerSettlement<TContractState> {
 pub mod PokerSettlement {
     use openzeppelin::access::ownable::OwnableComponent;
     use starknet::ContractAddress;
-    use starknet::storage::{StorageMap, StoragePointerReadAccess, StoragePointerWriteAccess};
+    use core::num::traits::Zero;
+    use core::poseidon::poseidon_hash_span;
+    use starknet::storage::{
+        Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
+        StoragePointerWriteAccess,
+    };
+    use super::IVaultDispatcherDispatcherTrait;
 
     component!(path: OwnableComponent, storage: ownable, event: OwnableEvent);
 
@@ -94,17 +86,20 @@ pub mod PokerSettlement {
 
     #[storage]
     struct Storage {
-        /// Authorized prover/operator that may register aggregates.
-        provers: StorageMap<ContractAddress, bool>,
-        /// Vault contract that holds chip balances.
+        /// Authorized operator (prover) that may register aggregates and
+        /// settle hands.
+        provers: Map<ContractAddress, bool>,
+        /// Vault contract that holds and moves chip balances.
         vault_address: ContractAddress,
         /// Registered aggregates keyed by digest.
-        /// (first_hand_id, last_hand_id, pre_state_root_hi, pre_state_root_lo, post_state_root_hi, post_state_root_lo)
-        aggregates: StorageMap<felt252, (u64, u64, felt252, felt252, felt252, felt252)>,
-        /// Per-hand settlement digest recorded from a registered aggregate.
-        settlement_digests: StorageMap<u64, felt252>,
+        /// (first_hand_id, last_hand_id, pre_root_hi, pre_root_lo,
+        ///  post_root_hi, post_root_lo).
+        aggregates: Map<felt252, (u64, u64, felt252, felt252, felt252, felt252)>,
+        /// Per-hand settlement commitment recorded at registration.
+        settlement_digests: Map<u64, felt252>,
         /// Hands that have been settled (replay protection).
-        settled_hands: StorageMap<u64, bool>,
+        settled_hands: Map<u64, bool>,
+        /// Highest registered last_hand_id (monotonic ordering).
         last_hand_id: u64,
         #[substorage(v0)]
         ownable: OwnableComponent::Storage,
@@ -125,10 +120,10 @@ pub mod PokerSettlement {
         aggregate_digest: felt252,
         first_hand_id: u64,
         last_hand_id: u64,
-        pre_state_root_hi: felt252,
-        pre_state_root_lo: felt252,
-        post_state_root_hi: felt252,
-        post_state_root_lo: felt252,
+        pre_root_hi: felt252,
+        pre_root_lo: felt252,
+        post_root_hi: felt252,
+        post_root_lo: felt252,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -136,6 +131,7 @@ pub mod PokerSettlement {
         aggregate_digest: felt252,
         hand_id: u64,
         settlement_digest: felt252,
+        participant_count: u32,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -153,13 +149,12 @@ pub mod PokerSettlement {
     ) {
         self.ownable.initializer(owner);
         self.vault_address.write(vault_address);
-        if (!initial_prover.is_zero()) {
+        if !initial_prover.is_zero() {
             self.provers.write(initial_prover, true);
         }
     }
 
     #[abi(embed_v0)]
-    #[generate_trait]
     impl IPokerSettlementImpl of super::IPokerSettlement<ContractState> {
         fn register_aggregate(
             ref self: ContractState,
@@ -171,45 +166,37 @@ pub mod PokerSettlement {
             settlement_roots: Span<felt252>,
         ) {
             let caller = starknet::get_caller_address();
-            assert!(self.provers.read(caller), 'Caller not authorized prover');
-            assert!(!aggregate_digest.is_zero(), 'Zero digest');
-            assert!(
-                self.aggregates.read(aggregate_digest).0 == 0
-                    && self.aggregates.read(aggregate_digest).1 == 0,
-                'Digest already registered',
-            );
-            assert!(first_hand_id <= last_hand_id, 'Invalid hand range');
-            assert!(
-                settlement_roots.len() == (last_hand_id - first_hand_id + 1),
-                'Settlement roots count mismatch',
-            );
-
-            // Protect against registering over already-settled hand range.
-            assert!(first_hand_id > self.last_hand_id.read(), 'Hand range overlaps past');
+            assert!(self.provers.read(caller), "Caller not authorized prover");
+            assert!(!aggregate_digest.is_zero(), "Zero digest");
+            // Unregistered digests map to the all-zero tuple (first_hand_id == 0).
+            let (existing_first, existing_last, _, _, _, _) = self
+                .aggregates
+                .read(aggregate_digest);
+            assert!(existing_first == 0 && existing_last == 0, "Digest already registered");
+            assert!(first_hand_id <= last_hand_id, "Invalid hand range");
+            let count_64 = last_hand_id - first_hand_id + 1;
+            let count_32: u32 = count_64.try_into().expect('hand count fits u32');
+            assert!(settlement_roots.len() == count_32, "Settlement roots count mismatch");
+            // Monotonic hand ranges prevent re-registering older outcomes.
+            assert!(first_hand_id > self.last_hand_id.read(), "Hand range overlaps past");
 
             let (pre_hi, pre_lo) = pre_state_root;
             let (post_hi, post_lo) = post_state_root;
-
             self
                 .aggregates
                 .write(
                     aggregate_digest,
-                    (
-                        first_hand_id,
-                        last_hand_id,
-                        pre_hi,
-                        pre_lo,
-                        post_hi,
-                        post_lo,
-                    ),
+                    (first_hand_id, last_hand_id, pre_hi, pre_lo, post_hi, post_lo),
                 );
 
-            // Record per-hand settlement digests from the ordered roots.
-            let mut index = 0;
+            let mut index = 0_u32;
             let mut hand_id = first_hand_id;
-            while hand_id <= last_hand_id {
+            loop {
                 let root = *settlement_roots.at(index);
                 self.settlement_digests.write(hand_id, root);
+                if hand_id == last_hand_id {
+                    break;
+                }
                 index += 1;
                 hand_id += 1;
             }
@@ -221,10 +208,10 @@ pub mod PokerSettlement {
                         aggregate_digest,
                         first_hand_id,
                         last_hand_id,
-                        pre_hi,
-                        pre_lo,
-                        post_hi,
-                        post_lo,
+                        pre_root_hi: pre_hi,
+                        pre_root_lo: pre_lo,
+                        post_root_hi: post_hi,
+                        post_root_lo: post_lo,
                     },
                 );
         }
@@ -233,66 +220,100 @@ pub mod PokerSettlement {
             ref self: ContractState,
             aggregate_digest: felt252,
             hand_id: u64,
-            settlement_digest: felt252,
-            winners: Span<ContractAddress>,
-            amounts: Span<u256>,
-            loser: ContractAddress,
+            players: Span<ContractAddress>,
+            deltas: Span<i128>,
         ) {
-            let aggregate = self.aggregates.read(aggregate_digest);
-            let (first_hand_id, last_hand_id) = (aggregate.0, aggregate.1);
-            assert!(first_hand_id != 0, 'Aggregate not registered');
-            assert!(hand_id >= first_hand_id && hand_id <= last_hand_id, 'Hand outside range');
-            assert!(!self.settled_hands.read(hand_id), 'Hand already settled');
+            let caller = starknet::get_caller_address();
+            assert!(self.provers.read(caller), "Caller not authorized prover");
+            assert!(players.len() == deltas.len(), "Players/deltas length mismatch");
+            assert!(players.len() > 0_u32, "No participants");
+            assert!(players.len() < 10_u32, "Too many participants");
+            assert!(!self.settled_hands.read(hand_id), "Hand already settled");
 
-            // The caller-supplied settlement_digest must equal the committed one.
-            let stored = self.settlement_digests.read(hand_id);
-            assert_eq!(stored, settlement_digest, 'Settlement digest mismatch');
+            let (first_hand_id, last_hand_id, _, _, _, _) = self
+                .aggregates
+                .read(aggregate_digest);
+            assert!(first_hand_id != 0, "Aggregate not registered");
+            assert!(hand_id >= first_hand_id && hand_id <= last_hand_id, "Hand outside range");
 
-            // Winner count must agree with amount list length.
-            assert!(winners.len() == amounts.len(), 'Winners/amounts length mismatch');
-            assert!(winners.len() > 0, 'No winners');
-
-            // Debiting the single `loser` must balance exactly the winner sum.
-            let mut winner_sum: u256 = 0;
-            let mut i = 0;
-            while i < winners.len() {
-                let winner = *winners.at(i);
-                let amount = *amounts.at(i);
-                assert!(amount > 0, 'Zero payout amount');
-                winner_sum += amount;
+            // Recompute the settlement commitment.
+            let mut felements: Array<felt252> = array![hand_id.into()];
+            let mut i = 0_u32;
+            while i < players.len() {
+                felements.append((*players.at(i)).into());
+                let delta = *deltas.at(i);
+                if delta >= 0_i128 {
+                    let as_u: u64 = delta.try_into().expect('delta fits u64');
+                    felements.append(1); // sign = positive
+                    felements.append(as_u.into());
+                } else {
+                    let abs_delta = -delta;
+                    let as_u: u64 = abs_delta.try_into().expect('abs delta fits u64');
+                    felements.append(0); // sign = negative
+                    felements.append(as_u.into());
+                };
                 i += 1;
             }
+            let computed = poseidon_hash_span(felements.span());
 
-            // Credit winners via the vault.
-            let mut j = 0;
-            while j < winners.len() {
-                let winner = *winners.at(j);
-                let amount = *amounts.at(j);
-                // Each winner receives `amount` chips.
-                self.debit_loser(loser, amount);
-                self.credit_winner(winner, amount);
+            // Require exact match with the root committed at registration.
+            let stored = self.settlement_digests.read(hand_id);
+            assert!(computed == stored, "Settlement digest mismatch");
+
+            // Zero-sum check.
+            let zero: i128 = 0_i128;
+            let mut sum: i128 = 0_i128;
+            let mut j = 0_u32;
+            while j < players.len() {
+                sum += *deltas.at(j);
                 j += 1;
             }
+            assert!(sum == zero, "Settlement not zero-sum");
 
-            // A zero-sum hand requires winner_sum == total loser debit (guaranteed
-            // by looping the same amount over both sides). Mark settled.
+            // Apply per-player net deltas through the vault.
+            let vault_addr = self.vault_address.read();
+            let mut k = 0_u32;
+            while k < players.len() {
+                let player = *players.at(k);
+                let delta = *deltas.at(k);
+                let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
+                vault.apply_settlement(player, delta);
+                k += 1;
+            }
+
             self.settled_hands.write(hand_id, true);
-            self.emit(HandSettled { aggregate_digest, hand_id, settlement_digest });
+            self
+                .emit(
+                    HandSettled {
+                        aggregate_digest,
+                        hand_id,
+                        settlement_digest: computed,
+                        participant_count: players.len(),
+                    },
+                );
         }
 
         fn set_prover(ref self: ContractState, prover: ContractAddress) {
             self.ownable.assert_only_owner();
-            // Only supports enabling a prover in this version; to revoke, call
-            // set_prover(prover) from a future version or redeploy.
-            self.provers.write(prover, true);
-            self.emit(ProverSet { prover, authorized: true });
+            if !prover.is_zero() {
+                self.provers.write(prover, true);
+                self.emit(ProverSet { prover, authorized: true });
+            }
+        }
+
+        fn remove_prover(ref self: ContractState, prover: ContractAddress) {
+            self.ownable.assert_only_owner();
+            self.provers.write(prover, false);
+            self.emit(ProverSet { prover, authorized: false });
         }
 
         fn is_prover(self: @ContractState, prover: ContractAddress) -> bool {
             self.provers.read(prover)
         }
 
-        fn aggregate(self: @ContractState, aggregate_digest: felt252) -> (u64, u64, felt252, felt252, felt252, felt252) {
+        fn aggregate(
+            self: @ContractState, aggregate_digest: felt252,
+        ) -> (u64, u64, felt252, felt252, felt252, felt252) {
             self.aggregates.read(aggregate_digest)
         }
 
@@ -308,34 +329,10 @@ pub mod PokerSettlement {
             self.vault_address.read()
         }
     }
-
-    // --- internal helpers ---
-
-    impl ContractState {
-        /// Credit `winner` with `amount` chips through the vault.
-        fn credit_winner(ref self: ContractState, winner: ContractAddress, amount: u256) {
-            let vault_addr = self.vault_address.read();
-            // i256 from u256 (amount fits since > 0 and bounded)
-            let delta: i256 = amount.try_into().expect('amount fits i256');
-            let vault = IVaultDispatcher { contract_address: vault_addr };
-            vault.apply_settlement(winner, delta);
-        }
-
-        /// Debit `amount` chips from `loser` through the vault. The vault
-        /// reverts if the loser's chip balance is insufficient.
-        fn debit_loser(ref self: ContractState, loser: ContractAddress, amount: u256) {
-            let vault_addr = self.vault_address.read();
-            let negative_delta: i256 = -(
-                amount.try_into().expect('amount fits i256')
-            );
-            let vault = IVaultDispatcher { contract_address: vault_addr };
-            vault.apply_settlement(loser, negative_delta);
-        }
-    }
 }
 
 /// Minimal vault interface consumed by the settlement contract.
 #[starknet::interface]
 pub trait IVaultDispatcher<TContractState> {
-    fn apply_settlement(ref self: TContractState, player: ContractAddress, delta: i256);
+    fn apply_settlement(ref self: TContractState, player: ContractAddress, delta: i128);
 }

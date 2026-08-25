@@ -15,6 +15,7 @@
 //! scope.
 
 use bincode::Options;
+use blake2::{Blake2bVar, digest::{Update, VariableOutput}};
 use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
 };
@@ -163,6 +164,57 @@ impl DualProofBundle {
         out.extend_from_slice(&self.crypto_request_bytes);
         out.extend_from_slice(&self.root_binding_bytes);
         Ok(out)
+    }
+
+    /// Hash the canonical envelope bytes without allocating a second full
+    /// encoded buffer. The caller supplies the domain and payload length
+    /// framing used by the outer aggregate digest.
+    pub(crate) fn update_hasher(&self, hasher: &mut Blake2bVar) -> TexasAirResult<usize> {
+        let encoded_len = self.encoded_len()?;
+        hasher.update(&DUAL_PROOF_MAGIC);
+        hasher.update(&[
+            self.version,
+            self.method_kind as u8,
+            self.precompile_id as u8,
+            self.abi_version,
+        ]);
+        hasher.update(&(self.stark_proof_bytes.len() as u32).to_le_bytes());
+        hasher.update(&(self.crypto_request_bytes.len() as u32).to_le_bytes());
+        hasher.update(&(self.root_binding_bytes.len() as u32).to_le_bytes());
+        hasher.update(&self.stark_proof_bytes);
+        hasher.update(&self.crypto_request_bytes);
+        hasher.update(&self.root_binding_bytes);
+        Ok(encoded_len)
+    }
+
+    /// Append the canonical envelope bytes to an existing output buffer.
+    pub(crate) fn encode_into(&self, out: &mut Vec<u8>) -> TexasAirResult<usize> {
+        let start = out.len();
+        let encoded_len = self.encoded_len()?;
+        let proof_len = u32::try_from(self.stark_proof_bytes.len()).map_err(|_| {
+            TexasAirError::SerializationError("dual proof length exceeds u32".into())
+        })?;
+        let request_len = u32::try_from(self.crypto_request_bytes.len()).map_err(|_| {
+            TexasAirError::SerializationError("crypto request length exceeds u32".into())
+        })?;
+        let binding_len = u32::try_from(self.root_binding_bytes.len()).map_err(|_| {
+            TexasAirError::SerializationError("root binding length exceeds u32".into())
+        })?;
+        out.extend_from_slice(&DUAL_PROOF_MAGIC);
+        out.extend_from_slice(&[
+            self.version,
+            self.method_kind as u8,
+            self.precompile_id as u8,
+            self.abi_version,
+        ]);
+        out.extend_from_slice(&proof_len.to_le_bytes());
+        out.extend_from_slice(&request_len.to_le_bytes());
+        out.extend_from_slice(&binding_len.to_le_bytes());
+        out.extend_from_slice(&self.stark_proof_bytes);
+        out.extend_from_slice(&self.crypto_request_bytes);
+        out.extend_from_slice(&self.root_binding_bytes);
+        debug_assert_eq!(out.len() - start, encoded_len);
+        Ok(encoded_len)
     }
 
     /// Exact encoded length of [`DualProofBundle::encode`] without building
@@ -1255,4 +1307,45 @@ fn validate_lengths(proof_len: usize, request_len: usize) -> TexasAirResult<()> 
 
 fn wire_error(message: impl Into<String>) -> TexasAirError {
     TexasAirError::SerializationError(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_child_hash_matches_legacy_encoded_digest() {
+        let bundle = DualProofBundle {
+            version: DUAL_PROOF_VERSION,
+            method_kind: MethodKind::SubmitShuffleV2,
+            precompile_id: PokerPrecompileId::Shuffle,
+            abi_version: SHUFFLE_ABI_VERSION,
+            stark_proof_bytes: vec![0x11; 3],
+            crypto_request_bytes: vec![0x22; 5],
+            root_binding_bytes: vec![0x33; 2],
+        };
+        let encoded = bundle.encode().unwrap();
+        assert_eq!(bundle.encoded_len().unwrap(), encoded.len());
+
+        let domain = b"zchain.poker.outer_aggregate.child_bytes.v1";
+        let mut legacy = Blake2bVar::new(32).unwrap();
+        legacy.update(domain);
+        legacy.update(&(encoded.len() as u64).to_le_bytes());
+        legacy.update(&encoded);
+        let mut legacy_digest = [0u8; 32];
+        legacy.finalize_variable(&mut legacy_digest).unwrap();
+
+        let mut streaming = Blake2bVar::new(32).unwrap();
+        streaming.update(domain);
+        streaming.update(&(encoded.len() as u64).to_le_bytes());
+        assert_eq!(bundle.update_hasher(&mut streaming).unwrap(), encoded.len());
+        let mut streaming_digest = [0u8; 32];
+        streaming.finalize_variable(&mut streaming_digest).unwrap();
+
+        assert_eq!(streaming_digest, legacy_digest);
+
+        let mut appended = Vec::new();
+        assert_eq!(bundle.encode_into(&mut appended).unwrap(), encoded.len());
+        assert_eq!(appended, encoded);
+    }
 }

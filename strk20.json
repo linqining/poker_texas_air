@@ -1,6 +1,42 @@
 {
+  "network": "sepolia",
+  "chain_id": "SN_SEPOLIA",
+  "rpc_url": "",
+  "explorer_url": "https://sepolia.starkscan.co",
+  "contracts": {
+    "poker_token": {
+      "address": "",
+      "class_name": "PokerToken",
+      "class_hash": "",
+      "constructor": ["owner", "name", "symbol", "initial_supply"]
+    },
+    "poker_vault": {
+      "address": "",
+      "class_name": "PokerVault",
+      "class_hash": "",
+      "constructor": ["owner", "token_address", "settlement_contract"]
+    },
+    "poker_settlement": {
+      "address": "",
+      "class_name": "PokerSettlement",
+      "class_hash": "",
+      "constructor": ["owner", "vault_address", "initial_prover"]
+    }
+  },
+  "token": {
+    "symbol": "STRK",
+    "decimals": 18,
+    "mode": "local_test_token",
+    "mainnet_address": "",
+    "sepolia_address": "",
+    "note": "Fill sepolia_address with the canonical Sepolia STRK token before production; PokerToken is only a local test token."
+  },
+  "proof_policy": {
+    "on_chain_verification": "aggregate_digest_and_settlement_state_only",
+    "off_chain_trust": "operator_must_verify_stwo_outer_aggregate_before_register_aggregate",
+    "replay_protection": "aggregate_digest_unique_and_hand_range_monotonic"
+  },
   "transactions": [],
-  "contracts": [],
   "demo_video": "",
   "demo_url": ""
 }
