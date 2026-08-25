@@ -108,17 +108,25 @@ impl PartialOrd for HandRank {
 ///
 /// - 7 张：枚举 C(7,5)=21 种组合。
 /// - 5/6 张：枚举 C(n,5) 组合。
-/// - <5 张：用点数 0 填充（0 < 任何合法点数 2..14，不影响牌型判定）。
+/// - <5 张：用点数 0、最少出现花色的占位牌填充（不影响牌型判定）。
 #[must_use]
 pub fn evaluate_best(cards: &[Card]) -> HandRank {
     if cards.len() < 5 {
-        // 不足 5 张：用 rank=0（不计入 counts）、花色递增的占位牌填充到 5 张。
-        // rank=0 保证不构成对子/顺子；花色递增保证不构成同花。
+        // 不足 5 张：用 rank=0（不计入 counts）、花色按当前出现次数最少的花色填充。
+        // rank=0 保证不构成对子/顺子；每次补入最少出现的花色，
+        // 保证任何花色总数不会达到 5（例如 4 张同花色真实牌不会被补成同花）。
         let mut padded = cards.to_vec();
-        let mut next_suit = 0u8;
         while padded.len() < 5 {
-            padded.push(Card::new(next_suit, 0));
-            next_suit = next_suit.wrapping_add(1);
+            let mut suit_counts = [0u8; 4];
+            for card in &padded {
+                if (card.suit() as usize) < 4 {
+                    suit_counts[card.suit() as usize] += 1;
+                }
+            }
+            let min_suit = (0..4u8)
+                .min_by_key(|&s| suit_counts[usize::from(s)])
+                .unwrap_or(0);
+            padded.push(Card::new(min_suit, 0));
         }
         return evaluate_five(&[padded[0], padded[1], padded[2], padded[3], padded[4]]);
     }
@@ -566,6 +574,45 @@ mod tests {
         // 0 张牌：HIGH_CARD，kickers 全 0
         let none: Vec<Card> = vec![];
         let rank = evaluate_best(&none);
+        assert_eq!(rank.category, HIGH_CARD);
+    }
+
+    #[test]
+    fn test_evaluate_best_partial_four_same_suit_not_flush() {
+        // 4 张黑桃占位后不能被判为同花（回归：占位牌花色从 0 开始导致误判）。
+        let four_spades = vec![
+            card(SPADES, ACE),
+            card(SPADES, KING),
+            card(SPADES, QUEEN),
+            card(SPADES, JACK),
+        ];
+        let rank = evaluate_best(&four_spades);
+        assert_eq!(rank.category, HIGH_CARD);
+        assert_eq!(rank.kickers, [14, 13, 12, 11, 0]);
+
+        // 4 张红心同样不得误判。
+        let four_hearts = vec![
+            card(HEARTS, ACE),
+            card(HEARTS, KING),
+            card(HEARTS, QUEEN),
+            card(HEARTS, JACK),
+        ];
+        let rank = evaluate_best(&four_hearts);
+        assert_eq!(rank.category, HIGH_CARD);
+
+        // 3 张同花色也不得误判。
+        let three_spades = vec![card(SPADES, ACE), card(SPADES, KING), card(SPADES, QUEEN)];
+        let rank = evaluate_best(&three_spades);
+        assert_eq!(rank.category, HIGH_CARD);
+
+        // 4 张覆盖 4 种花色时补位也不得构成同花。
+        let rainbow = vec![
+            card(SPADES, ACE),
+            card(HEARTS, KING),
+            card(DIAMONDS, QUEEN),
+            card(CLUBS, JACK),
+        ];
+        let rank = evaluate_best(&rainbow);
         assert_eq!(rank.category, HIGH_CARD);
     }
 }

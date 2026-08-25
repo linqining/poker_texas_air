@@ -2321,6 +2321,8 @@ pub fn apply_player_action(
             let seat_bet = table.seats[seat_index as usize].bet();
             let seat_stack = table.seats[seat_index as usize].stack();
             let round = table.active_betting_round_mut()?;
+            let prev_current_bet = round.current_bet;
+            let prev_min_raise = round.min_raise;
             let needed = round.process_raise(total_bet, seat_bet, seat_stack)?;
             let seat = table.seats[seat_index as usize].playing_mut()?;
             seat.occupied.stack =
@@ -2338,14 +2340,20 @@ pub fn apply_player_action(
             }
             table.set_seat_acted_this_round(seat_index, true);
             table.disarm_betting_deadline()?;
-            for (i, s) in table.seats.iter().enumerate() {
-                if i as u8 != seat_index
-                    && s.is_occupied()
-                    && !s.is_folded()
-                    && !s.is_all_in()
-                    && !s.is_waiting()
-                {
-                    table.acted_mask &= !(1u16 << i);
+            // 只有达到最小加注额的完整 raise 才重新打开其他玩家的行动权；
+            // 短 all-in（raise_amount < min_raise）只抬高 current_bet，
+            // 不清除已行动玩家的 acted 标记（call/fold 仍按新水位进行）。
+            let reopens_action = total_bet - prev_current_bet >= prev_min_raise;
+            if reopens_action {
+                for (i, s) in table.seats.iter().enumerate() {
+                    if i as u8 != seat_index
+                        && s.is_occupied()
+                        && !s.is_folded()
+                        && !s.is_all_in()
+                        && !s.is_waiting()
+                    {
+                        table.acted_mask &= !(1u16 << i);
+                    }
                 }
             }
             events::emit_event(
@@ -4864,6 +4872,34 @@ mod tests {
         assert_eq!(table.seats[0].bet(), 300);
         assert_eq!(table.seats[0].stack(), 700);
         assert!(!table.seat_acted_this_round(1));
+    }
+
+    #[test]
+    fn test_short_all_in_raise_does_not_reopen_action() {
+        // current_bet=100, min_raise=100；seat0 短 all-in 加到 150
+        // （raise_amount=50 < min_raise），不应清除 seat1 的 acted 标记。
+        let mut table = make_table();
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(150).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_bet(100);
+        table.set_seat_acted_this_round(1, true);
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .unwrap();
+        let mut events = vec![];
+
+        apply_raise(&mut table, 0, 150, &mut events).unwrap();
+        assert_eq!(table.seats[0].bet(), 150);
+        assert_eq!(table.seats[0].stack(), 0);
+        assert!(table.seats[0].is_all_in());
+        // 短 all-in 不重新打开 seat1 的行动权。
+        assert!(table.seat_acted_this_round(1));
+        // current_bet 被抬高，但 min_raise 保持不变。
+        let round = table.betting_round().unwrap();
+        assert_eq!(round.current_bet, 150);
+        assert_eq!(round.min_raise, 100);
     }
 
     #[test]

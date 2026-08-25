@@ -3,10 +3,16 @@
     {
       "name": "Default",
       "files": [
-        "src/canonical_state_hash.rs",
-        "src/texas_canonical.rs",
-        "src/texas_canonical_air.rs",
-        "strk20.json"
+        ".gitignore",
+        ".zcode/plans/plan-sess_ccdb5fbe-4d13-4406-abb6-875a028958df.md",
+        ".zcode/plans/plan-sess_cf13e1c8-bc93-484e-b23f-0aa4b3c905b1.md",
+        "poker_contracts/src/poker_settlement.cairo",
+        "poker_contracts/target/dev/poker_contracts.sierra.json",
+        "poker_l1/src/vm/contracts/texas_poker/hand_evaluator.rs",
+        "poker_l1/src/vm/contracts/texas_poker/settlement.rs",
+        "poker_l1/src/vm/contracts/texas_poker/state_machine.rs",
+        "src/ristretto_reconstruction_slot_or_air.rs",
+        ".vscode/changelists.json"
       ]
     }
   ],

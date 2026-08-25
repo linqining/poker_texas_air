@@ -5,3 +5,5 @@
 /fuzz/corpus/*/crash-*
 coverage.lcov
 .DS_Store
+.zcode/
+.vscode/

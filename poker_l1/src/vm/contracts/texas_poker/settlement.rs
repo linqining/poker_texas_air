@@ -394,6 +394,11 @@ impl SettlementPlan {
                 "settlement: plan exceeds fixed seat/pot bounds".into(),
             ));
         }
+        let valid_seat_mask = if seat_count >= 16 {
+            u16::MAX
+        } else {
+            (1u16 << seat_count) - 1
+        };
         if self
             .gross_pot
             .checked_sub(self.rake)
@@ -413,6 +418,11 @@ impl SettlementPlan {
             if usize::from(pot.pot_index) != index {
                 return Err(PokerL1Error::Serialization(
                     "settlement: non-canonical pot index".into(),
+                ));
+            }
+            if pot.eligible_mask & !valid_seat_mask != 0 {
+                return Err(PokerL1Error::Serialization(
+                    "settlement: pot eligible mask exceeds seat bounds".into(),
                 ));
             }
             if pot.gross_amount.checked_sub(pot.rake) != Some(pot.net_amount) {
@@ -506,6 +516,24 @@ impl SettlementPlan {
             return Err(PokerL1Error::Serialization(
                 "settlement: aggregate projection mismatch".into(),
             ));
+        }
+        if self.winner_mask & !valid_seat_mask != 0 {
+            return Err(PokerL1Error::Serialization(
+                "settlement: winner mask exceeds seat bounds".into(),
+            ));
+        }
+        // 只允许 winner 分得筹码，且座位范围之外不得有 award。
+        for (seat, amount) in self.awards.iter().enumerate() {
+            if *amount > 0 && (self.winner_mask >> seat) & 1 == 0 {
+                return Err(PokerL1Error::Serialization(
+                    "settlement: award paid to non-winner seat".into(),
+                ));
+            }
+            if seat >= seat_count && *amount != 0 {
+                return Err(PokerL1Error::Serialization(
+                    "settlement: award exceeds seat bounds".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -1158,5 +1186,51 @@ mod tests {
         assert_eq!(plan.pots[1].runouts[1].winner_mask, 0b110);
         assert_eq!(plan.awards.iter().sum::<u64>(), 581);
         plan.validate(table.seats.len()).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_masks_outside_seat_bounds() {
+        let table = table();
+        let plan = derive_settlement_plan(&table).unwrap();
+        let seat_count = table.seats.len();
+        plan.validate(seat_count).unwrap();
+
+        // eligible mask 含越界座位 bit。
+        let mut tampered = plan.clone();
+        tampered.pots[0].eligible_mask |= 1u16 << seat_count;
+        assert!(tampered.validate(seat_count).is_err());
+
+        // 顶层 winner mask 含越界座位 bit。
+        let mut tampered = plan.clone();
+        tampered.winner_mask |= 1u16 << seat_count;
+        assert!(tampered.validate(seat_count).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_awards_paid_to_non_winner_seats() {
+        let table = table();
+        let plan = derive_settlement_plan(&table).unwrap();
+        let seat_count = table.seats.len();
+
+        // 在保持所有金额守恒的前提下，把一个 winner 从 winner_mask 中移除
+        // （包括每个 runout 的 winner_mask），但其 award 保留：
+        // 相当于给"输家"发钱，validate 必须拒绝。
+        let mut tampered = plan.clone();
+        let donee = tampered
+            .awards
+            .iter()
+            .position(|&amount| amount > 0)
+            .expect("fixture has a paid seat");
+        tampered.winner_mask &= !(1u16 << donee);
+        for pot in &mut tampered.pots {
+            for runout in &mut pot.runouts {
+                if runout.is_active() {
+                    runout.winner_mask &= !(1u16 << donee);
+                }
+            }
+        }
+        assert!(tampered.awards[donee] > 0);
+        assert!((tampered.winner_mask >> donee) & 1 == 0);
+        assert!(tampered.validate(seat_count).is_err());
     }
 }

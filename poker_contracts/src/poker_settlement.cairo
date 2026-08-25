@@ -29,7 +29,7 @@ pub trait IPokerSettlement<TContractState> {
     /// Register a verified outer aggregate digest (authorized prover only).
     fn register_aggregate(
         ref self: TContractState,
-        aggregate_digest: felt252,
+        aggregate_digest: (felt252, felt252),
         first_hand_id: u64,
         last_hand_id: u64,
         pre_state_root: (felt252, felt252),
@@ -40,7 +40,7 @@ pub trait IPokerSettlement<TContractState> {
     /// Settle chips for one hand, using a registered aggregate.
     fn settle_hand(
         ref self: TContractState,
-        aggregate_digest: felt252,
+        aggregate_digest: (felt252, felt252),
         hand_id: u64,
         players: Span<ContractAddress>,
         deltas: Span<i128>,
@@ -56,7 +56,7 @@ pub trait IPokerSettlement<TContractState> {
     /// Returns (first_hand_id, last_hand_id, pre_root_hi, pre_root_lo, post_root_hi, post_root_lo).
     /// All zero if not registered.
     fn aggregate(
-        self: @TContractState, aggregate_digest: felt252,
+        self: @TContractState, aggregate_digest: (felt252, felt252),
     ) -> (u64, u64, felt252, felt252, felt252, felt252);
     /// Per-hand settlement commitment recorded at registration.
     fn settlement_digest(self: @TContractState, hand_id: u64) -> felt252;
@@ -94,7 +94,7 @@ pub mod PokerSettlement {
         /// Registered aggregates keyed by digest.
         /// (first_hand_id, last_hand_id, pre_root_hi, pre_root_lo,
         ///  post_root_hi, post_root_lo).
-        aggregates: Map<felt252, (u64, u64, felt252, felt252, felt252, felt252)>,
+        aggregates: Map<(felt252, felt252), (u64, u64, felt252, felt252, felt252, felt252)>,
         /// Per-hand settlement commitment recorded at registration.
         settlement_digests: Map<u64, felt252>,
         /// Hands that have been settled (replay protection).
@@ -117,7 +117,7 @@ pub mod PokerSettlement {
 
     #[derive(Drop, starknet::Event)]
     struct AggregateRegistered {
-        aggregate_digest: felt252,
+        aggregate_digest: (felt252, felt252),
         first_hand_id: u64,
         last_hand_id: u64,
         pre_root_hi: felt252,
@@ -128,7 +128,7 @@ pub mod PokerSettlement {
 
     #[derive(Drop, starknet::Event)]
     struct HandSettled {
-        aggregate_digest: felt252,
+        aggregate_digest: (felt252, felt252),
         hand_id: u64,
         settlement_digest: felt252,
         participant_count: u32,
@@ -158,7 +158,7 @@ pub mod PokerSettlement {
     impl IPokerSettlementImpl of super::IPokerSettlement<ContractState> {
         fn register_aggregate(
             ref self: ContractState,
-            aggregate_digest: felt252,
+            aggregate_digest: (felt252, felt252),
             first_hand_id: u64,
             last_hand_id: u64,
             pre_state_root: (felt252, felt252),
@@ -167,11 +167,12 @@ pub mod PokerSettlement {
         ) {
             let caller = starknet::get_caller_address();
             assert!(self.provers.read(caller), "Caller not authorized prover");
-            assert!(!aggregate_digest.is_zero(), "Zero digest");
+            let (aggregate_hi, aggregate_lo) = aggregate_digest;
+            assert!(aggregate_hi != 0 || aggregate_lo != 0, "Zero digest");
             // Unregistered digests map to the all-zero tuple (first_hand_id == 0).
             let (existing_first, existing_last, _, _, _, _) = self
                 .aggregates
-                .read(aggregate_digest);
+                .read((aggregate_hi, aggregate_lo));
             assert!(existing_first == 0 && existing_last == 0, "Digest already registered");
             assert!(first_hand_id <= last_hand_id, "Invalid hand range");
             let count_64 = last_hand_id - first_hand_id + 1;
@@ -185,7 +186,7 @@ pub mod PokerSettlement {
             self
                 .aggregates
                 .write(
-                    aggregate_digest,
+                    (aggregate_hi, aggregate_lo),
                     (first_hand_id, last_hand_id, pre_hi, pre_lo, post_hi, post_lo),
                 );
 
@@ -218,12 +219,13 @@ pub mod PokerSettlement {
 
         fn settle_hand(
             ref self: ContractState,
-            aggregate_digest: felt252,
+            aggregate_digest: (felt252, felt252),
             hand_id: u64,
             players: Span<ContractAddress>,
             deltas: Span<i128>,
         ) {
             let caller = starknet::get_caller_address();
+            let (aggregate_hi, aggregate_lo) = aggregate_digest;
             assert!(self.provers.read(caller), "Caller not authorized prover");
             assert!(players.len() == deltas.len(), "Players/deltas length mismatch");
             assert!(players.len() > 0_u32, "No participants");
@@ -232,7 +234,7 @@ pub mod PokerSettlement {
 
             let (first_hand_id, last_hand_id, _, _, _, _) = self
                 .aggregates
-                .read(aggregate_digest);
+                .read((aggregate_hi, aggregate_lo));
             assert!(first_hand_id != 0, "Aggregate not registered");
             assert!(hand_id >= first_hand_id && hand_id <= last_hand_id, "Hand outside range");
 
@@ -285,7 +287,7 @@ pub mod PokerSettlement {
             self
                 .emit(
                     HandSettled {
-                        aggregate_digest,
+                        aggregate_digest: (aggregate_hi, aggregate_lo),
                         hand_id,
                         settlement_digest: computed,
                         participant_count: players.len(),
@@ -312,7 +314,7 @@ pub mod PokerSettlement {
         }
 
         fn aggregate(
-            self: @ContractState, aggregate_digest: felt252,
+            self: @ContractState, aggregate_digest: (felt252, felt252),
         ) -> (u64, u64, felt252, felt252, felt252, felt252) {
             self.aggregates.read(aggregate_digest)
         }
