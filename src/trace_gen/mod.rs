@@ -54,6 +54,49 @@ impl MethodTrace {
         }
     }
 
+    /// Column-wise constructor taking fully materialized columns.
+    ///
+    /// Unlike [`MethodTrace::new`] this never zero-fills the matrix: every
+    /// column must already carry exactly `1 << log_size` values (callers that
+    /// leave columns for a later fill pass should pass empty vectors and
+    /// overwrite them wholesale, e.g. via [`MethodTrace::set_column`]).
+    #[must_use]
+    pub fn from_columns(log_size: u32, cols: Vec<Vec<M31>>) -> Self {
+        let num_columns = cols.len();
+        Self {
+            log_size,
+            num_columns,
+            cols,
+        }
+    }
+
+    /// Replace one column wholesale, growing it to the full domain height
+    /// with `value` when the column is shorter (used by table-fill passes).
+    pub fn set_column(&mut self, column_index: usize, column: Vec<M31>) {
+        let rows = 1usize << self.log_size;
+        let mut column = column;
+        if column.len() < rows {
+            column.resize(rows, ZERO);
+        }
+        self.cols[column_index] = column;
+    }
+
+    /// Allocate a zero-height trace skeleton with full-width capacity.
+    ///
+    /// Columns start empty (capacity `1 << log_size`); callers materialize
+    /// them column-by-column before [`MethodTrace::to_evaluations`].
+    #[must_use]
+    pub fn new_unfilled(log_size: u32, num_columns: usize) -> Self {
+        let rows = 1usize << log_size;
+        Self {
+            log_size,
+            num_columns,
+            cols: (0..num_columns)
+                .map(|_| Vec::with_capacity(rows))
+                .collect(),
+        }
+    }
+
     /// 写入一行数据（行索引 `row_idx`，列向量 `row`）。
     ///
     /// # Errors
@@ -139,9 +182,17 @@ impl MethodTrace {
                 self.num_columns
             )));
         }
-        let rows = 1usize << self.log_size;
-        for i in 0..rows {
-            self.write_row(i, active_row)?;
+        if active_row.len() != self.num_columns {
+            return Err(TexasAirError::TraceGenError(format!(
+                "active_row.len() = {} != num_columns = {}",
+                active_row.len(),
+                self.num_columns
+            )));
+        }
+        // Column-wise fill: one memset-style pass per column instead of a
+        // strided per-row element scatter.
+        for (column, &value) in self.cols.iter_mut().zip(active_row) {
+            column.fill(value);
         }
         Ok(())
     }

@@ -352,6 +352,111 @@ ePrint 2026/1329）；admission 并行验证双证明，归档接口保持递归
       7/7、outer aggregate 4/4 修复两处 root 字节解码）。
       同标量多基（批量解密 sk·C1ᵢ）可复用同一窗口分解见证再省一份。
     - 回归：`ristretto_fp_program_air` 35/35、MSM 3/3、ristretto 全模块套件全绿。
+14. **Ristretto 见证算术原生化 + 编排去 round-trip 轮（已完成，2026-08-25）**：
+    - **域算术后端原生化**：`curve25519-dalek` 4.x 的 `FieldElement` 是
+      `pub(crate)` 无法导入，改依赖 **fiat-crypto 0.2**（即 dalek 内部编译
+      所用、同源形式化验证的 u64 后端）。`ristretto_fp_program_air` 新增
+      `fp25519` 模块，decode/encode 的 inverse-sqrt、`nonnegative_sqrt`、
+      模逆全部从 `BigUint::modpow`（除法约减）换到惰性约减 Fe；期间定位
+      并修正 INVERT 指数常数（p−2 首字节 0xeb），用分阶段 oracle 对照
+      钉死。sqrt_ratio 重写为 dalek 单链 `r=(u·v³)·(u·v⁷)^((p−5)/8)`
+      （幂链 2–6 条→1 条，偶根约定 fail-closed 保留）；modulus/sqrt_m1/
+      negative_edwards_d 全部 `OnceLock` 缓存。字节一致性由 BigUint 旧
+      算法 oracle 对照测试 + 全量套件双保障，AIR 约束零改动。
+    - **witness 冗余削减**：decode inverse-sqrt 全局 memo（纯函数）+ 倍加
+      行 left==right 短路（256/335 行各省一次链）；`trace_tracked_columns`
+      改走 shape-only `trace_layout`（模板 witness 不再整体重算）；
+      `ProgramWitness` 携带 canonicity/limbs 消除二次分解；6 处 prove 路径
+      自验证统一 `ristretto_self_verify_enabled()` 门控（verify 公开入口
+      一行未动）。
+    - **BLAKE3 链摘要去重**：`chain_steps` 纯函数 prove/verify 共用；
+      digest 流式化（不再物化 blocks 向量，省 ≥32KB/次）；prove 侧直接
+      复用链终端 cv（压缩量减半）；verify 侧不再重建 blocks 取 steps。
+    - **stage-4 去 round-trip**：`prove_outer_aggregate` 内对刚 prove 产物
+      的 crypto 重验 3→1（receipt 签发所需的 native Stark 验证保留，总数
+      不增；跨进程/字节输入的全量验证 fail-closed 保留）；`children/
+      tasks.to_vec()` 深拷贝、整 bundle 重复 encode 尺寸校验（改纯长度
+      计算 `encoded_len`/`validate_package_lengths`）、`clone_anchor`
+      encode→decode 往返全部消除；公开 verify API 与 wire 格式未动。
+    - **实测（ristretto_perf，release+nightly，对照第 12 条空闲机基线）**：
+      压缩定点标量乘批 N=2 prove 7.5→**6.6s（−12%）**、N=4 14.6→
+      **12.8s（−12%）**；变基 MSM N=2 8.7→**8.0s（−8%）**、N=4
+      15.7→**14.2s（−10%）**；证明字节不变，verify 侧同步受益（单程序
+      点加 verify 717ms）。
+    - **完整一手牌（poker-hand-bench，不含 Ristretto 密码学阶段）**：
+      bundle prove 2.75→2.70s、hand 批 verify 210→**185ms（−12%）**；
+      TOTAL prove 3.59s / verify 3.09s / 2.93MB，较第 13 条基线
+      （3.49s/3.08s/2.93MB）总体持平——本轮主战场在 Ristretto witness
+      与 stage-4 聚合重验路径，hand-bench 不经过该路径，属预期。
+    - 回归：ristretto 套件 **110/110**（1 ignored 为既有）、flock 4/4、
+      e2e dual-proof 7/7、outer aggregate 4/4（`RUSTFLAGS=
+      '--cfg=texas_release_tests' cargo +nightly test --release
+      --features test-helpers`）。
+15. **剩余优化轮：编排局部 + 组合路径核查 + 协议级双实验（已完成，
+    2026-08-25）**：
+    - **编排局部**：`verifier.rs` StarkProof 深拷贝改部分移动（FRI 层 Vec
+      免拷贝）；`state_root_binding` 缓存加 1024 容量 FIFO 淘汰（长驻
+      prover 内存有界）；tagged receipts 改轻量 `decode_commitments()`
+      （bincode `Deserializer::from_slice` 流式前缀解析，只读 config+
+      commitments，不反解 MB 级 FRI 尾部）；`aggregate_digest` 预分配
+      + 每 child 哈希 rayon 并行（按索引序拼接，摘要字节不变）；
+      `same_task` 删除冗余 `canonical_command_bytes` 末项比较（其输入
+      method_kind/raw_args 已被逐字段比较，两次 borsh 序列化纯冗余）。
+    - **program_air 局部**：trace 全路径列式物化（`from_columns`/
+      `set_column`，消除 per-row clone 与跨列散写及预零化）；`FpProgramAir`
+      构造时预计算 `scope_ids`/`canonicity`（evaluate 免数百次 format!
+      与重算）；witness 入口一次性 `Vec<BigUint>` 预转换 + 恒不触发校验
+      降级 debug-only；点选择器去重键改 BLAKE2b 流式指纹（免数百 KB×16
+      序列化）；批量归档改 owned 变体（免 N×335 program 深拷贝）；MSM
+      累加链前 rayon 预热 decode memo。端到端 prove 持平（FRI/承诺主导），
+      分配/带宽削减为后续批规模放大留出空间。
+    - **组合路径核查**：`prove_ristretto_point_decode/encode/edwards_addition`
+      组合式路径生产调用方为零（host-zero-trust 重构时已全部迁移至
+      program AIR 折叠版），组合式仅存测试，无需迁移。
+    - **协议实验一（carry 对表拆分）— 实施后回退**：删除 131,072 项
+      FpCarry17 对表，carry 拆 FpRange11 lo + 64 项 FpRange6 hi。全测试
+      过、小程序 prove −42%/证明 −73%，但乘法密集生产路径显著回归
+      （scalar-mul 批 +14%、MSM N=4 prove 14.3→15.7s +10%），超预设 2%
+      红线且与第 12 条"纯 11-bit 单表回归"教训同构（interaction 条目数
+      是乘密集路径真瓶颈）——按实测裁决回退，对表方案保留。
+    - **协议实验二（LOG_SIZE 7→6）— 实施后回退**：单程序地板降 6 后
+      测试仍绿、单程序点加 prove −30%，但 carry 对表 stripes 1024→2048
+      致小程序证明 +50%、verify +45%，且承诺域缩小带来 FRI 查询去重
+      损失（30 queries 有效 distinct 下降）——回退至 7，128 行地板的
+      声音性注释维持成立。
+    - **完整一手牌（poker-hand-bench）**：bundle prove 2.70→**2.47s**、
+      verify 2.69→**2.44s**；hand 批 verify 210→**183ms**；流水线双批
+      0.89→**0.81s**；**TOTAL prove 3.59→3.27s（−9%）/ verify 3.09→
+      2.82s（−9%）**，tagged 证明 2.93MB 不变。
+    - 回归：ristretto 110/110、flock 4/4、e2e dual-proof 7/7、outer
+      aggregate 4/4、state_root_binding 2/2、tagged/orchestrator 16/16
+      （release+nightly）。
+16. **flock 子证明并行化 + Setup 电路缓存（已完成，2026-08-25）**：
+    - **可行性研究结论**：多链并入单链不可行（chain proof 仅单链 cv
+      穿线结构）；批 merkle `path_log>0` 要求 P 条路径共享同一 root，
+      而 bundle 的前后两个 state root 不同，无法并入；更小 m 的
+      Ligerito 配置不存在（m=k_log+n_log 由 R1CS 尺寸决定，Slim(m=22)
+      已是最小注册实例，Fast profile 实测证明 +92% 已否决）。
+    - **关键发现**：`csc_lincheck_circuit` 缓存是每个 `BlockR1cs` 实例
+      私有——每次 `Blake3Setup::with_profile` 都重付一次 ~21M 非零的
+      CSC 折叠电路构建，prove/verify 侧每条子证明各付一份。
+    - **实现**（仅 `src/blake3_flock.rs`，证明格式与字节完全不变）：
+      ①`segment_statements()` 把语句序列切段（prove/verify 共用同一
+      切分），prove 侧在 flock_pool（64MB 栈池）`into_par_iter` 并行
+      生成各子证明（每个子证明的 FsChallenger 由域分隔+语句字节独立
+      种子，无共享转录顺序，并行安全）；②verify 侧先串行完成段↔归档
+      配对与布局校验（逐语句 fail-closed 不变）再并行验证，按段序
+      返回首个错误；③`blake3_setup()` 按 n_blocks 全局缓存
+      `Blake3Setup`，消除每子证明的 CSC 电路重建。
+    - **实测**（3 次稳定复测）：hand bundle prove 2.47–2.70→**0.61s
+      （−75%）**、verify 2.44–2.69→**1.50s（−39%）**、证明字节
+      758,584B 不变；**TOTAL prove 3.27–3.42→1.45s（−56%）/ verify
+      2.82–2.90→1.88s（−34%）**，tagged 2.93MB 不变。verify 收敛到
+      ~3 个子证明墙钟（5 个并发 FRI 验证受内存带宽限制，硬件上限）。
+    - 回归：flock 4/4（含两个 fail-closed 篡改拒绝测试，未削弱）、
+      state_root 13/13、e2e dual-proof 7/7、outer aggregate 4/4、
+      create_table 10/10、ristretto 110/110、tagged 16/16
+      （release+nightly）。
 
 **完整一手牌实测（2026-08-23，Apple Silicon Mac15,7，BLAKE3/flock 后端）**：
 

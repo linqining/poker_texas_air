@@ -31,6 +31,7 @@ use flock_core::challenger::FsChallenger;
 use flock_prover::r1cs_hashes::blake3::{
     BLAKE3_IV, Blake3Setup, Compression, blake3_compress, cv_to_phys_bits,
 };
+use rayon::prelude::*;
 
 /// Fiat–Shamir domain for preimage-chain proofs.
 pub const FLOCK_CHAIN_DOMAIN: &[u8] = b"zchain.texas.flock-chain.v1";
@@ -250,6 +251,7 @@ struct PathRun {
     b_bits: Vec<bool>,
 }
 
+
 /// Detect the Merkle run starting at `start`, if any.  A run requires ≥ 2
 /// statements (leaf + parents), every message exactly 64 bytes, and each
 /// parent message containing the previous digest as one half.  Returns the
@@ -312,57 +314,119 @@ impl HashProofProvider for FlockProvider {
             ));
         };
         // Re-derive the segmentation from the covered statements; it must
-        // reproduce the archived chain/merkle layout exactly.
-        let mut chains = inner.chains.iter();
-        let mut merkles = inner.merkles.iter();
-        let mut i = 0usize;
-        while i < inner.statements.len() {
-            if let Some(run) = recognize_path_run(&inner.statements, i) {
-                let archived = merkles.next().ok_or_else(|| {
+        // reproduce the archived chain/merkle layout exactly.  Each sub-proof
+        // verifies against its own Fiat–Shamir challenger seeded from the
+        // domain plus its statement bytes, so the sub-proofs are mutually
+        // independent and verify in parallel (each pays a fixed Ligerito
+        // channel/FRI cost; see prove_statements_on_stack).  The result is
+        // fail-closed in segment order regardless of scheduling: the first
+        // failing segment by index is the reported error.
+        flock_pool().install(|| {
+            let segments = segment_statements(&inner.statements)?;
+            let mut chains = inner.chains.iter();
+            let mut merkles = inner.merkles.iter();
+            let mut next_chain = || {
+                chains.next().ok_or_else(|| {
+                    TexasAirError::ConstraintUnsatisfied(
+                        "flock proof is missing a chain sub-proof".into(),
+                    )
+                })
+            };
+            let mut next_merkle = || {
+                merkles.next().ok_or_else(|| {
                     TexasAirError::ConstraintUnsatisfied(
                         "flock proof is missing a merkle-path sub-proof".into(),
                     )
-                })?;
-                if archived.start as usize != run.start
-                    || archived.len as usize != run.len
-                    || archived.b_bits.len() != run.b_bits.len()
-                    || archived
-                        .b_bits
-                        .iter()
-                        .zip(run.b_bits.iter())
-                        .any(|(a, b)| (*a == 1) != *b)
-                {
-                    return Err(TexasAirError::ConstraintUnsatisfied(
-                        "flock merkle sub-proof is detached from its statements".into(),
-                    ));
+                })
+            };
+            let statements = &inner.statements;
+            // Pair each segment with its archived sub-proof (serial, keeps
+            // the archive layout check identical), then verify in parallel.
+            let mut jobs = Vec::with_capacity(segments.len());
+            let mut i = 0usize;
+            let mut seg_idx = 0usize;
+            while i < statements.len() {
+                let seg = &segments[seg_idx];
+                match seg {
+                    Segment::Chain { start: _ } => {
+                        let archived = next_chain()?;
+                        if archived.index as usize != i {
+                            return Err(TexasAirError::ConstraintUnsatisfied(
+                                "flock chain sub-proof index does not match the statement order"
+                                    .into(),
+                            ));
+                        }
+                        jobs.push(Job::Chain(&statements[i], archived));
+                        i += 1;
+                    }
+                    Segment::Merkle { run } => {
+                        let archived = next_merkle()?;
+                        let run: &PathRun = run;
+                        if archived.start as usize != run.start
+                            || archived.len as usize != run.len
+                            || archived.b_bits.len() != run.b_bits.len()
+                            || archived
+                                .b_bits
+                                .iter()
+                                .zip(run.b_bits.iter())
+                                .any(|(a, b)| (*a == 1) != *b)
+                        {
+                            return Err(TexasAirError::ConstraintUnsatisfied(
+                                "flock merkle sub-proof is detached from its statements".into(),
+                            ));
+                        }
+                        jobs.push(Job::Merkle(statements, run, archived));
+                        i += run.len;
+                    }
                 }
-                verify_merkle_run(&inner.statements, &run, archived)?;
-                i += run.len;
-                continue;
+                seg_idx += 1;
             }
-            let archived = chains.next().ok_or_else(|| {
-                TexasAirError::ConstraintUnsatisfied(
-                    "flock proof is missing a chain sub-proof".into(),
-                )
-            })?;
-            if archived.index as usize != i {
+            if chains.next().is_some() || merkles.next().is_some() {
                 return Err(TexasAirError::ConstraintUnsatisfied(
-                    "flock chain sub-proof index does not match the statement order".into(),
+                    "flock proof carries sub-proofs beyond the covered statements".into(),
                 ));
             }
-            verify_chain_statement(&inner.statements[i], archived)?;
-            i += 1;
-        }
-        if chains.next().is_some() || merkles.next().is_some() {
-            return Err(TexasAirError::ConstraintUnsatisfied(
-                "flock proof carries sub-proofs beyond the covered statements".into(),
-            ));
-        }
-        Ok(())
+            let results: Vec<TexasAirResult<()>> = jobs
+                .into_par_iter()
+                .map(|job| match job {
+                    Job::Chain(statement, archived) => verify_chain_statement(statement, archived),
+                    Job::Merkle(statements, run, archived) => {
+                        verify_merkle_run(statements, run, archived)
+                    }
+                })
+                .collect();
+            results
+                .into_iter()
+                .find(|r| r.is_err())
+                .unwrap_or(Ok(()))
+        })
     }
 }
 
 static FLOCK_POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+
+/// Cached [`Blake3Setup`] per block count.  Building a setup runs the
+/// one-time CSC fold-circuit build (a pass over ~21M nonzeros) plus prover
+/// scratch prewarm; that cost is per `BlockR1cs` instance, so constructing a
+/// fresh setup per sub-proof pays it once per statement on both prove and
+/// verify.  All real bundles use n_blocks = 256 (chains are padded to
+/// [`MIN_CHAIN_STEPS`], Merkle runs are depth-256), which hits the cache.
+static SETUP_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, Blake3Setup>>> =
+    std::sync::OnceLock::new();
+
+fn blake3_setup(n_blocks: usize) -> Blake3Setup {
+    let cache = SETUP_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = cache.lock().expect("flock setup cache lock");
+    if let Some(setup) = guard.get(&n_blocks) {
+        return setup.clone();
+    }
+    let setup = Blake3Setup::with_profile(
+        n_blocks,
+        flock_core::pcs::ligerito::LigeritoProfile::Slim,
+    );
+    guard.insert(n_blocks, setup.clone());
+    setup
+}
 
 fn flock_pool() -> &'static rayon::ThreadPool {
     FLOCK_POOL.get_or_init(|| {
@@ -373,20 +437,69 @@ fn flock_pool() -> &'static rayon::ThreadPool {
     })
 }
 
-fn prove_statements_on_stack(
-    statements: &[Blake2bStatement],
-) -> TexasAirResult<ArchivedHashProof> {
-    let mut chains = Vec::new();
-    let mut merkles = Vec::new();
+/// The segmentation of an ordered statement list into sub-proof units: one
+/// preimage chain per lone statement, one run per recognized Merkle path.
+enum Segment {
+    Chain { start: usize },
+    Merkle { run: PathRun },
+}
+
+/// A sub-proof verify job: statement slice plus the archived sub-proof it
+/// must authenticate against.
+enum Job<'a> {
+    Chain(&'a Blake2bStatement, &'a ArchivedFlockChain),
+    Merkle(&'a [Blake2bStatement], &'a PathRun, &'a ArchivedFlockMerkle),
+}
+
+/// Split an ordered statement list into chain/merkle segments.  Pure
+/// recognition (no proving), shared by prove and verify so the two sides
+/// cannot drift apart.
+fn segment_statements(statements: &[Blake2bStatement]) -> TexasAirResult<Vec<Segment>> {
+    let mut segments = Vec::new();
     let mut i = 0usize;
     while i < statements.len() {
         if let Some(run) = recognize_path_run(statements, i) {
-            merkles.push(prove_merkle_run(statements, &run)?);
             i += run.len;
+            segments.push(Segment::Merkle { run });
             continue;
         }
-        chains.push(prove_chain_statement(&statements[i], i as u32)?);
+        segments.push(Segment::Chain { start: i });
         i += 1;
+    }
+    Ok(segments)
+}
+
+fn prove_statements_on_stack(
+    statements: &[Blake2bStatement],
+) -> TexasAirResult<ArchivedHashProof> {
+    // Every sub-proof runs its own Ligerito instance with an independent
+    // Fiat–Shamir challenger (fresh transcript seeded from the domain plus
+    // this statement's bytes), so the ~fixed per-instance cost
+    // (channel/PoW/FRI) is paid once per sub-proof and the sub-proofs are
+    // parallel-safe with no shared transcript ordering.  Prove them on the
+    // dedicated flock pool: wall clock drops from `n_subproofs x fixed` to
+    // ~`fixed` when cores are available.
+    let segments = segment_statements(statements)?;
+    enum Sub {
+        Chain(ArchivedFlockChain),
+        Merkle(ArchivedFlockMerkle),
+    }
+    let subs: Vec<TexasAirResult<Sub>> = segments
+        .into_par_iter()
+        .map(|seg| match seg {
+            Segment::Chain { start } => {
+                prove_chain_statement(&statements[start], start as u32).map(Sub::Chain)
+            }
+            Segment::Merkle { run } => prove_merkle_run(statements, &run).map(Sub::Merkle),
+        })
+        .collect();
+    let mut chains = Vec::new();
+    let mut merkles = Vec::new();
+    for sub in subs {
+        match sub? {
+            Sub::Chain(c) => chains.push(c),
+            Sub::Merkle(m) => merkles.push(m),
+        }
     }
     Ok(ArchivedHashProof::Flock(ArchivedFlockHashesProof {
         statements: statements.to_vec(),
@@ -406,10 +519,7 @@ fn prove_chain_statement(
             "preimage statement digest does not match the blake3 chain".into(),
         ));
     }
-    let setup = Blake3Setup::with_profile(
-        blocks.len(),
-        flock_core::pcs::ligerito::LigeritoProfile::Slim,
-    );
+    let setup = blake3_setup(blocks.len());
     let mut ch = FsChallenger::new(FLOCK_CHAIN_DOMAIN);
     absorb_statement(&mut ch, statement);
     let (proof, commitment) = setup.prove_chain(&blocks, &mut ch);
@@ -432,10 +542,7 @@ fn verify_chain_statement(
     }
     let steps = chain_steps(statement.message.len());
     let bundle = unpack_chain(&archived.bundle)?;
-    let setup = Blake3Setup::with_profile(
-        steps,
-        flock_core::pcs::ligerito::LigeritoProfile::Slim,
-    );
+    let setup = blake3_setup(steps);
     let mut ch = FsChallenger::new(FLOCK_CHAIN_DOMAIN);
     absorb_statement(&mut ch, statement);
     setup
@@ -477,10 +584,7 @@ fn prove_merkle_run(
     }
     let leaf = statements[run.start].digest;
     let root = statements[run.start + run.len - 1].digest;
-    let setup = Blake3Setup::with_profile(
-        nodes,
-        flock_core::pcs::ligerito::LigeritoProfile::Slim,
-    );
+    let setup = blake3_setup(nodes);
     let mut ch = FsChallenger::new(FLOCK_MERKLE_DOMAIN);
     absorb_statement(&mut ch, &statements[run.start]);
     ch.observe_bytes(&root);
@@ -509,10 +613,7 @@ fn verify_merkle_run(
     }
     let nodes = run.len - 1;
     let bundle = unpack_merkle(&archived.bundle)?;
-    let setup = Blake3Setup::with_profile(
-        nodes,
-        flock_core::pcs::ligerito::LigeritoProfile::Slim,
-    );
+    let setup = blake3_setup(nodes);
     let b_bits: Vec<bool> = run.b_bits.clone();
     let mut ch = FsChallenger::new(FLOCK_MERKLE_DOMAIN);
     absorb_statement(&mut ch, &statements[run.start]);

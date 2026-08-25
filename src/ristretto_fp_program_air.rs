@@ -609,9 +609,35 @@ struct FpProgramAir {
     program: RistrettoFpProgram,
     range: FpRange11,
     carry: FpCarry17,
+    /// Precomputed preprocessed scope-column identifiers (built once instead
+    /// of one `format!` allocation per value per evaluate pass).
+    scope_ids: Vec<PreProcessedColumnId>,
+    /// Precomputed value canonicity classes.
+    canonicity: Vec<ValueCanonicity>,
 }
 
 impl FpProgramAir {
+    /// Build the AIR, precomputing the preprocessed-column identifiers and
+    /// the canonicity classification shared by every evaluate call.
+    fn new(
+        log_size: u32,
+        program: RistrettoFpProgram,
+        range: FpRange11,
+        carry: FpCarry17,
+    ) -> Self {
+        let scope_ids = preprocessed_ids(&program);
+        let canonicity = program_canonicity(&program)
+            .expect("program was validated before proving or verifying");
+        Self {
+            log_size,
+            program,
+            range,
+            carry,
+            scope_ids,
+            canonicity,
+        }
+    }
+
     /// Number of table stripes: the 2048-entry limb range table is striped
     /// across `2048 >> log_size` stripes, one entry per row per stripe
     /// (`t * 2^log_size + row`), each stripe holding one multiplicity and
@@ -821,8 +847,16 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
         .map(|value| to_limbs(value))
         .collect::<Vec<_>>();
     let mut canonicity_witnesses = Vec::with_capacity(program.values.len());
-    for (value_index, value) in program.values.iter().enumerate() {
-        if big_uint(value) >= *modulus() {
+    // One BigUint conversion per value up front: the op loop below used to
+    // re-convert operands (and re-derive products the builder already
+    // computed) on every operation.
+    let value_ints = program
+        .values
+        .iter()
+        .map(|value| big_uint(value))
+        .collect::<Vec<_>>();
+    for value_index in 0..program.values.len() {
+        if value_ints[value_index] >= *modulus() {
             return Err(TexasAirError::SpecViolation(
                 "Fp program value is noncanonical".into(),
             ));
@@ -840,31 +874,29 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
             RistrettoFpProgramOp::Add { a, b, out }
             | RistrettoFpProgramOp::Subtract { a, b, out } => {
                 let subtract = matches!(op, RistrettoFpProgramOp::Subtract { .. });
-                let a_value = program.values.get(usize::from(a)).ok_or_else(|| {
-                    TexasAirError::SpecViolation("Fp program operand is out of bounds".into())
-                })?;
-                let b_value = program.values.get(usize::from(b)).ok_or_else(|| {
-                    TexasAirError::SpecViolation("Fp program operand is out of bounds".into())
-                })?;
-                let out_value = program.values.get(usize::from(out)).ok_or_else(|| {
-                    TexasAirError::SpecViolation("Fp program output is out of bounds".into())
-                })?;
-                let expected = if subtract {
-                    subtract_big(&big_uint(a_value), &big_uint(b_value))
-                } else {
-                    add_big(&big_uint(a_value), &big_uint(b_value))
-                };
-                if limbs(&expected) != *out_value {
-                    return Err(TexasAirError::SpecViolation(
-                        "Fp program addition/subtraction relation is invalid".into(),
-                    ));
+                // Indices were already validated by `validate_indices`.
+                let (a, b, out) = (usize::from(a), usize::from(b), usize::from(out));
+                // The builder already guarantees the modular relation, so the
+                // independent BigUint re-derivation only runs in debug builds.
+                #[cfg(debug_assertions)]
+                {
+                    let expected = if subtract {
+                        subtract_big(&value_ints[a], &value_ints[b])
+                    } else {
+                        add_big(&value_ints[a], &value_ints[b])
+                    };
+                    if limbs(&expected) != program.values[out] {
+                        return Err(TexasAirError::SpecViolation(
+                            "Fp program addition/subtraction relation is invalid".into(),
+                        ));
+                    }
                 }
 
-                let a_limbs = &value_limbs[usize::from(a)];
-                let b_limbs = &value_limbs[usize::from(b)];
-                let out_limbs = &value_limbs[usize::from(out)];
-                let a_int = big_uint(a_value);
-                let b_int = big_uint(b_value);
+                let a_limbs = &value_limbs[a];
+                let b_limbs = &value_limbs[b];
+                let out_limbs = &value_limbs[out];
+                let a_int = &value_ints[a];
+                let b_int = &value_ints[b];
                 let (k_negative, k_magnitude) = if subtract {
                     (a_int < b_int, a_int < b_int)
                 } else {
@@ -916,30 +948,31 @@ fn program_witness(program: &RistrettoFpProgram) -> TexasAirResult<ProgramWitnes
                 });
             }
             RistrettoFpProgramOp::Multiply { a, b, out, q } => {
-                let a_value = program.values.get(usize::from(a)).ok_or_else(|| {
-                    TexasAirError::SpecViolation("Fp program operand is out of bounds".into())
-                })?;
-                let b_value = program.values.get(usize::from(b)).ok_or_else(|| {
-                    TexasAirError::SpecViolation("Fp program operand is out of bounds".into())
-                })?;
-                let out_value = program.values.get(usize::from(out)).ok_or_else(|| {
-                    TexasAirError::SpecViolation("Fp program output is out of bounds".into())
-                })?;
-                let q_value = program.values.get(usize::from(q)).ok_or_else(|| {
-                    TexasAirError::SpecViolation("Fp program quotient is out of bounds".into())
-                })?;
-                let product = &big_uint(a_value) * &big_uint(b_value);
-                let (expected_q, expected_out) = product.div_rem(modulus());
-                if limbs(&expected_q) != *q_value || limbs(&expected_out) != *out_value {
-                    return Err(TexasAirError::SpecViolation(
-                        "Fp program multiplication relation is invalid".into(),
-                    ));
+                // Indices were already validated by `validate_indices`.
+                let (a, b, out, q) = (
+                    usize::from(a),
+                    usize::from(b),
+                    usize::from(out),
+                    usize::from(q),
+                );
+                // The builder already derived the product and quotient, so the
+                // BigUint `div_rem` cross-check only runs in debug builds.
+                #[cfg(debug_assertions)]
+                {
+                    let product = &value_ints[a] * &value_ints[b];
+                    let (expected_q, expected_out) = product.div_rem(modulus());
+                    if limbs(&expected_q) != program.values[q]
+                        || limbs(&expected_out) != program.values[out]
+                    {
+                        return Err(TexasAirError::SpecViolation(
+                            "Fp program multiplication relation is invalid".into(),
+                        ));
+                    }
                 }
 
-                let product_limbs = convolution(&value_limbs[usize::from(a)], &value_limbs[usize::from(b)]);
-                let quotient_prime_limbs =
-                    convolution(&value_limbs[usize::from(q)], &P_BASE_LIMBS);
-                let out_limbs = &value_limbs[usize::from(out)];
+                let product_limbs = convolution(&value_limbs[a], &value_limbs[b]);
+                let quotient_prime_limbs = convolution(&value_limbs[q], &P_BASE_LIMBS);
+                let out_limbs = &value_limbs[out];
                 let mut carry_in: i64 = 0;
                 let mut carries = Vec::with_capacity(PRODUCT_LIMBS - 1);
                 for limb_index in 0..PRODUCT_LIMBS {
@@ -1162,11 +1195,13 @@ fn trace_columns(program: &RistrettoFpProgram) -> TexasAirResult<MethodTrace> {
     let (row, limb_columns, carry_pair_columns) = trace_row_with_limbs(program)?;
     let program_width = row.len();
     let table_columns = range_table_column_count(LOG_SIZE);
-    let mut trace = MethodTrace::new(LOG_SIZE, program_width + table_columns);
-    let mut padded = row;
-    padded.resize(program_width + table_columns, M31::from(0u32));
-    for row_index in 0..(1usize << LOG_SIZE) {
-        trace.write_row(row_index, &padded)?;
+    // Column-wise materialization: the single program row is replicated with
+    // one `vec![value; rows]` pass per column (no zero-fill, no per-row clone
+    // and strided scatter); table columns are filled wholesale below.
+    let rows = 1usize << LOG_SIZE;
+    let mut trace = MethodTrace::new_unfilled(LOG_SIZE, program_width + table_columns);
+    for (column_index, value) in row.into_iter().enumerate() {
+        trace.set_column(column_index, vec![value; rows]);
     }
     append_range_table_columns(
         &mut trace,
@@ -1200,13 +1235,12 @@ fn scope_row(program: &RistrettoFpProgram) -> Vec<M31> {
 
 fn scope_columns(program: &RistrettoFpProgram) -> MethodTrace {
     let row = scope_row(program);
-    let mut trace = MethodTrace::new(LOG_SIZE, row.len());
-    for row_index in 0..(1usize << LOG_SIZE) {
-        trace
-            .write_row(row_index, &row)
-            .expect("fixed program scope width");
-    }
-    trace
+    let rows = 1usize << LOG_SIZE;
+    // Replicate the single scope row column-wise: one fill per column.
+    MethodTrace::from_columns(
+        LOG_SIZE,
+        row.into_iter().map(|value| vec![value; rows]).collect(),
+    )
 }
 
 fn batch_log_size(program_count: usize) -> TexasAirResult<u32> {
@@ -1278,18 +1312,22 @@ fn append_range_table_columns(
     for t in 0..stripes {
         let mult_index = program_width + 2 * t;
         let value_index = program_width + 2 * t + 1;
+        let mut mult_column = Vec::with_capacity(rows);
+        let mut value_column = Vec::with_capacity(rows);
         for row in 0..rows {
             let entry = t * rows + row;
             // Inert entries carry value 2048 (outside the radix) and zero
             // multiplicity, contributing nothing to the LogUp balance.
-            let (value, multiplicity) = if entry < 2048 {
-                (M31::from(entry as u32), M31::from(multiplicities[entry]))
+            if entry < 2048 {
+                value_column.push(M31::from(entry as u32));
+                mult_column.push(M31::from(multiplicities[entry]));
             } else {
-                (M31::from(BASE), M31::from(0u32))
-            };
-            trace.cols[value_index][row] = value;
-            trace.cols[mult_index][row] = multiplicity;
+                value_column.push(M31::from(BASE));
+                mult_column.push(M31::from(0u32));
+            }
         }
+        trace.set_column(value_index, value_column);
+        trace.set_column(mult_index, mult_column);
     }
 
     let carry_stripes = carry_table_stripes(log_size);
@@ -1308,22 +1346,25 @@ fn append_range_table_columns(
         let mult_index = carry_offset + 3 * t;
         let low_index = carry_offset + 3 * t + 1;
         let high_index = carry_offset + 3 * t + 2;
+        let mut mult_column = Vec::with_capacity(rows);
+        let mut low_column = Vec::with_capacity(rows);
+        let mut high_column = Vec::with_capacity(rows);
         for row in 0..rows {
             let entry = t * rows + row;
             // Inert entries carry `hi = 2048` (outside its 0..64 range).
-            let (low, high, multiplicity) = if entry < 131_072 {
-                (
-                    M31::from((entry % 2048) as u32),
-                    M31::from((entry / 2048) as u32),
-                    M31::from(carry_multiplicities[entry]),
-                )
+            if entry < 131_072 {
+                low_column.push(M31::from((entry % 2048) as u32));
+                high_column.push(M31::from((entry / 2048) as u32));
+                mult_column.push(M31::from(carry_multiplicities[entry]));
             } else {
-                (M31::from(0u32), M31::from(BASE), M31::from(0u32))
-            };
-            trace.cols[low_index][row] = low;
-            trace.cols[high_index][row] = high;
-            trace.cols[mult_index][row] = multiplicity;
+                low_column.push(M31::from(0u32));
+                high_column.push(M31::from(BASE));
+                mult_column.push(M31::from(0u32));
+            }
         }
+        trace.set_column(low_index, low_column);
+        trace.set_column(high_index, high_column);
+        trace.set_column(mult_index, mult_column);
     }
 }
 
@@ -1343,12 +1384,18 @@ fn trace_columns_batch(programs: &[RistrettoFpProgram]) -> TexasAirResult<Method
         ));
     }
     let table_columns = range_table_column_count(log_size);
-    let mut trace = MethodTrace::new(log_size, program_width + table_columns);
-    for row_index in 0..rows {
-        let source = row_index.min(program_rows.len() - 1);
-        let mut padded = program_rows[source].clone();
-        padded.resize(program_width + table_columns, M31::from(0u32));
-        trace.write_row(row_index, &padded)?;
+    // Column-wise materialization: transpose the per-program rows once so
+    // every column is built in one contiguous pass (no per-row clone, no
+    // cross-column strided scatter); padding rows repeat the last program.
+    let program_count = program_rows.len();
+    let mut trace = MethodTrace::new_unfilled(log_size, program_width + table_columns);
+    for column_index in 0..program_width {
+        let mut column = Vec::with_capacity(rows);
+        for row_index in 0..rows {
+            let source = row_index.min(program_count - 1);
+            column.push(program_rows[source][column_index]);
+        }
+        trace.set_column(column_index, column);
     }
     append_range_table_columns(
         &mut trace,
@@ -1369,11 +1416,18 @@ fn scope_columns_batch(programs: &[RistrettoFpProgram]) -> TexasAirResult<Method
         .map(scope_row)
         .collect::<Vec<_>>();
     let width = scope_rows[0].len();
-    let mut trace = MethodTrace::new(log_size, width);
-    for row_index in 0..rows {
-        let source = row_index.min(scope_rows.len() - 1);
-        trace.write_row(row_index, &scope_rows[source])?;
+    // Column-wise transpose with the same last-row padding as the main trace.
+    let scope_count = scope_rows.len();
+    let mut columns = Vec::with_capacity(width);
+    for column_index in 0..width {
+        let mut column = Vec::with_capacity(rows);
+        for row_index in 0..rows {
+            let source = row_index.min(scope_count - 1);
+            column.push(scope_rows[source][column_index]);
+        }
+        columns.push(column);
     }
+    let trace = MethodTrace::from_columns(log_size, columns);
     Ok(trace)
 }
 
@@ -1397,9 +1451,8 @@ impl FrameworkEval for FpProgramAir {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let one: E::F = M31::from(1u32).into();
         let base: E::F = M31::from(BASE).into();
-        let ids = preprocessed_ids(&self.program);
-        let canonicity =
-            program_canonicity(&self.program).expect("program was validated before proving");
+        let ids = &self.scope_ids;
+        let canonicity = &self.canonicity;
         let mut value_limbs = Vec::with_capacity(self.program.values.len());
 
         for value_index in 0..self.program.values.len() {
@@ -1901,12 +1954,7 @@ pub fn prove_ristretto_fp_program(
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
         &mut allocator,
-        FpProgramAir {
-            log_size: LOG_SIZE,
-            program: program.clone(),
-            range,
-            carry,
-        },
+        FpProgramAir::new(LOG_SIZE, program.clone(), range, carry),
         range_sum,
     );
     let proof = prove(&[&component], &mut channel, scheme)
@@ -1987,12 +2035,7 @@ pub fn verify_ristretto_fp_program(
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
         &mut allocator,
-        FpProgramAir {
-            log_size: LOG_SIZE,
-            program: archive.program.clone(),
-            range,
-            carry,
-        },
+        FpProgramAir::new(LOG_SIZE, archive.program.clone(), range, carry),
         claimed,
     );
     stwo::core::verifier::verify(&[&component], &mut channel, &mut scheme, proof)
@@ -2003,15 +2046,24 @@ pub fn verify_ristretto_fp_program(
 pub fn prove_ristretto_fp_program_batch(
     programs: &[RistrettoFpProgram],
 ) -> TexasAirResult<ArchivedRistrettoFpProgramBatchProof> {
-    validate_program_batch_shape(programs)?;
+    prove_ristretto_fp_program_batch_owned(programs.to_vec())
+}
+
+/// Owning variant of [`prove_ristretto_fp_program_batch`]: callers that no
+/// longer need the programs hand them over instead of re-cloning the whole
+/// batch (N x 335 deep programs) into the archive.
+pub(crate) fn prove_ristretto_fp_program_batch_owned(
+    programs: Vec<RistrettoFpProgram>,
+) -> TexasAirResult<ArchivedRistrettoFpProgramBatchProof> {
+    validate_program_batch_shape(&programs)?;
     let log_size = batch_log_size(programs.len())?;
-    let trace = trace_columns_batch(programs)?;
-    let scope = scope_columns_batch(programs)?;
+    let trace = trace_columns_batch(&programs)?;
+    let scope = scope_columns_batch(&programs)?;
     let config = crate::prover_context::protocol_pcs_config();
     let twiddles =
         crate::prover_context::simd_twiddles(log_size + config.fri_config.log_blowup_factor);
     let mut channel = stwo::core::channel::Poseidon252Channel::default();
-    mix_program_batch(&mut channel, programs);
+    mix_program_batch(&mut channel, &programs);
     let mut scheme =
         CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::with_memory_pool(
             config,
@@ -2028,8 +2080,7 @@ pub fn prove_ristretto_fp_program_batch(
         tree.extend_evals(trace.to_evaluations());
         tree.commit(&mut channel);
     }
-    let template = &programs[0];
-    let (limb_columns, carry_pair_columns) = trace_tracked_columns(template);
+    let (limb_columns, carry_pair_columns) = trace_tracked_columns(&programs[0]);
     let program_width = trace.cols.len() - range_table_column_count(log_size);
     let range = FpRange11::draw(&mut channel);
     let carry = FpCarry17::draw(&mut channel);
@@ -2048,16 +2099,11 @@ pub fn prove_ristretto_fp_program_batch(
         tree.extend_evals(interaction);
         tree.commit(&mut channel);
     }
-    let ids = preprocessed_ids(template);
+    let ids = preprocessed_ids(&programs[0]);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
         &mut allocator,
-        FpProgramAir {
-            log_size,
-            program: template.clone(),
-            range,
-            carry,
-        },
+        FpProgramAir::new(log_size, programs[0].clone(), range, carry),
         range_sum,
     );
     let proof = prove(&[&component], &mut channel, scheme)
@@ -2066,7 +2112,7 @@ pub fn prove_ristretto_fp_program_batch(
         .serialize(&proof)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
     Ok(ArchivedRistrettoFpProgramBatchProof {
-        programs: programs.to_vec(),
+        programs,
         stark_proof_bytes,
         range_claimed_sum: range_sum.to_m31_array().map(|limb| limb.0),
     })
@@ -2142,12 +2188,7 @@ pub fn verify_ristretto_fp_program_batch(
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(
         &mut allocator,
-        FpProgramAir {
-            log_size,
-            program: template.clone(),
-            range,
-            carry,
-        },
+        FpProgramAir::new(log_size, template.clone(), range, carry),
         claimed,
     );
     stwo::core::verifier::verify(&[&component], &mut channel, &mut scheme, proof)
@@ -2451,6 +2492,17 @@ fn canonical_decode_inverse_sqrt(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; 
         cached.insert(*encoding, computed);
     }
     Ok(computed)
+}
+
+/// Warm the decode memo for a set of encodings in parallel.
+///
+/// The MSM accumulation chain consumes each output's decode serially inside a
+/// data-dependent loop; pre-populating the memo with a `par_iter` pass lets
+/// the sqrt chains run concurrently before the chain starts.
+pub(crate) fn preheat_canonical_decode_memo(encodings: &[[u8; LIMBS]]) {
+    encodings
+        .par_iter()
+        .for_each(|encoding| drop(canonical_decode_inverse_sqrt(encoding)));
 }
 
 fn canonical_decode_inverse_sqrt_uncached(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
@@ -3788,7 +3840,7 @@ pub fn prove_ristretto_fp_program_projective_addition_batch(
         }
         programs.push(program);
     }
-    let additions = prove_ristretto_fp_program_batch(&programs)?;
+    let additions = prove_ristretto_fp_program_batch_owned(programs)?;
     let archive = ArchivedRistrettoFpProgramProjectiveAdditionBatchProof {
         left: left.to_vec(),
         right: right.to_vec(),
@@ -4123,6 +4175,38 @@ pub fn ristretto_fp_program_point_table_entry(
     })
 }
 
+/// Streaming BLAKE2b over a point's canonical borsh serialization.
+///
+/// The selector dedup pass used to materialize the full serialization (the
+/// nested STARK proof bytes, hundreds of KB per table entry) as an owned
+/// `Vec<u8>` key.  Hashing the same byte stream into a 64-byte digest keeps
+/// the dedup semantics bit-for-bit (same key equality domain) while removing
+/// the per-entry deep-copy allocations.
+struct Blake2bWriter(blake2::Blake2b512);
+
+impl borsh::io::Write for Blake2bWriter {
+    fn write(&mut self, buf: &[u8]) -> borsh::io::Result<usize> {
+        use blake2::digest::Update;
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> borsh::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Lightweight dedup fingerprint of an authenticated point.
+fn point_dedup_key(
+    point: &ArchivedRistrettoFpProgramProjectivePoint,
+) -> TexasAirResult<[u8; 64]> {
+    use blake2::digest::Digest;
+    let mut writer = Blake2bWriter(blake2::Blake2b512::new());
+    BorshSerialize::serialize(point, &mut writer)
+        .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+    Ok(writer.0.finalize().into())
+}
+
 /// Prove selection of one projective point from a 16-entry table.
 pub fn prove_ristretto_fp_program_point_selector(
     table: [ArchivedRistrettoFpProgramProjectivePoint; 16],
@@ -4135,8 +4219,7 @@ pub fn prove_ristretto_fp_program_point_selector(
     }
     let mut verified_points = std::collections::HashSet::new();
     for point in &table {
-        let key = borsh::to_vec(point)
-            .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+        let key = point_dedup_key(point)?;
         if verified_points.insert(key) {
             verify_ristretto_fp_program_projective_point(point)?;
         }
@@ -4164,8 +4247,7 @@ pub fn verify_ristretto_fp_program_point_selector(
     }
     let mut verified_points = std::collections::HashSet::new();
     for point in &archive.table {
-        let key = borsh::to_vec(point)
-            .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+        let key = point_dedup_key(point)?;
         if verified_points.insert(key) {
             verify_ristretto_fp_program_projective_point(point)?;
         }
@@ -4516,7 +4598,7 @@ pub fn prove_ristretto_fp_program_compressed_fixed_window_scalar_mul(
     base: [u8; LIMBS],
 ) -> TexasAirResult<ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulProof> {
     let (programs, output) = build_compressed_fixed_window_scalar_mul_rows(&windows, &base)?;
-    let additions = prove_ristretto_fp_program_batch(&programs)?;
+    let additions = prove_ristretto_fp_program_batch_owned(programs)?;
     let archive = ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulProof {
         scalar,
         windows,
@@ -4593,7 +4675,7 @@ pub fn prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
         statements.push(statement);
         programs.extend(rows);
     }
-    let additions = prove_ristretto_fp_program_batch(&programs)?;
+    let additions = prove_ristretto_fp_program_batch_owned(programs)?;
     let archive = ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof {
         statements,
         additions,
@@ -5149,13 +5231,8 @@ mod tests {
             &evals,
             LOG_SIZE,
             |eval| {
-                FpProgramAir {
-                    log_size: LOG_SIZE,
-                    program: program.clone(),
-                    range: range.clone(),
-                    carry: carry.clone(),
-                }
-                .evaluate(NoLogupAssertEvaluator(eval));
+                FpProgramAir::new(LOG_SIZE, program.clone(), range.clone(), carry.clone())
+                    .evaluate(NoLogupAssertEvaluator(eval));
             },
             SecureField::from(0u32),
         );
@@ -5207,12 +5284,12 @@ mod tests {
         let out = builder.multiply(0, 1).unwrap();
         let program = builder.finish(&[out]).unwrap();
         let mut evaluator = crate::ristretto_degree_util::DegreeEvaluator { max: 0 };
-        evaluator = FpProgramAir {
-            log_size: LOG_SIZE,
+        evaluator = FpProgramAir::new(
+            LOG_SIZE,
             program,
-            range: FpRange11::draw(&mut stwo::core::channel::Poseidon252Channel::default()),
-            carry: FpCarry17::draw(&mut stwo::core::channel::Poseidon252Channel::default()),
-        }
+            FpRange11::draw(&mut stwo::core::channel::Poseidon252Channel::default()),
+            FpCarry17::draw(&mut stwo::core::channel::Poseidon252Channel::default()),
+        )
         .evaluate(evaluator);
         assert_eq!(evaluator.max, 2);
     }

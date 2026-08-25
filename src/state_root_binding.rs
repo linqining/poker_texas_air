@@ -84,9 +84,43 @@ fn provider_statements(
     ]
 }
 
-static BINDING_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<[u8; 64], ArchivedStateRootBindingProof>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+/// Maximum number of memoized binding proofs kept resident.
+///
+/// Each cached value embeds full flock witness statements, so an unbounded
+/// cache would grow without limit in a long-lived prover. When the cap is
+/// reached the oldest half of the entries (by insertion order) is evicted;
+/// this is a simple FIFO approximation of LRU, not a true LRU. Hit semantics
+/// are unchanged: a hit still returns the identical memoized proof.
+const BINDING_CACHE_CAPACITY: usize = 1024;
+
+#[derive(Default)]
+struct BindingCache {
+    entries: std::collections::HashMap<[u8; 64], ArchivedStateRootBindingProof>,
+    insertion_order: std::collections::VecDeque<[u8; 64]>,
+}
+
+impl BindingCache {
+    fn get(&self, key: &[u8; 64]) -> Option<&ArchivedStateRootBindingProof> {
+        self.entries.get(key)
+    }
+
+    fn insert(&mut self, key: [u8; 64], proof: ArchivedStateRootBindingProof) {
+        if self.entries.len() >= BINDING_CACHE_CAPACITY {
+            let evict = self.entries.len() - BINDING_CACHE_CAPACITY / 2;
+            for _ in 0..evict {
+                if let Some(oldest) = self.insertion_order.pop_front() {
+                    self.entries.remove(&oldest);
+                }
+            }
+        }
+        if self.entries.insert(key, proof).is_none() {
+            self.insertion_order.push_back(key);
+        }
+    }
+}
+
+static BINDING_CACHE: std::sync::LazyLock<std::sync::Mutex<BindingCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(BindingCache::default()));
 
 fn binding_cache_key(endpoints: &[StateRootEndpointStatement; 2]) -> [u8; 64] {
     let mut key = [0u8; 64];
@@ -116,10 +150,7 @@ pub fn prove_state_root_binding(
     let proof = crate::hash_prover::default_hash_provider()
         .prove_statements(&statements)?;
     let archive = ArchivedStateRootBindingProof { endpoints, proof };
-    BINDING_CACHE
-        .lock()
-        .unwrap()
-        .insert(key, archive.clone());
+    BINDING_CACHE.lock().unwrap().insert(key, archive.clone());
     Ok(archive)
 }
 

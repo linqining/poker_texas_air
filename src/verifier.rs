@@ -187,7 +187,10 @@ where
         )));
     }
     let expected_trace_row = expected_public_inputs.require_expected_trace_row(num_columns)?;
-    let stark_proof = proof.stark_proof.clone();
+    // All other `proof` fields are consumed above; move the (multi-megabyte)
+    // StarkProof out instead of deep-cloning its FRI layers. MethodProof has
+    // no Drop impl, so the partial move is allowed.
+    let stark_proof = proof.stark_proof;
 
     // 1. Channel + CommitmentSchemeVerifier
     let mut channel = Poseidon252Channel::default();

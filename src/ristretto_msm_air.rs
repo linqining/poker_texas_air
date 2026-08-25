@@ -25,7 +25,8 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::ristretto_fp_program_air::{
     ArchivedRistrettoFpProgramBatchProof,
     ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof,
-    build_ristretto_fp_program_compressed_point_addition, prove_ristretto_fp_program_batch,
+    build_ristretto_fp_program_compressed_point_addition, preheat_canonical_decode_memo,
+    prove_ristretto_fp_program_batch_owned,
     prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch,
     verify_ristretto_fp_program_batch,
     verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch,
@@ -102,7 +103,7 @@ pub fn prove_ristretto_compressed_addition_batch(
         });
         programs.push(program);
     }
-    let additions = prove_ristretto_fp_program_batch(&programs)?;
+    let additions = prove_ristretto_fp_program_batch_owned(programs)?;
     Ok(ArchivedRistrettoCompressedAdditionBatchProof { rows, additions })
 }
 
@@ -135,6 +136,10 @@ fn prove_msm_accumulation(
     }
     let mut rows = Vec::with_capacity(outputs.len() - 1);
     let mut programs = Vec::with_capacity(outputs.len() - 1);
+    // The accumulation chain itself is serial (each row's left summand is the
+    // previous row's output), but every right-hand decode is independent:
+    // warm the global decode memo in parallel before the chain starts.
+    preheat_canonical_decode_memo(outputs);
     let mut partial_sum = outputs[0];
     for output in &outputs[1..] {
         let (program, sum) =
@@ -147,7 +152,7 @@ fn prove_msm_accumulation(
         programs.push(program);
         partial_sum = sum;
     }
-    let additions = prove_ristretto_fp_program_batch(&programs)?;
+    let additions = prove_ristretto_fp_program_batch_owned(programs)?;
     Ok(ArchivedRistrettoCompressedAdditionBatchProof { rows, additions })
 }
 

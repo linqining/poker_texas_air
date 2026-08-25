@@ -271,6 +271,43 @@ impl ArchivedTaggedMethodProofBundle {
                 ))
             })
     }
+
+    /// Decode only the commitment roots from the embedded Stwo proof.
+    ///
+    /// `StarkProof` wraps `CommitmentSchemeProof`, whose serde field order is
+    /// `config, commitments, sampled_values, decommitments, queried_values,
+    /// proof_of_work, fri_proof`. Bincode is not self-describing, so
+    /// deserializing this two-field prefix consumes exactly the bytes of
+    /// `config` + `commitments` and stops before the megabyte-scale FRI tail.
+    ///
+    /// Behavior-equivalent to `decode_stark()?.commitments` because the derive
+    /// serializes struct fields in declaration order. Receipt issuance runs
+    /// only after the full proof was already decoded and verified, so the
+    /// trailing bytes are known to be well formed.
+    fn decode_commitments(&self) -> TexasAirResult<Vec<starknet_ff::FieldElement>> {
+        self.validate()?;
+        // Stream the prefix so the reader stops right after `commitments`;
+        // full-buffer `deserialize` would reject the (well-formed) trailing
+        // proof bytes.
+        let mut deserializer =
+            bincode::Deserializer::from_slice(&self.stark_proof_bytes, bincode_options());
+        let prefix: StarkProofCommitmentsPrefix =
+            serde::Deserialize::deserialize(&mut deserializer).map_err(|error| {
+                TexasAirError::SerializationError(format!(
+                    "tagged method Stwo proof commitment decoding failed: {error}"
+                ))
+            })?;
+        Ok(prefix.commitments)
+    }
+}
+
+/// Bincode prefix of `CommitmentSchemeProof` stopping right after the
+/// `commitments` field (see [`ArchivedTaggedMethodProofBundle::decode_commitments`]).
+#[derive(serde::Deserialize)]
+struct StarkProofCommitmentsPrefix {
+    #[allow(dead_code)]
+    config: stwo::core::pcs::PcsConfig,
+    commitments: Vec<starknet_ff::FieldElement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -666,8 +703,7 @@ fn issue_tagged_receipts_after_verification(
     tasks: &[ProveTask],
     package: &ArchivedTaggedBatchProofPackage,
 ) -> TexasAirResult<Vec<crate::verified_chain::VerificationReceipt>> {
-    let proof = package.method.decode_stark()?;
-    let commitments = proof.commitments.to_vec();
+    let commitments = package.method.decode_commitments()?;
     tasks
         .iter()
         .map(|task| {

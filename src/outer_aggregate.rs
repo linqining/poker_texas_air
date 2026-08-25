@@ -13,6 +13,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use rayon::prelude::*;
 use starknet_ff::FieldElement;
 
 use crate::dual_proof::{
@@ -482,7 +483,23 @@ fn aggregate_digest(
             "outer aggregate digest input count mismatch".into(),
         ));
     }
-    let mut material = Vec::new();
+    // Header material is fixed-size: version + child count + table/hand ids +
+    // call seq + two versions + two 32-byte roots.
+    let header_material_len = 1 + 4 + 8 + 8 + 8 + 8 + 8 + 32 + 32;
+    let receipts = chain.receipts();
+    let per_child_len = |receipt: &VerificationReceipt| {
+        4 + 4 + 32 // index, length, child digest
+            + 1 + 8 + 8 + 8 + 8 + 8 + 32 + 32 + 32 + 4 + 8 + 4 // receipt fields
+            + 32 * receipt.proof_commitments().len()
+            + 3 + 32 + 32 // binding ids and digests
+    };
+    let mut material = Vec::with_capacity(
+        header_material_len
+            + receipts
+                .iter()
+                .map(per_child_len)
+                .sum::<usize>(),
+    );
     material.extend_from_slice(&[bundle.version]);
     material.extend_from_slice(&(bundle.children.len() as u32).to_le_bytes());
     material.extend_from_slice(&bundle.table_id.to_le_bytes());
@@ -493,20 +510,33 @@ fn aggregate_digest(
     material.extend_from_slice(&bundle.pre_state_root.bytes());
     material.extend_from_slice(&bundle.post_state_root.bytes());
 
-    for (index, ((child, receipt), binding)) in bundle
+    // Encode + digest each child in parallel; the per-index results are then
+    // appended strictly in order, so the concatenated material — and hence
+    // the final digest — stays byte-for-byte identical to the sequential
+    // version.
+    let child_digests = bundle
         .children
-        .iter()
-        .zip(chain.receipts())
+        .par_iter()
+        .map(|child| {
+            let child_bytes = child.encode()?;
+            let digest = hash256(
+                b"zchain.poker.outer_aggregate.child_bytes.v1",
+                &child_bytes,
+            );
+            Ok((child_bytes.len(), digest))
+        })
+        .collect::<TexasAirResult<Vec<_>>>()?;
+
+    for (index, ((child_digest, receipt), binding)) in child_digests
+        .into_iter()
+        .zip(receipts)
         .zip(bindings)
         .enumerate()
     {
-        let child_bytes = child.encode()?;
+        let (child_len, child_digest) = child_digest;
         material.extend_from_slice(&(index as u32).to_le_bytes());
-        material.extend_from_slice(&(child_bytes.len() as u32).to_le_bytes());
-        material.extend_from_slice(&hash256(
-            b"zchain.poker.outer_aggregate.child_bytes.v1",
-            &child_bytes,
-        ));
+        material.extend_from_slice(&(child_len as u32).to_le_bytes());
+        material.extend_from_slice(&child_digest);
         append_receipt(&mut material, receipt);
         material.extend_from_slice(&[
             binding.precompile_id() as u8,

@@ -1134,7 +1134,9 @@ fn require_expected_request(supplied: Option<&[u8]>, expected: Vec<u8>) -> Texas
                     .into(),
             ));
         }
-        Ok(bytes.to_vec())
+        // Byte-equal to `expected`; return the already-allocated canonical
+        // buffer instead of copying the supplied slice again.
+        Ok(expected)
     } else {
         Ok(expected)
     }

@@ -787,6 +787,9 @@ impl MethodPayloadV2 {
 }
 
 fn same_task(left: &ProveTask, right: &ProveTask) -> crate::error::TexasAirResult<bool> {
+    // `canonical_command_bytes` is a pure function of `method_kind` and
+    // `raw_args`, both compared field-wise here, so serializing both tasks
+    // again would be redundant.
     Ok(left.method_kind == right.method_kind
         && left.context == right.context
         && left.raw_args == right.raw_args
@@ -794,8 +797,7 @@ fn same_task(left: &ProveTask, right: &ProveTask) -> crate::error::TexasAirResul
         && left.post_table == right.post_table
         && left.table_id == right.table_id
         && left.hand_id == right.hand_id
-        && left.call_seq == right.call_seq
-        && left.canonical_command_bytes()? == right.canonical_command_bytes()?)
+        && left.call_seq == right.call_seq)
 }
 
 impl BorshSerialize for ProveTask {
