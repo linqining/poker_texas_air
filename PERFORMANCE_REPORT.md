@@ -1,7 +1,7 @@
 # poker\_texas\_air 性能报告 —— 以一手完整德州扑克为准（标准 9 座桌）
 
 日期：2026-08-23 · 主机：Apple Silicon `Mac15,7` (aarch64) · 工具链：nightly + stwo 2.3（`--release`）
-复现：`cargo run --release -p poker-hand-bench`
+复现：`cargo +nightly run --release -p poker-hand-bench`（stwo 依赖 `#![feature]`，必须使用 nightly 工具链，stable 下报 E0554 编译失败）
 
 ## “一手完整牌局”的构成（标准 9 座桌）
 
