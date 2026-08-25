@@ -55,6 +55,9 @@ mod prover_context;
 pub mod public_inputs;
 pub mod settlement_binding;
 pub mod state_root;
+/// Strict Cairo ABI calldata builder for the verified outer aggregate
+/// settlement path on Starknet Sepolia.
+pub mod starknet_settlement;
 /// Flock-proven state-root binding replacing host hash recomputation.
 pub mod state_root_binding;
 pub mod tagged_method;

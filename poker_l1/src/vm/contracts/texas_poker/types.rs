@@ -342,21 +342,12 @@ impl Seat {
     }
 
     /// Clear hand-local payload and project a retained player into the next-hand ready state.
+    ///
+    /// Waiting 座位（waiting-for-big-blind）保持 Waiting：跨手保留等待状态，
+    /// 只在 `start_hand` 的盲注位提升逻辑中被显式拉回参与。
     pub fn prepare_next_hand(&mut self) {
         match self {
-            Self::Vacant { .. } | Self::DepartedThisHand { .. } => {}
-            Self::Waiting { occupied } => {
-                let occupied = occupied.clone();
-                *self = Self::Playing {
-                    playing: PlayingSeat {
-                        occupied,
-                        hand: HoleCards::empty(),
-                        bet: 0,
-                        total_bet: 0,
-                        status: PlayingSeatStatus::Active,
-                    },
-                };
-            }
+            Self::Vacant { .. } | Self::DepartedThisHand { .. } | Self::Waiting { .. } => {}
             Self::Playing { playing } => {
                 playing.hand.clear();
                 playing.bet = 0;
@@ -364,6 +355,26 @@ impl Seat {
                 playing.status = PlayingSeatStatus::Active;
             }
         }
+    }
+
+    /// 把 Waiting 座位提升为下一手-ready 的参与座位（waiting-for-BB 到位时调用）。
+    ///
+    /// 返回是否发生了提升；非 Waiting 座位不受影响。
+    pub fn promote_waiting(&mut self) -> bool {
+        if let Self::Waiting { occupied } = self {
+            let occupied = occupied.clone();
+            *self = Self::Playing {
+                playing: PlayingSeat {
+                    occupied,
+                    hand: HoleCards::empty(),
+                    bet: 0,
+                    total_bet: 0,
+                    status: PlayingSeatStatus::Active,
+                },
+            };
+            return true;
+        }
+        false
     }
 
     /// 判断座位是否被活跃占用（player != [0;20] 且未中途离开）。

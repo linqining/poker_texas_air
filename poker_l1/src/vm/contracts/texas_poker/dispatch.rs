@@ -1764,8 +1764,8 @@ fn dispatch_join_table(
         context.caller,
         input.buy_in,
         ECPoint::from(pk),
-        SeatStatus::Active,
-    )?; // WAITING 状态加入，立即参与下一局
+        SeatStatus::Waiting,
+    )?; // waiting-for-BB：先入座等待，盲注位（大盲）到达时才参与发牌
 
     // P0 修复：与 apply_join_shuffle 保持一致的资金记账——buy_in 必须进入 chip_pool，
     // 否则离座退款时 chip_pool 会出现负差额（资金凭空多退）。
@@ -1779,7 +1779,7 @@ fn dispatch_join_table(
         seat_index: seat_idx,
         player: context.caller,
         buy_in: input.buy_in,
-        is_waiting: false,
+        is_waiting: true,
         active_count_after,
     });
     Ok(())

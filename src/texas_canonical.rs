@@ -914,7 +914,11 @@ fn expected_betting_successor(post: &CanonicalStateImage, actor: usize) -> u8 {
         .map(|offset| ((actor + offset) % usize::from(post.max_players)) as u8)
         .find(|&candidate| {
             let seat = post.seats[usize::from(candidate)];
-            seat.status == CanonicalSeatStatus::Active && !seat.acted
+            // A short all-in can raise the water over an already-acted seat;
+            // such a seat still owes chips and remains actionable (it must
+            // call or fold) even though its acted bit stays set (TDA #41).
+            seat.status == CanonicalSeatStatus::Active
+                && (!seat.acted || seat.bet < post.current_bet)
         })
         .unwrap_or(NO_CANONICAL_SEAT)
 }
@@ -1915,8 +1919,8 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             if pre.phase != CanonicalPhase::Waiting || before.status != CanonicalSeatStatus::Empty {
                 return Err("join_table requires an empty seat in waiting phase".into());
             }
-            if after.status != CanonicalSeatStatus::Active || w.action.amount == 0 {
-                return Err("join_table must create a funded participating seat".into());
+            if after.status != CanonicalSeatStatus::Waiting || w.action.amount == 0 {
+                return Err("join_table must create a funded waiting seat".into());
             }
             if pre.seats[..seat]
                 .iter()
@@ -1994,7 +1998,9 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             if post.deadline_ms == 0 || post.current_turn != NO_CANONICAL_SEAT {
                 return Err("start_hand must arm the shuffle deadline".into());
             }
-            let active_count = pre
+            // Count post-state participants: waiting-for-big-blind seats that
+            // StartHand promotes into the new hand must satisfy the gate too.
+            let active_count = post
                 .seats
                 .iter()
                 .filter(|seat| {
@@ -2020,7 +2026,7 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                     break;
                 }
             }
-            let participant_mask = active_reveal_mask(&pre.seats);
+            let participant_mask = active_reveal_mask(&post.seats);
             if post.button != button.unwrap_or(pre.button)
                 || post.phase_subtag != 1
                 || post.street != 0
@@ -2037,6 +2043,18 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                 expected.deadline_ms = actual.deadline_ms;
                 expected.call_seq = actual.call_seq;
                 expected.protocol_pending_mask = actual.protocol_pending_mask;
+                // Waiting-for-big-blind admission: a Waiting seat may be
+                // promoted to Active for the new hand; every other seat field
+                // stays identical.
+                for (expected_seat, actual_seat) in
+                    expected.seats.iter_mut().zip(actual.seats.iter())
+                {
+                    if expected_seat.status == CanonicalSeatStatus::Waiting
+                        && actual_seat.status == CanonicalSeatStatus::Active
+                    {
+                        expected_seat.status = CanonicalSeatStatus::Active;
+                    }
+                }
             })?;
         }
         CanonicalTransitionKind::AdvanceDeadline => {
@@ -2487,15 +2505,17 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                 _ => unreachable!("only betting actions reach the canonical betting branch"),
             }
             // `acted` is the per-seat projection of `acted_mask`.  A normal
-            // action changes only its own bit; a Raise reopens action by
-            // clearing every other actionable (Active) seat, while preserving
-            // flags on folded/all-in/waiting seats exactly as the VM does.
+            // action changes only its own bit; a full Raise (increment >=
+            // pre.min_raise) reopens action by clearing every other actionable
+            // (Active) seat, while a sub-minimum all-in keeps their flags —
+            // folded/all-in/waiting seats always keep theirs, as the VM does.
+            let raise_increment = w.action.amount.saturating_sub(pre.current_bet);
+            let raise_reopens =
+                w.kind == CanonicalTransitionKind::Raise && raise_increment >= pre.min_raise;
             for index in 0..MAX_CANONICAL_SEATS {
                 let expected_acted = if index == seat {
                     true
-                } else if w.kind == CanonicalTransitionKind::Raise
-                    && pre.seats[index].status == CanonicalSeatStatus::Active
-                {
+                } else if raise_reopens && pre.seats[index].status == CanonicalSeatStatus::Active {
                     false
                 } else {
                     pre.seats[index].acted

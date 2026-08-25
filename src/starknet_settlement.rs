@@ -26,16 +26,13 @@
 //! each half comfortably fits in `felt252` since the Stark prime is
 //! ≈ 2^251 and 2^128 < prime.
 //!
-//! `settle_hand` takes the digest as a single `felt252` for backwards ABI
-//! stability. The host must therefore compress the verified dual-felt digest
-//! back into the canonical single felt before submitting a `settle_hand`
-//! call. The Cairo contract validates equality against the registered
-//! high/low halves in storage.
+//! `settle_hand` takes the digest as a single `felt252` for ABI stability.
+//! The host compresses the verified dual-felt digest into the canonical
+//! single felt before submitting a `settle_hand` call; the Cairo contract
+//! validates equality against the registered halves in storage.
 
 use poker_l1::vm::contracts::texas_poker::settlement::SettlementPlan;
-use poker_l1::vm::contracts::texas_poker::types::{
-    Address, Seat, TexasPokerTable, EMPTY_PLAYER,
-};
+use poker_l1::vm::contracts::texas_poker::types::{Seat, TexasPokerTable, EMPTY_PLAYER};
 use starknet_ff::FieldElement;
 
 use crate::error::{TexasAirError, TexasAirResult};
@@ -64,15 +61,15 @@ impl AggregateDigestFelts {
     /// # Errors
     ///
     /// Returns [`TexasAirError::SpecViolation`] if either half does not fit
-    /// in 128 bits (this cannot happen for a 16-byte slice, but the explicit
-    /// check guards future refactors).
+    /// in 128 bits (cannot happen for a 16-byte slice; the explicit check
+    /// guards future refactors).
     pub fn split(bytes: &[u8; 32]) -> TexasAirResult<Self> {
         let mut hi_bytes = [0u8; 16];
         let mut lo_bytes = [0u8; 16];
         hi_bytes.copy_from_slice(&bytes[..16]);
         lo_bytes.copy_from_slice(&bytes[16..]);
-        let hi = bytes16_to_felt(&hi_bytes)?;
-        let lo = bytes16_to_felt(&lo_bytes)?;
+        let hi = bytes16_to_felt(&hi_bytes);
+        let lo = bytes16_to_felt(&lo_bytes);
         Ok(Self { hi, lo })
     }
 
@@ -81,8 +78,7 @@ impl AggregateDigestFelts {
     /// # Errors
     ///
     /// Returns [`TexasAirError::SpecViolation`] if either felt exceeds the
-    /// canonical 128-bit range, indicating the on-chain storage has been
-    /// corrupted or the wrong digest was supplied.
+    /// canonical 128-bit range, indicating corruption or a wrong digest.
     pub fn merge(hi: FieldElement, lo: FieldElement) -> TexasAirResult<[u8; 32]> {
         let hi_bytes = felt_to_bytes16(hi)?;
         let lo_bytes = felt_to_bytes16(lo)?;
@@ -92,19 +88,9 @@ impl AggregateDigestFelts {
         Ok(out)
     }
 
-    /// Lossy single-felt projection used by `settle_hand` ABI.
-    ///
-    /// This intentionally throws away the high half because the contract
-    /// signature for `settle_hand` is single-`felt252`. Callers must
-    /// independently verify that the registered aggregate digest's low half
-    /// matches this value before submitting the call.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TexasAirError::SpecViolation`] if the low half does not fit
-    /// in 128 bits (cannot happen with a `Self::split`-derived pair).
+    /// Single-felt projection used by the `settle_hand` ABI (low half).
     #[must_use]
-    pub fn settle_abi_single_felt(self) -> FieldElement {
+    pub const fn settle_abi_single_felt(self) -> FieldElement {
         self.lo
     }
 }
@@ -112,9 +98,9 @@ impl AggregateDigestFelts {
 /// One signed chip delta for the on-chain `i128` ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayerDelta {
-    /// Starknet contract address (20 bytes, left-padded to felt252 by Cairo).
+    /// Player address (20 bytes, encoded big-endian into felt252).
     pub address: [u8; 20],
-    /// Net chip movement: positive wins, negative loses, zero skipped.
+    /// Net chip movement: positive wins, negative loses.
     pub delta: i128,
 }
 
@@ -133,18 +119,26 @@ pub struct RegisterAggregateCalldata {
 }
 
 impl RegisterAggregateCalldata {
-    /// Build calldata from a host-verified outer aggregate plus the
+    /// Build calldata from one or more host-verified outer aggregates that
+    /// together cover `first_hand_id..=last_hand_id`, plus the
     /// caller-prepared settlement commitment list (already Poseidon-derived
-    /// from the canonical settlement plan per hand, in `first_hand_id..=last_hand_id` order).
+    /// from the canonical settlement plan per hand, in hand-id order).
+    ///
+    /// A single [`VerifiedOuterAggregate`] covers exactly one hand (its
+    /// receipt chain enforces single-hand continuity), so a multi-hand
+    /// registration supplies one verified aggregate per hand. All supplied
+    /// aggregates must share the same aggregate digest and table id, form a
+    /// contiguous hand range, and have continuous endpoint state roots.
     ///
     /// # Errors
     ///
     /// Returns an error when:
-    /// - `settlement_roots.len()` does not match `last_hand_id - first_hand_id + 1`,
-    /// - the chain's hand range or monotonicity fails,
-    /// - any endpoint or settlement root is non-canonical.
+    /// - `aggregates` is empty or its count does not match the hand span,
+    /// - `settlement_roots.len()` does not match the hand span,
+    /// - hand ids are not contiguous, or table id / aggregate digest drift,
+    /// - the endpoint state roots are discontinuous between aggregates.
     pub fn new(
-        verified: &VerifiedOuterAggregate,
+        aggregates: &[VerifiedOuterAggregate],
         first_hand_id: u32,
         last_hand_id: u32,
         settlement_roots: Vec<FieldElement>,
@@ -161,50 +155,92 @@ impl RegisterAggregateCalldata {
                 settlement_roots.len()
             )));
         }
-        if last_hand_id > u32::MAX {
+        if aggregates.is_empty() {
             return Err(TexasAirError::SpecViolation(
-                "register_aggregate: last_hand_id exceeds u64 range".into(),
+                "register_aggregate: no verified aggregates supplied".into(),
             ));
         }
+        if aggregates.len() as u64 != span {
+            return Err(TexasAirError::SpecViolation(format!(
+                "register_aggregate: aggregate count {} does not match range {span}",
+                aggregates.len()
+            )));
+        }
 
-        let chain = verified.chain();
-        let receipts = chain.receipts();
-        let first_receipt = receipts
-            .first()
-            .ok_or_else(|| TexasAirError::SpecViolation("verified chain is empty".into()))?;
-        let last_receipt = receipts
-            .last()
-            .expect("non-empty chain validated above");
-        if first_receipt.hand_id != first_hand_id {
-            return Err(TexasAirError::SpecViolation(format!(
-                "register_aggregate: chain first hand {} != requested {first_hand_id}",
-                first_receipt.hand_id
-            )));
-        }
-        if last_receipt.hand_id != last_hand_id {
-            return Err(TexasAirError::SpecViolation(format!(
-                "register_aggregate: chain last hand {} != requested {last_hand_id}",
-                last_receipt.hand_id
-            )));
-        }
-        for window in receipts.windows(2) {
-            let prev = &window[0];
-            let next = &window[1];
-            if next.hand_id != prev.hand_id + 1 {
+        let mut expected_hand = first_hand_id;
+        let mut expected_post_root: Option<[u8; 32]> = None;
+        let mut first_pre_root: Option<[u8; 32]> = None;
+        let mut last_post_root: Option<[u8; 32]> = None;
+        let mut last_table_id: Option<u64> = None;
+        let mut shared_aggregate_digest: Option<[u8; 32]> = None;
+
+        for (idx, agg) in aggregates.iter().enumerate() {
+            let receipts = agg.chain().receipts();
+            let first_receipt = receipts.first().ok_or_else(|| {
+                TexasAirError::SpecViolation("register_aggregate: empty receipt chain".into())
+            })?;
+            let last_receipt = receipts.last().expect("non-empty chain validated above");
+
+            if first_receipt.table_id() != last_receipt.table_id() {
+                return Err(TexasAirError::SpecViolation(
+                    "register_aggregate: chain crosses tables".into(),
+                ));
+            }
+            if let Some(prev_table) = last_table_id {
+                if first_receipt.table_id() != prev_table {
+                    return Err(TexasAirError::SpecViolation(format!(
+                        "register_aggregate: table_id drift at index {idx}"
+                    )));
+                }
+            }
+            last_table_id = Some(first_receipt.table_id());
+
+            if first_receipt.hand_id() != expected_hand {
                 return Err(TexasAirError::SpecViolation(format!(
-                    "register_aggregate: non-monotonic hand_id {} -> {}",
-                    prev.hand_id, next.hand_id
+                    "register_aggregate: hand mismatch at index {idx} (expected {expected_hand}, got {})",
+                    first_receipt.hand_id()
                 )));
             }
+
+            if idx == 0 {
+                first_pre_root = Some(first_receipt.pre_state_root().bytes());
+            }
+            if let Some(prev_post) = expected_post_root {
+                if first_receipt.pre_state_root().bytes() != prev_post {
+                    return Err(TexasAirError::SpecViolation(format!(
+                        "register_aggregate: state-root discontinuity at hand {expected_hand}"
+                    )));
+                }
+            }
+            expected_post_root = Some(last_receipt.post_state_root().bytes());
+            last_post_root = Some(last_receipt.post_state_root().bytes());
+
+            let digest = agg.aggregate_digest();
+            if let Some(prev_digest) = shared_aggregate_digest {
+                if digest != prev_digest {
+                    return Err(TexasAirError::SpecViolation(
+                        "register_aggregate: aggregate digest mismatch across hand range".into(),
+                    ));
+                }
+            }
+            shared_aggregate_digest = Some(digest);
+
+            expected_hand = expected_hand
+                .checked_add(1)
+                .ok_or_else(|| TexasAirError::SpecViolation("hand id overflow".into()))?;
         }
 
-        let agg = AggregateDigestFelts::split(&verified.aggregate_digest())?;
-        let pre = AggregateDigestFelts::split(&first_receipt.pre_state_root.bytes())?;
-        let post = AggregateDigestFelts::split(&last_receipt.post_state_root.bytes())?;
+        let shared_digest = shared_aggregate_digest.expect("non-empty validated above");
+        let first_pre = first_pre_root.expect("non-empty validated above");
+        let last_post = last_post_root.expect("non-empty validated above");
+
+        let agg_felts = AggregateDigestFelts::split(&shared_digest)?;
+        let pre = AggregateDigestFelts::split(&first_pre)?;
+        let post = AggregateDigestFelts::split(&last_post)?;
 
         Ok(Self {
-            aggregate_hi: agg.hi,
-            aggregate_lo: agg.lo,
+            aggregate_hi: agg_felts.hi,
+            aggregate_lo: agg_felts.lo,
             first_hand_id: u64::from(first_hand_id),
             last_hand_id: u64::from(last_hand_id),
             pre_state_hi: pre.hi,
@@ -263,7 +299,7 @@ impl RegisterAggregateCalldata {
     /// settlement_roots: Span<felt252>)`.
     #[must_use]
     pub fn to_felts(&self) -> Vec<FieldElement> {
-        let mut out = Vec::with_capacity(7 + self.settlement_roots.len());
+        let mut out = Vec::with_capacity(9 + self.settlement_roots.len());
         out.push(self.aggregate_hi);
         out.push(self.aggregate_lo);
         out.push(FieldElement::from(self.first_hand_id));
@@ -303,12 +339,11 @@ impl SettleHandCalldata {
     ///
     /// Returns an error when:
     /// - `pre_table.hand_id != hand_id`,
-    /// - any seat has a non-positive total bet without a matching award (delta overflow),
     /// - the rake recipient is missing but `plan.rake > 0`,
     /// - the merged participant set is empty, oversized, contains the empty
     ///   address, or duplicates an address,
     /// - deltas are not zero-sum,
-    /// - any signed magnitude does not fit in `u64` (Cairo `i128` ABI limit).
+    /// - any signed magnitude does not fit in `u64`.
     #[allow(clippy::too_many_lines)]
     pub fn new(
         verified_aggregate_digest: [u8; 32],
@@ -330,7 +365,9 @@ impl SettleHandCalldata {
         // 1. Player deltas from plan.awards and pre_table seat contributions.
         let mut participants: Vec<PlayerDelta> = Vec::with_capacity(MAX_SETTLE_PARTICIPANTS);
         for (seat_index, seat) in pre_table.seats.iter().enumerate() {
-            let player_addr = seat_player_for_settlement(seat)?;
+            let Some(player_addr) = seat_player_for_settlement(seat) else {
+                continue;
+            };
             let total_bet = seat.total_bet();
             let award = plan.awards.get(seat_index).copied().unwrap_or(0);
             let delta = signed_delta(award, total_bet)?;
@@ -355,25 +392,18 @@ impl SettleHandCalldata {
                     "settle_hand: rake recipient is the empty player address".into(),
                 ));
             }
-            let treasury_magnitude: u64 = plan.rake.try_into().map_err(|_| {
-                TexasAirError::SpecViolation(format!(
-                    "settle_hand: rake {} does not fit in u64 ABI magnitude",
-                    plan.rake
-                ))
-            })?;
+            let treasury_delta = i128::from(plan.rake);
             if let Some(existing) = participants.iter_mut().find(|p| p.address == treasury) {
-                let merged = existing.delta.checked_add(treasury_magnitude as i128).ok_or_else(
-                    || {
-                        TexasAirError::SpecViolation(
-                            "settle_hand: merging treasury delta overflows i128".into(),
-                        )
-                    },
-                )?;
+                let merged = existing.delta.checked_add(treasury_delta).ok_or_else(|| {
+                    TexasAirError::SpecViolation(
+                        "settle_hand: merging treasury delta overflows i128".into(),
+                    )
+                })?;
                 existing.delta = merged;
             } else {
                 participants.push(PlayerDelta {
                     address: treasury,
-                    delta: treasury_magnitude as i128,
+                    delta: treasury_delta,
                 });
             }
         }
@@ -390,10 +420,10 @@ impl SettleHandCalldata {
             )));
         }
 
-        // 3. Sort by address ascending with treasury last.
+        // 3. Deterministic ordering: sort by address ascending.
         participants.sort_by(|a, b| a.address.cmp(&b.address));
 
-        // 4. Reject duplicate addresses (deterministic addresses make sort stable).
+        // 4. Reject duplicate addresses.
         for window in participants.windows(2) {
             if window[0].address == window[1].address {
                 return Err(TexasAirError::SpecViolation(
@@ -424,10 +454,7 @@ impl SettleHandCalldata {
             deltas.push(p.delta);
         }
 
-        let settlement_digest = compute_settlement_digest(
-            u64::from(hand_id),
-            &participants,
-        )?;
+        let settlement_digest = compute_settlement_digest(u64::from(hand_id), &participants)?;
 
         Ok(Self {
             aggregate_digest: aggregate_digest_single,
@@ -450,7 +477,7 @@ impl SettleHandCalldata {
         self.hand_id
     }
 
-    /// Participant contract addresses (felt252 encoding, big-endian 20-byte padding).
+    /// Participant addresses (felt252 encoding, big-endian 20-byte).
     #[must_use]
     pub fn players(&self) -> &[FieldElement] {
         &self.players
@@ -489,74 +516,67 @@ impl SettleHandCalldata {
     }
 }
 
-/// Extract the player address from a seat, or reject seats that cannot settle.
-fn seat_player_for_settlement(seat: &Seat) -> TexasAirResult<[u8; 20]> {
+/// Extract the player address from a seat.
+///
+/// Vacant slots return `None`: they have neither a player nor a
+/// `total_bet`, so they can never produce a non-zero delta and are simply
+/// skipped by the caller.
+fn seat_player_for_settlement(seat: &Seat) -> Option<[u8; 20]> {
     match seat {
-        Seat::Playing { playing } | Seat::Waiting { occupied: playing } => Ok(playing.player),
-        Seat::DepartedThisHand { player, .. } => Ok(*player),
-        Seat::Vacant { .. } => Err(TexasAirError::SpecViolation(
-            "settle_hand: vacant seat cannot participate".into(),
-        )),
+        Seat::Playing { playing } => Some(playing.occupied.player),
+        Seat::Waiting { occupied } => Some(occupied.player),
+        Seat::DepartedThisHand { player, .. } => Some(*player),
+        Seat::Vacant { .. } => None,
     }
 }
 
-/// Compute `award - total_bet` with strict overflow checks.
+/// Compute `award - total_bet` as an `i128`.
 ///
-/// Both inputs are `u64` and the result must fit in `i128`. We treat `total_bet > award`
-/// (a loss) as a strict negative, refusing to silently truncate.
+/// Both inputs are `u64`; the difference of two u64 values always fits in
+/// i128, so this cannot overflow.
 fn signed_delta(award: u64, total_bet: u64) -> TexasAirResult<i128> {
     if award >= total_bet {
-        let gain = u64::try_from(award - total_bet)
-            .expect("non-negative u64 always fits in u64");
-        let gain_i128: i128 = gain.into();
-        Ok(gain_i128)
+        Ok(i128::from(award - total_bet))
     } else {
-        let loss = u64::try_from(total_bet - award)
-            .expect("non-negative u64 always fits in u64");
-        let loss_i128: i128 = loss.into();
-        Ok(-loss_i128)
+        Ok(-i128::from(total_bet - award))
     }
 }
 
 /// Reject i128 values whose absolute magnitude exceeds the Cairo `i128`
-/// contract limit (sign + u64 magnitude in the Poseidon commitment).
+/// commitment limit (sign + u64 magnitude in the Poseidon encoding).
 fn validate_i128_abi(delta: i128) -> TexasAirResult<()> {
-    let magnitude = delta.unsigned_abs();
-    if magnitude > u64::MAX as u128 {
+    if delta.unsigned_abs() > u64::MAX as u128 {
         return Err(TexasAirError::SpecViolation(format!(
-            "settle_hand: delta magnitude {magnitude} exceeds u64 ABI bound"
+            "settle_hand: delta magnitude {} exceeds u64 ABI bound",
+            delta.unsigned_abs()
         )));
     }
     Ok(())
 }
 
-/// Encode a Starknet contract address as a felt252 (left-padded 20-byte big-endian).
+/// Encode a player address as a felt252 (big-endian 20 bytes).
 fn address_to_felt(addr: [u8; 20]) -> TexasAirResult<FieldElement> {
     if addr == EMPTY_PLAYER {
         return Err(TexasAirError::SpecViolation(
             "settle_hand: empty player address in participant set".into(),
         ));
     }
-    // Starknet addresses fit in felt252 by construction (20 bytes < 251 bits).
-    Ok(FieldElement::from_byte_slice_be(&addr).expect("20-byte address always fits in felt252"))
+    FieldElement::from_byte_slice_be(&addr)
+        .map_err(|e| TexasAirError::SpecViolation(format!("address encoding failed: {e}")))
 }
 
 /// Encode a signed i128 into the Starknet prime as a felt.
 ///
-/// Negative values become the modular complement `-magnitude`.
+/// Negative values become the modular complement `-magnitude`; the contract
+/// reads these back into `i128` via the two's-complement felt representation.
 fn i128_to_felt(value: i128) -> FieldElement {
     if value >= 0 {
-        let magnitude: u64 = value
-            .try_into()
-            .expect("non-negative i128 always fits in u64 after validate_i128_abi");
+        let magnitude =
+            u64::try_from(value).expect("non-negative delta fits in u64 after validate_i128_abi");
         FieldElement::from(magnitude)
     } else {
-        // Two's-complement-style modular reduction; the contract reads these
-        // back into `i128` via the inverse `from_felt_signed_i128` helper.
-        let magnitude: u64 = value
-            .unsigned_abs()
-            .try_into()
-            .expect("validated by validate_i128_abi");
+        let magnitude = u64::try_from(value.unsigned_abs())
+            .expect("abs delta fits in u64 after validate_i128_abi");
         -FieldElement::from(magnitude)
     }
 }
@@ -565,26 +585,23 @@ fn i128_to_felt(value: i128) -> FieldElement {
 ///
 /// The encoding matches `poker_contracts/src/settlement_hash.cairo`:
 /// `hand_id`, then for each ordered player: `address`, `sign` (1 non-negative,
-/// 0 negative), `magnitude` (u64). Sign / magnitude are written as the same
-/// felt252 values the Cairo contract reads back into `i128`.
-fn compute_settlement_digest(hand_id: u64, participants: &[PlayerDelta]) -> TexasAirResult<FieldElement> {
+/// 0 negative), `magnitude` (u64).
+fn compute_settlement_digest(
+    hand_id: u64,
+    participants: &[PlayerDelta],
+) -> TexasAirResult<FieldElement> {
     let mut fields: Vec<FieldElement> = Vec::with_capacity(1 + participants.len() * 3);
     fields.push(FieldElement::from(hand_id));
     for p in participants {
         fields.push(address_to_felt(p.address)?);
         if p.delta >= 0 {
             fields.push(FieldElement::from(1_u64));
-            let magnitude: u64 = p
-                .delta
-                .try_into()
+            let magnitude = u64::try_from(p.delta)
                 .expect("non-negative delta fits in u64 after validate_i128_abi");
             fields.push(FieldElement::from(magnitude));
         } else {
             fields.push(FieldElement::from(0_u64));
-            let magnitude: u64 = p
-                .delta
-                .unsigned_abs()
-                .try_into()
+            let magnitude = u64::try_from(p.delta.unsigned_abs())
                 .expect("abs delta fits in u64 after validate_i128_abi");
             fields.push(FieldElement::from(magnitude));
         }
@@ -593,11 +610,10 @@ fn compute_settlement_digest(hand_id: u64, participants: &[PlayerDelta]) -> Texa
 }
 
 /// Convert a 16-byte big-endian slice into a `FieldElement`.
-fn bytes16_to_felt(bytes: &[u8; 16]) -> TexasAirResult<FieldElement> {
-    // A 128-bit value is always a canonical felt252 (Stark prime ≈ 2^251).
-    let felt = FieldElement::from_byte_slice_be(bytes)
-        .expect("16 bytes (128 bits) always fits in felt252");
-    Ok(felt)
+///
+/// A 128-bit value is always a canonical felt252 (Stark prime ≈ 2^251).
+fn bytes16_to_felt(bytes: &[u8; 16]) -> FieldElement {
+    FieldElement::from_byte_slice_be(bytes).expect("16 bytes (128 bits) always fit in felt252")
 }
 
 /// Convert a `FieldElement` back to a 16-byte big-endian slice.
@@ -608,13 +624,6 @@ fn bytes16_to_felt(bytes: &[u8; 16]) -> TexasAirResult<FieldElement> {
 /// canonical range, indicating corruption or a wrong digest.
 fn felt_to_bytes16(felt: FieldElement) -> TexasAirResult<[u8; 16]> {
     let bytes = felt.to_bytes_be();
-    if bytes.len() != 32 {
-        return Err(TexasAirError::SpecViolation(format!(
-            "felt_to_bytes16: expected 32-byte big-endian, got {} bytes",
-            bytes.len()
-        )));
-    }
-    // The top 16 bytes must be zero (felt must fit in 128 bits).
     if bytes[..16].iter().any(|b| *b != 0) {
         return Err(TexasAirError::SpecViolation(
             "felt_to_bytes16: felt exceeds canonical 128-bit range".into(),
@@ -625,23 +634,22 @@ fn felt_to_bytes16(felt: FieldElement) -> TexasAirResult<[u8; 16]> {
     Ok(out)
 }
 
-#[allow(dead_code)]
-fn _address_marker(_addr: &Address) {} // keep Address import live for downstream constructors
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state_root::StateRoot;
-    use crate::verified_chain::VerificationReceipt;
-    use poker_l1::vm::contracts::texas_poker::settlement::SettlementPlan;
-    use poker_l1::vm::contracts::texas_poker::types::{
-        BoardCards, DeckState, HandPhase, HoleCards, OccupiedSeat, PlayingSeat, PlayingSeatStatus,
-        ECPoint,
-    };
-    use poker_l1::cryptography::algebraic::G1Projective;
+    use crate::verified_chain::{VerificationReceipt, VerifiedChain};
+    use blstrs::G1Projective;
+    use group::Group;
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::rules::TableRules;
-    use poker_l1::account::derive_address;
+    use poker_l1::vm::contracts::texas_poker::card::{BoardCards, HoleCards};
+    use poker_l1::vm::contracts::texas_poker::settlement::{
+        SettlementPlan, SettlementRunoutSchedule,
+    };
+    use poker_l1::vm::contracts::texas_poker::types::{
+        DeckState, HandPhase, OccupiedSeat, PlayingSeat, PlayingSeatStatus, TableRules,
+    };
+    use poker_protocol::crypto::types::ECPoint;
 
     fn receipt_with_state(
         table_id: u64,
@@ -667,21 +675,16 @@ mod tests {
         VerifiedOuterAggregate::test_only_new(chain, agg)
     }
 
-    fn pk_point() -> ECPoint {
-        ECPoint(G1Projective::generator())
-    }
-
     fn playing_seat(player: [u8; 20], total_bet: u64) -> Seat {
-        let occupied = OccupiedSeat {
-            player,
-            stack: 1000,
-            pk: pk_point(),
-            pending_addon: 0,
-            time_bank_ms: 30_000,
-        };
         Seat::Playing {
             playing: PlayingSeat {
-                occupied,
+                occupied: OccupiedSeat {
+                    player,
+                    stack: 1000,
+                    pk: ECPoint(G1Projective::generator()),
+                    pending_addon: 0,
+                    time_bank_ms: 30_000,
+                },
                 hand: HoleCards::empty(),
                 bet: total_bet,
                 total_bet,
@@ -691,16 +694,14 @@ mod tests {
     }
 
     fn vacant_seat() -> Seat {
-        Seat::Vacant {
-            time_bank_ms: 30_000,
-        }
+        Seat::Vacant { time_bank_ms: 30_000 }
     }
 
     fn build_test_table(hand_id: u32) -> TexasPokerTable {
         TexasPokerTable {
-            id: ObjectID([0xAB; 32]),
+            id: ObjectID::new([0xAB; 20], 0),
             name: "test".to_string(),
-            creator: derive_address(b"test"),
+            creator: [0xAA; 20],
             rules: TableRules::new(9, 5, 10),
             seats: vec![
                 playing_seat([0x11; 20], 50),
@@ -724,6 +725,19 @@ mod tests {
             run_it_twice_state: Default::default(),
             hand_id,
             call_seq: 0,
+        }
+    }
+
+    fn zero_rake_plan(winner_award: u64) -> SettlementPlan {
+        SettlementPlan {
+            version: 1,
+            schedule: SettlementRunoutSchedule::Single,
+            gross_pot: 100,
+            rake: 0,
+            total_awards: winner_award,
+            winner_mask: 1,
+            awards: [winner_award, 0, 0, 0, 0, 0, 0, 0, 0],
+            pots: vec![],
         }
     }
 
@@ -756,16 +770,7 @@ mod tests {
     fn settle_hand_zero_sum_invariant() {
         let table = build_test_table(7);
         // Seat 0 wins the 100-chip pot: awards[0] = 100 (delta +50), seat 1 loses (delta -50).
-        let plan = SettlementPlan {
-            version: 1,
-            schedule: Default::default(),
-            gross_pot: 100,
-            rake: 0,
-            total_awards: 100,
-            winner_mask: 1,
-            awards: [100, 0, 0, 0, 0, 0, 0, 0, 0],
-            pots: vec![],
-        };
+        let plan = zero_rake_plan(100);
         let calldata = SettleHandCalldata::new([1u8; 32], 7, &table, &plan, None).unwrap();
         let sum: i128 = calldata.deltas().iter().sum();
         assert_eq!(sum, 0);
@@ -788,17 +793,8 @@ mod tests {
     #[test]
     fn settle_hand_rejects_non_zero_sum() {
         let table = build_test_table(7);
-        // Awards seat 0 with 200 chips when only 100 were wagered, no rake, no loser.
-        let plan = SettlementPlan {
-            version: 1,
-            schedule: Default::default(),
-            gross_pot: 200,
-            rake: 0,
-            total_awards: 200,
-            winner_mask: 1,
-            awards: [200, 0, 0, 0, 0, 0, 0, 0, 0],
-            pots: vec![],
-        };
+        // Awards seat 0 with 200 chips when only 100 were wagered: +150/-50 ≠ 0.
+        let plan = zero_rake_plan(200);
         let err = SettleHandCalldata::new([2u8; 32], 7, &table, &plan, None).unwrap_err();
         assert!(matches!(err, TexasAirError::SpecViolation(_)));
     }
@@ -808,7 +804,7 @@ mod tests {
         let table = build_test_table(7);
         let plan = SettlementPlan {
             version: 1,
-            schedule: Default::default(),
+            schedule: SettlementRunoutSchedule::Single,
             gross_pot: 100,
             rake: 5,
             total_awards: 95,
@@ -820,18 +816,17 @@ mod tests {
         let winner_addr = [0x11; 20];
         let calldata =
             SettleHandCalldata::new([3u8; 32], 7, &table, &plan, Some(winner_addr)).unwrap();
-        // Players should be ordered: seat 0 first (winner + rake), seat 1 second (loser).
         assert_eq!(calldata.players().len(), 2);
         let sum: i128 = calldata.deltas().iter().sum();
         assert_eq!(sum, 0);
-        // Merged delta for the winner should be +45 (95 award - 50 bet + 5 rake).
+        // Merged delta for the winner: 95 award - 50 bet + 5 rake = +50.
         let winner_felt = address_to_felt([0x11; 20]).unwrap();
         let winner_idx = calldata
             .players()
             .iter()
             .position(|p| *p == winner_felt)
             .expect("winner present");
-        assert_eq!(calldata.deltas()[winner_idx], 45);
+        assert_eq!(calldata.deltas()[winner_idx], 50);
     }
 
     #[test]
@@ -839,7 +834,7 @@ mod tests {
         let table = build_test_table(7);
         let plan = SettlementPlan {
             version: 1,
-            schedule: Default::default(),
+            schedule: SettlementRunoutSchedule::Single,
             gross_pot: 100,
             rake: 5,
             total_awards: 95,
@@ -854,49 +849,91 @@ mod tests {
     #[test]
     fn settle_hand_rejects_hand_id_mismatch() {
         let table = build_test_table(7);
-        let plan = SettlementPlan {
-            version: 1,
-            schedule: Default::default(),
-            gross_pot: 100,
-            rake: 0,
-            total_awards: 100,
-            winner_mask: 1,
-            awards: [100, 0, 0, 0, 0, 0, 0, 0, 0],
-            pots: vec![],
-        };
+        let plan = zero_rake_plan(100);
         let err = SettleHandCalldata::new([5u8; 32], 8, &table, &plan, None).unwrap_err();
         assert!(matches!(err, TexasAirError::SpecViolation(_)));
     }
 
     #[test]
+    fn settle_hand_felt_layout_matches_contract_abi() {
+        let table = build_test_table(7);
+        let plan = zero_rake_plan(100);
+        let calldata = SettleHandCalldata::new([6u8; 32], 7, &table, &plan, None).unwrap();
+        let felts = calldata.to_felts();
+        // digest + hand_id + player_len + 2 players + delta_len + 2 deltas = 9
+        assert_eq!(felts.len(), 9);
+        assert_eq!(felts[0], calldata.aggregate_digest());
+        assert_eq!(felts[1], FieldElement::from(7_u64));
+        assert_eq!(felts[2], FieldElement::from(2_u64));
+        assert_eq!(felts[5], FieldElement::from(2_u64));
+        // Sorted: [0x11..] < [0x22..], so felts[3] is seat 0, felts[4] is seat 1.
+        assert_eq!(felts[3], address_to_felt([0x11; 20]).unwrap());
+        assert_eq!(felts[4], address_to_felt([0x22; 20]).unwrap());
+        // Deltas: winner +50, loser -50 (modular complement).
+        assert_eq!(felts[6], FieldElement::from(50_u64));
+        assert_eq!(felts[7], -FieldElement::from(50_u64));
+    }
+
+    #[test]
     fn register_aggregate_validates_matching_range() {
-        let chain = chain_from(vec![
-            receipt_with_state(1, 10, 0, [0x10; 32], [0x20; 32]),
-            receipt_with_state(1, 11, 1, [0x20; 32], [0x30; 32]),
-        ]);
-        let agg = mock_aggregate(chain, [0xAA; 32]);
+        let chain_a = chain_from(vec![receipt_with_state(1, 10, 0, [0x10; 32], [0x20; 32])]);
+        let chain_b = chain_from(vec![receipt_with_state(1, 11, 0, [0x20; 32], [0x30; 32])]);
+        let agg_a = mock_aggregate(chain_a, [0xAA; 32]);
+        let agg_b = mock_aggregate(chain_b, [0xAA; 32]);
         let ok = RegisterAggregateCalldata::new(
-            &agg,
+            &[agg_a, agg_b],
             10,
             11,
-            vec![FieldElement::from(1), FieldElement::from(2)],
+            vec![FieldElement::from(1_u64), FieldElement::from(2_u64)],
         );
         assert!(ok.is_ok());
     }
 
     #[test]
     fn register_aggregate_rejects_hand_range_mismatch() {
-        let chain = chain_from(vec![
-            receipt_with_state(1, 10, 0, [0x10; 32], [0x20; 32]),
-            receipt_with_state(1, 11, 1, [0x20; 32], [0x30; 32]),
-        ]);
-        let agg = mock_aggregate(chain, [0xAA; 32]);
-        // Range asks for hand 11..=12 but chain only covers 10..=11.
+        let chain_a = chain_from(vec![receipt_with_state(1, 10, 0, [0x10; 32], [0x20; 32])]);
+        let chain_b = chain_from(vec![receipt_with_state(1, 11, 0, [0x20; 32], [0x30; 32])]);
+        let agg_a = mock_aggregate(chain_a, [0xAA; 32]);
+        let agg_b = mock_aggregate(chain_b, [0xAA; 32]);
+        // Range asks for hand 11..=12 but aggregates cover 10..=11.
         let err = RegisterAggregateCalldata::new(
-            &agg,
+            &[agg_a, agg_b],
             11,
             12,
-            vec![FieldElement::from(1), FieldElement::from(2)],
+            vec![FieldElement::from(1_u64), FieldElement::from(2_u64)],
+        )
+        .unwrap_err();
+        assert!(matches!(err, TexasAirError::SpecViolation(_)));
+    }
+
+    #[test]
+    fn register_aggregate_rejects_digest_drift() {
+        let chain_a = chain_from(vec![receipt_with_state(1, 10, 0, [0x10; 32], [0x20; 32])]);
+        let chain_b = chain_from(vec![receipt_with_state(1, 11, 0, [0x20; 32], [0x30; 32])]);
+        let agg_a = mock_aggregate(chain_a, [0xAA; 32]);
+        let agg_b = mock_aggregate(chain_b, [0xBB; 32]);
+        let err = RegisterAggregateCalldata::new(
+            &[agg_a, agg_b],
+            10,
+            11,
+            vec![FieldElement::from(1_u64), FieldElement::from(2_u64)],
+        )
+        .unwrap_err();
+        assert!(matches!(err, TexasAirError::SpecViolation(_)));
+    }
+
+    #[test]
+    fn register_aggregate_rejects_root_discontinuity() {
+        let chain_a = chain_from(vec![receipt_with_state(1, 10, 0, [0x10; 32], [0x20; 32])]);
+        // Second hand starts from a different root than the first ended with.
+        let chain_b = chain_from(vec![receipt_with_state(1, 11, 0, [0x99; 32], [0x30; 32])]);
+        let agg_a = mock_aggregate(chain_a, [0xAA; 32]);
+        let agg_b = mock_aggregate(chain_b, [0xAA; 32]);
+        let err = RegisterAggregateCalldata::new(
+            &[agg_a, agg_b],
+            10,
+            11,
+            vec![FieldElement::from(1_u64), FieldElement::from(2_u64)],
         )
         .unwrap_err();
         assert!(matches!(err, TexasAirError::SpecViolation(_)));
@@ -912,12 +949,13 @@ mod tests {
             [0x02; 32],
         )]);
         let agg = mock_aggregate(chain, [0xAA; 32]);
-        let c = RegisterAggregateCalldata::new(&agg, 5, 5, vec![FieldElement::from(42)]).unwrap();
+        let c =
+            RegisterAggregateCalldata::new(&[agg], 5, 5, vec![FieldElement::from(42_u64)]).unwrap();
         let felts = c.to_felts();
         // 2 (digest) + 2 (hand range) + 4 (state roots) + 1 (length) + 1 (root) = 10
         assert_eq!(felts.len(), 10);
-        assert_eq!(felts[0], c.aggregate_hi);
-        assert_eq!(felts[1], c.aggregate_lo);
+        assert_eq!(felts[0], c.aggregate_hi());
+        assert_eq!(felts[1], c.aggregate_lo());
         assert_eq!(felts[2], FieldElement::from(5_u64));
         assert_eq!(felts[3], FieldElement::from(5_u64));
         assert_eq!(felts[8], FieldElement::from(1_u64));

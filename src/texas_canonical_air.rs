@@ -204,7 +204,11 @@ const RAKE_AWARD_LIMBS_OFFSET: usize = RAKE_FINAL_BYTES_OFFSET + 4 * 2;
 const RAKE_AWARD_BYTES_OFFSET: usize = RAKE_AWARD_LIMBS_OFFSET + 4;
 const RAKE_CHIP_INTERMEDIATE_OFFSET: usize = RAKE_AWARD_BYTES_OFFSET + 4 * 2;
 const RAKE_CHIP_EXTRA_CARRIES_OFFSET: usize = RAKE_CHIP_INTERMEDIATE_OFFSET + 4;
-const NUM_COLUMNS: usize = RAKE_CHIP_EXTRA_CARRIES_OFFSET + 3;
+/// Per-seat `owes` advice for the betting successor relation: flag, four
+/// difference limbs, three subtraction borrows, and a non-zero inverse.
+const SEAT_OWES_ADVICE_OFFSET: usize = RAKE_CHIP_EXTRA_CARRIES_OFFSET + 3;
+const NUM_COLUMNS: usize =
+    SEAT_OWES_ADVICE_OFFSET + MAX_CANONICAL_SEATS * (1 + 4 + 3 + 1 + 1);
 // The fixed public scope contains the table/sequence/image boundary plus the
 // five authenticated root domains (state, lifecycle, overlay, settlement and
 // custody) at both ends of the batch.
@@ -1566,8 +1570,10 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     out.push(M31::from(u32::from(consume_all)));
     out.push(M31::from(u32::from(deadline_extension && !consume_all)));
     let is_start = w.kind == CanonicalTransitionKind::StartHand;
+    // Count post-state participants: StartHand promotes waiting-for-big-blind
+    // seats into the new hand, so the >= 2 gate uses the post image.
     let active_count = w
-        .pre
+        .post
         .seats
         .iter()
         .filter(|seat| {
@@ -2017,6 +2023,59 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     } else {
         [M31::from(0u32); 3]
     });
+    // Per-seat `owes` advice: a betting seat that already acted but still
+    // owes chips below the post current_bet stays actionable (short all-in
+    // reopened the water without reopening the raise right, TDA #41).
+    let is_betting_row = is_betting_action(w.kind);
+    for seat in &w.post.seats {
+        let owes = is_betting_row
+            && seat.status == CanonicalSeatStatus::Active
+            && seat.bet < w.post.current_bet;
+        let diff = if owes {
+            w.post.current_bet - seat.bet
+        } else {
+            0
+        };
+        out.push(M31::from(u32::from(owes)));
+        out.extend(u64_limbs(diff));
+        // Subtraction borrows of current_bet - bet over 16-bit limbs.
+        let borrows = if owes {
+            let mut borrow: u32 = 0;
+            let mut borrows = [0u32; 3];
+            for limb in 0..4 {
+                let c = ((w.post.current_bet >> (16 * limb)) & 0xffff) as u32;
+                let b = ((seat.bet >> (16 * limb)) & 0xffff) as u32;
+                let sub = c as i64 - b as i64 - i64::from(borrow);
+                if sub < 0 {
+                    borrow = 1;
+                } else {
+                    borrow = 0;
+                }
+                if limb < 3 {
+                    borrows[limb] = borrow;
+                }
+            }
+            borrows
+        } else {
+            [0u32; 3]
+        };
+        for borrow in borrows {
+            out.push(M31::from(borrow));
+        }
+        let limb_sum: u32 = u64_limbs(diff)
+            .into_iter()
+            .map(|limb| u32::from(limb.0))
+            .sum();
+        out.push(if owes && limb_sum != 0 {
+            M31::from(limb_sum).inverse()
+        } else {
+            M31::from(0u32)
+        });
+        // settled = acted && !owes: an acted seat that has matched the water
+        // is no longer actionable and may be skipped by the turn scan.
+        let settled = is_betting_row && seat.acted && !owes;
+        out.push(M31::from(u32::from(settled)));
+    }
     debug_assert_eq!(out.len(), NUM_COLUMNS);
     out
 }
@@ -3030,6 +3089,23 @@ impl FrameworkEval for CanonicalAir {
             eval.next_trace_mask(),
             eval.next_trace_mask(),
         ];
+        // The per-seat `owes` advice is interleaved seat-major
+        // (flag, 4 diff limbs, 3 borrows, inverse, settled) x 9 seats, so the
+        // masks must be allocated in exactly that order.
+        let mut owes_flat: Vec<E::F> = Vec::with_capacity(MAX_CANONICAL_SEATS * 10);
+        for _ in 0..MAX_CANONICAL_SEATS * 10 {
+            owes_flat.push(eval.next_trace_mask());
+        }
+        let seat_owes: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|i| owes_flat[i * 10].clone());
+        let seat_owes_diff: [[E::F; 4]; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|i| std::array::from_fn(|l| owes_flat[i * 10 + 1 + l].clone()));
+        let seat_owes_borrows: [[E::F; 3]; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|i| std::array::from_fn(|l| owes_flat[i * 10 + 5 + l].clone()));
+        let seat_owes_inv: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|i| owes_flat[i * 10 + 8].clone());
+        let seat_settled: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|i| owes_flat[i * 10 + 9].clone());
         eval.add_constraint(active.clone() * flag.clone() * (flag.clone() - one.clone()));
         eval.add_constraint(seq_carry.clone() * (seq_carry.clone() - one.clone()));
         for (pre, post) in [
@@ -3620,7 +3696,7 @@ impl FrameworkEval for CanonicalAir {
         eval.add_constraint(is_join.clone() * pre_phase.clone());
         eval.add_constraint(is_join.clone() * post_phase.clone());
         eval.add_constraint(is_join.clone() * pre_status.clone());
-        eval.add_constraint(is_join.clone() * (post_status.clone() - M31::from(2u32).into()));
+        eval.add_constraint(is_join.clone() * (post_status.clone() - M31::from(1u32).into()));
         let mut join_amount_sum: E::F = M31::from(0u32).into();
         for limb in &amount {
             join_amount_sum += limb.clone();
@@ -5595,9 +5671,9 @@ impl FrameworkEval for CanonicalAir {
                         - one.clone()),
             );
             // JoinTable credits the buy-in exactly once: the selected stack
-            // receives it and TableVault locks it.  The VM creates a Playing
-            // seat that participates in the next hand, with no current-round
-            // accounting yet.
+            // receives it and TableVault locks it.  The VM creates a Waiting
+            // seat (waiting-for-big-blind): the seat participates only once
+            // StartHand promotes it from the blind position.
             eval.add_constraint(
                 is_join.clone()
                     * transition_selector.clone()
@@ -5614,7 +5690,7 @@ impl FrameworkEval for CanonicalAir {
             eval.add_constraint(
                 is_join.clone()
                     * transition_selector.clone()
-                    * (full_post_status[index][CanonicalSeatStatus::Active as usize].clone()
+                    * (full_post_status[index][CanonicalSeatStatus::Waiting as usize].clone()
                         - one.clone()),
             );
             for limb in 0..4 {
@@ -5975,14 +6051,17 @@ impl FrameworkEval for CanonicalAir {
                 eval.add_constraint(unselected_betting.clone() * (right.clone() - left.clone()));
             }
 
-            // CreateTable and StartHand do not alter any public seat bucket.
-            // For actions that target one lifecycle seat, every non-target
-            // seat must also remain identical.  This uses the complete nine
-            // seat projection, not the single legacy action-seat projection.
+            // CreateTable does not alter any public seat bucket.  StartHand keeps
+            // every seat's funds identical but may promote Waiting seats to
+            // Active (waiting-for-big-blind admission); the promotion domain is
+            // constrained below.  For actions that target one lifecycle seat,
+            // every non-target seat must also remain identical.  This uses the
+            // complete nine seat projection, not the single legacy action-seat
+            // projection.
             let immutable_full_seat = is_create.clone()
-                + is_start.clone()
                 + is_set_leave.clone()
                 + is_deadline_extension.clone();
+            let immutable_funds = immutable_full_seat.clone() + is_start.clone();
             let immutable_time_bank = (immutable_full_seat.clone() - is_deadline_extension.clone())
                 + is_deadline_extension.clone() * (one.clone() - transition_selector.clone());
             let unselected_lifecycle =
@@ -5991,7 +6070,33 @@ impl FrameworkEval for CanonicalAir {
                 let unchanged = full_post_status[index][status].clone()
                     - full_pre_status[index][status].clone();
                 eval.add_constraint(immutable_full_seat.clone() * unchanged.clone());
-                eval.add_constraint(unselected_lifecycle.clone() * unchanged);
+                eval.add_constraint(unselected_lifecycle.clone() * unchanged.clone());
+                if status == CanonicalSeatStatus::Active as usize {
+                    // DeltaActive must equal pre_waiting - post_waiting, so the only
+                    // legal lifecycle change is a Waiting -> Active promotion.
+                    eval.add_constraint(
+                        is_start.clone()
+                            * (unchanged.clone()
+                                - full_pre_status[index]
+                                    [CanonicalSeatStatus::Waiting as usize]
+                                    .clone()
+                                + full_post_status[index][CanonicalSeatStatus::Waiting as usize]
+                                    .clone()),
+                    );
+                } else if status != CanonicalSeatStatus::Waiting as usize {
+                    eval.add_constraint(is_start.clone() * unchanged);
+                }
+                // The Waiting channel is one-way: post_waiting implies
+                // pre_waiting (no Active -> Waiting demotion).
+                eval.add_constraint(
+                    is_start.clone()
+                        * (full_post_status[index][CanonicalSeatStatus::Waiting as usize].clone()
+                            - full_pre_status[index][CanonicalSeatStatus::Waiting as usize]
+                                .clone()
+                                * full_post_status[index]
+                                    [CanonicalSeatStatus::Waiting as usize]
+                                    .clone()),
+                );
             }
             for (pre, post) in [
                 (&full_pre_stack[index], &full_post_stack[index]),
@@ -6001,7 +6106,7 @@ impl FrameworkEval for CanonicalAir {
             ] {
                 for (left, right) in pre.iter().zip(post.iter()) {
                     let unchanged = right.clone() - left.clone();
-                    eval.add_constraint(immutable_full_seat.clone() * unchanged.clone());
+                    eval.add_constraint(immutable_funds.clone() * unchanged.clone());
                     eval.add_constraint(unselected_lifecycle.clone() * unchanged);
                 }
             }
@@ -6072,12 +6177,16 @@ impl FrameworkEval for CanonicalAir {
             eval.add_constraint(
                 raise_actor[index].clone() * (post_acted_bits[index].clone() - one.clone()),
             );
+            // Only a full raise (raise_delta >= pre min_raise) reopens action
+            // for the other Active seats; a sub-minimum all-in keeps their
+            // acted bits exactly as the VM does (TDA #41).
+            let raise_reset_others = raise_meets_min.clone()
+                * (raise_active[index].clone() - raise_actor[index].clone());
             eval.add_constraint(
-                (raise_active[index].clone() - raise_actor[index].clone())
-                    * post_acted_bits[index].clone(),
+                raise_reset_others.clone() * post_acted_bits[index].clone(),
             );
             eval.add_constraint(
-                (is_raise.clone() - raise_active[index].clone())
+                (is_raise.clone() - raise_actor[index].clone() - raise_reset_others.clone())
                     * (post_acted_bits[index].clone() - pre_acted_bits[index].clone()),
             );
         }
@@ -6176,10 +6285,12 @@ impl FrameworkEval for CanonicalAir {
                         - one.clone()),
             );
             // If the action stays in this mid-round component, the VM's next
-            // actor cannot already have acted.  Otherwise the just-completed
-            // round must follow the separate collect/advance relation rather
-            // than be represented as a stale betting row.
-            eval.add_constraint(selector.clone() * post_acted_bits[index].clone());
+            // actor is either an unacted Active seat or — after a short
+            // all-in raised the water over it — an acted seat that still owes
+            // chips (it must call or fold; TDA #41).  Otherwise the
+            // just-completed round must follow the separate collect/advance
+            // relation rather than be represented as a stale betting row.
+            eval.add_constraint(selector.clone() * seat_settled[index].clone());
             // No successor is valid only at the exact completed-round
             // boundary: every remaining actionable seat must already have
             // acted and matched the final current bet.  The following
@@ -6225,14 +6336,100 @@ impl FrameworkEval for CanonicalAir {
                 };
                 for offset in 1..distance {
                     let between = (from + offset) % MAX_CANONICAL_SEATS;
+                    // No Active seat may be skipped unless it has already
+                    // acted AND matched the post current_bet: actionable =
+                    // !acted || owes.
                     eval.add_constraint(
                         pair.clone()
                             * full_post_status[between][CanonicalSeatStatus::Active as usize]
                                 .clone()
-                            * (one.clone() - post_acted_bits[between].clone()),
+                            * (one.clone() - seat_settled[between].clone()),
                     );
                 }
             }
+        }
+        // Per-seat `owes` honesty: the flag is binary, and the difference
+        // limbs must be the canonical 16-bit subtraction
+        // `current_bet - seat.bet` with a borrow chain on betting rows.
+        // When the flag is clear the limbs and borrows are zero, which forces
+        // `seat.bet == current_bet` — a host cannot hide an acted seat that
+        // still owes chips from the successor scan above.
+        for index in 0..MAX_CANONICAL_SEATS {
+            let owes = seat_owes[index].clone();
+            eval.add_constraint(
+                active.clone() * owes.clone() * (owes.clone() - one.clone()),
+            );
+            for limb in 0..4 {
+                eval.add_constraint(
+                    active.clone()
+                        * (one.clone() - owes.clone())
+                        * seat_owes_diff[index][limb].clone(),
+                );
+            }
+            for borrow in &seat_owes_borrows[index] {
+                eval.add_constraint(
+                    active.clone() * borrow.clone() * (borrow.clone() - one.clone()),
+                );
+                eval.add_constraint(
+                    active.clone() * (one.clone() - owes.clone()) * borrow.clone(),
+                );
+            }
+            // Ripple-borrow chain, gated to post-Active seats: empty/folded/
+            // all-in seats keep owes zero and are exempt (their bet is not
+            // comparable to the round water).
+            let owes_active =
+                full_post_status[index][CanonicalSeatStatus::Active as usize].clone();
+            let owes_base: E::F = M31::from(65_536u32).into();
+            eval.add_constraint(
+                is_betting.clone() * owes_active.clone()
+                    * (post_current[0].clone()
+                        - full_post_bet[index][0].clone()
+                        - seat_owes_diff[index][0].clone()
+                        + owes_base.clone() * seat_owes_borrows[index][0].clone()),
+            );
+            eval.add_constraint(
+                is_betting.clone() * owes_active.clone()
+                    * (post_current[1].clone()
+                        - full_post_bet[index][1].clone()
+                        - seat_owes_diff[index][1].clone()
+                        - seat_owes_borrows[index][0].clone()
+                        + owes_base.clone() * seat_owes_borrows[index][1].clone()),
+            );
+            eval.add_constraint(
+                is_betting.clone() * owes_active.clone()
+                    * (post_current[2].clone()
+                        - full_post_bet[index][2].clone()
+                        - seat_owes_diff[index][2].clone()
+                        - seat_owes_borrows[index][1].clone()
+                        + owes_base.clone() * seat_owes_borrows[index][2].clone()),
+            );
+            eval.add_constraint(
+                is_betting.clone() * owes_active.clone()
+                    * (post_current[3].clone()
+                        - full_post_bet[index][3].clone()
+                        - seat_owes_diff[index][3].clone()
+                        - seat_owes_borrows[index][2].clone()),
+            );
+            // owes = 1 must prove a non-zero difference limb sum; the owes=0
+            // rows carry a zero inverse, so no extra selector gate is needed
+            // (and gating would raise the expression degree above three).
+            let mut owes_sum: E::F = M31::from(0u32).into();
+            for limb in 0..4 {
+                owes_sum += seat_owes_diff[index][limb].clone();
+            }
+            eval.add_constraint(
+                owes.clone() * (owes_sum.clone() * seat_owes_inv[index].clone() - one.clone()),
+            );
+            eval.add_constraint((one.clone() - owes.clone()) * seat_owes_inv[index].clone());
+            // settled <=> acted && !owes (degree-safe turn-scan helper),
+            // meaningful on betting rows only.
+            eval.add_constraint(
+                is_betting.clone()
+                    * (seat_settled[index].clone()
+                        - post_acted_bits[index].clone() * (one.clone() - owes.clone())),
+            );
+            // settled <=> acted && !owes (degree-safe turn-scan helper).
+
         }
         eval.add_constraint(is_betting.clone() * pre_status.clone() - selected_full_pre_status);
         eval.add_constraint(is_betting.clone() * post_status.clone() - selected_full_post_status);
@@ -7176,6 +7373,15 @@ impl FrameworkEval for CanonicalAir {
             eval.add_constraint(inactive.clone() * funding_seat_selectors[index].clone());
             eval.add_constraint(inactive.clone() * transition_seat_selectors[index].clone());
             eval.add_constraint(inactive.clone() * round_complete_active[index].clone());
+            eval.add_constraint(inactive.clone() * seat_owes[index].clone());
+            eval.add_constraint(inactive.clone() * seat_owes_inv[index].clone());
+            for limb in &seat_owes_diff[index] {
+                eval.add_constraint(inactive.clone() * limb.clone());
+            }
+            for borrow in &seat_owes_borrows[index] {
+                eval.add_constraint(inactive.clone() * borrow.clone());
+            }
+            eval.add_constraint(inactive.clone() * seat_settled[index].clone());
             for pair in &next_turn_pairs[index] {
                 eval.add_constraint(inactive.clone() * pair.clone());
             }
@@ -7475,10 +7681,12 @@ impl FrameworkEval for CanonicalAir {
         );
         let mut start_active_count: E::F = M31::from(0u32).into();
         for index in 0..MAX_CANONICAL_SEATS {
-            start_active_count += full_pre_status[index][CanonicalSeatStatus::Active as usize]
+            // Count post-state participants: StartHand admits promoted
+            // waiting-for-big-blind seats into the new hand.
+            start_active_count += full_post_status[index][CanonicalSeatStatus::Active as usize]
                 .clone()
-                + full_pre_status[index][CanonicalSeatStatus::Folded as usize].clone()
-                + full_pre_status[index][CanonicalSeatStatus::AllIn as usize].clone();
+                + full_post_status[index][CanonicalSeatStatus::Folded as usize].clone()
+                + full_post_status[index][CanonicalSeatStatus::AllIn as usize].clone();
         }
         eval.add_constraint(
             is_start.clone()
@@ -9007,7 +9215,7 @@ mod tests {
         post.call_seq = pre.call_seq + 1;
         post.chip_pool = pre.chip_pool + 1;
         post.seats[usize::from(seat)] = CanonicalSeat {
-            status: CanonicalSeatStatus::Active,
+            status: CanonicalSeatStatus::Waiting,
             acted: false,
             stack: 1,
             bet: 0,
@@ -10498,6 +10706,9 @@ mod tests {
         witness.post.seats[0].bet = 175;
         witness.post.seats[0].total_bet = 175;
         witness.action.amount = 175;
+        // 不足最小加注的 all-in 不重新打开行动权：对手的 acted 位保持。
+        witness.post.seats[1].acted = true;
+        witness.post.acted_mask = 0b11;
         witness.seal();
         witness
     }
@@ -11319,6 +11530,9 @@ mod tests {
         post.deadline_ms = 100;
         post.protocol_pending_mask = 0b11;
         post.call_seq = 0;
+        // 全新桌 StartHand：两个 Waiting 座位（waiting-for-BB fallback）一起提升为 Active。
+        post.seats[0].status = CanonicalSeatStatus::Active;
+        post.seats[1].status = CanonicalSeatStatus::Active;
         let mut start = CanonicalTransitionWitness {
             pre: second.post.clone(),
             post,

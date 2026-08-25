@@ -7,3 +7,4 @@ coverage.lcov
 .DS_Store
 .zcode/
 .vscode/
+target-bench/

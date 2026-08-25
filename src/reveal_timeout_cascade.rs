@@ -711,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn native_vm_raked_one_survivor_reveal_timeout_charges_the_exact_rake() {
+    fn native_vm_raked_one_survivor_reveal_timeout_does_not_rake_uncontested_pot() {
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xDB; 20], 0),
             "raked-one-survivor-reveal-timeout".into(),
@@ -759,9 +759,10 @@ mod tests {
 
         let mut events = Vec::new();
         state_machine::advance_deadline(&mut table, 11_000, &mut events).unwrap();
-        // floor(90 * 500 / 10_000) = 4 raked from the 90-chip pot.
-        assert_eq!(table.seats[2].stack(), 186);
-        assert_eq!(table.chip_pool, 186);
+        // Uncontested one-survivor award pays no rake: the complete
+        // 90-chip pot goes to the survivor.
+        assert_eq!(table.seats[2].stack(), 190);
+        assert_eq!(table.chip_pool, 190);
         assert_eq!(table.pot, 0);
         let mut accounted = table.pot;
         for seat in &table.seats {

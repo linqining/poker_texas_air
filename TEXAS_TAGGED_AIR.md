@@ -42,8 +42,10 @@ subset of the VM:
 - full fixed-width opening of every seat's lifecycle and mutable betting
   buckets during a betting action; the selected-seat fields are derived from
   that opening and non-acting seat images are immutable;
-- Raise resets exactly the other `Active` seats' acted flags, while preserving
-  inactive-seat flags;
+- Raise reopens action by resetting the other `Active` seats' acted flags only
+  when the raise increment meets the pre-state `min_raise`; a sub-minimum
+  all-in keeps every non-acting seat's flags (TDA #41), while inactive-seat
+  flags are always preserved;
 - canonical circular next-active-seat scan, including a proof that no Active
   seat was skipped between actor and successor, and contiguous batches.
 - `Addon` and `Rebuy` range-check the four 16-bit TableVault limbs and prove
@@ -60,14 +62,22 @@ subset of the VM:
 - `SetLeaveAfterHand`, with an occupied in-capacity seat and exactly one
   canonical mask-bit transition. The VM's idempotent no-op is rejected because
   it cannot be represented as a `call_seq`-incrementing witness.
-- `CreateTable`/`StartHand` preserve all opened mutable seat buckets; StartHand
-  additionally proves its post-state deadline is non-zero;
+- `CreateTable` preserves all opened mutable seat buckets; StartHand keeps
+  every seat's funds identical but admits waiting-for-big-blind seats through
+  a constrained `Waiting -> Active` promotion channel (funds and all other
+  lifecycle statuses immutable, no `Active -> Waiting` demotion), counts
+  post-state participants for the `>= 2` gate, and proves its post-state
+  deadline is non-zero. Which Waiting seat is promoted is a host admission
+  policy (the blind-position rule) and is not recomputed inside the AIR;
 - `AdvanceDeadline` proves a canonical 64-bit comparison
   `action.height >= pre.deadline` with limb range checks and checked carries,
   and preserves all opened mutable seat buckets;
-  `JoinTable`/`LeaveTable`/`ForceFold`/`KickPlayer` preserve every non-target
-  opened seat, and ForceFold/KickPlayer enforce their selected-seat lifecycle
-  domain (`Active|Waiting` to `Folded|Out|Empty`). Rules and governance
+  `JoinTable` installs a `Waiting` seat (waiting-for-big-blind: the seat joins
+  the deal only after StartHand promotes it from the blind position) with the
+  exact buy-in custody relation; `LeaveTable`/`ForceFold`/`KickPlayer`
+  preserve every non-target opened seat, and ForceFold/KickPlayer enforce
+  their selected-seat lifecycle domain (`Active|Waiting` to
+  `Folded|Out|Empty`). Rules and governance
   commitments are also constrained to remain immutable on every active row.
 
 The narrow tagged AIR uses eight one-hot action tags.  The canonical AIR uses

@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use poker_texas_air::ristretto_fp_program_air::{
     build_ristretto_fp_program_compressed_point_addition, prove_ristretto_fp_program,
+    prove_ristretto_fp_program_compressed_fixed_window_scalar_mul,
     prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch,
     verify_ristretto_fp_program,
     verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch,
@@ -92,7 +93,7 @@ fn main() {
         );
     }
 
-    for pairs in [2usize, 4] {
+    for pairs in [2usize, 4, 8, 16, 52] {
         println!("=== compressed fixed-window scalar-mul batch N={pairs} ===");
         let inputs = (1..=pairs)
             .map(|index| {
@@ -132,6 +133,47 @@ fn main() {
             prove_elapsed,
             verify_elapsed,
             borsh_len(&archive)
+        );
+    }
+
+    println!("=== per-input 8-batches vs single 8-input batch (simulated per-slot vs global slot-OR muls) ===");
+    for batch_size in [4usize, 8] {
+        let inputs: Vec<_> = (1..=batch_size)
+            .map(|index| {
+                let scalar = scalar(index as u8);
+                (scalar, nibbles(&scalar), basepoint())
+            })
+            .collect();
+        let started = Instant::now();
+        let single = prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
+            inputs.clone(),
+        )
+        .unwrap();
+        let single_prove = started.elapsed();
+        let single_bytes = borsh_len(&single);
+
+        let started = Instant::now();
+        let mut total_prove = std::time::Duration::ZERO;
+        let mut total_bytes = 0usize;
+        for input in &inputs {
+            let item_started = Instant::now();
+            let one = prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
+                vec![*input],
+            )
+            .unwrap();
+            total_prove = total_prove + item_started.elapsed();
+            total_bytes += borsh_len(&one);
+        }
+        let _ = started;
+        let per_input_prove = total_prove;
+
+        println!(
+            "N={batch_size:>2}  single 8-input batch: prove {:>8.1?}  proof bytes {}",
+            single_prove, single_bytes
+        );
+        println!(
+            "N={batch_size:>2}  {batch_size} separate N=1 batches: prove {:>8.1?}  proof bytes {}",
+            per_input_prove, total_bytes
         );
     }
 }

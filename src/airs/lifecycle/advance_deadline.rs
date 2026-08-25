@@ -1262,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_input_binds_rake_event_from_betting_timeout_settlement() {
+    fn canonical_input_binds_betting_timeout_settlement_without_uncontested_rake() {
         let mut pre = betting_table(0);
         // Model an already-collected 100-chip wager from each player.  The
         // table vault is therefore stacks (1,800) + pot (200) = 2,000.
@@ -1280,13 +1280,12 @@ mod tests {
 
         let now_ms = 1_030_001;
         let (post, events) = execute_advance_deadline(&pre, now_ms);
-        assert!(events.iter().any(|event| matches!(
+        // The timeout folds seat 0 and the pot is awarded without a showdown:
+        // uncontested pots pay no rake (consistent with the settlement plan
+        // rule "uncontested pot must not be raked").
+        assert!(!events.iter().any(|event| matches!(
             event,
-            TexasPokerEvent::RakeCollected {
-                rake_amount: 10,
-                rake_mode: RAKE_MODE_PERCENTAGE,
-                ..
-            }
+            TexasPokerEvent::RakeCollected { .. }
         )));
         assert!(events.iter().any(|event| matches!(
             event,
@@ -1302,7 +1301,7 @@ mod tests {
         assert!(input.timeout_required);
         assert_eq!(input.time_bank_consumed, 0);
         assert_eq!(input.rake_mode, RAKE_MODE_PERCENTAGE);
-        assert_eq!(input.rake_amount, 10);
+        assert_eq!(input.rake_amount, 0);
         assert_eq!(
             input.lifecycle.branch_kind,
             ADVANCE_DEADLINE_BRANCH_BETTING_TIMEOUT

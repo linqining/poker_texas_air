@@ -2460,6 +2460,59 @@ pub fn apply_raise(
 
 // ========== 开局 / 超时 / 结算 ==========
 
+/// waiting-for-BB：把应在大盲位入局的 Waiting 座位提升为参与座位。
+///
+/// 提升规则（确定性，防"离桌—重入躲盲注"）：
+/// - 桌上没有任何参与座位（全新桌）时，所有 Waiting 座位一起入局；
+/// - 否则从 button 顺时针找到第一个参与座位（本手 SB），紧随其后的
+///   occupied 座位若是 Waiting 则提升（正好以 BB 身份入局）；
+/// - 提升后参与人数仍不足 `MIN_PLAYERS_TO_START` 时，按 button 之后的
+///   顺序提升最早的 Waiting 座位补足（保证有人等待时牌桌可以开局）。
+fn promote_waiting_for_big_blind(table: &mut TexasPokerTable) {
+    let n = usize::from(table.max_players);
+    let participating =
+        |seats: &[Seat]| seats.iter().filter(|s| s.is_occupied() && !s.is_waiting()).count();
+
+    if participating(&table.seats) == 0 {
+        // 全新桌：没有可参照的盲注轨道，所有等待座位同时入局。
+        for seat in table.seats.iter_mut() {
+            seat.promote_waiting();
+        }
+        return;
+    }
+
+    // 本手 SB = button 后第一个参与座位；紧随其后的 Waiting 座位以 BB 身份入局。
+    if let Some(sb) = find_next_participating_seat(&table.seats, table.button, table.max_players)
+    {
+        for offset in 1..=n {
+            let idx = (usize::from(sb) + offset) % n;
+            if table.seats[idx].is_waiting() {
+                table.seats[idx].promote_waiting();
+                break;
+            }
+            if table.seats[idx].is_occupied() {
+                // SB 后紧邻的已是参与座位，本手 BB 已有归属。
+                break;
+            }
+        }
+    }
+
+    // 补足开局人数下限。
+    let mut count = participating(&table.seats);
+    if count < usize::from(MIN_PLAYERS_TO_START) {
+        for offset in 1..=n {
+            let idx = (usize::from(table.button) + offset) % n;
+            if table.seats[idx].is_waiting() {
+                table.seats[idx].promote_waiting();
+                count += 1;
+                if count >= usize::from(MIN_PLAYERS_TO_START) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// 开局：投盲注 + 进入 SHUFFLE_PHASE_BEFORE_PREFLOP + 设置 pending_players。
 ///
 /// 镜像 `table.move::start_hand / do_start_hand`（line 1061-1100）。
@@ -2473,6 +2526,10 @@ pub fn start_hand(
             table.round_state()
         )));
     }
+
+    move_button(table);
+    // waiting-for-BB：先按盲注位规则提升应入局的等待座位，再校验参与人数。
+    promote_waiting_for_big_blind(table);
     if count_active_occupied(&table.seats) < MIN_PLAYERS_TO_START {
         return Err(PokerL1Error::Serialization(format!(
             "active players {} < MIN_PLAYERS_TO_START {}",
@@ -2480,8 +2537,6 @@ pub fn start_hand(
             MIN_PLAYERS_TO_START
         )));
     }
-
-    move_button(table);
     set_initial_encrypted_deck(table)?;
     // `set_initial_encrypted_deck` replaces the prior deck with the canonical plaintext-base
     // ciphertexts. No per-hand shuffle layer has therefore been applied yet, even though

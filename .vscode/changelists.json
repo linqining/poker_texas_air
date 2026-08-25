@@ -4,14 +4,18 @@
       "name": "Default",
       "files": [
         ".gitignore",
-        ".zcode/plans/plan-sess_ccdb5fbe-4d13-4406-abb6-875a028958df.md",
-        ".zcode/plans/plan-sess_cf13e1c8-bc93-484e-b23f-0aa4b3c905b1.md",
-        "poker_contracts/src/poker_settlement.cairo",
-        "poker_contracts/target/dev/poker_contracts.sierra.json",
-        "poker_l1/src/vm/contracts/texas_poker/hand_evaluator.rs",
-        "poker_l1/src/vm/contracts/texas_poker/settlement.rs",
         "poker_l1/src/vm/contracts/texas_poker/state_machine.rs",
-        "src/ristretto_reconstruction_slot_or_air.rs",
+        "TEXAS_TAGGED_AIR.md",
+        "poker_l1/src/vm/contracts/texas_poker/dispatch.rs",
+        "poker_l1/src/vm/contracts/texas_poker/types.rs",
+        "src/airs/lifecycle/advance_deadline.rs",
+        "src/bin/ristretto_perf.rs",
+        "src/lib.rs",
+        "src/reveal_timeout_cascade.rs",
+        "src/texas_canonical.rs",
+        "src/texas_canonical_air.rs",
+        "target-bench/release/poker-hand-bench",
+        "target-bench/release/poker-hand-bench.d",
         ".vscode/changelists.json"
       ]
     }
