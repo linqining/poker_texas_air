@@ -474,6 +474,30 @@ ePrint 2026/1329）；admission 并行验证双证明，归档接口保持递归
   FRI fold\_step 1→2 实验（canonical 侧）：证明尺寸 −1.5%、时间持平，收益不抵
   声音性复核成本，维持 1。
 
+## 第 17 轮：scalar-mul 归档 wire 压缩与 release 基准（2026-08-26）
+
+本轮针对 slot-OR 归档中可由 `(scalar, windows, base)` 确定重建的
+Fp-program 行做了字节级压缩。新的 `RSMB`/version-1 wire 只携带 statements、
+认证 STARK 字节和 claimed sum；解码端重建并校验程序行与 statement output，旧
+Borsh 格式仍可在 wire 边界读取，因而不改变证明语义或篡改拒绝规则。
+
+冷启动 release microbench（Apple Silicon，`cargo +nightly run --release`）：
+
+| 场景 | prove | verify | 归档/证明 |
+| --- | ---: | ---: | ---: |
+| 完整 canonical 手牌 | 2.005 s | 396 ms | 约 2.98 MB |
+| Ristretto accumulator（104 rows） | 1.61 s | 0.88 s | 7.14 MB |
+| compressed scalar-mul（N=52） | 233.5 s | 10.1 s | **6.54 MB** |
+
+同一 N=52 fixture 的旧归档约 102 MB；新 wire 降至约 6.54 MB（约 −94%），
+主要收益来自移除 52 条 scalar-mul schedule 中重复嵌入的 335-row programs。
+本轮未改变 scalar-mul trace 域大小，因此证明时间仍由 FRI/承诺主导；下一步若
+继续压缩域大小，应单独进行协议格式与基准评审。
+
+回归：`RUSTFLAGS='--cfg=texas_release_tests' cargo +nightly test --release
+--features test-helpers`，469 passed、0 failed、4 ignored；所有集成测试和
+doctest 均通过。
+
 ## 方法说明
 
 - 计时为墙钟，单次冷启动（twiddle/列池缓存跨证明复用属正常生产路径）。
@@ -481,4 +505,3 @@ ePrint 2026/1329）；admission 并行验证双证明，归档接口保持递归
 - bench 驱动器（`hand-bench/src/main.rs`）本身通过全部 witness 校验与 AIR
   证明/验证（含九座位轮转、加注重置 acted、终局 reset 投影），等价于一组
   端到端正确性测试。
-

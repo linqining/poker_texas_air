@@ -546,12 +546,93 @@ pub struct RistrettoCompressedFixedWindowScalarMulStatement {
 }
 
 /// Multiple compressed scalar multiplications sharing one point-addition STARK.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof {
     /// Public statements in canonical caller-defined order.
     pub statements: Vec<RistrettoCompressedFixedWindowScalarMulStatement>,
     /// Concatenated 335-row schedules for all statements.
     pub additions: ArchivedRistrettoFpProgramBatchProof,
+}
+
+const COMPRESSED_SCALAR_MUL_BATCH_ARCHIVE_MAGIC: [u8; 4] = *b"RSMB";
+const COMPRESSED_SCALAR_MUL_BATCH_ARCHIVE_VERSION: u8 = 1;
+
+/// The scalar-multiplication schedule is deterministically reconstructed from
+/// `(scalar, windows, base)` statements.  Keep only those statements and the
+/// authenticated STARK bytes on the wire; embedding all 335-row programs
+/// duplicated hundreds of megabytes of data in deep slot-OR archives.
+impl BorshSerialize for ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_all(&COMPRESSED_SCALAR_MUL_BATCH_ARCHIVE_MAGIC)?;
+        COMPRESSED_SCALAR_MUL_BATCH_ARCHIVE_VERSION.serialize(writer)?;
+        self.statements.serialize(writer)?;
+        self.additions.stark_proof_bytes.serialize(writer)?;
+        self.additions.range_claimed_sum.serialize(writer)
+    }
+}
+
+impl BorshDeserialize for ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof {
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let mut magic = [0u8; 4];
+        reader.read_exact(&mut magic)?;
+        let statements = if magic == COMPRESSED_SCALAR_MUL_BATCH_ARCHIVE_MAGIC {
+            let version = u8::deserialize_reader(reader)?;
+            if version != COMPRESSED_SCALAR_MUL_BATCH_ARCHIVE_VERSION {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unsupported compressed scalar-mul batch archive version {version}"),
+                ));
+            }
+            Vec::<RistrettoCompressedFixedWindowScalarMulStatement>::deserialize_reader(reader)?
+        } else {
+            // Legacy format began with the Borsh Vec length and embedded the
+            // complete Fp-program batch.  Continue accepting it at the wire
+            // boundary while all new encoders use the compact representation.
+            let count = u32::from_le_bytes(magic) as usize;
+            if count > 1_000_000 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "legacy compressed scalar-mul statement count is unreasonable",
+                ));
+            }
+            let mut statements = Vec::with_capacity(count);
+            for _ in 0..count {
+                statements.push(
+                    RistrettoCompressedFixedWindowScalarMulStatement::deserialize_reader(reader)?,
+                );
+            }
+            let additions = ArchivedRistrettoFpProgramBatchProof::deserialize_reader(reader)?;
+            return Ok(Self {
+                statements,
+                additions,
+            });
+        };
+        let stark_proof_bytes = Vec::<u8>::deserialize_reader(reader)?;
+        let range_claimed_sum = <[u32; 4]>::deserialize_reader(reader)?;
+        let mut programs = Vec::new();
+        for statement in &statements {
+            let (rows, output) =
+                build_compressed_fixed_window_scalar_mul_rows(&statement.windows, &statement.base)
+                    .map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                    })?;
+            if output != statement.output {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "compressed scalar-mul output is detached from its statement",
+                ));
+            }
+            programs.extend(rows);
+        }
+        Ok(Self {
+            statements,
+            additions: ArchivedRistrettoFpProgramBatchProof {
+                programs,
+                stark_proof_bytes,
+                range_claimed_sum,
+            },
+        })
+    }
 }
 
 /// Incremental host-side program builder.
@@ -5585,6 +5666,12 @@ mod tests {
             2 * COMPRESSED_FIXED_WINDOW_ROWS
         );
         validate_compressed_fixed_window_scalar_mul_batch_statement(&archive).unwrap();
+        let wire = borsh::to_vec(&archive).unwrap();
+        let decoded = borsh::from_slice::<
+            ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof,
+        >(&wire)
+        .unwrap();
+        assert_eq!(decoded, archive);
 
         let mut statement_swap = archive.clone();
         statement_swap.statements.swap(0, 1);
@@ -5609,6 +5696,25 @@ mod tests {
         assert!(
             validate_compressed_fixed_window_scalar_mul_batch_statement(&padding_relabel).is_err()
         );
+    }
+
+    #[test]
+    fn compressed_scalar_mul_batch_archive_omits_reconstructible_program_rows() {
+        let archive = ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof {
+            statements: Vec::new(),
+            additions: ArchivedRistrettoFpProgramBatchProof {
+                programs: Vec::new(),
+                stark_proof_bytes: vec![1, 2, 3],
+                range_claimed_sum: [4, 5, 6, 7],
+            },
+        };
+        let encoded = borsh::to_vec(&archive).unwrap();
+        assert_eq!(&encoded[..4], b"RSMB");
+        let decoded = borsh::from_slice::<
+            ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof,
+        >(&encoded)
+        .unwrap();
+        assert_eq!(decoded, archive);
     }
 
     #[test]

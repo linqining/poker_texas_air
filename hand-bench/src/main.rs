@@ -134,6 +134,9 @@ fn lifecycle_batch() -> Vec<CanonicalTransitionWitness> {
         post.call_seq = 2 + seat as u32;
         post.chip_pool = 1_000 * (seat as u64 + 1);
         post.seats[seat] = active_seat(1_000, false, seat);
+        // JoinTable creates a funded waiting seat; StartHand promotes the
+        // waiting participants into the active hand.
+        post.seats[seat].status = CanonicalSeatStatus::Waiting;
         post.seats[seat].hole_cards_commitment = [0; 32];
         let join = witness(
             pre,
@@ -155,6 +158,9 @@ fn lifecycle_batch() -> Vec<CanonicalTransitionWitness> {
     start_post.phase_subtag = 1;
     start_post.deadline_ms = 100;
     start_post.protocol_pending_mask = 0x1ff;
+    for seat in 0..SEATS {
+        start_post.seats[seat].status = CanonicalSeatStatus::Active;
+    }
     let start = witness(
         start_pre,
         start_post,
