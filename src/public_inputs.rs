@@ -447,7 +447,9 @@ impl TexasPublicInputs {
         let endpoint = |image: &[FieldElement],
                         root: StateRoot,
                         label: &str|
-         -> TexasAirResult<crate::state_root_binding::StateRootEndpointStatement> {
+         -> TexasAirResult<
+            crate::state_root_binding::StateRootEndpointStatement,
+        > {
             let preimage = match crate::state_root::table_from_state_preimage(image) {
                 Ok(table) if crate::state_root::is_absent_table(&table) => {
                     crate::state_root::ABSENT_TABLE_PREIMAGE.to_vec()
@@ -463,7 +465,7 @@ impl TexasPublicInputs {
                 Err(error) => {
                     return Err(TexasAirError::StateRootError(format!(
                         "{label} state image is not a canonical resolved Texas table: {error}"
-                    )))
+                    )));
                 }
             };
             // The endpoint statement message is the domain-prefixed preimage,
@@ -597,16 +599,12 @@ mod tests {
         };
         // The endpoint derivation must reject the empty image before any
         // binding is consulted; use an arbitrary valid binding.
-        let endpoint = crate::state_root_binding::StateRootEndpointStatement::from_preimage(
-            Vec::new(),
-        );
+        let endpoint =
+            crate::state_root_binding::StateRootEndpointStatement::from_preimage(Vec::new());
         let binding =
             crate::state_root_binding::prove_state_root_binding(endpoint.clone(), endpoint)
                 .expect("dummy binding proves");
-        assert!(
-            pi.verify_roots(&binding).is_err(),
-            "empty image must fail"
-        );
+        assert!(pi.verify_roots(&binding).is_err(), "empty image must fail");
     }
 
     #[test]

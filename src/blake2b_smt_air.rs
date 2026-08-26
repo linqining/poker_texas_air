@@ -282,7 +282,12 @@ fn fixed_block_from_message(
     Ok(block)
 }
 
-fn scope_ids() -> Vec<PreProcessedColumnId> {
+fn scope_ids() -> &'static [PreProcessedColumnId] {
+    static IDS: std::sync::OnceLock<Vec<PreProcessedColumnId>> = std::sync::OnceLock::new();
+    IDS.get_or_init(build_scope_ids).as_slice()
+}
+
+fn build_scope_ids() -> Vec<PreProcessedColumnId> {
     let mut ids = vec![
         "blake2b.smt.active.v1",
         "blake2b.smt.first.v1",
@@ -490,16 +495,16 @@ fn trace_bits<E: EvalAtRow>(eval: &mut E) -> [[E::F; LIMB_BITS]; WORD_LIMBS] {
     std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()))
 }
 
-fn next_scope<E: EvalAtRow>(
+fn next_scope<E: EvalAtRow, I: Iterator<Item = PreProcessedColumnId>>(
     eval: &mut E,
-    ids: &mut std::vec::IntoIter<PreProcessedColumnId>,
+    ids: &mut I,
 ) -> E::F {
     eval.get_preprocessed_column(ids.next().expect("complete Blake2b scope layout"))
 }
 
-fn scope_word<E: EvalAtRow>(
+fn scope_word<E: EvalAtRow, I: Iterator<Item = PreProcessedColumnId>>(
     eval: &mut E,
-    ids: &mut std::vec::IntoIter<PreProcessedColumnId>,
+    ids: &mut I,
 ) -> [E::F; WORD_LIMBS] {
     std::array::from_fn(|_| next_scope(eval, ids))
 }
@@ -623,7 +628,7 @@ fn xor_rotate<E: EvalAtRow>(
 }
 
 fn evaluate_blake2b<E: EvalAtRow>(mut eval: E) -> E {
-    let mut ids = scope_ids().into_iter();
+    let mut ids = scope_ids().iter().cloned();
     let active = next_scope(&mut eval, &mut ids);
     let first = next_scope(&mut eval, &mut ids);
     let last = next_scope(&mut eval, &mut ids);

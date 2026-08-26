@@ -96,8 +96,9 @@ fn options() -> impl Options {
         .with_limit(32 * 1024 * 1024)
 }
 
-fn modulus() -> BigUint {
-    (BigUint::one() << 255u32) - BigUint::from(19u32)
+fn modulus() -> &'static BigUint {
+    static MODULUS: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+    MODULUS.get_or_init(|| (BigUint::one() << 255u32) - BigUint::from(19u32))
 }
 
 fn big_uint(value: &[u8; LIMBS]) -> BigUint {
@@ -129,14 +130,14 @@ fn multiplication_witness(
     let p = modulus();
     let a_value = big_uint(a);
     let b_value = big_uint(b);
-    if a_value >= p || b_value >= p {
+    if a_value >= *p || b_value >= *p {
         return Err(TexasAirError::SpecViolation(
             "Ristretto modular multiplication inputs must be canonical".into(),
         ));
     }
     let product = &a_value * &b_value;
-    let quotient = &product / &p;
-    let remainder = &product % &p;
+    let quotient = &product / p;
+    let remainder = &product % p;
     let c = limbs(&remainder);
     let q = limbs(&quotient);
 
@@ -217,12 +218,16 @@ fn scope_columns(
     trace
 }
 
-fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    (0..PREPROCESSED_COLUMNS)
-        .map(|column| PreProcessedColumnId {
-            id: format!("ristretto.fp.mul.v1.{column}").into(),
-        })
-        .collect()
+fn preprocessed_ids() -> &'static [PreProcessedColumnId] {
+    static IDS: std::sync::OnceLock<Vec<PreProcessedColumnId>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        (0..PREPROCESSED_COLUMNS)
+            .map(|column| PreProcessedColumnId {
+                id: format!("ristretto.fp.mul.v1.{column}").into(),
+            })
+            .collect()
+    })
+    .as_slice()
 }
 
 #[derive(Clone, Copy)]

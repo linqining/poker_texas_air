@@ -207,8 +207,7 @@ const RAKE_CHIP_EXTRA_CARRIES_OFFSET: usize = RAKE_CHIP_INTERMEDIATE_OFFSET + 4;
 /// Per-seat `owes` advice for the betting successor relation: flag, four
 /// difference limbs, three subtraction borrows, and a non-zero inverse.
 const SEAT_OWES_ADVICE_OFFSET: usize = RAKE_CHIP_EXTRA_CARRIES_OFFSET + 3;
-const NUM_COLUMNS: usize =
-    SEAT_OWES_ADVICE_OFFSET + MAX_CANONICAL_SEATS * (1 + 4 + 3 + 1 + 1);
+const NUM_COLUMNS: usize = SEAT_OWES_ADVICE_OFFSET + MAX_CANONICAL_SEATS * (1 + 4 + 3 + 1 + 1);
 // The fixed public scope contains the table/sequence/image boundary plus the
 // five authenticated root domains (state, lifecycle, overlay, settlement and
 // custody) at both ends of the batch.
@@ -2140,7 +2139,12 @@ fn archive_root_scope(proof: &ArchivedCanonicalTaggedProof) -> [[u8; 32]; ROOT_D
     ]
 }
 
-fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
+fn preprocessed_ids() -> &'static [PreProcessedColumnId] {
+    static IDS: std::sync::OnceLock<Vec<PreProcessedColumnId>> = std::sync::OnceLock::new();
+    IDS.get_or_init(build_preprocessed_ids).as_slice()
+}
+
+fn build_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     let mut ids = vec![
         "texas.canonical.active.v2",
         "texas.canonical.first.v2",
@@ -6058,9 +6062,8 @@ impl FrameworkEval for CanonicalAir {
             // every non-target seat must also remain identical.  This uses the
             // complete nine seat projection, not the single legacy action-seat
             // projection.
-            let immutable_full_seat = is_create.clone()
-                + is_set_leave.clone()
-                + is_deadline_extension.clone();
+            let immutable_full_seat =
+                is_create.clone() + is_set_leave.clone() + is_deadline_extension.clone();
             let immutable_funds = immutable_full_seat.clone() + is_start.clone();
             let immutable_time_bank = (immutable_full_seat.clone() - is_deadline_extension.clone())
                 + is_deadline_extension.clone() * (one.clone() - transition_selector.clone());
@@ -6077,8 +6080,7 @@ impl FrameworkEval for CanonicalAir {
                     eval.add_constraint(
                         is_start.clone()
                             * (unchanged.clone()
-                                - full_pre_status[index]
-                                    [CanonicalSeatStatus::Waiting as usize]
+                                - full_pre_status[index][CanonicalSeatStatus::Waiting as usize]
                                     .clone()
                                 + full_post_status[index][CanonicalSeatStatus::Waiting as usize]
                                     .clone()),
@@ -6093,8 +6095,7 @@ impl FrameworkEval for CanonicalAir {
                         * (full_post_status[index][CanonicalSeatStatus::Waiting as usize].clone()
                             - full_pre_status[index][CanonicalSeatStatus::Waiting as usize]
                                 .clone()
-                                * full_post_status[index]
-                                    [CanonicalSeatStatus::Waiting as usize]
+                                * full_post_status[index][CanonicalSeatStatus::Waiting as usize]
                                     .clone()),
                 );
             }
@@ -6182,9 +6183,7 @@ impl FrameworkEval for CanonicalAir {
             // acted bits exactly as the VM does (TDA #41).
             let raise_reset_others = raise_meets_min.clone()
                 * (raise_active[index].clone() - raise_actor[index].clone());
-            eval.add_constraint(
-                raise_reset_others.clone() * post_acted_bits[index].clone(),
-            );
+            eval.add_constraint(raise_reset_others.clone() * post_acted_bits[index].clone());
             eval.add_constraint(
                 (is_raise.clone() - raise_actor[index].clone() - raise_reset_others.clone())
                     * (post_acted_bits[index].clone() - pre_acted_bits[index].clone()),
@@ -6356,9 +6355,7 @@ impl FrameworkEval for CanonicalAir {
         // still owes chips from the successor scan above.
         for index in 0..MAX_CANONICAL_SEATS {
             let owes = seat_owes[index].clone();
-            eval.add_constraint(
-                active.clone() * owes.clone() * (owes.clone() - one.clone()),
-            );
+            eval.add_constraint(active.clone() * owes.clone() * (owes.clone() - one.clone()));
             for limb in 0..4 {
                 eval.add_constraint(
                     active.clone()
@@ -6370,25 +6367,24 @@ impl FrameworkEval for CanonicalAir {
                 eval.add_constraint(
                     active.clone() * borrow.clone() * (borrow.clone() - one.clone()),
                 );
-                eval.add_constraint(
-                    active.clone() * (one.clone() - owes.clone()) * borrow.clone(),
-                );
+                eval.add_constraint(active.clone() * (one.clone() - owes.clone()) * borrow.clone());
             }
             // Ripple-borrow chain, gated to post-Active seats: empty/folded/
             // all-in seats keep owes zero and are exempt (their bet is not
             // comparable to the round water).
-            let owes_active =
-                full_post_status[index][CanonicalSeatStatus::Active as usize].clone();
+            let owes_active = full_post_status[index][CanonicalSeatStatus::Active as usize].clone();
             let owes_base: E::F = M31::from(65_536u32).into();
             eval.add_constraint(
-                is_betting.clone() * owes_active.clone()
+                is_betting.clone()
+                    * owes_active.clone()
                     * (post_current[0].clone()
                         - full_post_bet[index][0].clone()
                         - seat_owes_diff[index][0].clone()
                         + owes_base.clone() * seat_owes_borrows[index][0].clone()),
             );
             eval.add_constraint(
-                is_betting.clone() * owes_active.clone()
+                is_betting.clone()
+                    * owes_active.clone()
                     * (post_current[1].clone()
                         - full_post_bet[index][1].clone()
                         - seat_owes_diff[index][1].clone()
@@ -6396,7 +6392,8 @@ impl FrameworkEval for CanonicalAir {
                         + owes_base.clone() * seat_owes_borrows[index][1].clone()),
             );
             eval.add_constraint(
-                is_betting.clone() * owes_active.clone()
+                is_betting.clone()
+                    * owes_active.clone()
                     * (post_current[2].clone()
                         - full_post_bet[index][2].clone()
                         - seat_owes_diff[index][2].clone()
@@ -6404,7 +6401,8 @@ impl FrameworkEval for CanonicalAir {
                         + owes_base.clone() * seat_owes_borrows[index][2].clone()),
             );
             eval.add_constraint(
-                is_betting.clone() * owes_active.clone()
+                is_betting.clone()
+                    * owes_active.clone()
                     * (post_current[3].clone()
                         - full_post_bet[index][3].clone()
                         - seat_owes_diff[index][3].clone()
@@ -6429,7 +6427,6 @@ impl FrameworkEval for CanonicalAir {
                         - post_acted_bits[index].clone() * (one.clone() - owes.clone())),
             );
             // settled <=> acted && !owes (degree-safe turn-scan helper).
-
         }
         eval.add_constraint(is_betting.clone() * pre_status.clone() - selected_full_pre_status);
         eval.add_constraint(is_betting.clone() * post_status.clone() - selected_full_post_status);
@@ -8362,18 +8359,28 @@ fn canonical_range_interaction(
     // The committed trace/preprocessed columns are bit-reversed by
     // MethodTrace::to_evaluations; the interaction columns must align with
     // that storage, so every source column is bit-reversed before packing.
+    //
+    // Build the permutation table once: row `i` maps to bit-reversed `i` in
+    // O(2) total, then every column lookup is O(1).
+    let n_rows = 1usize << log_size;
+    let mut permutation: Vec<u32> = (0..n_rows as u32).collect();
+    for i in 0..n_rows {
+        let mut r = 0usize;
+        let mut j = i;
+        for bit in 0..log_size {
+            if (j & 1) == 1 {
+                r |= 1 << (log_size - 1 - bit);
+            }
+            j >>= 1;
+        }
+        permutation[i] = r as u32;
+    }
     let bitrev = |column: &[M31]| -> Vec<M31> {
-        (0..column.len())
-            .map(|i| {
-                let mut r = 0usize;
-                for bit in 0..log_size {
-                    if (i >> bit) & 1 == 1 {
-                        r |= 1 << (log_size - 1 - bit);
-                    }
-                }
-                column[r]
-            })
-            .collect()
+        let mut out = vec![M31::from(0u32); column.len()];
+        for (i, &r) in permutation.iter().enumerate() {
+            out[i] = column[r as usize];
+        }
+        out
     };
     let raked_gate = bitrev(&trace.cols[RAKED_KIND_COLUMN]);
     let multiplicity = bitrev(&trace.cols[NUM_COLUMNS]);
@@ -11007,8 +11014,10 @@ mod tests {
 
         fn finalize_logup_batched(&mut self, batching: &[usize]) {
             let last_batch = *batching.iter().max().unwrap();
-            let mut fracs_by_batch: std::collections::HashMap<usize, Vec<(SecureField, SecureField)>> =
-                std::collections::HashMap::new();
+            let mut fracs_by_batch: std::collections::HashMap<
+                usize,
+                Vec<(SecureField, SecureField)>,
+            > = std::collections::HashMap::new();
             let fracs: Vec<(SecureField, SecureField)> = std::mem::take(&mut self.logup.fracs)
                 .into_iter()
                 .map(|f| {
@@ -11023,10 +11032,11 @@ mod tests {
                     .or_default()
                     .push((num.clone(), den.clone()));
             }
-            let mut sum_frac = |num: &SecureField, den: &SecureField| -> (SecureField, SecureField) {
-                // Sum fractions pairwise: (n1/d1 + n2/d2) = (n1*d2+n2*d1)/(d1*d2)
-                ((*num), (*den))
-            };
+            let mut sum_frac =
+                |num: &SecureField, den: &SecureField| -> (SecureField, SecureField) {
+                    // Sum fractions pairwise: (n1/d1 + n2/d2) = (n1*d2+n2*d1)/(d1*d2)
+                    ((*num), (*den))
+                };
             let _ = &mut sum_frac;
             // Combine each batch's fractions.
             let mut batch_fracs: Vec<(usize, SecureField, SecureField)> = Vec::new();
@@ -11119,10 +11129,7 @@ mod tests {
             SecureField::from_m31_array(values)
         }
 
-        fn write_logup_frac(
-            &mut self,
-            fraction: stwo::core::Fraction<Self::EF, Self::EF>,
-        ) {
+        fn write_logup_frac(&mut self, fraction: stwo::core::Fraction<Self::EF, Self::EF>) {
             if self.logup.fracs.is_empty() {
                 self.logup.is_finalized = false;
             }
@@ -11231,12 +11238,24 @@ mod tests {
         let reordered = std::env::var_os("NATURAL_ASSERT").is_none();
         let preprocessed_reordered: Vec<Vec<M31>> = preprocessed_cols
             .iter()
-            .map(|column| if reordered { reorder(column) } else { (*column).clone() })
+            .map(|column| {
+                if reordered {
+                    reorder(column)
+                } else {
+                    (*column).clone()
+                }
+            })
             .collect();
         let trace_reordered: Vec<Vec<M31>> = trace
             .cols
             .iter()
-            .map(|column| if reordered { reorder(column) } else { column.clone() })
+            .map(|column| {
+                if reordered {
+                    reorder(column)
+                } else {
+                    column.clone()
+                }
+            })
             .collect();
         let evals = stwo::core::pcs::TreeVec::new(vec![
             preprocessed_reordered.iter().collect(),

@@ -2330,8 +2330,7 @@ pub fn apply_player_action(
             // 只有完整 raise 才会清除 acted 位并恢复加注权。
             if table.seat_acted_this_round(seat_index) {
                 return Err(PokerL1Error::ContractExecutionFailed(
-                    "betting error: action not reopened for acted seat (call or fold only)"
-                        .into(),
+                    "betting error: action not reopened for acted seat (call or fold only)".into(),
                 ));
             }
             let needed = table
@@ -2470,8 +2469,12 @@ pub fn apply_raise(
 ///   顺序提升最早的 Waiting 座位补足（保证有人等待时牌桌可以开局）。
 fn promote_waiting_for_big_blind(table: &mut TexasPokerTable) {
     let n = usize::from(table.max_players);
-    let participating =
-        |seats: &[Seat]| seats.iter().filter(|s| s.is_occupied() && !s.is_waiting()).count();
+    let participating = |seats: &[Seat]| {
+        seats
+            .iter()
+            .filter(|s| s.is_occupied() && !s.is_waiting())
+            .count()
+    };
 
     if participating(&table.seats) == 0 {
         // 全新桌：没有可参照的盲注轨道，所有等待座位同时入局。
@@ -2482,8 +2485,7 @@ fn promote_waiting_for_big_blind(table: &mut TexasPokerTable) {
     }
 
     // 本手 SB = button 后第一个参与座位；紧随其后的 Waiting 座位以 BB 身份入局。
-    if let Some(sb) = find_next_participating_seat(&table.seats, table.button, table.max_players)
-    {
+    if let Some(sb) = find_next_participating_seat(&table.seats, table.button, table.max_players) {
         for offset in 1..=n {
             let idx = (usize::from(sb) + offset) % n;
             if table.seats[idx].is_waiting() {
@@ -5004,9 +5006,11 @@ mod tests {
         let mut events = vec![];
 
         end_without_showdown(&mut table, &mut events).unwrap();
-        assert!(!events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::RakeCollected { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::RakeCollected { .. }))
+        );
         assert_eq!(table.seats[0].stack(), 1300);
         assert_eq!(table.pot, 0);
     }

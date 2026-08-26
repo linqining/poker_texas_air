@@ -14,7 +14,6 @@
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use rayon::prelude::*;
-use starknet_ff::FieldElement;
 
 use crate::dual_proof::{
     DualProofBundle, MAX_CRYPTO_REQUEST_BYTES, MAX_STARK_PROOF_BYTES, prove_dual_proof_verified,
@@ -325,17 +324,42 @@ pub fn prove_outer_aggregate(tasks: &[ProveTask]) -> TexasAirResult<OuterAggrega
     // carried in memory instead of re-decoding and re-verifying the fresh
     // packages. Children arriving from bytes still take the full
     // `aggregate_dual_proofs` path.
-    let mut children = Vec::with_capacity(tasks.len());
-    let mut receipts = Vec::with_capacity(tasks.len());
-    let mut bindings = Vec::with_capacity(tasks.len());
-    for task in tasks {
-        let proven = prove_dual_proof_verified(task)?;
-        receipts.push(proven.receipt.clone());
-        bindings.push(proven.binding.clone());
-        children.push(proven.bundle);
+    // Child proofs are independent until the receipt chain is assembled.
+    // Rayon preserves the input order in `collect`, so the resulting bundle,
+    // digest, and first-error behavior remain deterministic.
+    let proven: Vec<TexasAirResult<ProvenDualProofResult>> = tasks
+        .par_iter()
+        .map(|task| prove_dual_proof_verified(task).map(ProvenDualProofResult::from))
+        .collect();
+    let mut children = Vec::with_capacity(proven.len());
+    let mut receipts = Vec::with_capacity(proven.len());
+    let mut bindings = Vec::with_capacity(proven.len());
+    for item in proven {
+        let item = item?;
+        receipts.push(item.receipt);
+        bindings.push(item.binding);
+        children.push(item.bundle);
     }
     let chain = VerifiedChain::try_from_receipts(receipts)?;
     build_bundle(children, &chain, &bindings)
+}
+
+/// Owned child result used to keep the parallel prove path's output explicit
+/// and avoid cloning acceptance artifacts before ordered chain assembly.
+struct ProvenDualProofResult {
+    bundle: DualProofBundle,
+    receipt: VerificationReceipt,
+    binding: PrecompileCallBinding,
+}
+
+impl From<crate::dual_proof::ProvenDualProof> for ProvenDualProofResult {
+    fn from(value: crate::dual_proof::ProvenDualProof) -> Self {
+        Self {
+            bundle: value.bundle,
+            receipt: value.receipt,
+            binding: value.binding,
+        }
+    }
 }
 
 /// Verify and aggregate an existing ordered list of stage-3 child packages.
@@ -401,10 +425,19 @@ fn verify_children(
             children.len()
         )));
     }
+    // Verify children in parallel (fail-closed: index-ordered first error wins).
+    // Each child is an independent dual proof with its own bincode-decoded
+    // Stwo proof and borsh-decoded flock binding; the chain assembly below
+    // remains serial because receipts are order-sensitive.
+    let verified: Vec<TexasAirResult<crate::dual_proof::VerifiedDualProof>> = tasks
+        .par_iter()
+        .zip(children.par_iter())
+        .map(|(task, child)| verify_dual_proof(task, child))
+        .collect();
     let mut receipts = Vec::with_capacity(children.len());
     let mut precompile_bindings = Vec::with_capacity(children.len());
-    for (task, child) in tasks.iter().zip(children) {
-        let verified = verify_dual_proof(task, child)?;
+    for result in verified {
+        let verified = result?;
         receipts.push(verified.receipt().clone());
         precompile_bindings.push(verified.precompile_binding().clone());
     }

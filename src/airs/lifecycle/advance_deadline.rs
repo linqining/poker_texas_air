@@ -1283,10 +1283,11 @@ mod tests {
         // The timeout folds seat 0 and the pot is awarded without a showdown:
         // uncontested pots pay no rake (consistent with the settlement plan
         // rule "uncontested pot must not be raked").
-        assert!(!events.iter().any(|event| matches!(
-            event,
-            TexasPokerEvent::RakeCollected { .. }
-        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, TexasPokerEvent::RakeCollected { .. }))
+        );
         assert!(events.iter().any(|event| matches!(
             event,
             TexasPokerEvent::PlayerFolded {

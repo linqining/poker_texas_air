@@ -118,7 +118,10 @@ pub fn verify_ristretto_compressed_addition_batch(
     }
     for (row, program) in archive.rows.iter().zip(&archive.additions.programs) {
         verify_ristretto_fp_program_compressed_point_addition_row(
-            program, &row.left, &row.right, &row.output,
+            program,
+            &row.left,
+            &row.right,
+            &row.output,
         )?;
     }
     verify_ristretto_fp_program_batch(&archive.additions)
@@ -175,21 +178,26 @@ fn prove_msm_accumulation(
     // Parallel pass: build every Fp program from its precomputed pair.  The
     // builder recomputes the sum internally; a debug assertion confirms the
     // fast path and the builder agree on the canonical encoding.
-    let built: Vec<TexasAirResult<(crate::ristretto_fp_program_air::RistrettoFpProgram, [u8; LIMBS])>> =
-        (0..outputs.len() - 1)
-            .into_par_iter()
-            .map(|i| {
-                let left = partial_sums[i];
-                let right = outputs[i + 1];
-                let (program, sum) =
-                    build_ristretto_fp_program_compressed_point_addition(&left, &right)?;
-                debug_assert_eq!(
-                    sum, partial_sums[i + 1],
-                    "fast-path curve sum must match the Fp program builder's recomputation"
-                );
-                Ok((program, sum))
-            })
-            .collect();
+    let built: Vec<
+        TexasAirResult<(
+            crate::ristretto_fp_program_air::RistrettoFpProgram,
+            [u8; LIMBS],
+        )>,
+    > = (0..outputs.len() - 1)
+        .into_par_iter()
+        .map(|i| {
+            let left = partial_sums[i];
+            let right = outputs[i + 1];
+            let (program, sum) =
+                build_ristretto_fp_program_compressed_point_addition(&left, &right)?;
+            debug_assert_eq!(
+                sum,
+                partial_sums[i + 1],
+                "fast-path curve sum must match the Fp program builder's recomputation"
+            );
+            Ok((program, sum))
+        })
+        .collect();
 
     let mut rows = Vec::with_capacity(outputs.len() - 1);
     let mut programs = Vec::with_capacity(outputs.len() - 1);
@@ -366,7 +374,8 @@ mod tests {
 
     fn native_multiple(multiplier: u64) -> Vec<u8> {
         use poker_protocol::crypto::curve::{Curve, CurveScalar, RistrettoCurve};
-        let expected = RistrettoCurve::base_g() * <RistrettoCurve as Curve>::Scalar::from_u64(multiplier);
+        let expected =
+            RistrettoCurve::base_g() * <RistrettoCurve as Curve>::Scalar::from_u64(multiplier);
         expected.compress().as_bytes().to_vec()
     }
 

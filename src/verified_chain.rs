@@ -252,7 +252,7 @@ impl VerificationReceipt {
 /// Returns an error when the native Stwo verifier rejects the proof.
 pub(crate) fn verify_method_against_and_issue_receipt<A>(
     proof: MethodProof<A>,
-    expected_air: A,
+    expected_air: &A,
     expected_public_inputs: &TexasPublicInputs,
 ) -> TexasAirResult<VerificationReceipt>
 where
@@ -262,7 +262,7 @@ where
     let log_size = expected_air.log_size();
     let num_columns = expected_air.trace_num_columns();
 
-    crate::verifier::verify_method_against(proof, expected_air, expected_public_inputs)?;
+    crate::verifier::verify_method_against(proof, expected_air.clone(), expected_public_inputs)?;
 
     Ok(VerificationReceipt {
         kind: expected_public_inputs.kind,

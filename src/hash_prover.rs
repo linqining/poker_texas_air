@@ -76,17 +76,38 @@ pub trait HashProofProvider {
         proof: &ArchivedHashProof,
         statements: &[Blake2bStatement],
     ) -> TexasAirResult<()> {
-        let covered = proof.statements();
-        if covered.len() != statements.len() {
-            return Err(TexasAirError::ConstraintUnsatisfied(
-                "hash proof statement count does not match the request".into(),
-            ));
-        }
-        for (covered, requested) in covered.iter().zip(statements.iter()) {
-            if covered.message != requested.message || covered.digest != requested.digest {
-                return Err(TexasAirError::ConstraintUnsatisfied(
-                    "hash proof is detached from the requested statements".into(),
-                ));
+        // Compare the covered messages (cheap borrows) and digests without
+        // cloning each statement.  Layout-equivalence of the two backends'
+        // `statements` fields is not assumed: we match on the variant and
+        // walk the inner Vec directly.
+        match proof {
+            ArchivedHashProof::Flock(inner) => {
+                if inner.statements.len() != statements.len() {
+                    return Err(TexasAirError::ConstraintUnsatisfied(
+                        "hash proof statement count does not match the request".into(),
+                    ));
+                }
+                for (covered, requested) in inner.statements.iter().zip(statements.iter()) {
+                    if covered.message != requested.message || covered.digest != requested.digest {
+                        return Err(TexasAirError::ConstraintUnsatisfied(
+                            "hash proof is detached from the requested statements".into(),
+                        ));
+                    }
+                }
+            }
+            ArchivedHashProof::LookupStack(inner) => {
+                if inner.statements.len() != statements.len() {
+                    return Err(TexasAirError::ConstraintUnsatisfied(
+                        "hash proof statement count does not match the request".into(),
+                    ));
+                }
+                for (covered, requested) in inner.statements.iter().zip(statements.iter()) {
+                    if covered.message != requested.message || covered.digest != requested.digest {
+                        return Err(TexasAirError::ConstraintUnsatisfied(
+                            "hash proof is detached from the requested statements".into(),
+                        ));
+                    }
+                }
             }
         }
         self.verify_proof(proof)

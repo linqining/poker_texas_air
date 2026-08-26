@@ -150,12 +150,16 @@ fn scope_columns(value: &[u8; LIMBS]) -> MethodTrace {
     trace
 }
 
-fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    (0..LIMBS)
-        .map(|limb| PreProcessedColumnId {
-            id: format!("ristretto.scalar.canonical.v1.{limb}").into(),
-        })
-        .collect()
+fn preprocessed_ids() -> &'static [PreProcessedColumnId] {
+    static IDS: std::sync::OnceLock<Vec<PreProcessedColumnId>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        (0..LIMBS)
+            .map(|limb| PreProcessedColumnId {
+                id: format!("ristretto.scalar.canonical.v1.{limb}").into(),
+            })
+            .collect()
+    })
+    .as_slice()
 }
 
 #[derive(Clone, Copy)]

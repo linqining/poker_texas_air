@@ -219,20 +219,22 @@ pub fn verify_ristretto_reconstruction_deck_accumulator(
         )));
     }
     verify_ristretto_fp_program_batch(&archive.additions)?;
-    (0..CANONICAL_RECONSTRUCTION_CARDS).into_par_iter().try_for_each(|index| {
-        verify_ristretto_fp_program_compressed_point_addition_row(
-            &archive.additions.programs[index * 2],
-            &archive.prior[index].c1,
-            &archive.contributions[index].c1,
-            &archive.post[index].c1,
-        )?;
-        verify_ristretto_fp_program_compressed_point_addition_row(
-            &archive.additions.programs[index * 2 + 1],
-            &archive.prior[index].c2,
-            &archive.contributions[index].c2,
-            &archive.post[index].c2,
-        )
-    })
+    (0..CANONICAL_RECONSTRUCTION_CARDS)
+        .into_par_iter()
+        .try_for_each(|index| {
+            verify_ristretto_fp_program_compressed_point_addition_row(
+                &archive.additions.programs[index * 2],
+                &archive.prior[index].c1,
+                &archive.contributions[index].c1,
+                &archive.post[index].c1,
+            )?;
+            verify_ristretto_fp_program_compressed_point_addition_row(
+                &archive.additions.programs[index * 2 + 1],
+                &archive.prior[index].c2,
+                &archive.contributions[index].c2,
+                &archive.post[index].c2,
+            )
+        })
 }
 
 fn canonical_ciphertext(value: &EncodedCiphertext) -> TexasAirResult<CanonicalRistrettoCiphertext> {
@@ -421,7 +423,7 @@ mod tests {
             additions: ArchivedRistrettoFpProgramBatchProof {
                 programs: Vec::new(),
                 stark_proof_bytes: Vec::new(),
-            range_claimed_sum: [0, 0, 0, 0],
+                range_claimed_sum: [0, 0, 0, 0],
             },
         }
     }
@@ -497,7 +499,7 @@ mod tests {
             additions: ArchivedRistrettoFpProgramBatchProof {
                 programs,
                 stark_proof_bytes: Vec::new(),
-            range_claimed_sum: [0, 0, 0, 0],
+                range_claimed_sum: [0, 0, 0, 0],
             },
         }
     }
@@ -618,7 +620,10 @@ mod tests {
     #[test]
     #[ignore = "timing probe for step-2 optimization"]
     fn timing_single_reconstruction_batch() {
-        let prior = CanonicalRistrettoCiphertext { c1: [0; 32], c2: [0; 32] };
+        let prior = CanonicalRistrettoCiphertext {
+            c1: [0; 32],
+            c2: [0; 32],
+        };
         let c1_base_c2_double = CanonicalRistrettoCiphertext {
             c1: basepoint(),
             c2: double_basepoint(),

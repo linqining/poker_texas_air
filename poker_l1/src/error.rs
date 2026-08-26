@@ -884,13 +884,35 @@ mod tests {
     #[test]
     fn error_categories_are_stable_and_non_overlapping() {
         assert!(PokerL1Error::InvalidSignature.is_client_fault());
-        assert_eq!(PokerL1Error::InvalidSignature.category(), ErrorCategory::ClientInput);
-        assert_eq!(PokerL1Error::InvalidVertexSignature { vertex_hash: [0; 32] }.category(), ErrorCategory::ProofRejection);
-        assert_eq!(PokerL1Error::InvalidZkProofFormat("bad".into()).category(), ErrorCategory::ProofRejection);
-        assert_eq!(PokerL1Error::InputTooLong { actual: 2, limit: 1 }.category(), ErrorCategory::ClientInput);
+        assert_eq!(
+            PokerL1Error::InvalidSignature.category(),
+            ErrorCategory::ClientInput
+        );
+        assert_eq!(
+            PokerL1Error::InvalidVertexSignature {
+                vertex_hash: [0; 32]
+            }
+            .category(),
+            ErrorCategory::ProofRejection
+        );
+        assert_eq!(
+            PokerL1Error::InvalidZkProofFormat("bad".into()).category(),
+            ErrorCategory::ProofRejection
+        );
+        assert_eq!(
+            PokerL1Error::InputTooLong {
+                actual: 2,
+                limit: 1
+            }
+            .category(),
+            ErrorCategory::ClientInput
+        );
         assert!(PokerL1Error::Rocksdb("io".into()).is_retryable());
         assert!(PokerL1Error::SyncError("timeout".into()).is_retryable());
-        assert_eq!(PokerL1Error::Other("bug".into()).category(), ErrorCategory::Internal);
+        assert_eq!(
+            PokerL1Error::Other("bug".into()).category(),
+            ErrorCategory::Internal
+        );
         assert!(!PokerL1Error::Other("bug".into()).is_retryable());
     }
 }

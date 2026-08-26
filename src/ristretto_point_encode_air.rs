@@ -134,8 +134,9 @@ pub struct ArchivedRistrettoPointEncodeProof {
     pub negative_s_raw_proof: ArchivedRistrettoFpSubtractionProof,
 }
 
-fn modulus() -> BigUint {
-    (BigUint::one() << 255u32) - BigUint::from(19u32)
+fn modulus() -> &'static BigUint {
+    static MODULUS: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+    MODULUS.get_or_init(|| (BigUint::one() << 255u32) - BigUint::from(19u32))
 }
 
 fn big_uint(value: &[u8; LIMBS]) -> BigUint {
@@ -174,16 +175,22 @@ fn negative(value: &BigUint) -> BigUint {
     }
 }
 
-fn sqrt_m1() -> BigUint {
-    BigUint::from(2u32).modpow(&((&modulus() - BigUint::one()) >> 2u32), &modulus())
+fn sqrt_m1() -> &'static BigUint {
+    static SQRT_M1: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+    SQRT_M1.get_or_init(|| {
+        BigUint::from(2u32).modpow(&((modulus() - BigUint::one()) >> 2u32), modulus())
+    })
 }
 
-fn invsqrt_a_minus_d() -> BigUint {
-    BigUint::parse_bytes(
-        b"54469307008909316920995813868745141605393597292927456921205312896311721017578",
-        10,
-    )
-    .expect("decimal Ristretto magic constant is valid")
+fn invsqrt_a_minus_d() -> &'static BigUint {
+    static VALUE: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+    VALUE.get_or_init(|| {
+        BigUint::parse_bytes(
+            b"54469307008909316920995813868745141605393597292927456921205312896311721017578",
+            10,
+        )
+        .expect("decimal Ristretto magic constant is valid")
+    })
 }
 
 /// Decode and then prove the canonical Ristretto encoding of a 32-byte point.

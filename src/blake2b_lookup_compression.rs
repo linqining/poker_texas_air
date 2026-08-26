@@ -379,19 +379,23 @@ fn log_size_for_calls(calls: &[Blake2bGCall]) -> TexasAirResult<u32> {
     Ok(calls.len().next_power_of_two().ilog2().max(MIN_LOG_SIZE))
 }
 
-fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    let mut ids = Vec::with_capacity(SCOPE_COLUMNS + 3);
-    for column in 0..SCOPE_COLUMNS {
-        ids.push(PreProcessedColumnId {
-            id: format!("preprocessed.blake2b.lookup.compression.scope.{column}.v1").into(),
-        });
-    }
-    for column in 0..3 {
-        ids.push(PreProcessedColumnId {
-            id: format!("preprocessed.blake2b.lookup.compression.xor.table.{column}.v1").into(),
-        });
-    }
-    ids
+fn preprocessed_ids() -> &'static [PreProcessedColumnId] {
+    static IDS: std::sync::OnceLock<Vec<PreProcessedColumnId>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        let mut ids = Vec::with_capacity(SCOPE_COLUMNS + 3);
+        for column in 0..SCOPE_COLUMNS {
+            ids.push(PreProcessedColumnId {
+                id: format!("preprocessed.blake2b.lookup.compression.scope.{column}.v1").into(),
+            });
+        }
+        for column in 0..3 {
+            ids.push(PreProcessedColumnId {
+                id: format!("preprocessed.blake2b.lookup.compression.xor.table.{column}.v1").into(),
+            });
+        }
+        ids
+    })
+    .as_slice()
 }
 
 fn scope_columns(
@@ -562,18 +566,23 @@ fn trace_columns(
 }
 
 fn xor_table() -> Vec<BaseColumn> {
-    let mut columns = vec![Vec::with_capacity(XOR_ROWS); 3];
-    for index in 0..XOR_ROWS {
-        let a = (index >> 8) as u32;
-        let b = (index & 0xff) as u32;
-        columns[0].push(M31::from(a));
-        columns[1].push(M31::from(b));
-        columns[2].push(M31::from(a ^ b));
-    }
-    columns
-        .into_iter()
-        .map(|column| BaseColumn::from_cpu(&column))
-        .collect()
+    static TABLE: std::sync::OnceLock<Vec<BaseColumn>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            let mut columns = vec![Vec::with_capacity(XOR_ROWS); 3];
+            for index in 0..XOR_ROWS {
+                let a = (index >> 8) as u32;
+                let b = (index & 0xff) as u32;
+                columns[0].push(M31::from(a));
+                columns[1].push(M31::from(b));
+                columns[2].push(M31::from(a ^ b));
+            }
+            columns
+                .into_iter()
+                .map(|column| BaseColumn::from_cpu(&column))
+                .collect()
+        })
+        .clone()
 }
 
 fn circle_evals(
@@ -595,44 +604,6 @@ fn scope_pack(scope: &[BaseColumn], column: usize, vector_row: usize) -> PackedB
     pack_column(&scope[column], vector_row)
 }
 
-fn scheduler_tuples(
-    trace: &[BaseColumn],
-    scope: &[BaseColumn],
-    vector_row: usize,
-) -> Vec<[PackedBaseField; 3]> {
-    let mut tuples = Vec::with_capacity(XOR_LOOKUPS);
-    for word in 0..HASH_WORDS {
-        for byte in 0..WORD_BYTES {
-            let mid = pack_column(
-                &trace[DIGEST_MID_BASE + word * WORD_BYTES + byte],
-                vector_row,
-            );
-            tuples.push([
-                scope_pack(
-                    scope,
-                    SCOPE_INITIAL_BASE + word * WORD_BYTES + byte,
-                    vector_row,
-                ),
-                pack_column(&trace[next_word_base(word) + byte], vector_row),
-                mid,
-            ]);
-            tuples.push([
-                mid,
-                // Blake2b's right working-state half starts at v[8].
-                // HASH_WORDS is the eight-word chaining width, not this
-                // state-half offset.
-                pack_column(&trace[next_word_base(word + 8) + byte], vector_row),
-                scope_pack(
-                    scope,
-                    SCOPE_HASH_BASE + word * WORD_BYTES + byte,
-                    vector_row,
-                ),
-            ]);
-        }
-    }
-    tuples
-}
-
 fn scheduler_interaction_trace(
     trace: &[BaseColumn],
     scope: &[BaseColumn],
@@ -646,15 +617,53 @@ fn scheduler_interaction_trace(
     for pair in 0..INTERACTION_COLUMNS {
         let mut column = generator.new_col();
         for vector_row in 0..(1usize << (log_size - LOG_N_LANES)) {
-            let tuples = scheduler_tuples(trace, scope, vector_row);
+            let (d0_tuple, d1_tuple) = scheduler_pair_tuples(trace, scope, vector_row, pair);
             let active = PackedSecureField::from(scope_pack(scope, SCOPE_LAST, vector_row));
-            let d0: PackedSecureField = elements.combine(&tuples[pair * 2]);
-            let d1: PackedSecureField = elements.combine(&tuples[pair * 2 + 1]);
+            let d0: PackedSecureField = elements.combine(&d0_tuple);
+            let d1: PackedSecureField = elements.combine(&d1_tuple);
             column.write_frac(vector_row, active * (d0 + d1), d0 * d1);
         }
         column.finalize_col();
     }
     generator.finalize_last()
+}
+
+/// Returns the two [`PackedBaseField`] tuples for one `(pair, vector_row)`.
+/// Builds only the two tuples consumed by one interaction pair.  The previous
+/// implementation rebuilt all 128 tuples per (pair, row), then discarded all
+/// but `pair*2` and `pair*2+1`.
+#[inline]
+fn scheduler_pair_tuples(
+    trace: &[BaseColumn],
+    scope: &[BaseColumn],
+    vector_row: usize,
+    pair: usize,
+) -> ([PackedBaseField; 3], [PackedBaseField; 3]) {
+    let word = pair / WORD_BYTES;
+    let byte = pair % WORD_BYTES;
+    let mid = pack_column(
+        &trace[DIGEST_MID_BASE + word * WORD_BYTES + byte],
+        vector_row,
+    );
+    let d0 = [
+        scope_pack(
+            scope,
+            SCOPE_INITIAL_BASE + word * WORD_BYTES + byte,
+            vector_row,
+        ),
+        pack_column(&trace[next_word_base(word) + byte], vector_row),
+        mid,
+    ];
+    let d1 = [
+        mid,
+        pack_column(&trace[next_word_base(word + 8) + byte], vector_row),
+        scope_pack(
+            scope,
+            SCOPE_HASH_BASE + word * WORD_BYTES + byte,
+            vector_row,
+        ),
+    ];
+    (d0, d1)
 }
 
 fn scheduler_scalar_tuples(

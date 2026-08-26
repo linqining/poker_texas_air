@@ -25,9 +25,9 @@ const WINDOWS: usize = 64;
 
 fn basepoint() -> [u8; LIMBS] {
     [
-        0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71, 0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00,
-        0x51, 0x5f, 0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d, 0xb6, 0xa6, 0x59, 0x45,
-        0xe0, 0x8d, 0x2d, 0x76,
+        0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71, 0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00, 0x51,
+        0x5f, 0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d, 0xb6, 0xa6, 0x59, 0x45, 0xe0, 0x8d,
+        0x2d, 0x76,
     ]
 }
 
@@ -136,7 +136,9 @@ fn main() {
         );
     }
 
-    println!("=== per-input 8-batches vs single 8-input batch (simulated per-slot vs global slot-OR muls) ===");
+    println!(
+        "=== per-input 8-batches vs single 8-input batch (simulated per-slot vs global slot-OR muls) ==="
+    );
     for batch_size in [4usize, 8] {
         let inputs: Vec<_> = (1..=batch_size)
             .map(|index| {
@@ -145,10 +147,9 @@ fn main() {
             })
             .collect();
         let started = Instant::now();
-        let single = prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
-            inputs.clone(),
-        )
-        .unwrap();
+        let single =
+            prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(inputs.clone())
+                .unwrap();
         let single_prove = started.elapsed();
         let single_bytes = borsh_len(&single);
 
@@ -157,10 +158,9 @@ fn main() {
         let mut total_bytes = 0usize;
         for input in &inputs {
             let item_started = Instant::now();
-            let one = prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
-                vec![*input],
-            )
-            .unwrap();
+            let one =
+                prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(vec![*input])
+                    .unwrap();
             total_prove = total_prove + item_started.elapsed();
             total_bytes += borsh_len(&one);
         }

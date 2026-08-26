@@ -167,12 +167,16 @@ fn scope_columns(a: &[u8; LIMBS], b: &[u8; LIMBS], c: &[u8; LIMBS], reduced: boo
     trace
 }
 
-fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    (0..PREPROCESSED_COLUMNS)
-        .map(|i| PreProcessedColumnId {
-            id: format!("ristretto.scalar.add.v1.{i}").into(),
-        })
-        .collect()
+fn preprocessed_ids() -> &'static [PreProcessedColumnId] {
+    static IDS: std::sync::OnceLock<Vec<PreProcessedColumnId>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        (0..PREPROCESSED_COLUMNS)
+            .map(|i| PreProcessedColumnId {
+                id: format!("ristretto.scalar.add.v1.{i}").into(),
+            })
+            .collect()
+    })
+    .as_slice()
 }
 
 #[derive(Clone, Copy)]
@@ -308,7 +312,8 @@ pub fn prove_ristretto_scalar_addition(
 
 pub fn verify_ristretto_scalar_addition(
     archive: &ArchivedRistrettoScalarAdditionProof,
-) -> TexasAirResult<()> {    for (proof, expected) in archive
+) -> TexasAirResult<()> {
+    for (proof, expected) in archive
         .canonical
         .iter()
         .zip([archive.a, archive.b, archive.c])
@@ -440,10 +445,7 @@ fn scope_columns_batch(rows: &[ArchivedRistrettoScalarAdditionRow]) -> MethodTra
     trace
 }
 
-fn mix_scope_batch(
-    channel: &mut impl Channel,
-    rows: &[ArchivedRistrettoScalarAdditionRow],
-) {
+fn mix_scope_batch(channel: &mut impl Channel, rows: &[ArchivedRistrettoScalarAdditionRow]) {
     channel.mix_u64(0x7363_616c_6164_6462);
     channel.mix_u64(rows.len() as u64);
     for row in rows {
@@ -596,7 +598,11 @@ pub fn verify_ristretto_scalar_addition_batch(
         &vec![log_size; PREPROCESSED_COLUMNS],
         &mut channel,
     );
-    scheme.commit(proof.commitments[1], &vec![log_size; NUM_COLUMNS], &mut channel);
+    scheme.commit(
+        proof.commitments[1],
+        &vec![log_size; NUM_COLUMNS],
+        &mut channel,
+    );
     let ids = preprocessed_ids();
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let component = FrameworkComponent::new(

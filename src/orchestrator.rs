@@ -290,7 +290,20 @@ impl Orchestrator {
         &mut self,
         task: &ProveTask,
     ) -> TexasAirResult<ArchivedProvenTask> {
-        let current = &*self;
+        let (archived, receipt) = self.prove_verify_and_archive_task_uncommitted(task)?;
+        self.verified_chain_builder.push_receipt(receipt)?;
+        self.proven.push(archived.summary.clone());
+        Ok(archived)
+    }
+
+    /// Prove and verify one task without mutating the orchestrator's receipt
+    /// chain.  The caller commits the receipt in input order after all
+    /// parallel jobs complete.
+    fn prove_verify_and_archive_task_uncommitted(
+        &self,
+        task: &ProveTask,
+    ) -> TexasAirResult<(ArchivedProvenTask, VerificationReceipt)> {
+        let current = self;
         let (method_result, composition_result) = rayon::join(
             || {
                 let mut backend = NativeMethodProofBackend;
@@ -300,13 +313,15 @@ impl Orchestrator {
         );
         let (summary, output) = method_result?;
         let composition_archive = composition_result?;
-        self.verified_chain_builder.push_receipt(output.receipt)?;
-        self.proven.push(summary.clone());
-        Ok(ArchivedProvenTask {
-            summary,
-            archive: output.archive,
-            composition_archive,
-        })
+        let receipt = output.receipt;
+        Ok((
+            ArchivedProvenTask {
+                summary,
+                archive: output.archive,
+                composition_archive,
+            },
+            receipt,
+        ))
     }
 
     /// Reverify both the original method proof and every required component proof.
@@ -527,12 +542,33 @@ impl Orchestrator {
     ///
     /// # Errors
     ///
-    /// 任一任务失败则停止并返回错误。
+    /// 任一任务失败则返回错误；批次不会提交任何 receipt。
+    /// Batch-prove with intra-task parallelism. Each task's prove+verify pair
+    /// runs concurrently with the next task's, while the receipt chain
+    /// (order-sensitive) is appended in submission order. The inner
+    /// `prove_and_verify_task` already parallelises the prove and verify
+    /// phases inside the task, so this lets a multi-core machine overlap
+    /// the verify-side decode of task `i+1` with the prove-side grind of
+    /// task `i`.
     pub fn prove_tasks(&mut self, tasks: &[ProveTask]) -> TexasAirResult<Vec<ProvenTask>> {
+        use rayon::prelude::*;
+        // Run prove+verify in parallel; then drain results in input order so
+        // the receipt chain stays order-stable.
+        let results: Vec<TexasAirResult<(ArchivedProvenTask, VerificationReceipt)>> = tasks
+            .par_iter()
+            .map(|task| self.prove_verify_and_archive_task_uncommitted(task))
+            .collect();
+        let mut next_chain = self.verified_chain_builder.clone();
         let mut out = Vec::with_capacity(tasks.len());
-        for t in tasks {
-            out.push(self.prove_and_verify_task(t)?);
+        let mut summaries = Vec::with_capacity(tasks.len());
+        for result in results {
+            let (archived, receipt) = result?;
+            next_chain.push_receipt(receipt)?;
+            summaries.push(archived.summary.clone());
+            out.push(archived.summary);
         }
+        self.verified_chain_builder = next_chain;
+        self.proven.extend(summaries);
         Ok(out)
     }
 
@@ -2548,7 +2584,7 @@ impl MethodBackend for NativeMethodProofBackend {
             &proof.stark_proof,
             &proof.root_binding,
         )?;
-        let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
+        let receipt = verify_method_against_and_issue_receipt(proof, &air, &public_inputs)?;
         Ok(NativeMethodProofOutput { receipt, archive })
     }
 }
@@ -2598,7 +2634,7 @@ impl MethodBackend for ArchivedVerificationBackend<'_> {
             public_inputs: public_inputs.clone(),
         };
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            verify_method_against_and_issue_receipt(proof, air, &public_inputs)
+            verify_method_against_and_issue_receipt(proof, &air, &public_inputs)
         }))
         .map_err(|_| {
             TexasAirError::ConstraintUnsatisfied(

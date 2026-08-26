@@ -553,14 +553,8 @@ impl MethodBatchV2 {
         hasher.update(&first.hand_id.to_le_bytes());
         hasher.update(&first.call_seq.to_le_bytes());
         hasher.update(&last.call_seq.to_le_bytes());
-        hasher.update(
-            &crate::state_root::compute_state_root(&self.initial_table)?
-                .bytes(),
-        );
-        hasher.update(
-            &crate::state_root::compute_state_root(&self.final_table)?
-                .bytes(),
-        );
+        hasher.update(&crate::state_root::compute_state_root(&self.initial_table)?.bytes());
+        hasher.update(&crate::state_root::compute_state_root(&self.final_table)?.bytes());
         for task in tasks {
             let command =
                 poker_l1::vm::contracts::texas_poker::dispatch::CanonicalCommand::from_u8(
@@ -712,10 +706,8 @@ impl MethodPayloadV2 {
             hand_id: task.hand_id,
             pre_call_seq: task.pre_table.call_seq,
             post_call_seq: task.post_table.call_seq,
-            pre_state_root: crate::state_root::compute_state_root(&task.pre_table)?
-                .bytes(),
-            post_state_root: crate::state_root::compute_state_root(&task.post_table)?
-                .bytes(),
+            pre_state_root: crate::state_root::compute_state_root(&task.pre_table)?.bytes(),
+            post_state_root: crate::state_root::compute_state_root(&task.post_table)?.bytes(),
             canonical_command_digest: dispatch_call_digest(
                 &task.context,
                 &task.selector(),

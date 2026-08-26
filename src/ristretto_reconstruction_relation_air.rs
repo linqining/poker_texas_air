@@ -78,7 +78,8 @@ pub struct ArchivedRistrettoCrossKeyEquationProof {
     pub challenge_nonzero: ArchivedRistrettoFpProgramProof,
     /// One window-decomposition proof per scalar-multiplication input; the
     /// shared batch references only `(scalar, windows)` statement data.
-    pub scalar_windows: Vec<crate::ristretto_scalar_windows_air::ArchivedRistrettoScalarWindowsProof>,
+    pub scalar_windows:
+        Vec<crate::ristretto_scalar_windows_air::ArchivedRistrettoScalarWindowsProof>,
     /// Rows, in fixed order:
     /// `response_owner*G`, `challenge*owner_pk`,
     /// `response_randomness*G`, `challenge*negative.c1`,
@@ -153,12 +154,14 @@ pub struct ArchivedRistrettoReconstructionCrossKeyBatchProof {
         [ArchivedRistrettoCrossKeyEquationProof; RISTRETTO_RECONSTRUCTION_READABLE_CARDS],
 }
 
-fn modulus() -> BigUint {
-    (BigUint::one() << 255u32) - BigUint::from(19u32)
+fn modulus() -> &'static BigUint {
+    static MODULUS: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+    MODULUS.get_or_init(|| (BigUint::one() << 255u32) - BigUint::from(19u32))
 }
 
-fn scalar_modulus() -> BigUint {
-    BigUint::from_bytes_le(&GROUP_ORDER_BYTES)
+fn scalar_modulus() -> &'static BigUint {
+    static MODULUS: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+    MODULUS.get_or_init(|| BigUint::from_bytes_le(&GROUP_ORDER_BYTES))
 }
 
 fn big(value: &[u8; LIMBS]) -> BigUint {
@@ -167,12 +170,12 @@ fn big(value: &[u8; LIMBS]) -> BigUint {
 
 fn inverse(value: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
     let value = big(value);
-    if value.is_zero() || value >= modulus() {
+    if value.is_zero() || value >= *modulus() {
         return Err(TexasAirError::SpecViolation(
             "cross-key challenge must be a non-zero canonical field element".into(),
         ));
     }
-    let inverse = value.modpow(&(modulus() - BigUint::from(2u32)), &modulus());
+    let inverse = value.modpow(&(modulus() - BigUint::from(2u32)), modulus());
     let mut bytes = [0u8; LIMBS];
     let encoded = inverse.to_bytes_le();
     bytes[..encoded.len()].copy_from_slice(&encoded);
@@ -181,7 +184,7 @@ fn inverse(value: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
 
 fn validate_canonical_scalar(value: &[u8; LIMBS], label: &str) -> TexasAirResult<()> {
     let value = big(value);
-    if value >= scalar_modulus() {
+    if value >= *scalar_modulus() {
         return Err(TexasAirError::SpecViolation(format!(
             "cross-key {label} must be a canonical Ristretto scalar"
         )));
@@ -420,9 +423,7 @@ pub fn prove_ristretto_cross_key_equation(
                 .iter()
                 .zip(scalar_windows.iter())
                 .zip(scalar_inputs(&statement).into_iter().map(|(_, base)| base))
-                .map(|(((scalar, _), window_proof), base)| {
-                    (*scalar, window_proof.windows, base)
-                })
+                .map(|(((scalar, _), window_proof), base)| (*scalar, window_proof.windows, base))
                 .collect(),
         )?;
     let outputs = scalar_outputs(&scalar_multiplications)?;
@@ -893,7 +894,7 @@ mod tests {
                     )
                     .unwrap(),
                     stark_proof_bytes: Vec::new(),
-            range_claimed_sum: [0, 0, 0, 0],
+                    range_claimed_sum: [0, 0, 0, 0],
                 },
                 scalar_multiplications:
                     ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof {
@@ -901,13 +902,13 @@ mod tests {
                         additions: ArchivedRistrettoFpProgramBatchProof {
                             programs: Vec::new(),
                             stark_proof_bytes: Vec::new(),
-            range_claimed_sum: [0, 0, 0, 0],
+                            range_claimed_sum: [0, 0, 0, 0],
                         },
                     },
                 additions: ArchivedRistrettoFpProgramBatchProof {
                     programs: Vec::new(),
                     stark_proof_bytes: Vec::new(),
-            range_claimed_sum: [0, 0, 0, 0],
+                    range_claimed_sum: [0, 0, 0, 0],
                 },
             }),
         };

@@ -265,8 +265,8 @@ mod tests {
     fn byte_xor_logup_table_proves_and_rejects_a_modified_relation() {
         let witness = XorWitness::new();
         let config = config();
-        let twiddles = SimdBackend::precompute_twiddles(
-            CanonicCoset::new(LOG_SIZE + 1 + config.fri_config.log_blowup_factor).half_coset(),
+        let twiddles = crate::prover_context::simd_twiddles(
+            LOG_SIZE + 1 + config.fri_config.log_blowup_factor,
         );
         let mut channel = Poseidon252Channel::default();
         let mut scheme =

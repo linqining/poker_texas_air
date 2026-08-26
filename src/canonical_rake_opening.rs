@@ -18,14 +18,9 @@
 
 #![allow(missing_docs)]
 
-use blake2::Blake2bVar;
-use blake2::digest::{Update, VariableOutput};
 use borsh::BorshDeserialize;
 use poker_l1::vm::contracts::texas_poker::types::TableRules;
 
-use crate::blake2b_lookup_compression::{
-    ArchivedBlake2bLookupHashesProof, prove_blake2b_lookup_hashes, verify_blake2b_lookup_hashes,
-};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::hash_prover::HashProofProvider as _;
 
@@ -137,8 +132,7 @@ pub fn verify_canonical_rules_hash(
             "canonical rules hash proof is detached from the rules commitment".into(),
         ));
     }
-    crate::blake3_flock::FlockProvider
-        .verify_proof(&crate::hash_prover::ArchivedHashProof::Flock(archive.hashes.clone()))?;
+    crate::blake3_flock::verify_flock_archive(&archive.hashes)?;
     let rules = decode_rules_statement(&statement.message)?;
     Ok(AuthenticatedRulesOpening {
         rake: rake_opening_of(&rules),
@@ -258,8 +252,7 @@ pub fn verify_canonical_hand_openings(
             "hand-opening proof is detached from a public commitment".into(),
         ));
     }
-    crate::blake3_flock::FlockProvider
-        .verify_proof(&crate::hash_prover::ArchivedHashProof::Flock(archive.hashes.clone()))?;
+    crate::blake3_flock::verify_flock_archive(&archive.hashes)?;
     let rules = decode_rules_statement(&rules_statement.message)?;
     Ok(AuthenticatedRulesOpening {
         rake: rake_opening_of(&rules),
@@ -442,8 +435,8 @@ mod tests {
 
     #[test]
     fn hand_bundle_rejects_statement_splices() {
-        use crate::hash_prover::{Blake2bStatement, HashProofProvider as _};
         use crate::blake3_flock::FlockProvider;
+        use crate::hash_prover::{Blake2bStatement, HashProofProvider as _};
         use crate::texas_canonical::{
             CANONICAL_ABI_VERSION, CanonicalPhase, CanonicalSeat, CanonicalStateImage,
             MAX_CANONICAL_SEATS, NO_CANONICAL_SEAT,

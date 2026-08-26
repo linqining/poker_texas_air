@@ -117,8 +117,7 @@ fn to_limbs(value: &[u8; LIMBS]) -> [u16; LIMB_COUNT] {
 /// `p = 2^255 − 19` as twenty-four 11-bit limbs.
 const P_BASE_LIMBS: [u16; LIMB_COUNT] = base_limbs(&P_BYTES);
 /// `2^256 − p` as twenty-four 11-bit limbs.
-const CANONICITY_COMPLEMENT_LIMBS: [u16; LIMB_COUNT] =
-    base_limbs(&CANONICITY_COMPLEMENT_BYTES);
+const CANONICITY_COMPLEMENT_LIMBS: [u16; LIMB_COUNT] = base_limbs(&CANONICITY_COMPLEMENT_BYTES);
 /// Bound on a multiplication carry magnitude: `|carry| ≤ (2·L·(2^11−1)² +
 /// terms) / 2^11 < 2^17`, so every magnitude splits into two range-checked
 /// 11-bit limbs and every relation stays far below the M31 wraparound bound.
@@ -703,12 +702,7 @@ struct FpProgramAir {
 impl FpProgramAir {
     /// Build the AIR, precomputing the preprocessed-column identifiers and
     /// the canonicity classification shared by every evaluate call.
-    fn new(
-        log_size: u32,
-        program: RistrettoFpProgram,
-        range: FpRange11,
-        carry: FpCarry17,
-    ) -> Self {
+    fn new(log_size: u32, program: RistrettoFpProgram, range: FpRange11, carry: FpCarry17) -> Self {
         let scope_ids = preprocessed_ids(&program);
         let canonicity = program_canonicity(&program)
             .expect("program was validated before proving or verifying");
@@ -823,9 +817,7 @@ fn validate_indices(value_count: usize, op_count: usize, outputs: &[u16]) -> Tex
 
 /// Limb-wise witness that `value < p`: the sum limbs and boolean carries of
 /// `value + (2^256 − p)`, which stays below `2^256` exactly when `value < p`.
-fn canonicity_witness(
-    value: &[u16; LIMB_COUNT],
-) -> ([u16; LIMB_COUNT], [u16; LIMB_COUNT]) {
+fn canonicity_witness(value: &[u16; LIMB_COUNT]) -> ([u16; LIMB_COUNT], [u16; LIMB_COUNT]) {
     let mut sum = [0u16; LIMB_COUNT];
     let mut carries = [0u16; LIMB_COUNT];
     let mut carry_in = 0u16;
@@ -835,7 +827,10 @@ fn canonicity_witness(
         carry_in = total / BASE as u16;
         carries[index] = carry_in;
     }
-    debug_assert_eq!(carry_in, 0, "value < p plus its complement stays below 2^256");
+    debug_assert_eq!(
+        carry_in, 0,
+        "value < p plus its complement stays below 2^256"
+    );
     (sum, carries)
 }
 
@@ -1236,7 +1231,9 @@ fn trace_row(program: &RistrettoFpProgram) -> TexasAirResult<Vec<M31>> {
 /// depends only on the value count, the canonicity pattern, and the op list,
 /// so verifiers use it to size the trace commitment without re-deriving the
 /// (constraint-enforced) witness.
-fn trace_layout(program: &RistrettoFpProgram) -> TexasAirResult<(usize, Vec<usize>, Vec<[usize; 2]>)> {
+fn trace_layout(
+    program: &RistrettoFpProgram,
+) -> TexasAirResult<(usize, Vec<usize>, Vec<[usize; 2]>)> {
     validate_indices(program.values.len(), program.ops.len(), &program.outputs)?;
     let canonicity = program_canonicity(program)?;
     let mut width = 0usize;
@@ -1363,8 +1360,8 @@ fn validate_program_batch_shape(programs: &[RistrettoFpProgram]) -> TexasAirResu
 fn trace_tracked_columns(program: &RistrettoFpProgram) -> (Vec<usize>, Vec<[usize; 2]>) {
     // Shape-only derivation: `trace_layout` mirrors the column indices of
     // `trace_row_with_limbs` without materializing any BigUint witness.
-    let (_, limb_columns, carry_pair_columns) = trace_layout(program)
-        .expect("program shape was validated before trace generation");
+    let (_, limb_columns, carry_pair_columns) =
+        trace_layout(program).expect("program shape was validated before trace generation");
     (limb_columns, carry_pair_columns)
 }
 
@@ -1421,8 +1418,7 @@ fn append_range_table_columns(
         let low = &trace.cols[pair[0]];
         let high = &trace.cols[pair[1]];
         for row in 0..rows {
-            let value =
-                u32::from(low[row].0) as usize + 2048 * u32::from(high[row].0) as usize;
+            let value = u32::from(low[row].0) as usize + 2048 * u32::from(high[row].0) as usize;
             carry_multiplicities[value] += 1;
         }
     }
@@ -1495,10 +1491,7 @@ fn scope_columns_batch(programs: &[RistrettoFpProgram]) -> TexasAirResult<Method
     validate_program_batch_shape(programs)?;
     let log_size = batch_log_size(programs.len())?;
     let rows = 1usize << log_size;
-    let scope_rows = programs
-        .par_iter()
-        .map(scope_row)
-        .collect::<Vec<_>>();
+    let scope_rows = programs.par_iter().map(scope_row).collect::<Vec<_>>();
     let width = scope_rows[0].len();
     // Column-wise transpose with the same last-row padding as the main trace.
     let scope_count = scope_rows.len();
@@ -1587,9 +1580,7 @@ impl FrameworkEval for FpProgramAir {
                     };
                     eval.add_constraint(
                         value[index].clone()
-                            + E::F::from(M31::from(u32::from(
-                                CANONICITY_COMPLEMENT_LIMBS[index],
-                            )))
+                            + E::F::from(M31::from(u32::from(CANONICITY_COMPLEMENT_LIMBS[index])))
                             + carry_in
                             - sum[index].clone()
                             - base.clone() * carry_out,
@@ -1607,8 +1598,7 @@ impl FrameworkEval for FpProgramAir {
                 }
                 let mut top_reconstruction: E::F = M31::from(0u32).into();
                 for (bit_index, bit) in top_bits.iter().enumerate() {
-                    top_reconstruction +=
-                        bit.clone() * E::F::from(M31::from(1u32 << bit_index));
+                    top_reconstruction += bit.clone() * E::F::from(M31::from(1u32 << bit_index));
                 }
                 eval.add_constraint(sum[LIMB_COUNT - 1].clone() - top_reconstruction);
             }
@@ -1619,8 +1609,7 @@ impl FrameworkEval for FpProgramAir {
                 );
                 let mut packed: E::F = scope;
                 for (shift, limb) in group.iter().enumerate() {
-                    packed = packed
-                        - limb.clone() * E::F::from(M31::from(BASE.pow(shift as u32)));
+                    packed = packed - limb.clone() * E::F::from(M31::from(BASE.pow(shift as u32)));
                 }
                 eval.add_constraint(packed);
             }
@@ -1695,8 +1684,7 @@ impl FrameworkEval for FpProgramAir {
                         ));
                         let magnitude = limb_low.clone() + base.clone() * limb_high.clone();
                         let positive = one.clone() - negative.clone();
-                        signed_carries
-                            .push(positive * magnitude.clone() - negative * magnitude);
+                        signed_carries.push(positive * magnitude.clone() - negative * magnitude);
                     }
 
                     for limb_index in 0..PRODUCT_LIMBS {
@@ -1709,13 +1697,10 @@ impl FrameworkEval for FpProgramAir {
                                 * value_limbs[usize::from(b)][right_index].clone();
                             relation = relation
                                 - value_limbs[usize::from(q)][left_index].clone()
-                                    * E::F::from(M31::from(u32::from(
-                                        P_BASE_LIMBS[right_index],
-                                    )));
+                                    * E::F::from(M31::from(u32::from(P_BASE_LIMBS[right_index])));
                         }
                         if limb_index < LIMB_COUNT {
-                            relation = relation
-                                - value_limbs[usize::from(out)][limb_index].clone();
+                            relation = relation - value_limbs[usize::from(out)][limb_index].clone();
                         }
                         if limb_index > 0 {
                             relation += signed_carries[limb_index - 1].clone();
@@ -1794,7 +1779,11 @@ fn program_statement_digest(program: &RistrettoFpProgram) -> [u32; 16] {
     use blake2::digest::Digest;
     let digest = blake2::Blake2b512::digest(&program_statement_bytes(program));
     core::array::from_fn(|index| {
-        u32::from_le_bytes(digest[4 * index..4 * index + 4].try_into().expect("4 bytes"))
+        u32::from_le_bytes(
+            digest[4 * index..4 * index + 4]
+                .try_into()
+                .expect("4 bytes"),
+        )
     })
 }
 
@@ -1939,9 +1928,7 @@ fn fp_range_interaction(
         match entry {
             Entry::Use(_) | Entry::CarryUse(_) => one_packed,
             Entry::Table(t) => -PackedSecureField::from(pack_vec(&table_mult[*t], vector_row)),
-            Entry::CarryTable(t) => {
-                -PackedSecureField::from(pack_vec(&carry_mult[*t], vector_row))
-            }
+            Entry::CarryTable(t) => -PackedSecureField::from(pack_vec(&carry_mult[*t], vector_row)),
         }
     };
 
@@ -1982,8 +1969,7 @@ fn range_combine_pair(
     let combined: [stwo::prover::backend::simd::m31::PackedBaseField; 2] =
         [low.clone(), high.clone()];
     <FpCarry17 as stwo_constraint_framework::Relation<_, PackedSecureField>>::combine(
-        carry,
-        &combined,
+        carry, &combined,
     )
 }
 
@@ -2109,7 +2095,7 @@ pub fn verify_ristretto_fp_program(
         + carry_pair_columns.len()
         + range_table_stripes(LOG_SIZE)
         + carry_table_stripes(LOG_SIZE))
-        .div_ceil(2);
+    .div_ceil(2);
     scheme.commit(
         proof.commitments[2],
         &vec![LOG_SIZE; interaction_columns * 4],
@@ -2212,8 +2198,7 @@ pub fn verify_ristretto_fp_program_batch(
     let proof: Proof = options()
         .deserialize(&archive.stark_proof_bytes)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
-    let (program_width, limb_columns, carry_pair_columns) =
-        trace_layout(&archive.programs[0])?;
+    let (program_width, limb_columns, carry_pair_columns) = trace_layout(&archive.programs[0])?;
     let trace_width = program_width + range_table_column_count(log_size);
     let scope = scope_columns_batch(&archive.programs)?;
     let config = crate::prover_context::protocol_pcs_config();
@@ -2261,7 +2246,7 @@ pub fn verify_ristretto_fp_program_batch(
         + carry_pair_columns.len()
         + range_table_stripes(log_size)
         + carry_table_stripes(log_size))
-        .div_ceil(2);
+    .div_ceil(2);
     scheme.commit(
         proof.commitments[2],
         &vec![log_size; interaction_columns * 4],
@@ -2550,9 +2535,8 @@ pub(crate) mod fp25519 {
 static NEGATIVE_EDWARDS_D: std::sync::OnceLock<[u8; LIMBS]> = std::sync::OnceLock::new();
 
 fn negative_edwards_d() -> [u8; LIMBS] {
-    *NEGATIVE_EDWARDS_D.get_or_init(|| {
-        limbs(&subtract_big(&modulus(), &big_uint(&EDWARDS_D_BYTES)))
-    })
+    *NEGATIVE_EDWARDS_D
+        .get_or_init(|| limbs(&subtract_big(&modulus(), &big_uint(&EDWARDS_D_BYTES))))
 }
 
 /// Memoized successful results of [`canonical_decode_inverse_sqrt`].  The
@@ -2585,14 +2569,21 @@ fn canonical_decode_inverse_sqrt(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; 
 /// avoids re-running the Fp-program builder for every repeated `(left, right)`
 /// pair inside fixed-window scalar multiplication tables.  Wire, proof, and
 /// transcript are unaffected; verifier still rebuilds on cache miss.
+use std::sync::Arc;
+
 static POINT_ADDITION_PROGRAM_CACHE: std::sync::OnceLock<
-    std::sync::RwLock<std::collections::HashMap<([u8; LIMBS], [u8; LIMBS]), (RistrettoFpProgram, [u8; LIMBS])>>,
+    std::sync::RwLock<
+        std::collections::HashMap<
+            ([u8; LIMBS], [u8; LIMBS]),
+            Arc<(RistrettoFpProgram, [u8; LIMBS])>,
+        >,
+    >,
 > = std::sync::OnceLock::new();
 
 fn point_addition_program_cache_lookup(
     left_encoding: &[u8; LIMBS],
     right_encoding: &[u8; LIMBS],
-) -> Option<(RistrettoFpProgram, [u8; LIMBS])> {
+) -> Option<Arc<(RistrettoFpProgram, [u8; LIMBS])>> {
     let cache = POINT_ADDITION_PROGRAM_CACHE.get()?;
     let guard = cache.read().ok()?;
     guard.get(&(*left_encoding, *right_encoding)).cloned()
@@ -2606,7 +2597,7 @@ fn point_addition_program_cache_store(
     let cache = POINT_ADDITION_PROGRAM_CACHE
         .get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()));
     if let Ok(mut guard) = cache.write() {
-        guard.insert((*left_encoding, *right_encoding), value.clone());
+        guard.insert((*left_encoding, *right_encoding), Arc::new(value.clone()));
     }
 }
 
@@ -4313,9 +4304,7 @@ impl borsh::io::Write for Blake2bWriter {
 }
 
 /// Lightweight dedup fingerprint of an authenticated point.
-fn point_dedup_key(
-    point: &ArchivedRistrettoFpProgramProjectivePoint,
-) -> TexasAirResult<[u8; 64]> {
+fn point_dedup_key(point: &ArchivedRistrettoFpProgramProjectivePoint) -> TexasAirResult<[u8; 64]> {
     use blake2::digest::Digest;
     let mut writer = Blake2bWriter(blake2::Blake2b512::new());
     BorshSerialize::serialize(point, &mut writer)
@@ -4565,7 +4554,7 @@ pub fn build_ristretto_fp_program_compressed_point_addition(
     right_encoding: &[u8; LIMBS],
 ) -> TexasAirResult<(RistrettoFpProgram, [u8; LIMBS])> {
     if let Some(cached) = point_addition_program_cache_lookup(left_encoding, right_encoding) {
-        return Ok(cached);
+        return Ok((*cached).clone());
     }
     let left_inverse_sqrt = canonical_decode_inverse_sqrt(left_encoding)?;
     // Doubling rows (accumulator squaring in the Horner ladder) decode the
@@ -4741,10 +4730,8 @@ fn validate_compressed_fixed_window_scalar_mul_statement(
             "compressed fixed-window scalar multiplication requires exactly {COMPRESSED_FIXED_WINDOW_ROWS} rows"
         )));
     }
-    let (expected_programs, expected_output) = build_compressed_fixed_window_scalar_mul_rows(
-        &archive.windows,
-        &archive.base,
-    )?;
+    let (expected_programs, expected_output) =
+        build_compressed_fixed_window_scalar_mul_rows(&archive.windows, &archive.base)?;
     if archive.additions.programs != expected_programs || archive.output != expected_output {
         return Err(TexasAirError::ConstraintUnsatisfied(
             "compressed fixed-window scalar multiplication is detached from its scalar, base, output, or row order"
@@ -4764,11 +4751,7 @@ pub fn verify_ristretto_fp_program_compressed_fixed_window_scalar_mul(
 
 /// Prove multiple compressed fixed-window scalar multiplications in one batch STARK.
 pub fn prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
-    inputs: Vec<(
-        [u8; LIMBS],
-        [u8; FIXED_WINDOW_COUNT],
-        [u8; LIMBS],
-    )>,
+    inputs: Vec<([u8; LIMBS], [u8; FIXED_WINDOW_COUNT], [u8; LIMBS])>,
 ) -> TexasAirResult<ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof> {
     if inputs.is_empty() {
         return Err(TexasAirError::SpecViolation(
@@ -4830,14 +4813,19 @@ fn validate_compressed_fixed_window_scalar_mul_batch_statement(
         )));
     }
     let mut offset = 0usize;
-    for statement in &archive.statements {
-        let (expected_programs, expected_output) = build_compressed_fixed_window_scalar_mul_rows(
-            &statement.windows,
-            &statement.base,
-        )?;
+    let expected_per_statement: Vec<(Vec<RistrettoFpProgram>, [u8; LIMBS])> = archive
+        .statements
+        .par_iter()
+        .map(|statement| {
+            build_compressed_fixed_window_scalar_mul_rows(&statement.windows, &statement.base)
+        })
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    for (statement, (expected_programs, expected_output)) in
+        archive.statements.iter().zip(expected_per_statement.iter())
+    {
         let end = offset + COMPRESSED_FIXED_WINDOW_ROWS;
-        if archive.additions.programs[offset..end] != expected_programs
-            || statement.output != expected_output
+        if archive.additions.programs[offset..end] != *expected_programs
+            || statement.output != *expected_output
         {
             return Err(TexasAirError::ConstraintUnsatisfied(
                 "compressed scalar-multiplication batch statement or row order is detached".into(),
@@ -5084,9 +5072,6 @@ mod tests {
         assert!(op_count > MAX_OPS);
     }
 
-
-
-
     #[test]
     fn range_logup_multiset_balances_algebraically() {
         // Native check: for the dummy lookup elements, the sum of use
@@ -5108,14 +5093,24 @@ mod tests {
         for column in &limb_columns {
             for row in 0..rows {
                 let limb = trace.cols[*column][row];
-                use_sum += <FpRange11 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(&range, &[limb]).inverse();
+                use_sum +=
+                    <FpRange11 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(
+                        &range,
+                        &[limb],
+                    )
+                    .inverse();
             }
         }
         for pair in &carry_pair_columns {
             for row in 0..rows {
                 let low = trace.cols[pair[0]][row];
                 let high = trace.cols[pair[1]][row];
-                use_sum += <FpCarry17 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(&carry, &[low, high]).inverse();
+                use_sum +=
+                    <FpCarry17 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(
+                        &carry,
+                        &[low, high],
+                    )
+                    .inverse();
             }
         }
         let mut table_sum = SecureField::from(0u32);
@@ -5123,7 +5118,12 @@ mod tests {
             for row in 0..rows {
                 let mult: SecureField = trace.cols[program_width + 2 * t][row].into();
                 let value = trace.cols[program_width + 2 * t + 1][row];
-                let den = <FpRange11 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(&range, &[value]).inverse();
+                let den =
+                    <FpRange11 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(
+                        &range,
+                        &[value],
+                    )
+                    .inverse();
                 table_sum += mult * den;
             }
         }
@@ -5133,7 +5133,12 @@ mod tests {
                 let mult: SecureField = trace.cols[carry_offset + 3 * t][row].into();
                 let low = trace.cols[carry_offset + 3 * t + 1][row];
                 let high = trace.cols[carry_offset + 3 * t + 2][row];
-                let den = <FpCarry17 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(&carry, &[low, high]).inverse();
+                let den =
+                    <FpCarry17 as stwo_constraint_framework::Relation<M31, SecureField>>::combine(
+                        &carry,
+                        &[low, high],
+                    )
+                    .inverse();
                 table_sum += mult * den;
             }
         }

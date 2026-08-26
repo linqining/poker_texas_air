@@ -76,19 +76,19 @@ struct RistrettoReconstructionRelationArchiveWire {
     bundle_digest: [u8; 32],
 }
 
-fn relation_archive_digest(
-    bundle: &ArchivedRistrettoReconstructionRelationBundle,
-) -> TexasAirResult<[u8; 32]> {
+/// Compute the transport digest over an already serialized bundle.  Keeping
+/// this separate lets the archive encoder hash the exact bytes it is about to
+/// emit, avoiding a second full serialization of the (often very large)
+/// relation proofs.
+fn relation_archive_digest_payload(payload: &[u8]) -> TexasAirResult<[u8; 32]> {
     use blake2::{
         Blake2bVar,
         digest::{Update, VariableOutput},
     };
 
-    let payload = borsh::to_vec(bundle)
-        .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
     let mut hasher = Blake2bVar::new(32).expect("Blake2b-256 output is valid");
     hasher.update(RELATION_ARCHIVE_DOMAIN);
-    hasher.update(&payload);
+    hasher.update(payload);
     let mut digest = [0u8; 32];
     hasher
         .finalize_variable(&mut digest)
@@ -96,22 +96,42 @@ fn relation_archive_digest(
     Ok(digest)
 }
 
+fn encode_relation_archive_bytes(bundle_payload: &[u8], bundle_digest: [u8; 32]) -> Vec<u8> {
+    // `RistrettoReconstructionRelationArchiveWire` is encoded as
+    // `(version, bundle, digest)` by Borsh.  Assemble those fields directly so
+    // callers can reuse the one serialized bundle payload and avoid cloning
+    // the complete archive merely to compute its digest.
+    let mut encoded = Vec::with_capacity(
+        RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len()
+            + 1
+            + bundle_payload.len()
+            + bundle_digest.len(),
+    );
+    encoded.extend_from_slice(&RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC);
+    encoded.push(RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_VERSION);
+    encoded.extend_from_slice(bundle_payload);
+    encoded.extend_from_slice(&bundle_digest);
+    encoded
+}
+
 impl ArchivedRistrettoReconstructionRelationBundle {
     /// Serialize this relation bundle with a versioned, self-identifying
     /// archive boundary suitable for another prover or verifier process.
     pub fn encode_archive(&self) -> TexasAirResult<Vec<u8>> {
-        let wire = RistrettoReconstructionRelationArchiveWire {
-            version: RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_VERSION,
-            bundle: self.clone(),
-            bundle_digest: relation_archive_digest(self)?,
-        };
-        let payload = borsh::to_vec(&wire)
-            .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
-        let mut encoded = Vec::with_capacity(
-            RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len() + payload.len(),
-        );
+        // Serialize directly into the final output buffer.  The previous
+        // implementation cloned the complete bundle and serialized it twice
+        // (once for the digest and once for the wire), which briefly doubled
+        // peak memory for large STARK archives.  Here the digest is computed
+        // over the in-place bundle slice and only its fixed 32-byte result is
+        // appended afterward.
+        let prefix_len = RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len() + 1;
+        let mut encoded = Vec::with_capacity(prefix_len);
         encoded.extend_from_slice(&RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC);
-        encoded.extend_from_slice(&payload);
+        encoded.push(RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_VERSION);
+        self.serialize(&mut encoded)
+            .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+        let digest = relation_archive_digest_payload(&encoded[prefix_len..])?;
+        encoded.extend_from_slice(&digest);
         Ok(encoded)
     }
 
@@ -139,12 +159,14 @@ impl ArchivedRistrettoReconstructionRelationBundle {
                 "unsupported Ristretto Reconstruction V3 relation-archive version".into(),
             ));
         }
-        if wire.bundle_digest != relation_archive_digest(&wire.bundle)? {
+        let bundle_payload = borsh::to_vec(&wire.bundle)
+            .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+        if wire.bundle_digest != relation_archive_digest_payload(&bundle_payload)? {
             return Err(TexasAirError::ConstraintUnsatisfied(
                 "Ristretto Reconstruction V3 relation-archive digest is detached".into(),
             ));
         }
-        if wire.bundle.encode_archive()? != bytes {
+        if encode_relation_archive_bytes(&bundle_payload, wire.bundle_digest) != bytes {
             return Err(TexasAirError::SerializationError(
                 "Ristretto Reconstruction V3 relation-archive is not canonically encoded".into(),
             ));
@@ -312,6 +334,23 @@ mod tests {
     fn relation_archive_roundtrip_is_versioned_and_strict() {
         let bundle = malformed_bundle_for_wire_test();
         let wire = bundle.encode_archive().unwrap();
+        // The optimized encoder must remain byte-for-byte compatible with
+        // the canonical Borsh representation used by the pre-optimization
+        // implementation.
+        let bundle_payload = borsh::to_vec(&bundle).unwrap();
+        let digest = relation_archive_digest_payload(&bundle_payload).unwrap();
+        let canonical_payload = borsh::to_vec(&RistrettoReconstructionRelationArchiveWire {
+            version: RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_VERSION,
+            bundle: bundle.clone(),
+            bundle_digest: digest,
+        })
+        .unwrap();
+        let mut canonical_wire = Vec::with_capacity(
+            RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len() + canonical_payload.len(),
+        );
+        canonical_wire.extend_from_slice(&RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC);
+        canonical_wire.extend_from_slice(&canonical_payload);
+        assert_eq!(wire, canonical_wire);
         assert_eq!(
             &wire[..RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC.len()],
             &RISTRETTO_RECONSTRUCTION_RELATION_ARCHIVE_MAGIC

@@ -436,9 +436,9 @@ fn slot_or_deep_batch() {
         TranscriptId,
     };
     use poker_texas_air::ristretto_reconstruction_proof_wire::{
-        RistrettoBayerGrothShuffleProofWire, RistrettoCiphertextProofWire,
-        RistrettoCrossKeyProofWire, RistrettoReconstructionProofEnvelope, RistrettoSlotOrProofWire,
-        RISTRETTO_RECONSTRUCTION_READABLE_CARDS,
+        RISTRETTO_RECONSTRUCTION_READABLE_CARDS, RistrettoBayerGrothShuffleProofWire,
+        RistrettoCiphertextProofWire, RistrettoCrossKeyProofWire,
+        RistrettoReconstructionProofEnvelope, RistrettoSlotOrProofWire,
     };
     use poker_texas_air::ristretto_reconstruction_slot_or_air::{
         RistrettoSlotOrTranscriptChallenges, prove_ristretto_reconstruction_slot_or_batch,
@@ -485,12 +485,12 @@ fn slot_or_deep_batch() {
         prior_state_digest: [2; 32],
         aggregate_pk: point_bytes(aggregate_pk),
         owner_pk: vec![4; 32],
-        cards: cards
-            .iter()
-            .map(|point| point_bytes(*point))
-            .collect(),
+        cards: cards.iter().map(|point| point_bytes(*point)).collect(),
         user_readable_cards: vec![
-            EncodedCiphertext { c1: vec![6; 32], c2: vec![7; 32] };
+            EncodedCiphertext {
+                c1: vec![6; 32],
+                c2: vec![7; 32]
+            };
             RISTRETTO_RECONSTRUCTION_READABLE_CARDS
         ],
         contributions: contributions
@@ -536,8 +536,10 @@ fn slot_or_deep_batch() {
         .collect();
     let envelope = RistrettoReconstructionProofEnvelope::from_components(
         &request,
-        [RistrettoCiphertextProofWire { c1: [0xA0; 32], c2: [0xA1; 32] };
-            RISTRETTO_RECONSTRUCTION_READABLE_CARDS],
+        [RistrettoCiphertextProofWire {
+            c1: [0xA0; 32],
+            c2: [0xA1; 32],
+        }; RISTRETTO_RECONSTRUCTION_READABLE_CARDS],
         RistrettoBayerGrothShuffleProofWire::default(),
         [RistrettoCrossKeyProofWire {
             commitment_owner_key: [0xB0; 32],
@@ -563,11 +565,17 @@ fn slot_or_deep_batch() {
     let t = std::time::Instant::now();
     let archive = prove_ristretto_reconstruction_slot_or_batch(&request, &challenges)
         .expect("deep slot-OR batch prove");
-    println!("deep slot-OR batch prove: {:.2}s", t.elapsed().as_secs_f64());
+    println!(
+        "deep slot-OR batch prove: {:.2}s",
+        t.elapsed().as_secs_f64()
+    );
     let t = std::time::Instant::now();
     verify_ristretto_reconstruction_slot_or_batch(&request, &challenges, &archive)
         .expect("deep slot-OR batch verify");
-    println!("deep slot-OR batch verify: {:.2}s", t.elapsed().as_secs_f64());
+    println!(
+        "deep slot-OR batch verify: {:.2}s",
+        t.elapsed().as_secs_f64()
+    );
     println!(
         "proof bytes: {}",
         borsh::to_vec(&archive).map(|v| v.len()).unwrap_or(0)
@@ -575,7 +583,9 @@ fn slot_or_deep_batch() {
 
     let mut spliced = archive;
     spliced.additions.programs[3].values[2][0] ^= 1;
-    assert!(verify_ristretto_reconstruction_slot_or_batch(&request, &challenges, &spliced).is_err());
+    assert!(
+        verify_ristretto_reconstruction_slot_or_batch(&request, &challenges, &spliced).is_err()
+    );
     println!("tampered point-addition row rejected");
 }
 
@@ -593,20 +603,26 @@ fn borsh_ser<T: borsh::BorshSerialize>(value: &T) -> Vec<u8> {
 }
 
 fn ristretto_timing() {
+    use poker_texas_air::canonical_reconstruction_binding::{
+        CANONICAL_RECONSTRUCTION_CARDS, CanonicalRistrettoCiphertext,
+    };
     use poker_texas_air::ristretto_reconstruction_accumulator_air::{
         prove_ristretto_reconstruction_deck_accumulator,
         verify_ristretto_reconstruction_deck_accumulator,
     };
-    use poker_texas_air::canonical_reconstruction_binding::{
-        CanonicalRistrettoCiphertext, CANONICAL_RECONSTRUCTION_CARDS,
-    };
     let basepoint: [u8; 32] = [
-        0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71, 0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00,
-        0x51, 0x5f, 0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d, 0xb6, 0xa6, 0x59, 0x45,
-        0xe0, 0x8d, 0x2d, 0x76,
+        0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71, 0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00, 0x51,
+        0x5f, 0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d, 0xb6, 0xa6, 0x59, 0x45, 0xe0, 0x8d,
+        0x2d, 0x76,
     ];
-    let prior = CanonicalRistrettoCiphertext { c1: [0; 32], c2: [0; 32] };
-    let contribution = CanonicalRistrettoCiphertext { c1: basepoint, c2: basepoint };
+    let prior = CanonicalRistrettoCiphertext {
+        c1: [0; 32],
+        c2: [0; 32],
+    };
+    let contribution = CanonicalRistrettoCiphertext {
+        c1: basepoint,
+        c2: basepoint,
+    };
     let contributions = [contribution; CANONICAL_RECONSTRUCTION_CARDS];
     let post = contributions;
     let t = std::time::Instant::now();

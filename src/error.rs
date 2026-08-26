@@ -94,9 +94,9 @@ impl TexasAirError {
             Self::StateRootError(_) | Self::MerkleError(_) | Self::StwoProverError(_) => {
                 ErrorCategory::Retryable
             }
-            Self::TraceGenError(_)
-            | Self::RecursionError(_)
-            | Self::NotImplemented(_) => ErrorCategory::Internal,
+            Self::TraceGenError(_) | Self::RecursionError(_) | Self::NotImplemented(_) => {
+                ErrorCategory::Internal
+            }
         }
     }
 

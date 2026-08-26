@@ -8,9 +8,6 @@
 
 #![allow(missing_docs)]
 
-use crate::blake2b_lookup_compression::{
-    ArchivedBlake2bLookupHashesProof, prove_blake2b_lookup_hashes, verify_blake2b_lookup_hashes,
-};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::hash_prover::HashProofProvider as _;
 use crate::texas_canonical::CanonicalStateImage;
@@ -86,8 +83,7 @@ pub fn verify_canonical_state_image_hashes(
             "canonical state-image hash proof is detached from an endpoint commitment".into(),
         ));
     }
-    crate::blake3_flock::FlockProvider
-        .verify_proof(&crate::hash_prover::ArchivedHashProof::Flock(archive.hashes.clone()))
+    crate::blake3_flock::verify_flock_archive(&archive.hashes)
 }
 
 #[cfg(test)]

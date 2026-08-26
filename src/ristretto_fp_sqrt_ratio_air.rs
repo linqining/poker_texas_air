@@ -311,7 +311,10 @@ mod tests {
         // reference oracle pins the exact legacy witness bytes instead.
         fn reference_sqrt_ratio(u: &[u8; LIMBS], v: &[u8; LIMBS]) -> (bool, [u8; LIMBS]) {
             let p = modulus();
-            let ratio = multiply(&big_uint(u), &big_uint(v).modpow(&(p - BigUint::from(2u32)), p));
+            let ratio = multiply(
+                &big_uint(u),
+                &big_uint(v).modpow(&(p - BigUint::from(2u32)), p),
+            );
             let mut root = ratio.modpow(&((p + BigUint::from(3u32)) >> 3u32), p);
             if multiply(&root, &root) != ratio {
                 root = multiply(&root, &sqrt_m1());
@@ -351,7 +354,10 @@ mod tests {
                 reference_sqrt_ratio(&u, &v)
             };
             assert_eq!(archive.was_square, was_square, "u={u:?} v={v:?}");
-            assert_eq!(archive.r, r, "witness root bytes diverged for u={u:?} v={v:?}");
+            assert_eq!(
+                archive.r, r,
+                "witness root bytes diverged for u={u:?} v={v:?}"
+            );
             assert_eq!(archive.r[0] & 1, 0);
         }
     }

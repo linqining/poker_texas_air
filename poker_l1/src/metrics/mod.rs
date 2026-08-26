@@ -112,12 +112,8 @@ impl MetricsCollector {
         out.push_str("# TYPE zchain_block_time_ms summary\n");
         let block_time_count = self.block_time_ms_count.load(Ordering::Acquire);
         let block_time_sum = self.block_time_ms_sum.load(Ordering::Acquire);
-        out.push_str(&format!(
-            "zchain_block_time_ms_sum {block_time_sum}\n"
-        ));
-        out.push_str(&format!(
-            "zchain_block_time_ms_count {block_time_count}\n"
-        ));
+        out.push_str(&format!("zchain_block_time_ms_sum {block_time_sum}\n"));
+        out.push_str(&format!("zchain_block_time_ms_count {block_time_count}\n"));
         // zchain_peer_count (gauge)
         out.push_str("# HELP zchain_peer_count Current P2P peer count.\n");
         out.push_str("# TYPE zchain_peer_count gauge\n");

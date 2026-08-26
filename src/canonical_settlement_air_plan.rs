@@ -71,8 +71,7 @@ pub const LAYER_ROW_COLUMNS: usize = LAYER_HEADER_COLUMNS + LAYER_RUNOUT_COLUMNS
 /// Plan-level header: version (1), schedule tag (2: runout count + shared
 /// prefix), gross pot (8), rake (8), total awards (8), winner mask (2),
 /// per-seat aggregate awards (9 × 8).
-pub const PLAN_HEADER_COLUMNS: usize =
-    3 + AMOUNT_BYTES * 3 + 2 + SETTLEMENT_SEATS * AWARD_BYTES;
+pub const PLAN_HEADER_COLUMNS: usize = 3 + AMOUNT_BYTES * 3 + 2 + SETTLEMENT_SEATS * AWARD_BYTES;
 
 /// Fixed-width trace width of the complete settlement plan projection:
 /// plan header + every layer row.
@@ -95,7 +94,8 @@ pub const RAKE_ALLOCATION_COLUMNS: usize = MAX_POT_LAYERS * 2 * AMOUNT_BYTES;
 
 /// Byte columns fed into the shared 256-entry range LogUp table per plan
 /// row (amounts, ranks, masks, odd-chip and rake advice).
-pub const PLAN_BYTE_LOOKUP_COLUMNS: usize = PLAN_ROW_COLUMNS + ODD_CHIP_COLUMNS + RAKE_ALLOCATION_COLUMNS;
+pub const PLAN_BYTE_LOOKUP_COLUMNS: usize =
+    PLAN_ROW_COLUMNS + ODD_CHIP_COLUMNS + RAKE_ALLOCATION_COLUMNS;
 
 #[cfg(test)]
 mod tests {

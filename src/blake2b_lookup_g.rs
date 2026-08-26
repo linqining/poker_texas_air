@@ -220,18 +220,23 @@ fn scope_columns(calls: &[Blake2bGCall], log_size: u32) -> Vec<BaseColumn> {
 }
 
 fn xor_table() -> Vec<BaseColumn> {
-    let mut columns = vec![Vec::with_capacity(XOR_ROWS); 3];
-    for index in 0..XOR_ROWS {
-        let a = (index >> 8) as u32;
-        let b = (index & 0xff) as u32;
-        columns[0].push(M31::from(a));
-        columns[1].push(M31::from(b));
-        columns[2].push(M31::from(a ^ b));
-    }
-    columns
-        .into_iter()
-        .map(|values| BaseColumn::from_cpu(&values))
-        .collect()
+    static TABLE: std::sync::OnceLock<Vec<BaseColumn>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            let mut columns = vec![Vec::with_capacity(XOR_ROWS); 3];
+            for index in 0..XOR_ROWS {
+                let a = (index >> 8) as u32;
+                let b = (index & 0xff) as u32;
+                columns[0].push(M31::from(a));
+                columns[1].push(M31::from(b));
+                columns[2].push(M31::from(a ^ b));
+            }
+            columns
+                .into_iter()
+                .map(|values| BaseColumn::from_cpu(&values))
+                .collect()
+        })
+        .clone()
 }
 
 fn rotate_table() -> Vec<BaseColumn> {
@@ -268,7 +273,12 @@ fn circle_evals(
         .collect()
 }
 
-fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
+fn preprocessed_ids() -> &'static [PreProcessedColumnId] {
+    static IDS: std::sync::OnceLock<Vec<PreProcessedColumnId>> = std::sync::OnceLock::new();
+    IDS.get_or_init(build_preprocessed_ids).as_slice()
+}
+
+fn build_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     let mut ids = Vec::with_capacity(SCOPE_COLUMNS + 7);
     ids.push(PreProcessedColumnId {
         id: "blake2b.g.scope.active.v1".into(),

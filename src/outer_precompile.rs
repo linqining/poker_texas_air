@@ -18,7 +18,7 @@ use bincode::Options;
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::BorshDeserialize;
-use starknet_ff::FieldElement;
+use std::sync::Arc;
 use stwo::core::channel::{Channel, Poseidon252Channel};
 use stwo::core::fields::m31::M31;
 use stwo::core::pcs::CommitmentSchemeVerifier;
@@ -357,6 +357,37 @@ pub fn verify_outer_precompile_request(
     })
 }
 
+/// Variant of [`verify_outer_precompile_request`] that skips the inner
+/// `request.encode()` and accepts the pre-encoded request bytes directly.
+/// Use this from host-side verification paths that already carry the wire
+/// bytes (avoid re-serializing a multi-MB request just to hash it back).
+fn verify_outer_precompile_request_with_bytes(
+    request: &OuterAggregatePrecompileRequest,
+    request_bytes: &[u8],
+    expected_anchor: &ExpectedChainAnchor,
+) -> TexasAirResult<VerifiedOuterAggregateCall> {
+    let carried_anchor = encode_anchor(&request.anchor)?;
+    let expected_anchor_bytes = encode_anchor(expected_anchor)?;
+    if carried_anchor != expected_anchor_bytes {
+        return Err(TexasAirError::RecursionError(
+            "outer precompile request anchor differs from authenticated anchor".into(),
+        ));
+    }
+    let verified_aggregate = verify_outer_aggregate(&request.tasks, &request.bundle)?;
+    verified_aggregate.verify_against_anchor(expected_anchor)?;
+
+    let binding = outer_call_binding(
+        verified_aggregate.aggregate_digest(),
+        &carried_anchor,
+        request_bytes,
+        request.tasks.len(),
+    )?;
+    Ok(VerifiedOuterAggregateCall {
+        verified_aggregate,
+        binding,
+    })
+}
+
 /// Canonical request encoding shared by the request object and the prove path.
 ///
 /// Produces byte-identical output to [`OuterAggregatePrecompileRequest::encode`]
@@ -591,11 +622,24 @@ impl OuterAggregatePrecompileRow {
 }
 
 /// Transferable package containing the canonical request and final AIR proof.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct HostVerifiedOuterAggregateProof {
     request_bytes: Vec<u8>,
     stark_proof_bytes: Vec<u8>,
+    /// Parsed request retained when this package came from [`Self::decode`].
+    /// Keeping it here lets verification reuse the strict decode exactly once
+    /// while still hashing the original canonical bytes for the binding.
+    request: Option<Arc<OuterAggregatePrecompileRequest>>,
 }
+
+impl PartialEq for HostVerifiedOuterAggregateProof {
+    fn eq(&self, other: &Self) -> bool {
+        self.request_bytes == other.request_bytes
+            && self.stark_proof_bytes == other.stark_proof_bytes
+    }
+}
+
+impl Eq for HostVerifiedOuterAggregateProof {}
 
 impl HostVerifiedOuterAggregateProof {
     /// Canonical outer-precompile request bytes.
@@ -634,8 +678,11 @@ impl HostVerifiedOuterAggregateProof {
     ///
     /// # Errors
     ///
-    /// Rejects unknown versions/flags, invalid sizes, truncation, malformed
-    /// requests, and trailing data.
+    /// Rejects unknown versions/flags, invalid sizes, truncation, and trailing
+    /// data. The embedded request is strictly decoded exactly once and kept
+    /// for [`verify_host_verified_outer_aggregate`], avoiding a second full
+    /// request decode/allocate round-trip while preserving fail-closed wire
+    /// validation at the package boundary.
     pub fn decode(bytes: &[u8]) -> TexasAirResult<Self> {
         if bytes.len() < PACKAGE_HEADER_LEN || bytes.len() > MAX_OUTER_PRECOMPILE_PROOF_BYTES {
             return Err(wire_error("outer precompile proof package size is invalid"));
@@ -663,10 +710,11 @@ impl HostVerifiedOuterAggregateProof {
         }
         let request_end = PACKAGE_HEADER_LEN + request_len;
         let request_bytes = bytes[PACKAGE_HEADER_LEN..request_end].to_vec();
-        let _ = OuterAggregatePrecompileRequest::decode(&request_bytes)?;
+        let request = OuterAggregatePrecompileRequest::decode(&request_bytes)?;
         Ok(Self {
             request_bytes,
             stark_proof_bytes: bytes[request_end..].to_vec(),
+            request: Some(Arc::new(request)),
         })
     }
 }
@@ -800,6 +848,7 @@ pub fn prove_host_verified_outer_aggregate_from_bundle(
     Ok(HostVerifiedOuterAggregateProof {
         request_bytes,
         stark_proof_bytes,
+        request: None,
     })
 }
 
@@ -818,8 +867,22 @@ pub fn verify_host_verified_outer_aggregate(
     expected_anchor: &ExpectedChainAnchor,
 ) -> TexasAirResult<VerifiedHostOuterAggregateProof> {
     validate_package_lengths(package.request_bytes.len(), package.stark_proof_bytes.len())?;
-    let request = OuterAggregatePrecompileRequest::decode(&package.request_bytes)?;
-    let verified = verify_outer_precompile_request(&request, expected_anchor)?;
+    // Packages decoded from wire retain their strict request parse; newly
+    // generated in-memory packages parse lazily here. In either case the
+    // original bytes are passed through for the request digest without a
+    // costly canonical re-encoding.
+    let decoded_request;
+    let request = if let Some(request) = package.request.as_ref() {
+        request
+    } else {
+        decoded_request = OuterAggregatePrecompileRequest::decode(&package.request_bytes)?;
+        &decoded_request
+    };
+    let verified = verify_outer_precompile_request_with_bytes(
+        &request,
+        &package.request_bytes,
+        expected_anchor,
+    )?;
     let air = OuterAggregatePrecompileAir {
         log_size: SINGLE_METHOD_LOG_SIZE,
         binding: verified.binding.air_binding(),

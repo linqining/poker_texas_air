@@ -104,12 +104,16 @@ fn scope_columns(scalar: &[u8; LIMBS]) -> MethodTrace {
     trace
 }
 
-fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    (0..LIMBS)
-        .map(|limb| PreProcessedColumnId {
-            id: format!("ristretto.scalar.windows.v1.{limb}").into(),
-        })
-        .collect()
+fn preprocessed_ids() -> &'static [PreProcessedColumnId] {
+    static IDS: std::sync::OnceLock<Vec<PreProcessedColumnId>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        (0..LIMBS)
+            .map(|limb| PreProcessedColumnId {
+                id: format!("ristretto.scalar.windows.v1.{limb}").into(),
+            })
+            .collect()
+    })
+    .as_slice()
 }
 
 #[derive(Clone, Copy)]
@@ -395,10 +399,7 @@ fn scope_columns_batch(rows: &[ArchivedRistrettoScalarWindowsRow]) -> MethodTrac
     trace
 }
 
-fn mix_scope_batch(
-    channel: &mut impl Channel,
-    rows: &[ArchivedRistrettoScalarWindowsRow],
-) {
+fn mix_scope_batch(channel: &mut impl Channel, rows: &[ArchivedRistrettoScalarWindowsRow]) {
     channel.mix_u64(0x7363_7769_6e62_6174);
     channel.mix_u64(rows.len() as u64);
     for row in rows {
@@ -422,8 +423,9 @@ pub fn prove_ristretto_scalar_windows_batch(
     // batches repeat responses and challenges across slots; proving every
     // duplicate independently wastes PoW/FRI wall clock.
     let mut unique_scalars: Vec<[u8; LIMBS]> = Vec::with_capacity(scalars.len());
+    let mut seen = std::collections::HashSet::with_capacity(scalars.len());
     for scalar in scalars {
-        if !unique_scalars.contains(scalar) {
+        if seen.insert(*scalar) {
             unique_scalars.push(*scalar);
         }
     }

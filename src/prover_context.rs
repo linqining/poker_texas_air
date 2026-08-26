@@ -74,15 +74,6 @@ pub(crate) fn simd_twiddles(domain_log_size: u32) -> Arc<TwiddleTree<SimdBackend
         return Arc::clone(twiddles);
     }
 
-    {
-        let cache = cache
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(twiddles) = cache.get(&domain_log_size) {
-            return Arc::clone(twiddles);
-        }
-    }
-
     // Precomputation is deliberately outside the write lock. Different cold
     // domains must not block readers or serialize one another unnecessarily.
     let twiddles = Arc::new(SimdBackend::precompute_twiddles(

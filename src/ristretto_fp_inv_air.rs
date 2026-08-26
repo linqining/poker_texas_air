@@ -26,6 +26,11 @@ const P_BYTES: [u8; LIMBS] = {
     bytes
 };
 
+fn modulus() -> &'static BigUint {
+    static MODULUS: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+    MODULUS.get_or_init(|| (BigUint::one() << 255u32) - BigUint::from(19u32))
+}
+
 /// Public inverse statement and its verified multiplication relation.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ArchivedRistrettoFpInverseProof {
@@ -50,8 +55,8 @@ pub fn prove_ristretto_fp_inverse(
     value: &[u8; LIMBS],
 ) -> TexasAirResult<ArchivedRistrettoFpInverseProof> {
     let value_integer = BigUint::from_bytes_le(value);
-    let p = (BigUint::one() << 255u32) - BigUint::from(19u32);
-    if value_integer >= p {
+    let p = modulus();
+    if value_integer >= *p {
         return Err(TexasAirError::SpecViolation(
             "Ristretto inverse input must be canonical".into(),
         ));
@@ -61,7 +66,8 @@ pub fn prove_ristretto_fp_inverse(
             "zero has no Ristretto multiplicative inverse".into(),
         ));
     }
-    let inverse_integer = value_integer.modpow(&(&p - BigUint::from(2u32)), &p);
+    let p_minus_two = modulus() - BigUint::from(2u32);
+    let inverse_integer = value_integer.modpow(&p_minus_two, modulus());
     let inverse = limbs(&inverse_integer);
     let multiplication = prove_ristretto_fp_multiplication(value, &inverse)?;
     Ok(ArchivedRistrettoFpInverseProof {

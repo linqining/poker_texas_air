@@ -75,9 +75,7 @@ pub fn synthetic_image_message(image: &[starknet_ff::FieldElement]) -> Vec<u8> {
     message
 }
 
-fn provider_statements(
-    endpoints: &[StateRootEndpointStatement; 2],
-) -> [Blake2bStatement; 2] {
+fn provider_statements(endpoints: &[StateRootEndpointStatement; 2]) -> [Blake2bStatement; 2] {
     [
         Blake2bStatement::new(endpoints[0].message.clone(), endpoints[0].root),
         Blake2bStatement::new(endpoints[1].message.clone(), endpoints[1].root),
@@ -95,26 +93,16 @@ const BINDING_CACHE_CAPACITY: usize = 1024;
 
 #[derive(Default)]
 struct BindingCache {
-    entries: std::collections::HashMap<
-        [u8; 64],
-        std::sync::Arc<ArchivedStateRootBindingProof>,
-    >,
+    entries: std::collections::HashMap<[u8; 64], std::sync::Arc<ArchivedStateRootBindingProof>>,
     insertion_order: std::collections::VecDeque<[u8; 64]>,
 }
 
 impl BindingCache {
-    fn get(
-        &self,
-        key: &[u8; 64],
-    ) -> Option<std::sync::Arc<ArchivedStateRootBindingProof>> {
+    fn get(&self, key: &[u8; 64]) -> Option<std::sync::Arc<ArchivedStateRootBindingProof>> {
         self.entries.get(key).map(std::sync::Arc::clone)
     }
 
-    fn insert(
-        &mut self,
-        key: [u8; 64],
-        proof: std::sync::Arc<ArchivedStateRootBindingProof>,
-    ) {
+    fn insert(&mut self, key: [u8; 64], proof: std::sync::Arc<ArchivedStateRootBindingProof>) {
         if self.entries.len() >= BINDING_CACHE_CAPACITY {
             let evict = self.entries.len() - BINDING_CACHE_CAPACITY / 2;
             for _ in 0..evict {
@@ -163,8 +151,7 @@ pub fn prove_state_root_binding(
         }
     }
     let statements = provider_statements(&endpoints);
-    let proof = crate::hash_prover::default_hash_provider()
-        .prove_statements(&statements)?;
+    let proof = crate::hash_prover::default_hash_provider().prove_statements(&statements)?;
     let archive = std::sync::Arc::new(ArchivedStateRootBindingProof { endpoints, proof });
     let result = (*archive).clone();
     BINDING_CACHE
@@ -206,7 +193,10 @@ impl ArchivedStateRootBindingProof {
     /// Public pre/post roots covered by the proof.
     #[must_use]
     pub fn roots(&self) -> [StateRoot; 2] {
-        [StateRoot::from_bytes(self.endpoints[0].root), StateRoot::from_bytes(self.endpoints[1].root)]
+        [
+            StateRoot::from_bytes(self.endpoints[0].root),
+            StateRoot::from_bytes(self.endpoints[1].root),
+        ]
     }
 }
 

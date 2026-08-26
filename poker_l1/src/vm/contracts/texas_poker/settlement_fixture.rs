@@ -16,7 +16,7 @@
 use crate::object_model::ObjectID;
 use crate::vm::contracts::texas_poker::card::Card;
 use crate::vm::contracts::texas_poker::settlement::{
-    SettlementBoards, SettlementPlan, SETTLEMENT_SEATS, derive_settlement_plan_for_boards,
+    SETTLEMENT_SEATS, SettlementBoards, SettlementPlan, derive_settlement_plan_for_boards,
 };
 use crate::vm::contracts::texas_poker::side_pot::calculate_side_pots;
 use crate::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
@@ -61,8 +61,7 @@ impl SettlementScene {
             let runout_sum: u64 = pot.runouts.iter().map(|r| r.amount).sum();
             if pot.is_contested() {
                 assert_eq!(
-                    runout_sum,
-                    pot.net_amount,
+                    runout_sum, pot.net_amount,
                     "contested layers must split their net across runouts"
                 );
             }

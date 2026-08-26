@@ -22,9 +22,9 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::ristretto_fp_program_air::{
     ArchivedRistrettoFpProgramBatchProof,
     ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof,
-    ArchivedRistrettoFpProgramProof, RistrettoCompressedFixedWindowScalarMulStatement, RistrettoFpProgramBuilder,
-    build_ristretto_fp_program_compressed_point_addition, prove_ristretto_fp_program,
-    prove_ristretto_fp_program_batch,
+    ArchivedRistrettoFpProgramProof, RistrettoCompressedFixedWindowScalarMulStatement,
+    RistrettoFpProgramBuilder, build_ristretto_fp_program_compressed_point_addition,
+    prove_ristretto_fp_program, prove_ristretto_fp_program_batch,
     prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch,
     verify_ristretto_fp_program, verify_ristretto_fp_program_batch,
     verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch,
@@ -144,18 +144,19 @@ pub struct ArchivedRistrettoReconstructionSlotOrBatchProof {
     pub scalar_windows: ArchivedRistrettoScalarWindowsBatchProof,
     /// One 416-input compressed scalar-multiplication batch in slot-major order.
     /// Global row `slot * SCALAR_MUL_COUNT + input_index` identifies each input.
-    pub scalar_multiplications:
-        ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof,
+    pub scalar_multiplications: ArchivedRistrettoFpProgramCompressedFixedWindowScalarMulBatchProof,
     /// One 260-row point-addition batch: five rows per slot in slot order.
     pub additions: ArchivedRistrettoFpProgramBatchProof,
 }
 
-fn scalar_modulus() -> BigUint {
-    BigUint::from_bytes_le(&GROUP_ORDER_BYTES)
+fn scalar_modulus() -> &'static BigUint {
+    static MODULUS: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+    MODULUS.get_or_init(|| BigUint::from_bytes_le(&GROUP_ORDER_BYTES))
 }
 
-fn field_modulus() -> BigUint {
-    (BigUint::one() << 255u32) - BigUint::from(19u32)
+fn field_modulus() -> &'static BigUint {
+    static MODULUS: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+    MODULUS.get_or_init(|| (BigUint::one() << 255u32) - BigUint::from(19u32))
 }
 
 fn bytes_to_big(value: &[u8; LIMBS]) -> BigUint {
@@ -163,7 +164,7 @@ fn bytes_to_big(value: &[u8; LIMBS]) -> BigUint {
 }
 
 fn scalar_canonical(value: &[u8; LIMBS], label: &str) -> TexasAirResult<()> {
-    if bytes_to_big(value) >= scalar_modulus() {
+    if bytes_to_big(value) >= *scalar_modulus() {
         return Err(TexasAirError::SpecViolation(format!(
             "slot-OR {label} is not a canonical scalar"
         )));
@@ -183,16 +184,16 @@ fn nonzero_scalar(value: &[u8; LIMBS], label: &str) -> TexasAirResult<()> {
 
 fn field_inverse(value: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
     let value_big = bytes_to_big(value);
-    if value_big.is_zero() || value_big >= field_modulus() {
+    if value_big.is_zero() || value_big >= *field_modulus() {
         return Err(TexasAirError::SpecViolation(
             "slot-OR challenge must be a non-zero canonical field element".into(),
         ));
     }
-    let inverse = value_big.modpow(&(field_modulus() - BigUint::from(2u32)), &field_modulus());
-    let encoded = inverse.to_bytes_le();
-    let mut out = [0u8; LIMBS];
-    out[..encoded.len()].copy_from_slice(&encoded);
-    Ok(out)
+    // Use the fiat-crypto Fe chain (same as fp25519::Fe::inverse) instead of
+    // a BigUint modpow: the fiat backend is ~10x faster on the 416-call
+    // slot-OR hot path and ships the same wire bytes.
+    let fe = crate::ristretto_fp_program_air::fp25519::Fe::from_bytes(value);
+    Ok(fe.invert().to_bytes())
 }
 
 fn fixed_point(value: &[u8], label: &str) -> TexasAirResult<[u8; LIMBS]> {
@@ -369,9 +370,7 @@ pub fn prove_ristretto_slot_or(
             scalar_windows
                 .iter()
                 .zip(inputs.iter().map(|(_, base)| *base))
-                .map(|(window_proof, base)| {
-                    (window_proof.scalar, window_proof.windows, base)
-                })
+                .map(|(window_proof, base)| (window_proof.scalar, window_proof.windows, base))
                 .collect(),
         )?;
     let outputs = scalar_outputs(&scalar_multiplications)?;
@@ -437,6 +436,14 @@ pub fn verify_ristretto_slot_or(archive: &ArchivedRistrettoSlotOrProof) -> Texas
         }
         verify_ristretto_scalar_windows(window_proof)?;
     }
+    let scalar_window_lookup: std::collections::HashMap<
+        [u8; LIMBS],
+        &crate::ristretto_scalar_windows_air::ArchivedRistrettoScalarWindowsProof,
+    > = archive
+        .scalar_windows
+        .iter()
+        .map(|proof| (proof.scalar, proof))
+        .collect();
     for (actual, (scalar, base)) in archive
         .scalar_multiplications
         .statements
@@ -448,10 +455,7 @@ pub fn verify_ristretto_slot_or(archive: &ArchivedRistrettoSlotOrProof) -> Texas
                 "slot-OR scalar multiplication statement is detached".into(),
             ));
         }
-        let matching = archive
-            .scalar_windows
-            .iter()
-            .find(|proof| proof.scalar == *scalar);
+        let matching = scalar_window_lookup.get(scalar).copied();
         if !matches!(matching, Some(proof) if prove_window_matches_statement(proof, actual)) {
             return Err(TexasAirError::ConstraintUnsatisfied(
                 "slot-OR scalar window decomposition is detached from its statement".into(),
@@ -596,10 +600,7 @@ pub fn prove_ristretto_reconstruction_slot_or_batch(
         .zip(outputs_per_slot.par_iter())
         .map(|(statement, outputs)| expected_additions(statement, outputs))
         .collect::<TexasAirResult<Vec<Vec<_>>>>()?;
-    let flat_additions = addition_programs
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let flat_additions = addition_programs.into_iter().flatten().collect::<Vec<_>>();
     let additions = prove_ristretto_fp_program_batch(&flat_additions)?;
 
     let archive = ArchivedRistrettoReconstructionSlotOrBatchProof {
@@ -763,20 +764,18 @@ pub fn verify_ristretto_reconstruction_slot_or_batch(
     // twiddle cache); verify them in parallel so the wall clock is the max
     // instead of the sum.  All binding checks above already ran serially, so
     // this parallel phase preserves the same fail-closed decision.
-    let stark_results: Vec<TexasAirResult<()>> = [
-        0usize, 1, 2, 3, 4,
-    ]
-    .into_par_iter()
-    .map(|which| match which {
-        0 => verify_ristretto_fp_program_batch(&archive.challenge_nonzero),
-        1 => verify_ristretto_scalar_addition_batch(&archive.challenge_additions),
-        2 => verify_ristretto_scalar_windows_batch(&archive.scalar_windows),
-        3 => verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
-            &archive.scalar_multiplications,
-        ),
-        _ => verify_ristretto_fp_program_batch(&archive.additions),
-    })
-    .collect();
+    let stark_results: Vec<TexasAirResult<()>> = [0usize, 1, 2, 3, 4]
+        .into_par_iter()
+        .map(|which| match which {
+            0 => verify_ristretto_fp_program_batch(&archive.challenge_nonzero),
+            1 => verify_ristretto_scalar_addition_batch(&archive.challenge_additions),
+            2 => verify_ristretto_scalar_windows_batch(&archive.scalar_windows),
+            3 => verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
+                &archive.scalar_multiplications,
+            ),
+            _ => verify_ristretto_fp_program_batch(&archive.additions),
+        })
+        .collect();
     stark_results
         .into_iter()
         .find(|result| result.is_err())
@@ -970,7 +969,10 @@ mod tests {
                 crate::ristretto_reconstruction_proof_wire::RISTRETTO_RECONSTRUCTION_READABLE_CARDS
             ],
             contributions: vec![
-                EncodedCiphertext { c1: vec![8; 32], c2: vec![9; 32] };
+                EncodedCiphertext {
+                    c1: vec![8; 32],
+                    c2: vec![9; 32]
+                };
                 SLOT_COUNT
             ],
             proof: vec![1],
@@ -1047,37 +1049,31 @@ mod tests {
             },
         };
         // Correct order reaches the (empty) sub-proof checks and fails there.
-        let err = verify_ristretto_reconstruction_slot_or_batch(
-            &request,
-            &challenges,
-            &archive,
-        )
-        .unwrap_err();
-        assert!(!err
-            .to_string()
-            .contains("slot-OR archive is detached from request, envelope, or transcript order"));
+        let err = verify_ristretto_reconstruction_slot_or_batch(&request, &challenges, &archive)
+            .unwrap_err();
+        assert!(
+            !err.to_string().contains(
+                "slot-OR archive is detached from request, envelope, or transcript order"
+            )
+        );
 
         // A slot-order splice is rejected by the statement binding itself
         // (or by the per-slot scalar-multiplication binding in the new global
         // batch layout).
         let mut spliced = archive;
         spliced.statements.swap(0, 1);
-        let err = verify_ristretto_reconstruction_slot_or_batch(
-            &request,
-            &challenges,
-            &spliced,
-        )
-        .unwrap_err();
+        let err = verify_ristretto_reconstruction_slot_or_batch(&request, &challenges, &spliced)
+            .unwrap_err();
         let err_text = err.to_string();
         assert!(
-            err_text.contains("slot-OR archive is detached from request, envelope, or transcript order")
-                || err_text.contains("slot-OR scalar multiplication statement is detached")
+            err_text.contains(
+                "slot-OR archive is detached from request, envelope, or transcript order"
+            ) || err_text.contains("slot-OR scalar multiplication statement is detached")
                 || err_text.contains("slot-OR batch archive count is not fixed")
                 || err_text.contains("scalar multiplication count mismatch"),
             "unexpected slot-order splice error: {err_text}",
         );
     }
-
 
     #[test]
     fn batch_rejects_any_slot_count_other_than_52() {

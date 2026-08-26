@@ -63,7 +63,11 @@ const AMOUNT_ACTIVE_BYTES: usize = 4;
 // ---------------------------------------------------------------------------
 
 fn scope_columns() -> usize {
-    12 + SETTLEMENT_SEATS * AMOUNT_BYTES + 4 + 1 + 3 * AMOUNT_BYTES + 2
+    12 + SETTLEMENT_SEATS * AMOUNT_BYTES
+        + 4
+        + 1
+        + 3 * AMOUNT_BYTES
+        + 2
         + SETTLEMENT_SEATS * AMOUNT_BYTES
         + MAX_POT_LAYERS
             * (4 + 3 * AMOUNT_BYTES
@@ -183,7 +187,11 @@ impl CanonicalSettlementProjection {
                 runouts[runout_slot] = ProjectionRunout {
                     amount: runout.amount,
                     winner_mask: runout.winner_mask,
-                    share: if winners == 0 { 0 } else { runout.amount / winners },
+                    share: if winners == 0 {
+                        0
+                    } else {
+                        runout.amount / winners
+                    },
                     remainder: runout.amount % winners.max(1),
                     awards: runout.awards,
                 };
@@ -226,10 +234,7 @@ impl CanonicalSettlementProjection {
     /// Derive the ascending all-in bet levels from the bet vector and the
     /// all-in mask, padded to the fixed layer width with zeros.
     #[must_use]
-    pub fn levels_of(
-        bets: &[u64; SETTLEMENT_SEATS],
-        allin_mask: u16,
-    ) -> [u64; MAX_POT_LAYERS] {
+    pub fn levels_of(bets: &[u64; SETTLEMENT_SEATS], allin_mask: u16) -> [u64; MAX_POT_LAYERS] {
         let mut levels: Vec<u64> = (0..SETTLEMENT_SEATS)
             .filter(|seat| (allin_mask >> seat) & 1 == 1 && bets[*seat] > 0)
             .map(|seat| bets[seat])
@@ -304,12 +309,16 @@ impl CanonicalSettlementProjection {
     }
 }
 
-fn scope_ids() -> Vec<PreProcessedColumnId> {
-    (0..scope_columns())
-        .map(|index| PreProcessedColumnId {
-            id: format!("texas.settlement.scope.v1.{index}").into(),
-        })
-        .collect()
+fn scope_ids() -> &'static [PreProcessedColumnId] {
+    static IDS: std::sync::OnceLock<Vec<PreProcessedColumnId>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        (0..scope_columns())
+            .map(|index| PreProcessedColumnId {
+                id: format!("texas.settlement.scope.v1.{index}").into(),
+            })
+            .collect()
+    })
+    .as_slice()
 }
 
 fn scope_trace(projection: &CanonicalSettlementProjection) -> MethodTrace {
@@ -687,13 +696,17 @@ fn hand_witness_bits(cards: &[u8]) -> Vec<M31> {
     // 12. Category base bits: royal, sf, quad, fh, flush, straight, trip,
     // pair_ge2, pair_eq1, pair_eq0 (each boolean; the inverses are not
     // needed — these are pure functions of already-proven bits).
-    let trips_count = (2u8..=14).filter(|v| counts[usize::from(*v - 2)] == 3).count();
-    let pairs_count = (2u8..=14).filter(|v| counts[usize::from(*v - 2)] == 2).count();
+    let trips_count = (2u8..=14)
+        .filter(|v| counts[usize::from(*v - 2)] == 3)
+        .count();
+    let pairs_count = (2u8..=14)
+        .filter(|v| counts[usize::from(*v - 2)] == 2)
+        .count();
     let trip_any = trips_count > 0;
     let quad_any = counts.iter().any(|c| *c == 4);
     let base_bits = [
-        sf_high == 14,          // royal
-        sf_high > 0,            // straight flush (incl. royal)
+        sf_high == 14, // royal
+        sf_high > 0,   // straight flush (incl. royal)
         quad_any,
         trip_any && trips_count + pairs_count >= 2,
         flush_suit.is_some(),
@@ -709,8 +722,12 @@ fn hand_witness_bits(cards: &[u8]) -> Vec<M31> {
 
     // Inverses of the base-bit defining expressions (X·inv = 1 − bit).
     {
-        let trips_count = (2u8..=14).filter(|v| counts[usize::from(*v - 2)] == 3).count() as u32;
-        let pairs_count = (2u8..=14).filter(|v| counts[usize::from(*v - 2)] == 2).count() as u32;
+        let trips_count = (2u8..=14)
+            .filter(|v| counts[usize::from(*v - 2)] == 3)
+            .count() as u32;
+        let pairs_count = (2u8..=14)
+            .filter(|v| counts[usize::from(*v - 2)] == 2)
+            .count() as u32;
         let quad_count = counts.iter().filter(|c| **c == 4).count() as u32;
         let suit_window = |suit: usize, high: u8| -> u32 {
             u32::from(
@@ -729,7 +746,10 @@ fn hand_witness_bits(cards: &[u8]) -> Vec<M31> {
                     * (pairs_count + trips_count - u32::from(counts[usize::from(v - 2)] == 3))
             })
             .sum();
-        let straight_sum: u32 = window_highs.iter().map(|h| u32::from(global_window(*h))).sum();
+        let straight_sum: u32 = window_highs
+            .iter()
+            .map(|h| u32::from(global_window(*h)))
+            .sum();
         let flush_count = u32::from(flush_suit.is_some());
         let pair_ge2 = pairs_count * pairs_count.saturating_sub(1);
         let defs = [
@@ -808,8 +828,7 @@ fn nibble_borrow_chain(a: u8, b: u8) -> ([bool; 4], [u8; 4]) {
     let mut diffs = [0u8; 4];
     let mut borrow: i8 = 0;
     for bit in 0..4 {
-        let value =
-            ((a >> bit) & 1) as i8 - ((b >> bit) & 1) as i8 - borrow;
+        let value = ((a >> bit) & 1) as i8 - ((b >> bit) & 1) as i8 - borrow;
         if value < 0 {
             borrows[bit] = true;
             diffs[bit] = (value + 2) as u8;
@@ -836,9 +855,7 @@ fn classify(counts: &[u8], straight_high: u8, flush: Option<[u8; 13]>) -> (u8, [
     if let Some(suited) = flush {
         let sf_high = [14u8, 13, 12, 11, 10, 9, 8, 7, 6]
             .into_iter()
-            .filter(|high| {
-                (*high - 4..=*high).all(|v| suited[(v as usize) - 2] > 0)
-            })
+            .filter(|high| (*high - 4..=*high).all(|v| suited[(v as usize) - 2] > 0))
             .max();
         if let Some(high) = sf_high {
             if high == 14 {
@@ -916,10 +933,7 @@ fn classify(counts: &[u8], straight_high: u8, flush: Option<[u8; 13]>) -> (u8, [
         singles.resize(3, 0);
         return (1, [p, singles[0], singles[1], singles[2], 0]);
     }
-    let mut highs: Vec<u8> = (2u8..=14)
-        .rev()
-        .filter(|v| presence(*v))
-        .collect();
+    let mut highs: Vec<u8> = (2u8..=14).rev().filter(|v| presence(*v)).collect();
     highs.resize(5, 0);
     (0, highs.try_into().unwrap())
 }
@@ -1018,13 +1032,19 @@ fn settlement_witness(projection: &CanonicalSettlementProjection) -> Vec<M31> {
         .iter()
         .map(|layer| gated(layer.active, layer.gross))
         .collect();
-    push_carries(&mut columns, &adder_carries(&gross_inputs, projection.gross_pot));
+    push_carries(
+        &mut columns,
+        &adder_carries(&gross_inputs, projection.gross_pot),
+    );
     let rake_inputs: Vec<u64> = projection
         .layers
         .iter()
         .map(|layer| gated(layer.active, layer.rake))
         .collect();
-    push_carries(&mut columns, &adder_carries(&rake_inputs, projection.total_rake));
+    push_carries(
+        &mut columns,
+        &adder_carries(&rake_inputs, projection.total_rake),
+    );
     for layer in &projection.layers {
         let gate = u64::from(layer.active);
         push_carries(
@@ -1061,7 +1081,10 @@ fn settlement_witness(projection: &CanonicalSettlementProjection) -> Vec<M31> {
                 )
             })
             .collect();
-        push_carries(&mut columns, &adder_carries(&inputs, projection.aggregate_awards[seat]));
+        push_carries(
+            &mut columns,
+            &adder_carries(&inputs, projection.aggregate_awards[seat]),
+        );
     }
     push_carries(
         &mut columns,
@@ -1080,8 +1103,7 @@ fn settlement_witness(projection: &CanonicalSettlementProjection) -> Vec<M31> {
         for runout in &layer.runouts {
             for seat in 0..SETTLEMENT_SEATS {
                 let winner = (runout.winner_mask >> seat) & 1 == 1;
-                let extra =
-                    winner && runout.awards[seat] == runout.share + 1;
+                let extra = winner && runout.awards[seat] == runout.share + 1;
                 columns.push(M31::from(u32::from(extra)));
                 columns.push(M31::from(u32::from(winner && extra)));
             }
@@ -1115,7 +1137,11 @@ fn settlement_witness(projection: &CanonicalSettlementProjection) -> Vec<M31> {
     let min_of = |bet: u64, level: u64| bet.min(level);
     for (index, layer) in projection.layers.iter().enumerate() {
         let level = projection.levels[index];
-        let prev = if index == 0 { 0 } else { projection.levels[index - 1] };
+        let prev = if index == 0 {
+            0
+        } else {
+            projection.levels[index - 1]
+        };
         for seat in 0..SETTLEMENT_SEATS {
             let bet = projection.bets[seat];
             for (a, b, unit) in [(bet, level, 0), (bet, prev, 1), (bet, prev, 0)] {
@@ -1167,11 +1193,13 @@ fn settlement_witness(projection: &CanonicalSettlementProjection) -> Vec<M31> {
         .iter()
         .map(|layer| if layer.contested { layer.gross } else { 0 })
         .collect();
-    push_carries(&mut columns, &adder_carries(&contested_inputs, contested_gross));
+    push_carries(
+        &mut columns,
+        &adder_carries(&contested_inputs, contested_gross),
+    );
     // School-mul A: contested_gross × bps → product (7 carries).
-    let mul_carries_a = |inputs: &[u64], target: u64| -> [u64; 7] {
-        adder_carries(&inputs.to_vec(), target)
-    };
+    let mul_carries_a =
+        |inputs: &[u64], target: u64| -> [u64; 7] { adder_carries(&inputs.to_vec(), target) };
     let _ = &mul_carries_a;
     let q = projection.rake_bps.to_le_bytes();
     let mut a_carries: Vec<u64> = Vec::new();
@@ -1385,7 +1413,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
     let mut next_bit = |eval: &mut E| -> E::F {
         let bit = eval.next_trace_mask();
         if !hand_section_skipped(18) {
-                // Non-binary read detection: cast via a helper that only exists
+            // Non-binary read detection: cast via a helper that only exists
             // when F is concretely M31 (debug builds via Any-like downcast
             // are unavailable; instead emit a canary when the constraint
             // fires later).
@@ -1430,7 +1458,8 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
         let suit = suit_bit0 + E::F::from(M31::from(2u32)) * suit_bit1;
         if !hand_section_skipped(1) {
             eval.add_constraint(
-                card_bytes[index].clone() - E::F::from(M31::from(13u32)) * suit.clone()
+                card_bytes[index].clone()
+                    - E::F::from(M31::from(13u32)) * suit.clone()
                     - rank.clone()
                     + E::F::from(M31::from(2u32)),
             );
@@ -1478,8 +1507,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
     for value in 0..13 {
         let mut trio = Vec::new();
         for target in [4u32, 3, 2] {
-            let difference =
-                counts[value].clone() - E::F::from(M31::from(target));
+            let difference = counts[value].clone() - E::F::from(M31::from(target));
             trio.push(next_eq_gated(eval, difference, g4));
         }
         group_bits.push(trio.try_into().unwrap());
@@ -1490,8 +1518,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
     for suit in 0u8..4 {
         let mut row = Vec::new();
         for index in 0..7 {
-            let difference =
-                suits[index].clone() - E::F::from(M31::from(u32::from(suit)));
+            let difference = suits[index].clone() - E::F::from(M31::from(u32::from(suit)));
             row.push(next_eq_gated(eval, difference, g4));
         }
         eq_suit.push(row);
@@ -1630,8 +1657,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
     for slot in 0..5 {
         let mut row = Vec::new();
         for value in 2u8..=14 {
-            let difference =
-                kickers[slot].clone() - E::F::from(M31::from(u32::from(value)));
+            let difference = kickers[slot].clone() - E::F::from(M31::from(u32::from(value)));
             row.push(next_eq_gated(eval, difference, !hand_section_skipped(7)));
         }
         kicker_eq.push(row);
@@ -1663,9 +1689,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
         let difference = straight_high.clone() - E::F::from(M31::from(u32::from(high)));
         let eq = next_eq(eval, difference);
         let mut borrow_final: E::F = M31::from(0u32).into();
-        let a_bits: Vec<E::F> = (0..4)
-            .map(|_| M31::from(0u32).into())
-            .collect();
+        let a_bits: Vec<E::F> = (0..4).map(|_| M31::from(0u32).into()).collect();
         let _ = a_bits;
         for _bit in 0..4 {
             borrow_final = next_bit(eval);
@@ -1747,8 +1771,8 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
         }
         let mut fh_expr: E::F = M31::from(0u32).into();
         for trio in &group_bits {
-            fh_expr = fh_expr
-                + trio[1].clone() * (pair_sum.clone() + trip_sum.clone() - trio[1].clone());
+            fh_expr =
+                fh_expr + trio[1].clone() * (pair_sum.clone() + trip_sum.clone() - trio[1].clone());
         }
         let flush_sum: E::F = flush_any.clone();
         let pair_ge2: E::F = pair_sum.clone() * (pair_sum.clone() - one.clone());
@@ -1771,7 +1795,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
         // are "X == 0" bits (bind X·inv = 1 − bit).
         for (index, (bit, difference)) in base.iter().zip(defs.into_iter()).enumerate() {
             let inv = eval.next_trace_mask();
-                if g8 {
+            if g8 {
                 if index <= 7 {
                     eval.add_constraint(difference * inv - bit.clone());
                 } else {
@@ -1790,13 +1814,9 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
             }
             let own = 9 - category_index;
             for higher in 0..own {
-                eval.add_constraint(
-                    cat_eq[category_index].clone() * base[higher].clone(),
-                );
+                eval.add_constraint(cat_eq[category_index].clone() * base[higher].clone());
             }
-            eval.add_constraint(
-                cat_eq[category_index].clone() * (one.clone() - base[own].clone()),
-            );
+            eval.add_constraint(cat_eq[category_index].clone() * (one.clone() - base[own].clone()));
         }
     }
 
@@ -1810,8 +1830,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
     for slot in 0..5 {
         let mut row = Vec::new();
         for value in 2u8..=14 {
-            let difference =
-                flush_kickers[slot].clone() - E::F::from(M31::from(u32::from(value)));
+            let difference = flush_kickers[slot].clone() - E::F::from(M31::from(u32::from(value)));
             row.push(next_eq_gated(eval, difference, !hand_section_skipped(11)));
         }
         flush_kicker_eq_final.push(row);
@@ -1876,12 +1895,11 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
             if !hand_section_skipped(12) {
                 // gt − lt = (v − k)·inv pins the sign; gt·lt = 0 and
                 // gt + lt + eq = 1 complete the triple.
-                eval.add_constraint(
-                    difference * inv - (gt.clone() - lt.clone()),
-                );
+                eval.add_constraint(difference * inv - (gt.clone() - lt.clone()));
                 eval.add_constraint(gt.clone() * lt.clone());
                 eval.add_constraint(
-                    gt.clone() + lt.clone() + kicker_eq[slot][(value - 2) as usize].clone() - one.clone(),
+                    gt.clone() + lt.clone() + kicker_eq[slot][(value - 2) as usize].clone()
+                        - one.clone(),
                 );
             }
             row.push(gt);
@@ -1911,7 +1929,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
         // (category, meaningful slots, multiset-per-slot, exclusion rank set)
         // Multiset per slot: M_i(v) and the excluded ranks E(v).
         let g9 = !hand_section_skipped(13);
-    let wire = |eval: &mut E,
+        let wire = |eval: &mut E,
                     gate: &E::F,
                     slots: usize,
                     multiset: &dyn Fn(usize, usize) -> E::F,
@@ -1979,9 +1997,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
                     if !hand_section_skipped(17) {
                         hand_family_emit_at("wire_dropped_gt", slots, value);
                         eval.add_constraint(
-                            gate.clone()
-                                * dropped.clone()
-                                * kicker_gt[slots - 1][value].clone(),
+                            gate.clone() * dropped.clone() * kicker_gt[slots - 1][value].clone(),
                         );
                     }
                 }
@@ -1990,12 +2006,10 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
         };
 
         let identity = |_slot: usize, v: usize| -> E::F { presence[v].clone() };
-        let minus_pair = |_slot: usize, v: usize| -> E::F {
-            presence[v].clone() - group_bits[v][2].clone()
-        };
-        let minus_trip = |_slot: usize, v: usize| -> E::F {
-            presence[v].clone() - group_bits[v][1].clone()
-        };
+        let minus_pair =
+            |_slot: usize, v: usize| -> E::F { presence[v].clone() - group_bits[v][2].clone() };
+        let minus_trip =
+            |_slot: usize, v: usize| -> E::F { presence[v].clone() - group_bits[v][1].clone() };
         let pair_only = |_slot: usize, v: usize| -> E::F { group_bits[v][2].clone() };
         let trip_only = |_slot: usize, v: usize| -> E::F { group_bits[v][1].clone() };
         let pair_or_trip = |_slot: usize, v: usize| -> E::F {
@@ -2044,8 +2058,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
                 if slot == 0 {
                     group_bits[v][1].clone()
                 } else {
-                    group_bits[v][1].clone() + group_bits[v][2].clone()
-                        - kicker_eq[0][v].clone()
+                    group_bits[v][1].clone() + group_bits[v][2].clone() - kicker_eq[0][v].clone()
                 }
             },
             &|slot, v| {
@@ -2059,9 +2072,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
         );
         // c4 straight: kicker 0 = straight high.
         if g9 {
-            eval.add_constraint(
-                cat_eq[4].clone() * (kickers[0].clone() - straight_high.clone()),
-            );
+            eval.add_constraint(cat_eq[4].clone() * (kickers[0].clone() - straight_high.clone()));
         }
         // c3 trips: [trip, top-2 singles].
         wire(
@@ -2148,7 +2159,13 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
             },
             &none,
         );
-        let _ = (&minus_pair, &minus_trip, &pair_only, &trip_only, &pair_or_trip);
+        let _ = (
+            &minus_pair,
+            &minus_trip,
+            &pair_only,
+            &trip_only,
+            &pair_or_trip,
+        );
     }
 
     // Bind the DERIVED hand evaluation to the committed 24-bit rank value:
@@ -2193,7 +2210,11 @@ impl FrameworkEval for CanonicalSettlementAir {
             }};
         }
         macro_rules! scope_amount {
-            () => {{ (0..AMOUNT_BYTES).map(|_| scope_byte!()).collect::<Vec<E::F>>() }};
+            () => {{
+                (0..AMOUNT_BYTES)
+                    .map(|_| scope_byte!())
+                    .collect::<Vec<E::F>>()
+            }};
         }
         macro_rules! scope_mask {
             () => {{ (0..2).map(|_| scope_byte!()).collect::<Vec<E::F>>() }};
@@ -2296,29 +2317,26 @@ impl FrameworkEval for CanonicalSettlementAir {
                 }
                 bytes
             };
-        let mut amount_from_bits =
-            |eval: &mut E, scope_bytes: &[E::F]| -> Vec<E::F> {
-                amount_from_bits_gated(eval, scope_bytes, AMOUNT_ACTIVE_BYTES)
-            };
+        let mut amount_from_bits = |eval: &mut E, scope_bytes: &[E::F]| -> Vec<E::F> {
+            amount_from_bits_gated(eval, scope_bytes, AMOUNT_ACTIVE_BYTES)
+        };
         // Witness-only advice amount: bits + reconstruction + high-byte pin,
         // with no scope binding.
-        let mut advice_amount_from_bits =
-            |eval: &mut E, active_bytes: usize| -> Vec<E::F> {
-                let mut bytes = Vec::with_capacity(AMOUNT_BYTES);
-                for byte_index in 0..AMOUNT_BYTES {
-                    let mut value: E::F = M31::from(0u32).into();
-                    for bit_index in 0..8 {
-                        let bit = next_bit(eval);
-                        value =
-                            value + bit * E::F::from(M31::from(1u32 << bit_index));
-                    }
-                    if byte_index >= active_bytes {
-                        eval.add_constraint(value.clone());
-                    }
-                    bytes.push(value);
+        let mut advice_amount_from_bits = |eval: &mut E, active_bytes: usize| -> Vec<E::F> {
+            let mut bytes = Vec::with_capacity(AMOUNT_BYTES);
+            for byte_index in 0..AMOUNT_BYTES {
+                let mut value: E::F = M31::from(0u32).into();
+                for bit_index in 0..8 {
+                    let bit = next_bit(eval);
+                    value = value + bit * E::F::from(M31::from(1u32 << bit_index));
                 }
-                bytes
-            };
+                if byte_index >= active_bytes {
+                    eval.add_constraint(value.clone());
+                }
+                bytes.push(value);
+            }
+            bytes
+        };
         let mut mask_from_bits = |eval: &mut E, scope_bytes: &[E::F]| -> Vec<E::F> {
             let mut bits = Vec::with_capacity(16);
             for byte_index in 0..2 {
@@ -2342,18 +2360,12 @@ impl FrameworkEval for CanonicalSettlementAir {
             eval.add_constraint(value.clone() - scope_byte_expr.clone());
             value
         };
-        let mut next_carries = |eval: &mut E| -> Vec<E::F> {
-            (0..7).map(|_| eval.next_trace_mask()).collect()
-        };
-        let mut adder = |eval: &mut E,
-                         inputs: &[Vec<E::F>],
-                         target: &[E::F],
-                         carries: &[E::F]| {
+        let mut next_carries =
+            |eval: &mut E| -> Vec<E::F> { (0..7).map(|_| eval.next_trace_mask()).collect() };
+        let mut adder = |eval: &mut E, inputs: &[Vec<E::F>], target: &[E::F], carries: &[E::F]| {
             let mut carry_in: Option<E::F> = None;
             for byte in 0..AMOUNT_BYTES {
-                let mut sum: E::F = carry_in
-                    .take()
-                    .unwrap_or_else(|| M31::from(0u32).into());
+                let mut sum: E::F = carry_in.take().unwrap_or_else(|| M31::from(0u32).into());
                 for input in inputs {
                     sum = sum + input[byte].clone();
                 }
@@ -2427,8 +2439,7 @@ impl FrameworkEval for CanonicalSettlementAir {
         let mut runout_count: E::F = M31::from(0u32).into();
         for bit_index in 0..8 {
             let bit = next_bit(&mut eval);
-            runout_count =
-                runout_count + bit * E::F::from(M31::from(1u32 << bit_index));
+            runout_count = runout_count + bit * E::F::from(M31::from(1u32 << bit_index));
         }
         eval.add_constraint(runout_count.clone() - scope_runout_count.clone());
         let two: E::F = M31::from(2u32).into();
@@ -2456,7 +2467,7 @@ impl FrameworkEval for CanonicalSettlementAir {
             );
         }
         let carries = next_carries(&mut eval);
-                    adder(&mut eval, &inputs, &a[10], &carries);
+        adder(&mut eval, &inputs, &a[10], &carries);
         // A3: Σ active·rake = total_rake.
         let mut inputs: Vec<Vec<E::F>> = Vec::new();
         for layer in 0..MAX_POT_LAYERS {
@@ -2478,10 +2489,11 @@ impl FrameworkEval for CanonicalSettlementAir {
             let r0 = a[amount_index(layer, 0, 0)].clone();
             let r1 = a[amount_index(layer, 1, 0)].clone();
             let gate = active[layer].clone();
-            let gated_rake: Vec<E::F> =
-                layer_rake.iter().map(|b| gate.clone() * b.clone()).collect();
-            let gated_net: Vec<E::F> =
-                layer_net.iter().map(|b| gate.clone() * b.clone()).collect();
+            let gated_rake: Vec<E::F> = layer_rake
+                .iter()
+                .map(|b| gate.clone() * b.clone())
+                .collect();
+            let gated_net: Vec<E::F> = layer_net.iter().map(|b| gate.clone() * b.clone()).collect();
             let carries = next_carries(&mut eval);
             adder(&mut eval, &[gated_rake, gated_net], &layer_gross, &carries);
             let carries = next_carries(&mut eval);
@@ -2534,8 +2546,9 @@ impl FrameworkEval for CanonicalSettlementAir {
             adder(&mut eval, &inputs, &a[13 + seat], &carries);
         }
         // Σ aggregate = total_awards; rake + awards = gross.
-        let aggregates: Vec<Vec<E::F>> =
-            (0..SETTLEMENT_SEATS).map(|seat| a[13 + seat].clone()).collect();
+        let aggregates: Vec<Vec<E::F>> = (0..SETTLEMENT_SEATS)
+            .map(|seat| a[13 + seat].clone())
+            .collect();
         let carries = next_carries(&mut eval);
         adder(&mut eval, &aggregates, &a[12], &carries);
         let carries = next_carries(&mut eval);
@@ -2585,13 +2598,20 @@ impl FrameworkEval for CanonicalSettlementAir {
                 let diffs: Vec<E::F> = (0..8).map(|_| eval.next_trace_mask()).collect();
                 let mut borrow_in: E::F = M31::from(0u32).into();
                 for byte in 0..AMOUNT_BYTES {
-                    let unit: E::F = if byte == 0 { one.clone() } else { M31::from(0u32).into() };
+                    let unit: E::F = if byte == 0 {
+                        one.clone()
+                    } else {
+                        M31::from(0u32).into()
+                    };
                     let count_byte: E::F = if byte == 0 {
                         count.clone()
                     } else {
                         M31::from(0u32).into()
                     };
-                    let value = remainder[byte].clone() - count_byte - unit - borrow_in.clone()
+                    let value = remainder[byte].clone()
+                        - count_byte
+                        - unit
+                        - borrow_in.clone()
                         - diffs[byte].clone();
                     let borrow_out = borrows[byte].clone();
                     eval.add_constraint(value + base.clone() * borrow_out.clone());
@@ -2603,29 +2623,28 @@ impl FrameworkEval for CanonicalSettlementAir {
 
         // Byte borrow chain of `x − y − unit`: reads 8 borrows + 8 diffs and
         // returns (borrows, diffs, final_borrow).
-        let mut chain = |eval: &mut E,
-                         x: &[E::F],
-                         y: &[E::F],
-                         unit: u64|
-         -> (Vec<E::F>, Vec<E::F>, E::F) {
-            let borrows: Vec<E::F> = (0..8).map(|_| eval.next_trace_mask()).collect();
-            let diffs: Vec<E::F> = (0..8).map(|_| eval.next_trace_mask()).collect();
-            let mut borrow_in: E::F = M31::from(0u32).into();
-            for byte in 0..AMOUNT_BYTES {
-                let unit_expr: E::F = if byte == 0 {
-                    M31::from(unit as u32).into()
-                } else {
-                    M31::from(0u32).into()
-                };
-                let value = x[byte].clone() - y[byte].clone() - unit_expr
-                    - borrow_in.clone()
-                    - diffs[byte].clone();
-                let borrow_out = borrows[byte].clone();
-                eval.add_constraint(value + base.clone() * borrow_out.clone());
-                borrow_in = borrow_out;
-            }
-            (borrows, diffs, borrow_in)
-        };
+        let mut chain =
+            |eval: &mut E, x: &[E::F], y: &[E::F], unit: u64| -> (Vec<E::F>, Vec<E::F>, E::F) {
+                let borrows: Vec<E::F> = (0..8).map(|_| eval.next_trace_mask()).collect();
+                let diffs: Vec<E::F> = (0..8).map(|_| eval.next_trace_mask()).collect();
+                let mut borrow_in: E::F = M31::from(0u32).into();
+                for byte in 0..AMOUNT_BYTES {
+                    let unit_expr: E::F = if byte == 0 {
+                        M31::from(unit as u32).into()
+                    } else {
+                        M31::from(0u32).into()
+                    };
+                    let value = x[byte].clone()
+                        - y[byte].clone()
+                        - unit_expr
+                        - borrow_in.clone()
+                        - diffs[byte].clone();
+                    let borrow_out = borrows[byte].clone();
+                    eval.add_constraint(value + base.clone() * borrow_out.clone());
+                    borrow_in = borrow_out;
+                }
+                (borrows, diffs, borrow_in)
+            };
 
         // ---- 6. eligibility ----
         for layer in 0..MAX_POT_LAYERS {
@@ -2658,8 +2677,7 @@ impl FrameworkEval for CanonicalSettlementAir {
                 } else {
                     M31::from(0u32).into()
                 };
-                let value =
-                    count_byte - unit - borrow_in.clone() - diffs[byte].clone();
+                let value = count_byte - unit - borrow_in.clone() - diffs[byte].clone();
                 let borrow_out = borrows[byte].clone();
                 eval.add_constraint(value + base.clone() * borrow_out.clone());
                 borrow_in = borrow_out;
@@ -2674,9 +2692,7 @@ impl FrameworkEval for CanonicalSettlementAir {
             let r1 = a[amount_index(layer, 1, 0)].clone();
             let rake = a[22 + layer * 27 + 1].clone();
             for byte in 0..AMOUNT_BYTES {
-                eval.add_constraint(
-                    uncontested.clone() * (r0[byte].clone() - net[byte].clone()),
-                );
+                eval.add_constraint(uncontested.clone() * (r0[byte].clone() - net[byte].clone()));
                 eval.add_constraint(uncontested.clone() * r1[byte].clone());
                 eval.add_constraint(uncontested.clone() * rake[byte].clone());
             }
@@ -2746,7 +2762,7 @@ impl FrameworkEval for CanonicalSettlementAir {
             adder(&mut eval, &inputs, &a[22 + layer * 27], &carries);
         }
 
-// ---- 8. total rake formula ----
+        // ---- 8. total rake formula ----
         // total_rake = mode · min(floor(contested_gross × bps / 10⁴), cap,
         // contested_gross).
         let mut rake_mode: E::F = M31::from(0u32).into();
@@ -2779,9 +2795,7 @@ impl FrameworkEval for CanonicalSettlementAir {
         {
             let mut carry_in: Option<E::F> = None;
             for j in 0..AMOUNT_BYTES {
-                let mut sum: E::F = carry_in
-                    .take()
-                    .unwrap_or_else(|| M31::from(0u32).into());
+                let mut sum: E::F = carry_in.take().unwrap_or_else(|| M31::from(0u32).into());
                 for a in 0..AMOUNT_BYTES {
                     let b = j as isize - a as isize;
                     if (0..2).contains(&b) {
@@ -2804,9 +2818,7 @@ impl FrameworkEval for CanonicalSettlementAir {
         {
             let mut carry_in: Option<E::F> = None;
             for j in 0..AMOUNT_BYTES {
-                let mut sum: E::F = carry_in
-                    .take()
-                    .unwrap_or_else(|| M31::from(0u32).into());
+                let mut sum: E::F = carry_in.take().unwrap_or_else(|| M31::from(0u32).into());
                 for a in 0..AMOUNT_BYTES {
                     let b = j as isize - a as isize;
                     if (0..2).contains(&b) {
@@ -2827,7 +2839,12 @@ impl FrameworkEval for CanonicalSettlementAir {
 
         // Division: t + remainder = product.
         let carries = next_carries(&mut eval);
-        adder(&mut eval, &[t_amount, remainder_amount.clone()], &product, &carries);
+        adder(
+            &mut eval,
+            &[t_amount, remainder_amount.clone()],
+            &product,
+            &carries,
+        );
 
         // remainder < 10⁴.
         let bound: Vec<E::F> = 9_999u64
@@ -2879,10 +2896,11 @@ impl FrameworkEval for CanonicalSettlementAir {
                     let mut value: E::F = M31::from(0u32).into();
                     for bit_index in 0..8 {
                         let bit = next_bit(&mut eval);
-                        value =
-                            value + bit * E::F::from(M31::from(1u32 << bit_index));
+                        value = value + bit * E::F::from(M31::from(1u32 << bit_index));
                     }
-                    eval.add_constraint(value.clone() - scope_ranks[runout][seat][byte_index].clone());
+                    eval.add_constraint(
+                        value.clone() - scope_ranks[runout][seat][byte_index].clone(),
+                    );
                     bytes.push(value);
                 }
                 for _ in 3..AMOUNT_BYTES {
@@ -2909,8 +2927,7 @@ impl FrameworkEval for CanonicalSettlementAir {
                                 * rank_bytes[runout][seat][byte].clone()
                         })
                         .collect();
-                    let (_, _, final_borrow) =
-                        chain(&mut eval, &running, &candidate, 0);
+                    let (_, _, final_borrow) = chain(&mut eval, &running, &candidate, 0);
                     let ge = one.clone() - final_borrow;
                     running = (0..AMOUNT_BYTES)
                         .map(|byte| {
@@ -2931,12 +2948,10 @@ impl FrameworkEval for CanonicalSettlementAir {
                     let value = &rank_bytes[runout][seat];
                     let (_, _, borrow_down) = chain(&mut eval, value, &running, 0);
                     let (_, _, borrow_up) = chain(&mut eval, &running, value, 0);
-                    let eq =
-                        (one.clone() - borrow_down) * (one.clone() - borrow_up);
+                    let eq = (one.clone() - borrow_down) * (one.clone() - borrow_up);
                     let winner = winner_bits[layer * MAX_RUNOUTS + runout][seat].clone();
                     eval.add_constraint(
-                        winner
-                            - eligible_bits[layer][seat].clone() * eq * slot_gate.clone(),
+                        winner - eligible_bits[layer][seat].clone() * eq * slot_gate.clone(),
                     );
                 }
             }
@@ -2960,9 +2975,8 @@ impl FrameworkEval for CanonicalSettlementAir {
         for (index, hand) in card_bytes.iter().enumerate() {
             let runout = index / SETTLEMENT_SEATS;
             let seat = index % SETTLEMENT_SEATS;
-            let rank_bytes: [E::F; 3] = std::array::from_fn(|byte| {
-                scope_ranks[runout][seat][byte].clone()
-            });
+            let rank_bytes: [E::F; 3] =
+                std::array::from_fn(|byte| scope_ranks[runout][seat][byte].clone());
             constrain_hand(&mut eval, hand, &rank_bytes);
         }
 
@@ -3022,8 +3036,11 @@ pub fn prove_canonical_settlement(
     }
     let ids = scope_ids();
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let component =
-        FrameworkComponent::new(&mut allocator, CanonicalSettlementAir, SecureField::from(0u32));
+    let component = FrameworkComponent::new(
+        &mut allocator,
+        CanonicalSettlementAir,
+        SecureField::from(0u32),
+    );
     let proof = prove(&[&component], &mut channel, scheme)
         .map_err(|error| TexasAirError::StwoProverError(error.to_string()))?;
     Ok(ArchivedCanonicalSettlementProof {
@@ -3091,8 +3108,11 @@ pub fn verify_canonical_settlement(
     );
     let ids = scope_ids();
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let component =
-        FrameworkComponent::new(&mut allocator, CanonicalSettlementAir, SecureField::from(0u32));
+    let component = FrameworkComponent::new(
+        &mut allocator,
+        CanonicalSettlementAir,
+        SecureField::from(0u32),
+    );
     verify(&[&component], &mut channel, &mut scheme, proof)
         .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))
 }
@@ -3181,7 +3201,10 @@ mod debug_oracle {
             let aggregate: u64 = layers
                 .iter()
                 .map(|layer| {
-                    gated(layer.active, layer.runouts[0].awards[seat] + layer.runouts[1].awards[seat])
+                    gated(
+                        layer.active,
+                        layer.runouts[0].awards[seat] + layer.runouts[1].awards[seat],
+                    )
                 })
                 .sum();
             assert_eq!(aggregate, p.aggregate_awards[seat], "per-seat aggregate");
@@ -3259,10 +3282,7 @@ mod debug_oracle {
     }
 
     fn take_at(w: &[M31], cursor: &mut usize, n: usize) -> Vec<bool> {
-        let out = w[*cursor..*cursor + n]
-            .iter()
-            .map(|v| v.0 == 1)
-            .collect();
+        let out = w[*cursor..*cursor + n].iter().map(|v| v.0 == 1).collect();
         *cursor += n;
         out
     }
@@ -3272,8 +3292,8 @@ mod debug_oracle {
 mod tests {
     use super::*;
     use poker_l1::vm::contracts::texas_poker::settlement_fixture::{
-        nine_seat_ladder, raked_odd_chip_split, run_it_twice_split_winners, three_seat_ladder,
-        SettlementScene,
+        SettlementScene, nine_seat_ladder, raked_odd_chip_split, run_it_twice_split_winners,
+        three_seat_ladder,
     };
 
     fn projection_of(scene: &SettlementScene) -> CanonicalSettlementProjection {
@@ -3304,7 +3324,12 @@ mod tests {
             poker_l1::vm::contracts::texas_poker::settlement::SettlementBoards::Single {
                 board,
             } => {
-                boards[0] = board.iter().map(|c| c.to_index()).collect::<Vec<_>>().try_into().unwrap();
+                boards[0] = board
+                    .iter()
+                    .map(|c| c.to_index())
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap();
                 boards[1] = boards[0];
             }
             poker_l1::vm::contracts::texas_poker::settlement::SettlementBoards::Twice {
@@ -3312,14 +3337,28 @@ mod tests {
                 board2,
                 ..
             } => {
-                boards[0] = board1.iter().map(|c| c.to_index()).collect::<Vec<_>>().try_into().unwrap();
-                boards[1] = board2.iter().map(|c| c.to_index()).collect::<Vec<_>>().try_into().unwrap();
+                boards[0] = board1
+                    .iter()
+                    .map(|c| c.to_index())
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap();
+                boards[1] = board2
+                    .iter()
+                    .map(|c| c.to_index())
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap();
             }
         }
         let mut rank_values = [[0u32; SETTLEMENT_SEATS]; MAX_RUNOUTS];
         for (runout, slot) in rank_values.iter_mut().enumerate() {
             for (seat, value) in slot.iter_mut().enumerate() {
-                match plan.pots.first().map(|pot| &pot.runouts[runout].ranks[seat]) {
+                match plan
+                    .pots
+                    .first()
+                    .map(|pot| &pot.runouts[runout].ranks[seat])
+                {
                     Some(Some(rank)) => {
                         *value = rank_value(rank.category, rank.kickers);
                     }
@@ -3452,7 +3491,9 @@ mod tests {
         // Random seven-card hands.
         let mut state = 0x5EED_1234u64;
         let mut next = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 33) % 52
         };
         for _ in 0..500 {
@@ -3553,19 +3594,17 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         if let Some(holes) = hole0 {
-            let mut cards0: Vec<u8> = table
-                .community_cards
-                .iter()
-                .map(|c| c.to_index())
-                .collect();
+            let mut cards0: Vec<u8> = table.community_cards.iter().map(|c| c.to_index()).collect();
             cards0.extend_from_slice(&holes);
             let hand_width = hand_witness_bits(&cards0).len();
             eprintln!("hand witness width: {hand_width}");
         }
         assert_eq!(
-            counter.trace_reads, witness.len(),
+            counter.trace_reads,
+            witness.len(),
             "evaluate reads {} witness columns but the builder pushes {}",
-            counter.trace_reads, witness.len()
+            counter.trace_reads,
+            witness.len()
         );
         assert_eq!(counter.preprocessed_reads, scope_columns());
     }
@@ -3650,7 +3689,10 @@ mod tests {
         let holes: Vec<Vec<u8>> = (0..3)
             .filter_map(|seat| {
                 table.seats[seat].hand().map(|h| {
-                    h.as_slice().iter().map(|c| c.to_index()).collect::<Vec<_>>()
+                    h.as_slice()
+                        .iter()
+                        .map(|c| c.to_index())
+                        .collect::<Vec<_>>()
                 })
             })
             .collect();
@@ -3663,7 +3705,11 @@ mod tests {
             index: 0,
         };
         let scope_bytes: Vec<M31> = cards.iter().map(|c| M31::from(u32::from(*c))).collect();
-        constrain_hand(&mut probe, &scope_bytes, &[0u32.into(), 0u32.into(), 0u32.into()]);
+        constrain_hand(
+            &mut probe,
+            &scope_bytes,
+            &[0u32.into(), 0u32.into(), 0u32.into()],
+        );
         assert_eq!(probe.index, witness.len(), "hand read count mismatch");
     }
 
@@ -3681,7 +3727,11 @@ mod tests {
             index: 0,
         };
         let scope_bytes: Vec<M31> = cards.iter().map(|c| M31::from(u32::from(*c))).collect();
-        constrain_hand(&mut probe, &scope_bytes, &[0u32.into(), 0u32.into(), 0u32.into()]);
+        constrain_hand(
+            &mut probe,
+            &scope_bytes,
+            &[0u32.into(), 0u32.into(), 0u32.into()],
+        );
         assert_eq!(probe.index, witness.len(), "empty-seat read count mismatch");
     }
 
@@ -3767,7 +3817,11 @@ mod tests {
                 let failing = log.len() - 1;
                 let hand = failing / 78;
                 let idx = failing % 78;
-                eprintln!("  failing: hand {hand}, emission {idx} (wire {} value {})", idx / 13, idx % 13);
+                eprintln!(
+                    "  failing: hand {hand}, emission {idx} (wire {} value {})",
+                    idx / 13,
+                    idx % 13
+                );
             }
         }
         let result = Ok::<(), ()>(());
@@ -3775,7 +3829,10 @@ mod tests {
         let log = super::HAND_FAMILY_LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
         eprintln!("families recorded: {}", log.len());
         if result.is_err() {
-            eprintln!("row-wise failure; family log tail: {:?}", &log[log.len().saturating_sub(3)..]);
+            eprintln!(
+                "row-wise failure; family log tail: {:?}",
+                &log[log.len().saturating_sub(3)..]
+            );
             panic!("re-propagating");
         }
     }
@@ -3788,8 +3845,14 @@ mod tests {
         let mut cards = board.clone();
         cards.extend_from_slice(&[0u8, 0]);
         eprintln!("cards: {cards:?}");
-        eprintln!("suits: {:?}", cards.iter().map(|c| c / 13).collect::<Vec<_>>());
-        eprintln!("ranks: {:?}", cards.iter().map(|c| (c % 13) + 2).collect::<Vec<_>>());
+        eprintln!(
+            "suits: {:?}",
+            cards.iter().map(|c| c / 13).collect::<Vec<_>>()
+        );
+        eprintln!(
+            "ranks: {:?}",
+            cards.iter().map(|c| (c % 13) + 2).collect::<Vec<_>>()
+        );
         eprintln!("rank value: {}", native_rank_value(&cards));
         // Pull category/kickers from the witness by recomputing classify.
         let ranks: Vec<u8> = cards.iter().map(|c| (c % 13) + 2).collect();
@@ -3816,19 +3879,24 @@ mod tests {
             })
             .max()
             .unwrap_or(0);
-        let (category, kickers) = classify(&counts, straight, flush_suit.map(|s| suited[usize::from(s)]));
+        let (category, kickers) = classify(
+            &counts,
+            straight,
+            flush_suit.map(|s| suited[usize::from(s)]),
+        );
         eprintln!("category: {category}, kickers: {kickers:?}");
         // Raked-scene empty-seat hand (seat 3: board + [0,0]).
         let raked_board: Vec<u8> = vec![12, 25, 10, 23, 8];
         let mut raked_cards = raked_board.clone();
         raked_cards.extend_from_slice(&[0, 0]);
-        eprintln!("raked empty rank value: {}", native_rank_value(&raked_cards));
+        eprintln!(
+            "raked empty rank value: {}",
+            native_rank_value(&raked_cards)
+        );
         {
             let witness = hand_witness_bits(&raked_cards);
             let nibble = |start: usize| -> u8 {
-                (0..4).fold(0u8, |acc, b| {
-                    acc | ((witness[start + b].0 as u8) & 1) << b
-                })
+                (0..4).fold(0u8, |acc, b| acc | ((witness[start + b].0 as u8) & 1) << b)
             };
             // Flush kickers at offset 570..590 (four bits per nibble).
             let kickers: Vec<u8> = (0..5).map(|i| nibble(570 + 4 * i)).collect();
@@ -3930,10 +3998,7 @@ mod tests {
         let mut projection = projection_of(&three_seat_ladder());
         // Swap the top two seats' ranks: seat 1 would now hold the best
         // hand, contradicting the committed winner masks.
-        let (a, b) = (
-            projection.rank_values[0][0],
-            projection.rank_values[0][1],
-        );
+        let (a, b) = (projection.rank_values[0][0], projection.rank_values[0][1]);
         projection.rank_values[0][0] = b;
         projection.rank_values[0][1] = a;
         assert!(prove_canonical_settlement(&projection).is_err());

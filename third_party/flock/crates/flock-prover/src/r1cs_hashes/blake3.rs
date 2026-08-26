@@ -1980,7 +1980,9 @@ mod tests {
         let depth = 256usize;
         let mut rng = Rng::new(0x1337_C0DE);
         let mut leaf: [u32; 8] = std::array::from_fn(|_| rng.next_u32());
-        let b_bits: Vec<bool> = (0..depth).map(|i| (rng.next_u32() >> (i % 32)) & 1 == 1).collect();
+        let b_bits: Vec<bool> = (0..depth)
+            .map(|i| (rng.next_u32() >> (i % 32)) & 1 == 1)
+            .collect();
         let siblings: Vec<[u32; 8]> = (0..depth)
             .map(|_| std::array::from_fn(|_| rng.next_u32()))
             .collect();
@@ -2014,21 +2016,27 @@ mod tests {
         let mut ch_v = FsChallenger::new(b"flock-blake3-merkle-v0");
         let mut bad_root = root;
         bad_root[0] ^= 1;
-        assert!(setup
-            .verify_merkle_path(&commitment, &proof, &leaf, &bad_root, &b_bits, &mut ch_v)
-            .is_err());
+        assert!(
+            setup
+                .verify_merkle_path(&commitment, &proof, &leaf, &bad_root, &b_bits, &mut ch_v)
+                .is_err()
+        );
         let mut ch_v = FsChallenger::new(b"flock-blake3-merkle-v0");
         let mut bad_leaf = leaf;
         bad_leaf[3] ^= 1;
-        assert!(setup
-            .verify_merkle_path(&commitment, &proof, &bad_leaf, &root, &b_bits, &mut ch_v)
-            .is_err());
+        assert!(
+            setup
+                .verify_merkle_path(&commitment, &proof, &bad_leaf, &root, &b_bits, &mut ch_v)
+                .is_err()
+        );
         let mut bad_bits = b_bits.clone();
         bad_bits[5] = !bad_bits[5];
         let mut ch_v = FsChallenger::new(b"flock-blake3-merkle-v0");
-        assert!(setup
-            .verify_merkle_path(&commitment, &proof, &leaf, &root, &bad_bits, &mut ch_v)
-            .is_err());
+        assert!(
+            setup
+                .verify_merkle_path(&commitment, &proof, &leaf, &root, &bad_bits, &mut ch_v)
+                .is_err()
+        );
 
         // Keep the leaf alive for the borrow checker's peace of mind.
         let _ = leaf;

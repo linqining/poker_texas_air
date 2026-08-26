@@ -81,7 +81,8 @@ pub fn prove_create_table(
         &trace.trace,
         CreateTableAir::num_columns(),
     )?;
-    let root_binding = crate::state_root_binding::prove_state_root_binding_for_inputs(&public_inputs)?;
+    let root_binding =
+        crate::state_root_binding::prove_state_root_binding_for_inputs(&public_inputs)?;
     public_inputs.verify_roots(&root_binding)?;
     public_inputs.verify_air_statement(&trace.air.statement())?;
     let expected_trace_row =
@@ -196,7 +197,8 @@ where
         )));
     }
     let public_inputs = prepare_public_inputs_for_trace(public_inputs, trace, num_columns)?;
-    let root_binding = crate::state_root_binding::prove_state_root_binding_for_inputs(&public_inputs)?;
+    let root_binding =
+        crate::state_root_binding::prove_state_root_binding_for_inputs(&public_inputs)?;
     public_inputs.verify_roots(&root_binding)?;
     public_inputs.verify_air_statement(&statement)?;
     let expected_trace_row = public_inputs.require_expected_trace_row(num_columns)?;

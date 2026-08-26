@@ -15,7 +15,10 @@
 //! scope.
 
 use bincode::Options;
-use blake2::{Blake2bVar, digest::{Update, VariableOutput}};
+use blake2::{
+    Blake2bVar,
+    digest::{Update, VariableOutput},
+};
 use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
 };
@@ -241,10 +244,7 @@ impl DualProofBundle {
         let binding_len = u32::try_from(self.root_binding_bytes.len()).map_err(|_| {
             TexasAirError::SerializationError("root binding length exceeds u32".into())
         })?;
-        Ok(HEADER_LEN
-            + proof_len as usize
-            + request_len as usize
-            + binding_len as usize)
+        Ok(HEADER_LEN + proof_len as usize + request_len as usize + binding_len as usize)
     }
 
     /// Strictly decode a dual-proof envelope.
@@ -385,9 +385,7 @@ pub(crate) fn prove_dual_proof_verified(task: &ProveTask) -> TexasAirResult<Prov
     let parts = prove_dual_proof_inner(task, true)?;
     Ok(ProvenDualProof {
         bundle: parts.bundle,
-        receipt: parts
-            .receipt
-            .expect("receipt issuance was requested"),
+        receipt: parts.receipt.expect("receipt issuance was requested"),
         binding: parts.binding,
     })
 }
@@ -411,8 +409,6 @@ fn prove_dual_proof_inner(
                 &row_values,
                 &SubmitShuffleV2Row::padding().to_vec(),
             )?;
-            let expected_air = air.clone();
-            let expected_inputs = public_inputs.clone();
             let proof = prove_method(
                 &trace,
                 air,
@@ -427,8 +423,14 @@ fn prove_dual_proof_inner(
                 request_bytes,
                 &proof.root_binding,
             )?;
+            // Borrow the air+inputs from the produced proof instead of cloning
+            // before `proof` is moved into the verify call.
+            let expected_air = proof.air.clone();
+            let expected_inputs = proof.public_inputs.clone();
             let receipt = issue_receipt
-                .then(|| verify_method_against_and_issue_receipt(proof, expected_air, &expected_inputs))
+                .then(|| {
+                    verify_method_against_and_issue_receipt(proof, &expected_air, &expected_inputs)
+                })
                 .transpose()?;
             Ok(ProvenDualParts {
                 bundle,
@@ -450,14 +452,14 @@ fn prove_dual_proof_inner(
                 &row_values,
                 &SubmitReconstructDeckRow::padding().to_vec(),
             )?;
-            let expected_air = air.clone();
-            let expected_inputs = public_inputs.clone();
             let proof = prove_method(
                 &trace,
                 air,
                 SubmitReconstructDeckAir::num_columns(),
                 public_inputs,
             )?;
+            let expected_air = proof.air.clone();
+            let expected_inputs = proof.public_inputs.clone();
             let bundle = bundle_from_stark(
                 MethodKind::SubmitReconstructDeck,
                 PokerPrecompileId::ReconstructionV3,
@@ -467,7 +469,9 @@ fn prove_dual_proof_inner(
                 &proof.root_binding,
             )?;
             let receipt = issue_receipt
-                .then(|| verify_method_against_and_issue_receipt(proof, expected_air, &expected_inputs))
+                .then(|| {
+                    verify_method_against_and_issue_receipt(proof, &expected_air, &expected_inputs)
+                })
                 .transpose()?;
             Ok(ProvenDualParts {
                 bundle,
@@ -489,9 +493,9 @@ fn prove_dual_proof_inner(
                 &row_values,
                 &FoldWithProofRow::padding().to_vec(),
             )?;
-            let expected_air = air.clone();
-            let expected_inputs = public_inputs.clone();
             let proof = prove_method(&trace, air, FoldWithProofAir::num_columns(), public_inputs)?;
+            let expected_air = proof.air.clone();
+            let expected_inputs = proof.public_inputs.clone();
             let bundle = bundle_from_stark(
                 MethodKind::FoldWithProof,
                 PokerPrecompileId::DleqLeave,
@@ -501,7 +505,9 @@ fn prove_dual_proof_inner(
                 &proof.root_binding,
             )?;
             let receipt = issue_receipt
-                .then(|| verify_method_against_and_issue_receipt(proof, expected_air, &expected_inputs))
+                .then(|| {
+                    verify_method_against_and_issue_receipt(proof, &expected_air, &expected_inputs)
+                })
                 .transpose()?;
             Ok(ProvenDualParts {
                 bundle,
@@ -523,14 +529,14 @@ fn prove_dual_proof_inner(
                 &row_values,
                 &SubmitPlayerRevealTokensRow::padding().to_vec(),
             )?;
-            let expected_air = air.clone();
-            let expected_inputs = public_inputs.clone();
             let proof = prove_method(
                 &trace,
                 air,
                 SubmitPlayerRevealTokensAir::num_columns(),
                 public_inputs,
             )?;
+            let expected_air = proof.air.clone();
+            let expected_inputs = proof.public_inputs.clone();
             let bundle = bundle_from_stark(
                 MethodKind::SubmitPlayerRevealTokens,
                 PokerPrecompileId::RevealToken,
@@ -540,7 +546,9 @@ fn prove_dual_proof_inner(
                 &proof.root_binding,
             )?;
             let receipt = issue_receipt
-                .then(|| verify_method_against_and_issue_receipt(proof, expected_air, &expected_inputs))
+                .then(|| {
+                    verify_method_against_and_issue_receipt(proof, &expected_air, &expected_inputs)
+                })
                 .transpose()?;
             Ok(ProvenDualParts {
                 bundle,
@@ -671,7 +679,7 @@ pub fn verify_dual_proof(
                 root_binding,
                 public_inputs: public_inputs.clone(),
             };
-            let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
+            let receipt = verify_method_against_and_issue_receipt(proof, &air, &public_inputs)?;
             Ok(VerifiedDualProof {
                 receipt,
                 precompile_binding: binding,
@@ -696,7 +704,7 @@ pub fn verify_dual_proof(
                 root_binding,
                 public_inputs: public_inputs.clone(),
             };
-            let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
+            let receipt = verify_method_against_and_issue_receipt(proof, &air, &public_inputs)?;
             Ok(VerifiedDualProof {
                 receipt,
                 precompile_binding: binding,
@@ -721,7 +729,7 @@ pub fn verify_dual_proof(
                 root_binding,
                 public_inputs: public_inputs.clone(),
             };
-            let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
+            let receipt = verify_method_against_and_issue_receipt(proof, &air, &public_inputs)?;
             Ok(VerifiedDualProof {
                 receipt,
                 precompile_binding: binding,
@@ -746,7 +754,7 @@ pub fn verify_dual_proof(
                 root_binding,
                 public_inputs: public_inputs.clone(),
             };
-            let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
+            let receipt = verify_method_against_and_issue_receipt(proof, &air, &public_inputs)?;
             Ok(VerifiedDualProof {
                 receipt,
                 precompile_binding: binding,
@@ -1222,9 +1230,8 @@ fn bundle_from_stark(
 fn decode_root_binding(
     bytes: &[u8],
 ) -> TexasAirResult<crate::state_root_binding::ArchivedStateRootBindingProof> {
-    borsh::from_slice(bytes).map_err(|error| {
-        wire_error(format!("dual proof root binding decoding failed: {error}"))
-    })
+    borsh::from_slice(bytes)
+        .map_err(|error| wire_error(format!("dual proof root binding decoding failed: {error}")))
 }
 
 fn decode_stark(bytes: &[u8]) -> TexasAirResult<StarkProof<Poseidon252MerkleHasher>> {

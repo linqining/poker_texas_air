@@ -199,12 +199,16 @@ fn scope_columns(a: &[u8; LIMBS], b: &[u8; LIMBS], c: &[u8; LIMBS], k: u8) -> Me
     trace
 }
 
-fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    (0..PREPROCESSED_COLUMNS)
-        .map(|column| PreProcessedColumnId {
-            id: format!("ristretto.fp.add.v1.{column}").into(),
-        })
-        .collect()
+fn preprocessed_ids() -> &'static [PreProcessedColumnId] {
+    static IDS: std::sync::OnceLock<Vec<PreProcessedColumnId>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        (0..PREPROCESSED_COLUMNS)
+            .map(|column| PreProcessedColumnId {
+                id: format!("ristretto.fp.add.v1.{column}").into(),
+            })
+            .collect()
+    })
+    .as_slice()
 }
 
 #[derive(Clone, Copy)]

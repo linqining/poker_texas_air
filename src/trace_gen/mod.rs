@@ -91,9 +91,7 @@ impl MethodTrace {
         Self {
             log_size,
             num_columns,
-            cols: (0..num_columns)
-                .map(|_| Vec::with_capacity(rows))
-                .collect(),
+            cols: (0..num_columns).map(|_| Vec::with_capacity(rows)).collect(),
         }
     }
 

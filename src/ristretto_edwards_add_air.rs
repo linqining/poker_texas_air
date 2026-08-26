@@ -105,8 +105,9 @@ pub struct ArchivedRistrettoEdwardsAdditionProof {
     pub t_proof: ArchivedRistrettoFpMultiplicationProof,
 }
 
-fn modulus() -> BigUint {
-    (BigUint::one() << 255u32) - BigUint::from(19u32)
+fn modulus() -> &'static BigUint {
+    static MODULUS: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+    MODULUS.get_or_init(|| (BigUint::one() << 255u32) - BigUint::from(19u32))
 }
 
 fn big_uint(value: &[u8; LIMBS]) -> BigUint {
@@ -137,12 +138,15 @@ fn subtract(left: &BigUint, right: &BigUint) -> BigUint {
     }
 }
 
-fn edwards_d() -> BigUint {
-    BigUint::parse_bytes(
-        b"37095705934669439343138083508754565189542113879843219016388785533085940283555",
-        10,
-    )
-    .expect("decimal Edwards d is valid")
+fn edwards_d() -> &'static BigUint {
+    static D: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+    D.get_or_init(|| {
+        BigUint::parse_bytes(
+            b"37095705934669439343138083508754565189542113879843219016388785533085940283555",
+            10,
+        )
+        .expect("decimal Edwards d is valid")
+    })
 }
 
 /// Prove the extended-Edwards sum of two canonical Ristretto encodings.
