@@ -54,10 +54,10 @@ pub mod prove_timing;
 mod prover_context;
 pub mod public_inputs;
 pub mod settlement_binding;
-pub mod state_root;
 /// Strict Cairo ABI calldata builder for the verified outer aggregate
 /// settlement path on Starknet Sepolia.
 pub mod starknet_settlement;
+pub mod state_root;
 /// Flock-proven state-root binding replacing host hash recomputation.
 pub mod state_root_binding;
 pub mod tagged_method;
@@ -94,22 +94,22 @@ pub mod blake2b_lookup_xor;
 pub mod blake2b_smt_air;
 /// Fixed-width Blake2b SMT compression witness ABI for the host-zero route.
 pub mod blake2b_smt_witness;
+/// Binary-field BLAKE3 (flock) hash-proving backend.
+pub mod blake3_flock;
 /// Blake2b authentication of the canonical table-rules preimage and the
 /// fixed-width rake opening consumed by raked settlement terminals.
 pub mod canonical_rake_opening;
 /// No-replay scope binding for canonical Reconstruction V3 AIR requests.
 pub mod canonical_reconstruction_binding;
+pub mod canonical_reveal_opening;
 /// Fixed-width, lookup-authenticated reveal-assignment ledger opening.
 pub mod canonical_settlement_air;
 pub mod canonical_settlement_air_plan;
-pub mod canonical_reveal_opening;
 /// Lookup-backed authentication of canonical state-image byte preimages.
 pub mod canonical_state_hash;
 /// Public-proof composition that binds canonical Texas transitions to L1
 /// fixed-width Blake2b state-object openings.
 pub mod canonical_state_opening;
-/// Binary-field BLAKE3 (flock) hash-proving backend.
-pub mod blake3_flock;
 /// Backend-agnostic Blake2b statement proving seam shared by the M31 lookup
 /// stack and the binary-field flock backend.
 pub mod hash_prover;

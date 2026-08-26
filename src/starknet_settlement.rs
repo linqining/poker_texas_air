@@ -32,7 +32,7 @@
 //! validates equality against the registered halves in storage.
 
 use poker_l1::vm::contracts::texas_poker::settlement::SettlementPlan;
-use poker_l1::vm::contracts::texas_poker::types::{Seat, TexasPokerTable, EMPTY_PLAYER};
+use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, Seat, TexasPokerTable};
 use starknet_ff::FieldElement;
 
 use crate::error::{TexasAirError, TexasAirResult};
@@ -694,7 +694,9 @@ mod tests {
     }
 
     fn vacant_seat() -> Seat {
-        Seat::Vacant { time_bank_ms: 30_000 }
+        Seat::Vacant {
+            time_bank_ms: 30_000,
+        }
     }
 
     fn build_test_table(hand_id: u32) -> TexasPokerTable {
@@ -860,8 +862,8 @@ mod tests {
         let plan = zero_rake_plan(100);
         let calldata = SettleHandCalldata::new([6u8; 32], 7, &table, &plan, None).unwrap();
         let felts = calldata.to_felts();
-        // digest + hand_id + player_len + 2 players + delta_len + 2 deltas = 9
-        assert_eq!(felts.len(), 9);
+        // digest + hand_id + player_len + 2 players + delta_len + 2 deltas = 8
+        assert_eq!(felts.len(), 8);
         assert_eq!(felts[0], calldata.aggregate_digest());
         assert_eq!(felts[1], FieldElement::from(7_u64));
         assert_eq!(felts[2], FieldElement::from(2_u64));
@@ -941,13 +943,7 @@ mod tests {
 
     #[test]
     fn calldata_felt_layout_matches_contract_abi() {
-        let chain = chain_from(vec![receipt_with_state(
-            1,
-            5,
-            0,
-            [0x01; 32],
-            [0x02; 32],
-        )]);
+        let chain = chain_from(vec![receipt_with_state(1, 5, 0, [0x01; 32], [0x02; 32])]);
         let agg = mock_aggregate(chain, [0xAA; 32]);
         let c =
             RegisterAggregateCalldata::new(&[agg], 5, 5, vec![FieldElement::from(42_u64)]).unwrap();

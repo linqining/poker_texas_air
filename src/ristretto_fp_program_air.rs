@@ -2578,6 +2578,38 @@ fn canonical_decode_inverse_sqrt(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; 
     Ok(computed)
 }
 
+/// Host-only memo for [`build_ristretto_fp_program_compressed_point_addition`].
+///
+/// The function is a pure mathematical statement of `(left, right) → program,
+/// output`, so the cached bytes equal the recomputed bytes exactly.  Caching
+/// avoids re-running the Fp-program builder for every repeated `(left, right)`
+/// pair inside fixed-window scalar multiplication tables.  Wire, proof, and
+/// transcript are unaffected; verifier still rebuilds on cache miss.
+static POINT_ADDITION_PROGRAM_CACHE: std::sync::OnceLock<
+    std::sync::RwLock<std::collections::HashMap<([u8; LIMBS], [u8; LIMBS]), (RistrettoFpProgram, [u8; LIMBS])>>,
+> = std::sync::OnceLock::new();
+
+fn point_addition_program_cache_lookup(
+    left_encoding: &[u8; LIMBS],
+    right_encoding: &[u8; LIMBS],
+) -> Option<(RistrettoFpProgram, [u8; LIMBS])> {
+    let cache = POINT_ADDITION_PROGRAM_CACHE.get()?;
+    let guard = cache.read().ok()?;
+    guard.get(&(*left_encoding, *right_encoding)).cloned()
+}
+
+fn point_addition_program_cache_store(
+    left_encoding: &[u8; LIMBS],
+    right_encoding: &[u8; LIMBS],
+    value: &(RistrettoFpProgram, [u8; LIMBS]),
+) {
+    let cache = POINT_ADDITION_PROGRAM_CACHE
+        .get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    if let Ok(mut guard) = cache.write() {
+        guard.insert((*left_encoding, *right_encoding), value.clone());
+    }
+}
+
 /// Warm the decode memo for a set of encodings in parallel.
 ///
 /// The MSM accumulation chain consumes each output's decode serially inside a
@@ -4532,6 +4564,9 @@ pub fn build_ristretto_fp_program_compressed_point_addition(
     left_encoding: &[u8; LIMBS],
     right_encoding: &[u8; LIMBS],
 ) -> TexasAirResult<(RistrettoFpProgram, [u8; LIMBS])> {
+    if let Some(cached) = point_addition_program_cache_lookup(left_encoding, right_encoding) {
+        return Ok(cached);
+    }
     let left_inverse_sqrt = canonical_decode_inverse_sqrt(left_encoding)?;
     // Doubling rows (accumulator squaring in the Horner ladder) decode the
     // same encoding twice; the function is pure, so reuse the left result.
@@ -4606,7 +4641,9 @@ pub fn build_ristretto_fp_program_compressed_point_addition(
         encoded.inverse_check,
         encoded.encoding,
     ])?;
-    Ok((program, output_encoding))
+    let result = (program, output_encoding);
+    point_addition_program_cache_store(left_encoding, right_encoding, &result);
+    Ok(result)
 }
 
 /// Verify that one public batch row is the exact fixed-shape compressed-point

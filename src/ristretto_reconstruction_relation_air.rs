@@ -394,16 +394,35 @@ pub fn prove_ristretto_cross_key_equation(
     }
     let challenge_nonzero =
         prove_nonzero_challenge(&statement.challenge, &statement.challenge_inverse)?;
-    let scalar_windows = scalar_inputs(&statement)
-        .into_iter()
-        .map(|(scalar, _)| prove_ristretto_scalar_windows(&scalar))
-        .collect::<TexasAirResult<Vec<_>>>()?;
+    let inputs = scalar_inputs(&statement);
+    let mut unique_scalars: Vec<[u8; LIMBS]> = Vec::with_capacity(SCALAR_MUL_COUNT);
+    for (scalar, _) in &inputs {
+        if !unique_scalars.contains(scalar) {
+            unique_scalars.push(*scalar);
+        }
+    }
+    let mut window_cache = std::collections::HashMap::with_capacity(unique_scalars.len());
+    for scalar in &unique_scalars {
+        window_cache.insert(*scalar, prove_ristretto_scalar_windows(scalar)?);
+    }
+    let scalar_windows: Vec<_> = inputs
+        .iter()
+        .map(|(scalar, _)| {
+            window_cache
+                .get(scalar)
+                .expect("scalar window cache must be exhaustive")
+                .clone()
+        })
+        .collect();
     let scalar_multiplications =
         prove_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
-            scalar_windows
+            inputs
                 .iter()
+                .zip(scalar_windows.iter())
                 .zip(scalar_inputs(&statement).into_iter().map(|(_, base)| base))
-                .map(|(window_proof, base)| (window_proof.scalar, window_proof.windows, base))
+                .map(|(((scalar, _), window_proof), base)| {
+                    (*scalar, window_proof.windows, base)
+                })
                 .collect(),
         )?;
     let outputs = scalar_outputs(&scalar_multiplications)?;
@@ -723,6 +742,75 @@ mod tests {
         let mut output_splice = outputs;
         output_splice[4] = compressed(g * scalar(37));
         assert!(expected_addition_programs(&statement, &output_splice).is_err());
+    }
+
+    #[test]
+    fn cross_key_rejects_duplicate_scalar_with_divergent_window_decomposition() {
+        // Owner response appears at indices 0 and 4 of scalar_inputs.  Mutating
+        // one duplicate slot's window decomposition while leaving the other
+        // untouched must still be rejected by the verifier.
+        let scalar = <RistrettoCurve as Curve>::Scalar::from_u64;
+        let g = RistrettoCurve::base_g();
+        let owner_secret = scalar(5);
+        let aggregate_secret = scalar(11);
+        let readable_randomness = scalar(13);
+        let contribution_randomness = scalar(17);
+        let plaintext = g * scalar(19);
+        let owner_pk = g * owner_secret;
+        let aggregate_pk = g * aggregate_secret;
+        let readable_c1 = g * readable_randomness;
+        let readable_c2 = plaintext + owner_pk * readable_randomness;
+        let negative_c1 = g * contribution_randomness;
+        let negative_c2 = -plaintext + aggregate_pk * contribution_randomness;
+
+        let owner_nonce = scalar(23);
+        let contribution_nonce = scalar(29);
+        let challenge_scalar = scalar(31);
+        let mut challenge = [0; LIMBS];
+        challenge.copy_from_slice(challenge_scalar.as_bytes());
+        let statement = RistrettoCrossKeyEquationStatement {
+            statement_digest: [42; 32],
+            readable: RistrettoCiphertextProofWire {
+                c1: compressed(readable_c1),
+                c2: compressed(readable_c2),
+            },
+            negative_contribution: RistrettoCiphertextProofWire {
+                c1: compressed(negative_c1),
+                c2: compressed(negative_c2),
+            },
+            owner_pk: compressed(owner_pk),
+            aggregate_pk: compressed(aggregate_pk),
+            challenge,
+            challenge_inverse: inverse(&challenge).unwrap(),
+            proof: RistrettoCrossKeyProofWire {
+                commitment_owner_key: compressed(g * owner_nonce),
+                commitment_contribution_c1: compressed(g * contribution_nonce),
+                commitment_joint_c2: compressed(
+                    readable_c1 * owner_nonce + aggregate_pk * contribution_nonce,
+                ),
+                response_owner_sk: {
+                    let mut response = [0; LIMBS];
+                    response.copy_from_slice(
+                        (owner_nonce + challenge_scalar * owner_secret).as_bytes(),
+                    );
+                    response
+                },
+                response_contribution_randomness: {
+                    let mut response = [0; LIMBS];
+                    response.copy_from_slice(
+                        (contribution_nonce + challenge_scalar * contribution_randomness)
+                            .as_bytes(),
+                    );
+                    response
+                },
+            },
+        };
+        let archive = prove_ristretto_cross_key_equation(statement).unwrap();
+        let mut spliced = archive;
+        let mut altered = spliced.scalar_windows[4].clone();
+        altered.windows[0] ^= 1;
+        spliced.scalar_windows[4] = altered;
+        assert!(verify_ristretto_cross_key_equation(&spliced).is_err());
     }
 
     fn request() -> ReconstructionV3VerifyRequest {

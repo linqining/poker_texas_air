@@ -36,6 +36,13 @@
     "off_chain_trust": "operator_must_verify_stwo_outer_aggregate_before_register_aggregate",
     "replay_protection": "aggregate_digest_unique_and_hand_range_monotonic"
   },
+  "abi_notes": {
+    "aggregate_digest_encoding": "(felt252, felt252) dual felt; hi = be bytes[0..16], lo = be bytes[16..32]; rust: starknet_settlement::AggregateDigestFelts::split/merge",
+    "settle_hand_digest": "single felt252 low-half projection; contract binds it to the registered dual-felt pair",
+    "settlement_commitment": "poseidon over hand_id then (player, sign, magnitude)* per participant, address-ascending; rust: starknet_settlement::SettleHandCalldata",
+    "delta_encoding": "i128 felt; negative values encoded as modular complement; magnitude bounded to u64",
+    "calldata_builder": "poker_texas_air::starknet_settlement::{RegisterAggregateCalldata, SettleHandCalldata}"
+  },
   "transactions": [],
   "demo_video": "",
   "demo_url": ""

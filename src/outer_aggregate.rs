@@ -159,8 +159,8 @@ impl OuterAggregateBundle {
         debug_assert_eq!(out.len(), HEADER_LEN);
         for child in &self.children {
             let len = child.encoded_len()?;
-            let len = u32::try_from(len)
-                .map_err(|_| wire_error("outer child length exceeds u32"))?;
+            let len =
+                u32::try_from(len).map_err(|_| wire_error("outer child length exceeds u32"))?;
             out.extend_from_slice(&len.to_le_bytes());
             child.encode_into(&mut out)?;
         }
@@ -507,13 +507,8 @@ fn aggregate_digest(
             + 32 * receipt.proof_commitments().len()
             + 3 + 32 + 32 // binding ids and digests
     };
-    let mut material = Vec::with_capacity(
-        header_material_len
-            + receipts
-                .iter()
-                .map(per_child_len)
-                .sum::<usize>(),
-    );
+    let mut material =
+        Vec::with_capacity(header_material_len + receipts.iter().map(per_child_len).sum::<usize>());
     material.extend_from_slice(&[bundle.version]);
     material.extend_from_slice(&(bundle.children.len() as u32).to_le_bytes());
     material.extend_from_slice(&bundle.table_id.to_le_bytes());
@@ -538,9 +533,7 @@ fn aggregate_digest(
             hasher.update(&(payload_len as u64).to_le_bytes());
             child.update_hasher(&mut hasher)?;
             let mut digest = [0u8; 32];
-            hasher
-                .finalize_variable(&mut digest)
-                .expect("32 <= 64");
+            hasher.finalize_variable(&mut digest).expect("32 <= 64");
             Ok((payload_len, digest))
         })
         .collect::<TexasAirResult<Vec<_>>>()?;

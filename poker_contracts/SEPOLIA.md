@@ -66,6 +66,75 @@ Before sending transactions:
    checks zero-sum, and forwards deltas to the vault.
 6. Player calls `withdraw(amount)`.
 
+## Rust calldata builder
+
+`poker_texas_air::starknet_settlement` produces the exact Cairo ABI calldata
+for steps 4–5. It only accepts already-verified inputs; there is no path from
+an unverified `OuterAggregateBundle` to trusted calldata.
+
+```text
+use poker_texas_air::outer_aggregate::verify_outer_aggregate;
+use poker_texas_air::starknet_settlement::{RegisterAggregateCalldata, SettleHandCalldata};
+
+// One verified aggregate per hand; a VerifiedChain is single-hand by
+// construction, so a multi-hand registration passes one per hand.
+let verified_hands: Vec<VerifiedOuterAggregate> = /* verify_outer_aggregate(...) per hand */;
+let settlement_roots: Vec<FieldElement> = /* poseidon commitment per hand */;
+
+let register = RegisterAggregateCalldata::new(
+    &verified_hands,
+    first_hand_id,
+    last_hand_id,
+    settlement_roots,
+)?;
+let felts: Vec<FieldElement> = register.to_felts();   // invoke calldata
+
+let settle = SettleHandCalldata::new(
+    verified_aggregate_digest_32,
+    hand_id,
+    &authenticated_pre_table,   // pre-settlement TexasPokerTable snapshot
+    &canonical_settlement_plan, // SettlementPlan for this hand
+    Some(rake_recipient),       // required when plan.rake > 0
+)?;
+let felts: Vec<FieldElement> = settle.to_felts();     // invoke calldata
+```
+
+The builder rejects, before any transaction is built: hand-range or
+state-root discontinuities across the aggregate list, aggregate-digest or
+table drift, a missing rake recipient when `plan.rake > 0`, empty or
+duplicate participant addresses, participant sets above
+`MAX_SETTLE_PARTICIPANTS` (10), non-zero-sum deltas, and deltas whose
+magnitude exceeds the Cairo `i128`/`u64` commitment bound.
+
+## Aggregate-digest ABI (dual felt)
+
+The 256-bit BLAKE2b/BLAKE3 aggregate digest does not fit in one `felt252`
+(Stark prime ≈ 2^251), so `register_aggregate` and its storage key encode it
+losslessly as a `(felt252, felt252)` pair:
+
+- `hi = felt252(bytes[0..16])` — big-endian high half.
+- `lo = felt252(bytes[16..32])` — big-endian low half.
+
+`poker_texas_air::starknet_settlement::AggregateDigestFelts::{split, merge}`
+implement the identical encoding with round-trip and range checks (each half
+must be a canonical 128-bit value). `settle_hand` takes the single-felt `lo`
+projection for ABI stability; the contract binds it back to the registered
+pair in storage.
+
+## Settlement commitment encoding
+
+`settle_hand` recomputes `poseidon_hash_span` over:
+
+```text
+hand_id,
+(player_i, sign_i, magnitude_i)*   # sign: 1 non-negative, 0 negative
+```
+
+with participants ordered by ascending address. The Rust builder computes the
+identical commitment via `starknet_crypto::poseidon_hash_many` and exposes it
+as `SettleHandCalldata::settlement_digest()`; a mismatch between the builder
+and the contract is a hard error on-chain.
+
 ## Security boundary
 
 This is intentionally a trusted-operator bridge for the testnet phase. The
