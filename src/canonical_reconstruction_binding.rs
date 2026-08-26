@@ -45,16 +45,9 @@ pub const CANONICAL_RECONSTRUCTION_PRIOR_STATE_DOMAIN: &[u8] =
 /// it is intentionally a distinct 32-byte route from the legacy BLS12-381
 /// 48-byte state encoding.
 pub fn canonical_ristretto_card(index: usize) -> TexasAirResult<[u8; 32]> {
-    if index >= CANONICAL_RECONSTRUCTION_CARDS {
-        return Err(TexasAirError::SpecViolation(
-            "canonical Ristretto card index is out of bounds".into(),
-        ));
-    }
-    use poker_protocol::crypto::curve::{Curve, RistrettoCurve};
-    let label = format!("texas_poker/card/{index}");
-    Ok(*RistrettoCurve::hash_to_curve(label.as_bytes())
-        .compress()
-        .as_bytes())
+    poker_protocol::ristretto_air::canonical_card_bytes(index).ok_or_else(|| {
+        TexasAirError::SpecViolation("canonical Ristretto card index is out of bounds".into())
+    })
 }
 
 /// Return the complete deterministic 52-card Ristretto route in canonical
@@ -533,17 +526,37 @@ fn validate_reconstruction_request_shape(
             "canonical reconstruction request shape is invalid: {error}"
         ))
     })?;
+    let transcript_ok = match request.proof_system {
+        ReconstructionProofSystem::RistrettoAirV1 => {
+            request.transcript == TranscriptId::Poseidon252
+        }
+        ReconstructionProofSystem::RistrettoAirV2 => {
+            request.transcript == TranscriptId::FlockBlake3
+        }
+        _ => false,
+    };
     if request.curve != CurveId::Ristretto255
-        || request.proof_system != ReconstructionProofSystem::RistrettoAirV1
-        || request.transcript != TranscriptId::Poseidon252
+        || !matches!(
+            request.proof_system,
+            ReconstructionProofSystem::RistrettoAirV1 | ReconstructionProofSystem::RistrettoAirV2
+        )
+        || !transcript_ok
     {
         return Err(TexasAirError::SpecViolation(
-            "canonical reconstruction route requires RistrettoAirV1 with Poseidon252".into(),
+            "canonical reconstruction route requires Ristretto AIR with its protocol transcript"
+                .into(),
         ));
     }
-    if request.context.as_slice()
-        != poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_V3_PROOF_LABEL
-    {
+    let expected_context = match request.proof_system {
+        ReconstructionProofSystem::RistrettoAirV1 => {
+            poker_protocol::ristretto_air::RISTRETTO_AIR_RECONSTRUCTION_V3_CONTEXT
+        }
+        ReconstructionProofSystem::RistrettoAirV2 => {
+            poker_protocol::ristretto_air::RISTRETTO_AIR_V2_RECONSTRUCTION_CONTEXT
+        }
+        _ => unreachable!("Ristretto proof-system checked above"),
+    };
+    if request.context.as_slice() != expected_context {
         return Err(TexasAirError::SpecViolation(
             "canonical reconstruction request uses the wrong proof transcript label".into(),
         ));
@@ -722,7 +735,7 @@ mod tests {
             curve: CurveId::Ristretto255,
             proof_system: ReconstructionProofSystem::RistrettoAirV1,
             transcript: TranscriptId::Poseidon252,
-            context: poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_V3_PROOF_LABEL
+            context: poker_protocol::ristretto_air::RISTRETTO_AIR_RECONSTRUCTION_V3_CONTEXT
                 .to_vec(),
             call_context: canonical_precompile_call_context(witness),
             statement_version: 3,

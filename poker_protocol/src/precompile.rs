@@ -153,6 +153,7 @@ impl ShuffleVerifier for NativeBls12381ShuffleVerifier {
             // Poseidon252 is reserved for the Ristretto AIR verifier. The
             // native BLS backend must fail closed rather than reinterpret it.
             TranscriptId::Poseidon252 => Err(NativePrecompileError::UnsupportedProofSystem),
+            TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
     }
 }
@@ -202,6 +203,7 @@ impl ReconstructionVerifier for NativeBls12381ReconstructionVerifier {
                 &mut FiatShamirTranscript::new(&request.context),
             ),
             TranscriptId::Poseidon252 => Err(NativePrecompileError::UnsupportedProofSystem),
+            TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
     }
 }
@@ -254,6 +256,7 @@ impl ReconstructionV3Verifier for NativeBls12381ReconstructionV3Verifier {
                 &mut FiatShamirTranscript::new(&request.context),
             ),
             TranscriptId::Poseidon252 => Err(NativePrecompileError::UnsupportedProofSystem),
+            TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
     }
 }

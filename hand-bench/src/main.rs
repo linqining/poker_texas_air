@@ -328,6 +328,10 @@ fn main() {
         slot_or_deep_batch();
         return;
     }
+    if std::env::args().any(|arg| arg == "full-hand-v2") {
+        full_hand_v2();
+        return;
+    }
     println!("=== poker_texas_air complete-hand proving benchmark ===");
     println!("host: {} / {}", std::env::consts::ARCH, sysctl_model());
     let lifecycle = lifecycle_batch();
@@ -645,5 +649,307 @@ fn ristretto_timing() {
     println!(
         "proof bytes: {}",
         borsh::to_vec(&deck).map(|v| v.len()).unwrap_or(0)
+    );
+}
+
+/// One complete mental-poker hand on the RistrettoAirV2 protocol layer.
+///
+/// Phases: N-player key registration (ownership proofs), canonical base deck
+/// under the aggregate key, N sequential Bayer--Groth shuffles, hole/board
+/// dealing, one mid-hand `fold_with_proof` (key layer removed from the deck
+/// and the aggregate key), a betting line over the remaining seats, and a
+/// showdown where every remaining player publishes reveal tokens for each
+/// revealed card (plaintext = c2 - sum(tokens)).  Every proof is verified
+/// with its server-side verifier; wall clocks and proof sizes are printed per
+/// phase.
+fn full_hand_v2() {
+    use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar, RistrettoCurve};
+    use poker_protocol::precompile_abi::ShuffleVerifyRequest;
+    use poker_protocol::ristretto_air::{
+        RistrettoAirCiphertext, RistrettoShuffleSubmission, RistrettoTexasDeck,
+    };
+    use poker_texas_air::ristretto_player_proofs_air::{
+        RistrettoCiphertext, prove_fold_with_proof_v2, prove_pk_ownership, prove_reveal_token,
+        verify_fold_with_proof_v2, verify_pk_ownership, verify_reveal_token,
+    };
+    use poker_texas_air::ristretto_shuffle_air::{
+        admit_ristretto_air_v2_shuffle_submission, prove_ristretto_air_v2_shuffle,
+    };
+    use rand::SeedableRng;
+
+    type Point = <RistrettoCurve as Curve>::Point;
+    type Scalar = <RistrettoCurve as Curve>::Scalar;
+
+    const PLAYERS: usize = 4;
+    const HOLE_PER_PLAYER: usize = 2;
+    const BOARD_CARDS: usize = 5;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0xC0FFEE);
+
+    let point_bytes = |point: &Point| {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(point.compress().as_bytes());
+        out
+    };
+    let mut total_prove = std::time::Duration::ZERO;
+    let mut total_verify = std::time::Duration::ZERO;
+    let mut total_bytes = 0usize;
+
+    // ---- Phase 1: keys + ownership proofs -------------------------------
+    let started = Instant::now();
+    let mut secret_keys = Vec::with_capacity(PLAYERS);
+    let mut public_keys = Vec::with_capacity(PLAYERS);
+    let mut ownership = Vec::with_capacity(PLAYERS);
+    for seat in 0..PLAYERS {
+        let sk = Scalar::random(&mut rng);
+        let pk = RistrettoCurve::base_g() * sk;
+        let context = format!("table7-hand3-seat{seat}");
+        let (wire, proof) =
+            prove_pk_ownership(&sk, &pk, context.as_bytes(), &mut rng).expect("ownership proof");
+        ownership.push((seat, context, wire, proof));
+        secret_keys.push(sk);
+        public_keys.push(pk);
+    }
+    let ownership_prove = started.elapsed();
+    let started = Instant::now();
+    for (seat, context, wire, proof) in &ownership {
+        verify_pk_ownership(&public_keys[*seat], context.as_bytes(), wire, proof)
+            .expect("ownership verify");
+        total_bytes += borsh_ser(wire).len() + borsh_ser(proof).len();
+    }
+    let ownership_verify = started.elapsed();
+    total_prove += ownership_prove;
+    total_verify += ownership_verify;
+    println!("ownership x{PLAYERS}: prove {ownership_prove:?}, verify {ownership_verify:?}");
+
+    // ---- Phase 2: canonical base deck under the aggregate key ------------
+    let aggregate: Point = public_keys.iter().copied().sum();
+    let base = RistrettoTexasDeck::canonical_base(&aggregate).expect("canonical base deck");
+    let mut deck: Vec<RistrettoCiphertext> = base
+        .encrypted
+        .iter()
+        .map(|wire| RistrettoCiphertext {
+            c1: <Point as CurvePoint>::from_compressed(&wire.c1).expect("c1 decodes"),
+            c2: <Point as CurvePoint>::from_compressed(&wire.c2).expect("c2 decodes"),
+        })
+        .collect();
+
+    // ---- Phase 3: every player shuffles (Bayer--Groth V2) ----------------
+    let started = Instant::now();
+    let mut shuffle_archives = Vec::with_capacity(PLAYERS);
+    for seat in 0..PLAYERS {
+        let mut permutation: Vec<usize> = (0..52).collect();
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ (seat as u64 + 1);
+        for index in (1..permutation.len()).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            permutation.swap(index, (seed % (index as u64 + 1)) as usize);
+        }
+        let rerandomizers: Vec<Scalar> = (0..52).map(|_| Scalar::random(&mut rng)).collect();
+        let output = permutation
+            .iter()
+            .zip(&rerandomizers)
+            .map(|(&source, r)| deck[source].re_encrypt(&aggregate, r))
+            .collect::<Vec<_>>();
+        let submission = RistrettoShuffleSubmission {
+            aggregate_pk: point_bytes(&aggregate),
+            input: deck
+                .iter()
+                .map(|ct| RistrettoAirCiphertext {
+                    c1: point_bytes(&ct.c1),
+                    c2: point_bytes(&ct.c2),
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+            output: output
+                .iter()
+                .map(|ct| RistrettoAirCiphertext {
+                    c1: point_bytes(&ct.c1),
+                    c2: point_bytes(&ct.c2),
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+            air_proof: vec![0; 8],
+        };
+        let mut request = submission
+            .to_verify_request_v2(format!("shuffle-seat{seat}").into_bytes())
+            .expect("V2 shuffle request");
+        let envelope =
+            prove_ristretto_air_v2_shuffle(&request, &permutation, &rerandomizers, &mut rng)
+                .expect("V2 shuffle proof");
+        request.proof = envelope.encode_wire().expect("envelope wire");
+        let request_bytes = request.encode().expect("canonical request");
+        shuffle_archives.push((request_bytes, envelope));
+        deck = output;
+    }
+    let shuffle_prove = started.elapsed();
+    let started = Instant::now();
+    for (request_bytes, envelope) in &shuffle_archives {
+        admit_ristretto_air_v2_shuffle_submission(request_bytes).expect("shuffle admission");
+        total_bytes += request_bytes.len();
+        let _ = envelope;
+    }
+    let shuffle_verify = started.elapsed();
+    total_prove += shuffle_prove;
+    total_verify += shuffle_verify;
+    println!("shuffles x{PLAYERS}: prove {shuffle_prove:?}, verify {shuffle_verify:?}");
+
+    // ---- Phase 4: deal hole cards and board ------------------------------
+    let mut cursor = 0usize;
+    let mut hole_cards: Vec<Vec<RistrettoCiphertext>> = Vec::with_capacity(PLAYERS);
+    for _ in 0..PLAYERS {
+        hole_cards.push(deck[cursor..cursor + HOLE_PER_PLAYER].to_vec());
+        cursor += HOLE_PER_PLAYER;
+    }
+    let board = deck[cursor..cursor + BOARD_CARDS].to_vec();
+    cursor += BOARD_CARDS;
+    let remaining_deck = deck[cursor..].to_vec();
+    println!(
+        "dealt {} hole cards + {BOARD_CARDS} board cards, {} deck positions remain",
+        PLAYERS * HOLE_PER_PLAYER,
+        remaining_deck.len()
+    );
+
+    // ---- Phase 5: seat 1 folds mid-hand (fold_with_proof) -----------------
+    // The folded key layer is removed from the encrypted universe and the
+    // aggregate key; the seat is excluded from every later reveal token.
+    let fold_seat = 1usize;
+    let fold_context = [0xF0; 32];
+    let started = Instant::now();
+    let (folded_universe, fold_archive) = prove_fold_with_proof_v2(
+        &secret_keys[fold_seat],
+        &public_keys[fold_seat],
+        &aggregate,
+        &deck,
+        fold_context,
+        &mut rng,
+    )
+    .expect("fold_with_proof proof");
+    let fold_prove = started.elapsed();
+    let new_aggregate = aggregate - public_keys[fold_seat];
+    let started = Instant::now();
+    verify_fold_with_proof_v2(
+        &public_keys[fold_seat],
+        &aggregate,
+        &deck,
+        &folded_universe,
+        &fold_archive,
+    )
+    .expect("fold verify");
+    let fold_verify = started.elapsed();
+    total_prove += fold_prove;
+    total_verify += fold_verify;
+    total_bytes += borsh_ser(&fold_archive).len();
+    println!("fold_with_proof x1: prove {fold_prove:?}, verify {fold_verify:?}");
+
+    // ---- Phase 6: betting line (call around, simulated amounts) -----------
+    // Monetary transitions are plain state: the canonical tagged AIR covers
+    // their STARK proving (see the default benchmark mode).  Here we advance
+    // the betting state natively and account only its wall clock.
+    let started = Instant::now();
+    let mut stacks = vec![10_000u64; PLAYERS];
+    let mut bets = vec![0u64; PLAYERS];
+    let blinds = [25u64, 50u64];
+    for (seat, blind) in blinds.iter().enumerate() {
+        bets[seat] = *blind;
+        stacks[seat] -= *blind;
+    }
+    let pot: u64 = bets.iter().sum();
+    for seat in 0..PLAYERS {
+        if seat == fold_seat {
+            continue; // folded seat takes no further action
+        }
+        let to_call = bets.iter().max().copied().unwrap_or(0) - bets[seat];
+        if to_call > 0 {
+            bets[seat] += to_call;
+            stacks[seat] -= to_call;
+        }
+    }
+    let final_pot: u64 = bets.iter().sum();
+    let betting_elapsed = started.elapsed();
+    println!("betting line (3 active calls): {betting_elapsed:?} native, pot {pot} -> {final_pot}");
+
+    // ---- Phase 7: showdown reveal tokens ----------------------------------
+    // Every remaining player publishes a reveal token for every revealed
+    // card; the plaintext is c2 - sum(tokens).  The folded seat contributes
+    // nothing: its key layer is already gone.
+    let active: Vec<usize> = (0..PLAYERS).filter(|&seat| seat != fold_seat).collect();
+    let revealed: Vec<RistrettoCiphertext> = active
+        .iter()
+        .flat_map(|&seat| hole_cards[seat].clone())
+        .chain(board.clone())
+        .collect();
+    let started = Instant::now();
+    let mut token_wires = Vec::new();
+    for &seat in &active {
+        for (card_index, card) in revealed.iter().enumerate() {
+            let context = format!("reveal-seat{seat}-card{card_index}");
+            let token = card.c1 * secret_keys[seat];
+            let (wire, proof) = prove_reveal_token(
+                &secret_keys[seat],
+                &public_keys[seat],
+                card,
+                &token,
+                context.as_bytes(),
+                &mut rng,
+            )
+            .expect("reveal token proof");
+            token_wires.push((seat, card_index, context, wire, proof));
+        }
+    }
+    let reveal_prove = started.elapsed();
+    let started = Instant::now();
+    for (seat, card_index, context, wire, proof) in &token_wires {
+        let token = revealed[*card_index].c1 * secret_keys[*seat];
+        verify_reveal_token(
+            &public_keys[*seat],
+            &revealed[*card_index],
+            &token,
+            context.as_bytes(),
+            wire,
+            proof,
+        )
+        .expect("reveal verify");
+        total_bytes += borsh_ser(wire).len() + borsh_ser(proof).len();
+    }
+    let reveal_verify = started.elapsed();
+    total_prove += reveal_prove;
+    total_verify += reveal_verify;
+    println!(
+        "reveal tokens x{} ({} cards x {} active players): prove {reveal_prove:?}, verify {reveal_verify:?}",
+        token_wires.len(),
+        revealed.len(),
+        active.len()
+    );
+
+    // ---- Phase 8: decrypt revealed cards and settle -----------------------
+    let started = Instant::now();
+    let mut plaintexts = Vec::with_capacity(revealed.len());
+    for card in &revealed {
+        let tokens: Point = active.iter().map(|&seat| card.c1 * secret_keys[seat]).sum();
+        plaintexts.push(card.c2 - tokens);
+    }
+    let all_distinct = {
+        let mut encodings: Vec<_> = plaintexts
+            .iter()
+            .map(|point| point.compress().as_bytes().to_vec())
+            .collect();
+        encodings.sort();
+        encodings.dedup();
+        encodings.len() == plaintexts.len()
+    };
+    assert!(all_distinct, "revealed plaintexts must be distinct cards");
+    let winner = 0usize;
+    let prize = final_pot;
+    stacks[winner] += prize;
+    let settlement_elapsed = started.elapsed();
+    println!(
+        "decrypt + settlement (winner seat {winner} takes {prize}): {settlement_elapsed:?} native"
+    );
+
+    println!(
+        "\nTOTAL protocol layer: prove {total_prove:?}, verify {total_verify:?}, client proof bytes {total_bytes}"
     );
 }

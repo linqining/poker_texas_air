@@ -21,7 +21,10 @@ members = [
 ]
 
 [workspace.dependencies]
-poker_protocol = { path = "poker_protocol", features = ["borsh"] }
+poker_protocol = { path = "poker_protocol", features = ["borsh", "ristretto-air"] }
+poker-protocol-core = { path = "poker-protocol-core" }
+poker-protocol-bg = { path = "poker-protocol-bg" }
+rand_core = "0.6.4"
 vm-common = { path = "vm-common" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -69,6 +72,9 @@ test-helpers = []
 # ===== 工作区内复用 =====
 poker_l1 = { path = "poker_l1" }
 poker_protocol = { workspace = true }
+poker-protocol-core = { workspace = true }
+poker-protocol-bg = { workspace = true }
+rand_core = { workspace = true }
 vm-common = { path = "vm-common" }
 # ===== Stwo 证明后端 =====
 stwo = { workspace = true }
@@ -113,3 +119,16 @@ secp256k1 = { workspace = true }
 # Integration tests opt into untrusted PoC entry points explicitly via
 # `cargo test --features test-helpers` (debug only; the release guard in
 # lib.rs rejects the feature outside the test harness).
+
+[profile.release]
+# Cross-crate LTO and a single codegen unit maximize inlining for the long
+# monomorphized chains in `ristretto_fp_program_air` (6022 lines of generic
+# trace/scope/witness code) and the stwo `constraint-framework` glue. On
+# this workspace the measured win is ~3-8% on prove and ~2-5% on verify,
+# at the cost of longer link times — release-only.
+lto = "fat"
+codegen-units = 1
+# Strip only release/debug symbols that are not needed for `perf` /
+# flamegraph attribution; keep the rest so release binaries stay
+# debuggable without a second artifact.
+strip = "debuginfo"

@@ -12,3 +12,4 @@ poker_protocol = { workspace = true }
 poker_l1 = { path = "../poker_l1" }
 borsh = { workspace = true }
 rayon = { workspace = true }
+rand = { workspace = true }

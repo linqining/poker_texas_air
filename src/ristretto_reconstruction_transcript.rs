@@ -21,11 +21,130 @@ use poker_protocol::precompile_abi::ReconstructionV3VerifyRequest;
 
 use crate::canonical_reconstruction_binding::CANONICAL_RECONSTRUCTION_CARDS;
 use crate::error::{TexasAirError, TexasAirResult};
+use crate::hash_prover::HashProofProvider;
 use crate::ristretto_reconstruction_proof_wire::{
     RISTRETTO_RECONSTRUCTION_READABLE_CARDS, RistrettoReconstructionProofEnvelope,
     reconstruction_v3_statement_digest,
 };
 use crate::ristretto_scalar_air::GROUP_ORDER_BYTES;
+
+/// Domain for the V2 protocol Fiat--Shamir transcript.  Stwo's Poseidon252
+/// channel is deliberately not used here; it remains an internal PCS/FRI
+/// channel only.
+pub const RISTRETTO_FLOCK_TRANSCRIPT_DOMAIN: &[u8] =
+    b"zchain.texas.ristretto-air-v2.flock-transcript.v1";
+
+/// A Flock-proven transcript seed and its deterministically derived challenge
+/// schedule.  The message is public and binds the request statement and proof
+/// commitments; the Flock chain proof authenticates the digest without
+/// trusting a host-computed hash.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedRistrettoFlockTranscriptProof {
+    pub statement_digest: [u8; 32],
+    pub component_digest: [u8; 32],
+    pub message: Vec<u8>,
+    pub digest: [u8; 32],
+    pub hash_proof: crate::hash_prover::ArchivedHashProof,
+    pub challenges: [[u8; 32]; RISTRETTO_POSEIDON_TRANSCRIPT_CHALLENGE_COUNT],
+    pub retry_count: [u32; RISTRETTO_POSEIDON_TRANSCRIPT_CHALLENGE_COUNT],
+}
+
+fn flock_transcript_message(statement_digest: &[u8; 32], component_digest: &[u8; 32]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        RISTRETTO_FLOCK_TRANSCRIPT_DOMAIN.len() + statement_digest.len() + component_digest.len(),
+    );
+    message.extend_from_slice(RISTRETTO_FLOCK_TRANSCRIPT_DOMAIN);
+    message.extend_from_slice(statement_digest);
+    message.extend_from_slice(component_digest);
+    message
+}
+
+fn derive_flock_challenge(digest: &[u8; 32], ordinal: usize, retry: u32) -> [u8; 32] {
+    let mut input = Vec::with_capacity(32 + 8);
+    input.extend_from_slice(digest);
+    input.extend_from_slice(&(ordinal as u32).to_le_bytes());
+    input.extend_from_slice(&retry.to_le_bytes());
+    crate::blake3_flock::blake3_chain_digest(&input)
+}
+
+impl ArchivedRistrettoFlockTranscriptProof {
+    pub fn prove(statement_digest: [u8; 32], component_digest: [u8; 32]) -> TexasAirResult<Self> {
+        let message = flock_transcript_message(&statement_digest, &component_digest);
+        let digest = crate::blake3_flock::blake3_chain_digest(&message);
+        let statement = crate::hash_prover::Blake2bStatement::new(message.clone(), digest);
+        let hash_proof = crate::blake3_flock::FlockProvider.prove_statements(&[statement])?;
+        let modulus = BigUint::from_bytes_le(&GROUP_ORDER_BYTES);
+        let mut challenges = [[0u8; 32]; RISTRETTO_POSEIDON_TRANSCRIPT_CHALLENGE_COUNT];
+        let mut retry_count = [0u32; RISTRETTO_POSEIDON_TRANSCRIPT_CHALLENGE_COUNT];
+        for ordinal in 0..challenges.len() {
+            let mut retry = 0u32;
+            loop {
+                let candidate = derive_flock_challenge(&digest, ordinal, retry);
+                if !BigUint::from_bytes_le(&candidate).is_zero()
+                    && BigUint::from_bytes_le(&candidate) < modulus
+                {
+                    challenges[ordinal] = candidate;
+                    retry_count[ordinal] = retry;
+                    break;
+                }
+                retry = retry.checked_add(1).ok_or_else(|| {
+                    TexasAirError::SpecViolation("Flock transcript retry overflow".into())
+                })?;
+            }
+        }
+        Ok(Self {
+            statement_digest,
+            component_digest,
+            message,
+            digest,
+            hash_proof,
+            challenges,
+            retry_count,
+        })
+    }
+
+    pub fn verify(&self) -> TexasAirResult<()> {
+        let expected_message =
+            flock_transcript_message(&self.statement_digest, &self.component_digest);
+        if self.message != expected_message
+            || self.digest != crate::blake3_flock::blake3_chain_digest(&self.message)
+        {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "Flock transcript message/digest is detached".into(),
+            ));
+        }
+        let statement =
+            crate::hash_prover::Blake2bStatement::new(self.message.clone(), self.digest);
+        crate::blake3_flock::FlockProvider.verify_statements(&self.hash_proof, &[statement])?;
+        let modulus = BigUint::from_bytes_le(&GROUP_ORDER_BYTES);
+        for ordinal in 0..self.challenges.len() {
+            let retry = self.retry_count[ordinal];
+            if retry > RISTRETTO_POSEIDON_TRANSCRIPT_MAX_RETRIES {
+                return Err(TexasAirError::SpecViolation(
+                    "Flock transcript retry count exceeds the fixed bound".into(),
+                ));
+            }
+            let expected = derive_flock_challenge(&self.digest, ordinal, retry);
+            if self.challenges[ordinal] != expected
+                || BigUint::from_bytes_le(&expected).is_zero()
+                || BigUint::from_bytes_le(&expected) >= modulus
+            {
+                return Err(TexasAirError::ConstraintUnsatisfied(
+                    "Flock transcript challenge schedule is detached".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn as_poseidon_compat(&self) -> RistrettoPoseidonTranscriptChallenges {
+        RistrettoPoseidonTranscriptChallenges {
+            statement_digest: self.statement_digest,
+            challenge: self.challenges,
+            retry_count: self.retry_count,
+        }
+    }
+}
 
 pub const RISTRETTO_POSEIDON_TRANSCRIPT_ABI_VERSION: u8 = 1;
 pub const RISTRETTO_POSEIDON_TRANSCRIPT_DOMAIN: &[u8] =
@@ -637,6 +756,16 @@ mod tests {
                         && *index == i
                 )
         );
+    }
+
+    #[test]
+    fn flock_transcript_roundtrip_is_statement_bound() {
+        let proof = ArchivedRistrettoFlockTranscriptProof::prove([7; 32], [9; 32])
+            .expect("Flock transcript proof");
+        proof.verify().expect("Flock transcript verifies");
+        let mut tampered = proof.clone();
+        tampered.component_digest[0] ^= 1;
+        assert!(tampered.verify().is_err());
     }
 
     #[test]

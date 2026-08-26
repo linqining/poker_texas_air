@@ -5,9 +5,14 @@ pub mod z_poker;
 #[cfg(feature = "legacy-bls381")]
 pub mod zk_shuffle;
 
+/// Pure Ristretto255 request construction for the AIR-backed mental-poker
+/// epoch.  This module does not expose a native proof verifier.
+#[cfg(feature = "ristretto-air")]
+pub mod ristretto_air;
+
 /// Stable request/response boundary for STWO foreign calls and chain
 /// precompile adapters.
-#[cfg(feature = "legacy-bls381")]
+#[cfg(any(feature = "legacy-bls381", feature = "ristretto-air"))]
 pub mod precompile_abi {
     pub use poker_protocol_abi::*;
 }

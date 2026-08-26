@@ -10,10 +10,6 @@
 
 #![allow(missing_docs)]
 
-use blake2::{
-    Blake2bVar,
-    digest::{Update, VariableOutput},
-};
 use borsh::{BorshDeserialize, BorshSerialize};
 use poker_protocol::precompile_abi::{ReconstructionProofSystem, ReconstructionV3VerifyRequest};
 
@@ -25,7 +21,16 @@ pub const RISTRETTO_RECONSTRUCTION_PROOF_WIRE_VERSION: u8 = 1;
 pub const RISTRETTO_RECONSTRUCTION_READABLE_CARDS: usize = 2;
 const STATEMENT_DOMAIN: &[u8] = b"zchain.texas.ristretto-reconstruction-v3.statement.v1";
 const COMPONENT_DOMAIN: &[u8] = b"zchain.texas.ristretto-reconstruction-v3.components.v1";
-const TRANSCRIPT_DOMAIN: &[u8] = b"zchain.texas.ristretto-reconstruction-v3.poseidon252";
+const POSEIDON_TRANSCRIPT_DOMAIN: &[u8] = b"zchain.texas.ristretto-reconstruction-v3.poseidon252";
+const FLOCK_TRANSCRIPT_DOMAIN: &[u8] = b"zchain.texas.ristretto-air-v2.transcript.flock-blake3.v1";
+
+fn transcript_domain(transcript: poker_protocol::precompile_abi::TranscriptId) -> &'static [u8] {
+    match transcript {
+        poker_protocol::precompile_abi::TranscriptId::Poseidon252 => POSEIDON_TRANSCRIPT_DOMAIN,
+        poker_protocol::precompile_abi::TranscriptId::FlockBlake3 => FLOCK_TRANSCRIPT_DOMAIN,
+        _ => FLOCK_TRANSCRIPT_DOMAIN,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, BorshSerialize, BorshDeserialize)]
 pub struct RistrettoCiphertextProofWire {
@@ -118,14 +123,10 @@ pub struct RistrettoReconstructionProofEnvelope {
 }
 
 fn digest(domain: &[u8], message: &[u8]) -> [u8; 32] {
-    let mut hasher = Blake2bVar::new(32).expect("Blake2b-256 output is valid");
-    hasher.update(domain);
-    hasher.update(message);
-    let mut out = [0u8; 32];
-    hasher
-        .finalize_variable(&mut out)
-        .expect("Blake2b-256 output has fixed size");
-    out
+    let mut preimage = Vec::with_capacity(domain.len() + message.len());
+    preimage.extend_from_slice(domain);
+    preimage.extend_from_slice(message);
+    crate::blake3_flock::blake3_chain_digest(&preimage)
 }
 
 fn append_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> TexasAirResult<()> {
@@ -212,7 +213,7 @@ impl RistrettoReconstructionProofEnvelope {
         let mut envelope = Self {
             version: RISTRETTO_RECONSTRUCTION_PROOF_WIRE_VERSION,
             statement_digest,
-            transcript_domain_digest: digest(&[], TRANSCRIPT_DOMAIN),
+            transcript_domain_digest: digest(&[], transcript_domain(request.transcript)),
             negative_contributions,
             shuffle_proof,
             cross_key_proofs,
@@ -263,7 +264,10 @@ impl RistrettoReconstructionProofEnvelope {
                 "unsupported Ristretto Reconstruction V3 proof-wire version".into(),
             ));
         }
-        if self.transcript_domain_digest != digest(&[], TRANSCRIPT_DOMAIN) {
+        let domain_ok = [POSEIDON_TRANSCRIPT_DOMAIN, FLOCK_TRANSCRIPT_DOMAIN]
+            .iter()
+            .any(|domain| self.transcript_domain_digest == digest(&[], domain));
+        if !domain_ok {
             return Err(TexasAirError::ConstraintUnsatisfied(
                 "Ristretto Reconstruction V3 transcript domain is detached".into(),
             ));
@@ -284,12 +288,50 @@ impl RistrettoReconstructionProofEnvelope {
             TexasAirError::SpecViolation(format!("invalid Reconstruction V3 request: {error}"))
         })?;
         if request.curve != poker_protocol::precompile_abi::CurveId::Ristretto255
-            || request.proof_system != ReconstructionProofSystem::RistrettoAirV1
+            || !matches!(
+                request.proof_system,
+                ReconstructionProofSystem::RistrettoAirV1
+                    | ReconstructionProofSystem::RistrettoAirV2
+            )
             || request.cards.len() != CANONICAL_RECONSTRUCTION_CARDS
             || request.user_readable_cards.len() != RISTRETTO_RECONSTRUCTION_READABLE_CARDS
         {
             return Err(TexasAirError::SpecViolation(
                 "Ristretto Reconstruction V3 proof-wire is bound to the fixed Texas statement shape".into(),
+            ));
+        }
+        let expected_transcript = match request.proof_system {
+            ReconstructionProofSystem::RistrettoAirV1 => {
+                poker_protocol::precompile_abi::TranscriptId::Poseidon252
+            }
+            ReconstructionProofSystem::RistrettoAirV2 => {
+                poker_protocol::precompile_abi::TranscriptId::FlockBlake3
+            }
+            _ => unreachable!("proof-system checked above"),
+        };
+        if request.transcript != expected_transcript {
+            return Err(TexasAirError::SpecViolation(
+                "Ristretto Reconstruction proof-wire transcript is detached from its protocol version".into(),
+            ));
+        }
+        if self.transcript_domain_digest != digest(&[], transcript_domain(request.transcript)) {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "Ristretto Reconstruction proof-wire transcript domain is detached from the request".into(),
+            ));
+        }
+        let expected_context = match request.proof_system {
+            ReconstructionProofSystem::RistrettoAirV1 => {
+                poker_protocol::ristretto_air::RISTRETTO_AIR_RECONSTRUCTION_V3_CONTEXT
+            }
+            ReconstructionProofSystem::RistrettoAirV2 => {
+                poker_protocol::ristretto_air::RISTRETTO_AIR_V2_RECONSTRUCTION_CONTEXT
+            }
+            _ => unreachable!("proof-system checked above"),
+        };
+        if request.context.as_slice() != expected_context {
+            return Err(TexasAirError::SpecViolation(
+                "Ristretto Reconstruction proof-wire context is detached from its protocol version"
+                    .into(),
             ));
         }
         if self.statement_digest != reconstruction_v3_statement_digest(request)? {

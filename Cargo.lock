@@ -1402,6 +1402,7 @@ dependencies = [
  "poker_l1",
  "poker_protocol",
  "poker_texas_air",
+ "rand 0.8.7",
  "rayon",
 ]
 
@@ -1531,10 +1532,13 @@ dependencies = [
  "num-integer",
  "num-traits",
  "pairing",
+ "poker-protocol-bg",
+ "poker-protocol-core",
  "poker_l1",
  "poker_protocol",
  "proptest",
  "rand 0.8.7",
+ "rand_core 0.6.4",
  "rayon",
  "secp256k1",
  "serde",

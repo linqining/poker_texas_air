@@ -1,0 +1,966 @@
+//! RistrettoAirV2 player sigma proofs: key ownership, reveal tokens, deck
+//! remasking, and deck layer removal (leave/fold).
+//!
+//! These complete the mental-poker protocol surface referenced from zgame's
+//! `poker-protocol-proofs` (`pk_ownership`, `reveal_token_proof`,
+//! `remask_proof`, `leave_proof`) under the V2 trust model already
+//! established by the shuffle and reconstruction routes:
+//!
+//! - every Fiat--Shamir challenge is derived from a Flock-BLAKE3 chain
+//!   transcript seeded over a proof-kind domain, absorbing the caller's
+//!   statement context first; one Flock STARK covers the chain statements;
+//! - the sigma equations are verified natively (public points, public
+//!   scalars), the same trust class as the V2 shuffle and reconstruction
+//!   verifiers;
+//! - the witnesses (secret keys, nonce blinding) never enter any STARK
+//!   trace, so every proof stays honest-verifier zero knowledge.
+//!
+//! # Equations
+//!
+//! - key ownership (Schnorr): `G·s = A + pk·c` for witness `sk` with
+//!   `pk = sk·G`.
+//! - reveal token (Chaum--Pedersen): `G·s = T1 + pk·c` and
+//!   `ct.c1·s = T2 + token·c`, proving one `sk` behind both `pk` and
+//!   `token = sk·ct.c1`; the caller checks the revealed plaintext
+//!   `ct.c2 − token` separately.
+//! - deck remask / leave (batched DLEQ over the fixed 52-card deck):
+//!   `G·s = B + pk·c` and `input_i.c1·s = A_i + d2_i·c` for every card,
+//!   where `d2_i = ±(output_i.c2 − input_i.c2)` selects the remask
+//!   (add a key layer) or leave (remove one) direction.  Per-card
+//!   commitments defeat aggregate-shuffle attacks across cards.
+//!
+//! # Path A
+//!
+//! Each proof's in-circuit obligation is two (or 53) fixed-base/variable-base
+//! scalar-multiplication equalities over public points — at most 106
+//! in-circuit multiplications per deck-sized proof.  The recursion boundary
+//! is the proof wire plus the Flock transcript statements, mirroring
+//! [`crate::ristretto_shuffle_air::RistrettoAirV2ShuffleInCircuitComponents`].
+
+#![allow(missing_docs)]
+
+use borsh::{BorshDeserialize, BorshSerialize};
+use rand_core::{CryptoRng, RngCore};
+
+use poker_protocol_core::{
+    CryptoTranscript, Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric, RistrettoCurve,
+};
+
+use crate::error::{TexasAirError, TexasAirResult};
+use crate::hash_prover::{ArchivedHashProof, HashProofProvider};
+use crate::ristretto_shuffle_air::{FlockShuffleTranscript, RistrettoShuffleV2ChallengeWire};
+
+type RistrettoPoint = <RistrettoCurve as Curve>::Point;
+type RistrettoScalar = <RistrettoCurve as Curve>::Scalar;
+pub type RistrettoCiphertext = ElGamalCiphertextGeneric<RistrettoCurve>;
+
+/// Fixed deck size shared by every deck-level proof.
+pub const RISTRETTO_PLAYER_PROOF_DECK_SIZE: usize = 52;
+
+/// Transcript protocol names, one per proof kind.
+pub const PK_OWNERSHIP_PROTOCOL: &[u8] = b"poker/ristretto-air/v2/pk-ownership";
+pub const REVEAL_TOKEN_PROTOCOL: &[u8] = b"poker/ristretto-air/v2/reveal-token";
+pub const REMASK_PROTOCOL: &[u8] = b"poker/ristretto-air/v2/remask";
+pub const LEAVE_PROTOCOL: &[u8] = b"poker/ristretto-air/v2/leave";
+
+fn decode_point(bytes: &[u8; 32], label: &str) -> TexasAirResult<RistrettoPoint> {
+    RistrettoPoint::from_compressed(bytes)
+        .ok_or_else(|| TexasAirError::SpecViolation(format!("{label} failed to decompress")))
+}
+
+fn decode_scalar(bytes: &[u8; 32], label: &str) -> TexasAirResult<RistrettoScalar> {
+    <RistrettoScalar as CurveScalar>::from_canonical_bytes(bytes)
+        .ok_or_else(|| TexasAirError::SpecViolation(format!("{label} is not canonical")))
+}
+
+fn point_bytes(point: &RistrettoPoint) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(point.compress().as_bytes());
+    out
+}
+
+fn scalar_bytes(scalar: &RistrettoScalar) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let bytes = scalar.as_bytes();
+    out.copy_from_slice(&bytes[..32]);
+    out
+}
+
+/// A player sigma proof: the wire, its single recorded challenge image, and
+/// the Flock STARK over the transcript chain statements.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedRistrettoPlayerProof {
+    /// Recorded transcript challenge image (splice detection; must equal the
+    /// verifier's native re-derivation).
+    pub challenge: RistrettoShuffleV2ChallengeWire,
+    /// Flock STARK over `[init, flush]` chain statements.
+    pub flock: ArchivedHashProof,
+}
+
+/// Prove the Flock layer once from a completed transcript.
+fn finish_player_proof(
+    transcript: &FlockShuffleTranscript,
+) -> TexasAirResult<ArchivedRistrettoPlayerProof> {
+    let challenges = transcript.challenges();
+    let [challenge] = challenges else {
+        return Err(TexasAirError::SpecViolation(format!(
+            "player sigma transcript must derive exactly one challenge (got {})",
+            challenges.len()
+        )));
+    };
+    let flock = crate::blake3_flock::FlockProvider.prove_statements(transcript.statements())?;
+    Ok(ArchivedRistrettoPlayerProof {
+        challenge: *challenge,
+        flock,
+    })
+}
+
+/// Verify the Flock layer and the recorded challenge image against a
+/// verifier-side transcript run.
+fn verify_player_proof(
+    proof: &ArchivedRistrettoPlayerProof,
+    transcript: &mut FlockShuffleTranscript,
+) -> TexasAirResult<RistrettoScalar> {
+    // Derive the challenge exactly as the prover did, after every absorb.
+    let derived = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    let challenges = transcript.challenges();
+    let [challenge] = challenges else {
+        return Err(TexasAirError::SpecViolation(
+            "player sigma transcript must derive exactly one challenge".into(),
+        ));
+    };
+    if *challenge != proof.challenge {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "player sigma challenge image is detached from the transcript".into(),
+        ));
+    }
+    let scalar = <RistrettoScalar as CurveScalar>::from_canonical_bytes(&challenge.image)
+        .ok_or_else(|| TexasAirError::SpecViolation("challenge image is not canonical".into()))?;
+    debug_assert_eq!(
+        scalar, derived,
+        "recorded image and derived challenge must agree"
+    );
+    crate::blake3_flock::FlockProvider.verify_statements(&proof.flock, transcript.statements())?;
+    Ok(scalar)
+}
+
+// ============================================================================
+// Key ownership
+// ============================================================================
+
+/// Schnorr ownership wire: `G·response = commitment + pk·c`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct RistrettoPkOwnershipWire {
+    pub commitment: [u8; 32],
+    pub response: [u8; 32],
+}
+
+/// Prove knowledge of `sk` with `pk = sk·G` under the Flock transcript.
+pub fn prove_pk_ownership(
+    sk: &RistrettoScalar,
+    pk: &RistrettoPoint,
+    context: &[u8],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(RistrettoPkOwnershipWire, ArchivedRistrettoPlayerProof)> {
+    if *sk == RistrettoScalar::zero() || pk.is_identity() || RistrettoCurve::base_g() * *sk != *pk {
+        return Err(TexasAirError::SpecViolation(
+            "pk-ownership witness does not match the public key".into(),
+        ));
+    }
+    let mut transcript = FlockShuffleTranscript::new(PK_OWNERSHIP_PROTOCOL);
+    transcript.absorb(b"context", context);
+    transcript.absorb(b"pk", &point_bytes(pk));
+    let mut nonce;
+    let mut commitment;
+    loop {
+        nonce = RistrettoScalar::random(rng);
+        if nonce == RistrettoScalar::zero() {
+            continue;
+        }
+        commitment = RistrettoCurve::base_g() * nonce;
+        if !commitment.is_identity() {
+            break;
+        }
+    }
+    transcript.absorb(b"commitment", &point_bytes(&commitment));
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    let response = nonce + challenge * *sk;
+    let wire = RistrettoPkOwnershipWire {
+        commitment: point_bytes(&commitment),
+        response: scalar_bytes(&response),
+    };
+    Ok((wire, finish_player_proof(&transcript)?))
+}
+
+/// Verify one key-ownership proof.
+pub fn verify_pk_ownership(
+    pk: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoPkOwnershipWire,
+    proof: &ArchivedRistrettoPlayerProof,
+) -> TexasAirResult<()> {
+    if pk.is_identity() {
+        return Err(TexasAirError::SpecViolation(
+            "pk-ownership public key is the identity".into(),
+        ));
+    }
+    let commitment = decode_point(&wire.commitment, "pk-ownership commitment")?;
+    let response = decode_scalar(&wire.response, "pk-ownership response")?;
+    if commitment.is_identity() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "pk-ownership commitment is the identity".into(),
+        ));
+    }
+    let mut transcript = FlockShuffleTranscript::new(PK_OWNERSHIP_PROTOCOL);
+    transcript.absorb(b"context", context);
+    transcript.absorb(b"pk", &point_bytes(pk));
+    transcript.absorb(b"commitment", &wire.commitment);
+    let challenge = verify_player_proof(proof, &mut transcript)?;
+    if RistrettoCurve::base_g() * response != commitment + *pk * challenge {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "pk-ownership equation is not satisfied".into(),
+        ));
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Reveal token
+// ============================================================================
+
+/// Chaum--Pedersen reveal-token wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct RistrettoRevealTokenWire {
+    /// `T1 = G·omega`.
+    pub commitment_t1: [u8; 32],
+    /// `T2 = ct.c1·omega`.
+    pub commitment_t2: [u8; 32],
+    /// `s = omega + c·sk`.
+    pub response: [u8; 32],
+}
+
+fn absorb_reveal_statement(
+    transcript: &mut FlockShuffleTranscript,
+    context: &[u8],
+    pk: &RistrettoPoint,
+    ciphertext: &RistrettoCiphertext,
+    reveal_token: &RistrettoPoint,
+) {
+    transcript.absorb(b"context", context);
+    transcript.absorb(b"pk", &point_bytes(pk));
+    transcript.absorb(b"c1", &point_bytes(&ciphertext.c1));
+    transcript.absorb(b"c2", &point_bytes(&ciphertext.c2));
+    transcript.absorb(b"reveal_token", &point_bytes(reveal_token));
+}
+
+/// Prove `token = sk·ct.c1` with the same `sk` behind `pk = sk·G`.
+///
+/// The caller binds the decrypted plaintext by checking `ct.c2 − token`
+/// against the expected card; that state-machine check is outside this
+/// relation.
+pub fn prove_reveal_token(
+    sk: &RistrettoScalar,
+    pk: &RistrettoPoint,
+    ciphertext: &RistrettoCiphertext,
+    reveal_token: &RistrettoPoint,
+    context: &[u8],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(RistrettoRevealTokenWire, ArchivedRistrettoPlayerProof)> {
+    if *sk == RistrettoScalar::zero()
+        || pk.is_identity()
+        || RistrettoCurve::base_g() * *sk != *pk
+        || !ciphertext.is_valid()
+        || reveal_token.is_identity()
+        || *reveal_token != ciphertext.c1 * *sk
+    {
+        return Err(TexasAirError::SpecViolation(
+            "reveal-token witness does not match the statement".into(),
+        ));
+    }
+    let mut transcript = FlockShuffleTranscript::new(REVEAL_TOKEN_PROTOCOL);
+    absorb_reveal_statement(&mut transcript, context, pk, ciphertext, reveal_token);
+    let (nonce, t1, t2) = loop {
+        let nonce = RistrettoScalar::random(rng);
+        if nonce == RistrettoScalar::zero() {
+            continue;
+        }
+        let t1 = RistrettoCurve::base_g() * nonce;
+        let t2 = ciphertext.c1 * nonce;
+        if !t1.is_identity() && !t2.is_identity() {
+            break (nonce, t1, t2);
+        }
+    };
+    transcript.absorb(b"t1", &point_bytes(&t1));
+    transcript.absorb(b"t2", &point_bytes(&t2));
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    let response = nonce + challenge * *sk;
+    let wire = RistrettoRevealTokenWire {
+        commitment_t1: point_bytes(&t1),
+        commitment_t2: point_bytes(&t2),
+        response: scalar_bytes(&response),
+    };
+    Ok((wire, finish_player_proof(&transcript)?))
+}
+
+/// Verify one reveal-token proof.
+pub fn verify_reveal_token(
+    pk: &RistrettoPoint,
+    ciphertext: &RistrettoCiphertext,
+    reveal_token: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoRevealTokenWire,
+    proof: &ArchivedRistrettoPlayerProof,
+) -> TexasAirResult<()> {
+    if !ciphertext.is_valid() || pk.is_identity() || reveal_token.is_identity() {
+        return Err(TexasAirError::SpecViolation(
+            "reveal-token statement contains identity points".into(),
+        ));
+    }
+    let t1 = decode_point(&wire.commitment_t1, "reveal-token commitment")?;
+    let t2 = decode_point(&wire.commitment_t2, "reveal-token commitment")?;
+    let response = decode_scalar(&wire.response, "reveal-token response")?;
+    if t1.is_identity() || t2.is_identity() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "reveal-token commitment is the identity".into(),
+        ));
+    }
+    let mut transcript = FlockShuffleTranscript::new(REVEAL_TOKEN_PROTOCOL);
+    absorb_reveal_statement(&mut transcript, context, pk, ciphertext, reveal_token);
+    transcript.absorb(b"t1", &wire.commitment_t1);
+    transcript.absorb(b"t2", &wire.commitment_t2);
+    let challenge = verify_player_proof(proof, &mut transcript)?;
+    let first = RistrettoCurve::base_g() * response == t1 + *pk * challenge;
+    let second = ciphertext.c1 * response == t2 + *reveal_token * challenge;
+    if !first || !second {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "reveal-token equation is not satisfied".into(),
+        ));
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Batched deck DLEQ: remask (add key layer) and leave (remove key layer)
+// ============================================================================
+
+/// Direction of the deck transition proved by the batched DLEQ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum RistrettoDeckDleqDirection {
+    /// `output.c2 = input.c2 + input.c1·sk` (remask: add an encryption
+    /// layer under the leaving/masking player's key).
+    Remask,
+    /// `output.c2 = input.c2 − input.c1·sk` (leave: remove one encryption
+    /// layer, used by `fold_with_proof` when the aggregate key drops the
+    /// player).
+    Leave,
+}
+
+impl RistrettoDeckDleqDirection {
+    /// Transcript protocol name.
+    pub fn protocol(self) -> &'static [u8] {
+        match self {
+            Self::Remask => REMASK_PROTOCOL,
+            Self::Leave => LEAVE_PROTOCOL,
+        }
+    }
+
+    fn compute_d2(self, input_c2: &RistrettoPoint, output_c2: &RistrettoPoint) -> RistrettoPoint {
+        match self {
+            Self::Remask => *output_c2 - *input_c2,
+            Self::Leave => *input_c2 - *output_c2,
+        }
+    }
+}
+
+/// Batched deck DLEQ wire over the fixed 52-card deck.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct RistrettoDeckDleqWire {
+    /// Per-card commitments `A_i = input_i.c1·omega`.
+    pub per_card_commitments: [[u8; 32]; RISTRETTO_PLAYER_PROOF_DECK_SIZE],
+    /// Key commitment `B = G·omega`.
+    pub commitment_pk: [u8; 32],
+    /// Shared response `s = omega + c·sk`.
+    pub response: [u8; 32],
+}
+
+fn absorb_deck_dleq_statement(
+    transcript: &mut FlockShuffleTranscript,
+    context: &[u8],
+    pk: &RistrettoPoint,
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    commitments: &[[u8; 32]; RISTRETTO_PLAYER_PROOF_DECK_SIZE],
+    commitment_pk: &[u8; 32],
+) {
+    transcript.absorb(b"context", context);
+    transcript.absorb(b"pk", &point_bytes(pk));
+    for ciphertext in input {
+        transcript.absorb(b"in_c1", &point_bytes(&ciphertext.c1));
+        transcript.absorb(b"in_c2", &point_bytes(&ciphertext.c2));
+    }
+    for ciphertext in output {
+        transcript.absorb(b"out_c1", &point_bytes(&ciphertext.c1));
+        transcript.absorb(b"out_c2", &point_bytes(&ciphertext.c2));
+    }
+    for commitment in commitments {
+        transcript.absorb(b"a_i", commitment);
+    }
+    transcript.absorb(b"commitment_pk", commitment_pk);
+}
+
+/// Prove one batched deck DLEQ in either direction.
+pub fn prove_deck_dleq(
+    direction: RistrettoDeckDleqDirection,
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    sk: &RistrettoScalar,
+    pk: &RistrettoPoint,
+    context: &[u8],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(RistrettoDeckDleqWire, ArchivedRistrettoPlayerProof)> {
+    if input.len() != RISTRETTO_PLAYER_PROOF_DECK_SIZE || output.len() != input.len() {
+        return Err(TexasAirError::SpecViolation(
+            "deck DLEQ requires the fixed 52-card deck".into(),
+        ));
+    }
+    if *sk == RistrettoScalar::zero() || pk.is_identity() || RistrettoCurve::base_g() * *sk != *pk {
+        return Err(TexasAirError::SpecViolation(
+            "deck DLEQ witness does not match the public key".into(),
+        ));
+    }
+    for index in 0..input.len() {
+        if !input[index].is_valid() || !output[index].is_valid() {
+            return Err(TexasAirError::SpecViolation(
+                "deck DLEQ ciphertext is invalid".into(),
+            ));
+        }
+        if input[index].c1 != output[index].c1 {
+            return Err(TexasAirError::SpecViolation(
+                "deck DLEQ requires c1 invariance".into(),
+            ));
+        }
+        let d2 = direction.compute_d2(&input[index].c2, &output[index].c2);
+        if d2.is_identity() || d2 != input[index].c1 * *sk {
+            return Err(TexasAirError::SpecViolation(
+                "deck DLEQ output deck does not match the witness key".into(),
+            ));
+        }
+    }
+    let mut nonce;
+    let mut commitments = [[0u8; 32]; RISTRETTO_PLAYER_PROOF_DECK_SIZE];
+    let mut commitment_pk;
+    loop {
+        nonce = RistrettoScalar::random(rng);
+        if nonce == RistrettoScalar::zero() {
+            continue;
+        }
+        commitment_pk = RistrettoCurve::base_g() * nonce;
+        let mut degenerate = commitment_pk.is_identity();
+        for (index, commitment) in commitments.iter_mut().enumerate() {
+            let point = input[index].c1 * nonce;
+            *commitment = point_bytes(&point);
+            degenerate |= point.is_identity();
+        }
+        if !degenerate {
+            break;
+        }
+    }
+    let mut transcript = FlockShuffleTranscript::new(direction.protocol());
+    absorb_deck_dleq_statement(
+        &mut transcript,
+        context,
+        pk,
+        input,
+        output,
+        &commitments,
+        &point_bytes(&commitment_pk),
+    );
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    let response = nonce + challenge * *sk;
+    let wire = RistrettoDeckDleqWire {
+        per_card_commitments: commitments,
+        commitment_pk: point_bytes(&commitment_pk),
+        response: scalar_bytes(&response),
+    };
+    Ok((wire, finish_player_proof(&transcript)?))
+}
+
+/// Convenience constructors matching the zgame naming.
+pub fn prove_remask(
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    sk: &RistrettoScalar,
+    pk: &RistrettoPoint,
+    context: &[u8],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(RistrettoDeckDleqWire, ArchivedRistrettoPlayerProof)> {
+    prove_deck_dleq(
+        RistrettoDeckDleqDirection::Remask,
+        input,
+        output,
+        sk,
+        pk,
+        context,
+        rng,
+    )
+}
+
+/// Leave direction used by `fold_with_proof` and table departure.
+pub fn prove_leave(
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    sk: &RistrettoScalar,
+    pk: &RistrettoPoint,
+    context: &[u8],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(RistrettoDeckDleqWire, ArchivedRistrettoPlayerProof)> {
+    prove_deck_dleq(
+        RistrettoDeckDleqDirection::Leave,
+        input,
+        output,
+        sk,
+        pk,
+        context,
+        rng,
+    )
+}
+
+/// Verify one batched deck DLEQ.
+pub fn verify_deck_dleq(
+    direction: RistrettoDeckDleqDirection,
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    pk: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoDeckDleqWire,
+    proof: &ArchivedRistrettoPlayerProof,
+) -> TexasAirResult<()> {
+    if input.len() != RISTRETTO_PLAYER_PROOF_DECK_SIZE || output.len() != input.len() {
+        return Err(TexasAirError::SpecViolation(
+            "deck DLEQ requires the fixed 52-card deck".into(),
+        ));
+    }
+    if pk.is_identity() {
+        return Err(TexasAirError::SpecViolation(
+            "deck DLEQ public key is the identity".into(),
+        ));
+    }
+    for index in 0..input.len() {
+        if !input[index].is_valid() || !output[index].is_valid() {
+            return Err(TexasAirError::SpecViolation(
+                "deck DLEQ ciphertext is invalid".into(),
+            ));
+        }
+        if input[index].c1 != output[index].c1 {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "deck DLEQ c1 invariance failed".into(),
+            ));
+        }
+    }
+    let mut commitments = [RistrettoPoint::identity(); RISTRETTO_PLAYER_PROOF_DECK_SIZE];
+    for (index, bytes) in wire.per_card_commitments.iter().enumerate() {
+        commitments[index] = decode_point(bytes, "deck DLEQ per-card commitment")?;
+        if commitments[index].is_identity() {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "deck DLEQ per-card commitment is the identity".into(),
+            ));
+        }
+    }
+    let commitment_pk = decode_point(&wire.commitment_pk, "deck DLEQ key commitment")?;
+    let response = decode_scalar(&wire.response, "deck DLEQ response")?;
+    if commitment_pk.is_identity() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "deck DLEQ key commitment is the identity".into(),
+        ));
+    }
+    let mut transcript = FlockShuffleTranscript::new(direction.protocol());
+    absorb_deck_dleq_statement(
+        &mut transcript,
+        context,
+        pk,
+        input,
+        output,
+        &wire.per_card_commitments,
+        &wire.commitment_pk,
+    );
+    let challenge = verify_player_proof(proof, &mut transcript)?;
+    if RistrettoCurve::base_g() * response != commitment_pk + *pk * challenge {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "deck DLEQ key equation is not satisfied".into(),
+        ));
+    }
+    for index in 0..RISTRETTO_PLAYER_PROOF_DECK_SIZE {
+        let d2 = direction.compute_d2(&input[index].c2, &output[index].c2);
+        if input[index].c1 * response != commitments[index] + d2 * challenge {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "deck DLEQ per-card equation is not satisfied".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Verify the remask direction.
+pub fn verify_remask(
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    pk: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoDeckDleqWire,
+    proof: &ArchivedRistrettoPlayerProof,
+) -> TexasAirResult<()> {
+    verify_deck_dleq(
+        RistrettoDeckDleqDirection::Remask,
+        input,
+        output,
+        pk,
+        context,
+        wire,
+        proof,
+    )
+}
+
+/// Verify the leave direction.
+pub fn verify_leave(
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    pk: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoDeckDleqWire,
+    proof: &ArchivedRistrettoPlayerProof,
+) -> TexasAirResult<()> {
+    verify_deck_dleq(
+        RistrettoDeckDleqDirection::Leave,
+        input,
+        output,
+        pk,
+        context,
+        wire,
+        proof,
+    )
+}
+
+// ============================================================================
+// fold_with_proof V2 crypto layer
+// ============================================================================
+
+/// Complete `fold_with_proof` V2 crypto statement: the acting player folds,
+/// their key layer is removed from the encrypted deck, and the aggregate key
+/// drops their public key.  After this proof the seat is folded in the
+/// canonical state machine and is excluded from every later reveal-token
+/// assignment.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedRistrettoFoldWithProofV2 {
+    /// Leave-direction DLEQ wire over the deck transition.
+    pub deck: RistrettoDeckDleqWire,
+    /// Flock transcript proof.
+    pub proof: ArchivedRistrettoPlayerProof,
+    /// New aggregate public key (`old_aggregate − player_pk`).
+    pub new_aggregate_pk: [u8; 32],
+    /// Digest binding the caller's canonical transition context
+    /// (table/hand/seat/call sequence), absorbed into the transcript.
+    pub context_digest: [u8; 32],
+}
+
+/// The deck transition applied by a folding player: remove their key layer.
+pub fn fold_deck_transition(
+    input: &[RistrettoCiphertext],
+    sk: &RistrettoScalar,
+) -> TexasAirResult<Vec<RistrettoCiphertext>> {
+    if input.len() != RISTRETTO_PLAYER_PROOF_DECK_SIZE {
+        return Err(TexasAirError::SpecViolation(
+            "fold deck transition requires the fixed 52-card deck".into(),
+        ));
+    }
+    let mut output = Vec::with_capacity(input.len());
+    for ciphertext in input {
+        let unmasked = RistrettoCiphertext {
+            c1: ciphertext.c1,
+            c2: ciphertext.c2 - ciphertext.c1 * *sk,
+        };
+        if !unmasked.is_valid() {
+            return Err(TexasAirError::SpecViolation(
+                "fold deck transition produced an invalid ciphertext".into(),
+            ));
+        }
+        output.push(unmasked);
+    }
+    Ok(output)
+}
+
+/// Prove the complete `fold_with_proof` crypto relation.
+pub fn prove_fold_with_proof_v2(
+    player_sk: &RistrettoScalar,
+    player_pk: &RistrettoPoint,
+    aggregate_pk: &RistrettoPoint,
+    input_deck: &[RistrettoCiphertext],
+    context_digest: [u8; 32],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(Vec<RistrettoCiphertext>, ArchivedRistrettoFoldWithProofV2)> {
+    let output_deck = fold_deck_transition(input_deck, player_sk)?;
+    let new_aggregate = *aggregate_pk - *player_pk;
+    let mut context = context_digest.to_vec();
+    context.extend_from_slice(&point_bytes(&new_aggregate));
+    let (deck, proof) = prove_leave(
+        input_deck,
+        &output_deck,
+        player_sk,
+        player_pk,
+        &context,
+        rng,
+    )?;
+    Ok((
+        output_deck,
+        ArchivedRistrettoFoldWithProofV2 {
+            deck,
+            proof,
+            new_aggregate_pk: point_bytes(&new_aggregate),
+            context_digest,
+        },
+    ))
+}
+
+/// Verify the complete `fold_with_proof` crypto relation.  The aggregate-key
+/// update is checked natively (public point arithmetic) alongside the DLEQ.
+pub fn verify_fold_with_proof_v2(
+    player_pk: &RistrettoPoint,
+    aggregate_pk: &RistrettoPoint,
+    input_deck: &[RistrettoCiphertext],
+    output_deck: &[RistrettoCiphertext],
+    archive: &ArchivedRistrettoFoldWithProofV2,
+) -> TexasAirResult<()> {
+    let new_aggregate = decode_point(&archive.new_aggregate_pk, "fold new aggregate key")?;
+    if new_aggregate != *aggregate_pk - *player_pk {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "fold aggregate-key update is detached from the player key".into(),
+        ));
+    }
+    let mut context = archive.context_digest.to_vec();
+    context.extend_from_slice(&archive.new_aggregate_pk);
+    verify_leave(
+        input_deck,
+        output_deck,
+        player_pk,
+        &context,
+        &archive.deck,
+        &archive.proof,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_rng() -> rand::rngs::StdRng {
+        use rand::SeedableRng;
+        rand::rngs::StdRng::seed_from_u64(0x0F01_D2A3)
+    }
+
+    fn keypair(rng: &mut rand::rngs::StdRng) -> (RistrettoScalar, RistrettoPoint) {
+        let sk = RistrettoScalar::random(rng);
+        (sk, RistrettoCurve::base_g() * sk)
+    }
+
+    fn sample_deck(pk: &RistrettoPoint, rng: &mut rand::rngs::StdRng) -> Vec<RistrettoCiphertext> {
+        (0..RISTRETTO_PLAYER_PROOF_DECK_SIZE)
+            .map(|index| {
+                let card = RistrettoCurve::hash_to_curve(format!("bench/card/{index}").as_bytes());
+                let randomness = RistrettoScalar::random(rng);
+                RistrettoCiphertext::encrypt(&card, pk, &randomness)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pk_ownership_roundtrip_and_tamper() {
+        let mut rng = test_rng();
+        let (sk, pk) = keypair(&mut rng);
+        let (wire, proof) = prove_pk_ownership(&sk, &pk, b"table7-hand3", &mut rng).unwrap();
+        verify_pk_ownership(&pk, b"table7-hand3", &wire, &proof).unwrap();
+
+        // Wrong context detaches the challenge schedule.
+        assert!(verify_pk_ownership(&pk, b"table8-hand3", &wire, &proof).is_err());
+
+        // Wrong key fails the equation.
+        let (_, other_pk) = keypair(&mut rng);
+        assert!(verify_pk_ownership(&other_pk, b"table7-hand3", &wire, &proof).is_err());
+
+        // Spliced response byte (kept canonical via byte 20).
+        let mut tampered = wire;
+        tampered.response[20] ^= 1;
+        assert!(verify_pk_ownership(&pk, b"table7-hand3", &tampered, &proof).is_err());
+    }
+
+    #[test]
+    fn reveal_token_roundtrip_and_tamper() {
+        let mut rng = test_rng();
+        let (sk, pk) = keypair(&mut rng);
+        let card = RistrettoCurve::hash_to_curve(b"bench/card/17");
+        let randomness = RistrettoScalar::random(&mut rng);
+        let ciphertext = RistrettoCiphertext::encrypt(&card, &pk, &randomness);
+        let token = ciphertext.c1 * sk;
+        assert_eq!(
+            ciphertext.c2 - token,
+            card,
+            "token must reveal the plaintext"
+        );
+
+        let (wire, proof) =
+            prove_reveal_token(&sk, &pk, &ciphertext, &token, b"reveal-ctx", &mut rng).unwrap();
+        verify_reveal_token(&pk, &ciphertext, &token, b"reveal-ctx", &wire, &proof).unwrap();
+
+        // A token from a different key fails.
+        let (other_sk, _) = keypair(&mut rng);
+        let wrong_token = ciphertext.c1 * other_sk;
+        assert!(
+            verify_reveal_token(&pk, &ciphertext, &wrong_token, b"reveal-ctx", &wire, &proof)
+                .is_err()
+        );
+
+        // Token bound to a different ciphertext fails.
+        let other = RistrettoCiphertext::encrypt(&card, &pk, &RistrettoScalar::random(&mut rng));
+        assert!(verify_reveal_token(&pk, &other, &token, b"reveal-ctx", &wire, &proof).is_err());
+
+        // Spliced commitment.
+        let mut tampered = wire;
+        tampered.commitment_t2[20] ^= 1;
+        assert!(
+            verify_reveal_token(&pk, &ciphertext, &token, b"reveal-ctx", &tampered, &proof)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn remask_and_leave_roundtrip_with_direction_binding() {
+        let mut rng = test_rng();
+        let (sk, pk) = keypair(&mut rng);
+        let input = sample_deck(&pk, &mut rng);
+
+        // Remask: add a layer under a second key.
+        let (mask_sk, mask_pk) = keypair(&mut rng);
+        let remasked: Vec<RistrettoCiphertext> = input
+            .iter()
+            .map(|ct| RistrettoCiphertext {
+                c1: ct.c1,
+                c2: ct.c2 + ct.c1 * mask_sk,
+            })
+            .collect();
+        let (remask_wire, remask_proof) = prove_remask(
+            &input,
+            &remasked,
+            &mask_sk,
+            &mask_pk,
+            b"remask-ctx",
+            &mut rng,
+        )
+        .unwrap();
+        verify_remask(
+            &input,
+            &remasked,
+            &mask_pk,
+            b"remask-ctx",
+            &remask_wire,
+            &remask_proof,
+        )
+        .unwrap();
+
+        // A remask proof must not verify in the leave direction.
+        assert!(
+            verify_leave(
+                &input,
+                &remasked,
+                &mask_pk,
+                b"remask-ctx",
+                &remask_wire,
+                &remask_proof
+            )
+            .is_err()
+        );
+
+        // Leave: strip the layer back.
+        let (leave_wire, leave_proof) = prove_leave(
+            &remasked,
+            &input,
+            &mask_sk,
+            &mask_pk,
+            b"leave-ctx",
+            &mut rng,
+        )
+        .unwrap();
+        verify_leave(
+            &remasked,
+            &input,
+            &mask_pk,
+            b"leave-ctx",
+            &leave_wire,
+            &leave_proof,
+        )
+        .unwrap();
+
+        // Splicing one output card breaks the per-card equation.
+        let mut swapped = remasked.clone();
+        swapped[5].c2 = remasked[6].c2;
+        assert!(
+            verify_remask(
+                &input,
+                &swapped,
+                &mask_pk,
+                b"remask-ctx",
+                &remask_wire,
+                &remask_proof
+            )
+            .is_err()
+        );
+
+        // Splicing a per-card commitment breaks the equation set.
+        let mut tampered = remask_wire;
+        tampered.per_card_commitments[9][20] ^= 1;
+        assert!(
+            verify_remask(
+                &input,
+                &remasked,
+                &mask_pk,
+                b"remask-ctx",
+                &tampered,
+                &remask_proof
+            )
+            .is_err()
+        );
+
+        let _ = (sk, pk);
+    }
+
+    #[test]
+    fn fold_with_proof_roundtrip_and_tamper() {
+        let mut rng = test_rng();
+        let (sk, pk) = keypair(&mut rng);
+        let (_, other_pk) = keypair(&mut rng);
+        let aggregate = pk + other_pk;
+        let input = sample_deck(&aggregate, &mut rng);
+        let context_digest = [0x5A; 32];
+
+        let (output, archive) =
+            prove_fold_with_proof_v2(&sk, &pk, &aggregate, &input, context_digest, &mut rng)
+                .unwrap();
+        verify_fold_with_proof_v2(&pk, &aggregate, &input, &output, &archive).unwrap();
+
+        // The new aggregate must drop exactly the folding key.
+        let new_aggregate = decode_point(&archive.new_aggregate_pk, "aggregate").unwrap();
+        assert_eq!(new_aggregate, other_pk);
+
+        // Tampered aggregate update.
+        let mut tampered = archive.clone();
+        tampered.new_aggregate_pk[20] ^= 1;
+        assert!(verify_fold_with_proof_v2(&pk, &aggregate, &input, &output, &tampered).is_err());
+
+        // Tampered deck output.
+        let mut swapped = output.clone();
+        swapped[3].c2 = output[4].c2;
+        assert!(verify_fold_with_proof_v2(&pk, &aggregate, &input, &swapped, &archive).is_err());
+
+        // Tampered response.
+        let mut tampered = archive.clone();
+        tampered.deck.response[20] ^= 1;
+        assert!(verify_fold_with_proof_v2(&pk, &aggregate, &input, &output, &tampered).is_err());
+    }
+}

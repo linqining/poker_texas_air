@@ -14,6 +14,20 @@ pub const RECONSTRUCTION_V3_STATEMENT_VERSION: u8 = 3;
 pub const MAX_DECK_SIZE: usize = 1024;
 pub const MAX_CONTEXT_SIZE: usize = 4096;
 pub const MAX_PROOF_SIZE: usize = 1 << 20;
+/// Maximum transport size of one V2 package part.  Relation archives contain
+/// STARK commitments and can legitimately exceed the legacy 1 MiB proof cap;
+/// the cap is still finite to avoid unbounded allocation during decoding.
+pub const MAX_RISTRETTO_AIR_V2_PACKAGE_PART_SIZE: usize = 2 * 1024 * 1024 * 1024;
+/// Fixed Texas deck cardinality for the Ristretto/AIR protocol epoch.
+///
+/// Legacy BLS requests remain variable-size because their verifier ABI is
+/// shared with non-Texas callers.  The Ristretto route is a distinct protocol:
+/// an AIR proof always authenticates the complete ordered 52-card deck.
+pub const RISTRETTO_AIR_DECK_SIZE: usize = 52;
+/// Number of owner-readable hole cards in one Texas reconstruction request.
+pub const RISTRETTO_AIR_RECONSTRUCTION_READABLE_CARDS: usize = 2;
+const RISTRETTO_AIR_V2_PACKAGE_MAGIC: [u8; 4] = *b"ZR4A";
+const RISTRETTO_AIR_V2_PACKAGE_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -57,6 +71,8 @@ pub enum TranscriptId {
     FiatShamirSha3 = 2,
     /// Poseidon252 transcript reserved for the Ristretto AIR protocol.
     Poseidon252 = 3,
+    /// Flock BLAKE3 transcript used by the trustless Ristretto AIR v2 route.
+    FlockBlake3 = 4,
 }
 
 impl TryFrom<u8> for TranscriptId {
@@ -67,6 +83,7 @@ impl TryFrom<u8> for TranscriptId {
             1 => Ok(Self::Merlin),
             2 => Ok(Self::FiatShamirSha3),
             3 => Ok(Self::Poseidon252),
+            4 => Ok(Self::FlockBlake3),
             _ => Err(AbiError::UnsupportedTranscript(value)),
         }
     }
@@ -78,6 +95,8 @@ pub enum ShuffleProofSystem {
     BayerGrothV2 = 2,
     /// Ristretto255 AIR proof whose public statement is encoded by this ABI.
     RistrettoAirV1 = 3,
+    /// Ristretto255 AIR v2: fixed 52-card batch verifier schedule.
+    RistrettoAirV2 = 4,
 }
 
 impl TryFrom<u8> for ShuffleProofSystem {
@@ -87,6 +106,7 @@ impl TryFrom<u8> for ShuffleProofSystem {
         match value {
             2 => Ok(Self::BayerGrothV2),
             3 => Ok(Self::RistrettoAirV1),
+            4 => Ok(Self::RistrettoAirV2),
             _ => Err(AbiError::UnsupportedProofSystem(value)),
         }
     }
@@ -100,6 +120,8 @@ pub enum ReconstructionProofSystem {
     BayerGrothSlotOrV3 = 3,
     /// Ristretto255 AIR proof for the corresponding reconstruction relation.
     RistrettoAirV1 = 4,
+    /// Ristretto255 AIR v2: fixed-shape, parallel relation composition.
+    RistrettoAirV2 = 5,
 }
 
 impl TryFrom<u8> for ReconstructionProofSystem {
@@ -110,6 +132,7 @@ impl TryFrom<u8> for ReconstructionProofSystem {
             2 => Ok(Self::BayerGrothOrderedV2),
             3 => Ok(Self::BayerGrothSlotOrV3),
             4 => Ok(Self::RistrettoAirV1),
+            5 => Ok(Self::RistrettoAirV2),
             _ => Err(AbiError::UnsupportedProofSystem(value)),
         }
     }
@@ -119,6 +142,89 @@ impl TryFrom<u8> for ReconstructionProofSystem {
 pub struct EncodedCiphertext {
     pub c1: Vec<u8>,
     pub c2: Vec<u8>,
+}
+
+/// Single transport object for a Ristretto AIR V2 submission.
+///
+/// The request is the canonical `ZKR3` statement and `relation_archive` is
+/// the server-verifiable AIR archive. Keeping both byte strings in one
+/// versioned container prevents request/archive mixups at the network layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RistrettoAirV2SubmissionPackage {
+    pub request: Vec<u8>,
+    pub relation_archive: Vec<u8>,
+}
+
+/// Borrowed view of a `ZR4A` package.  Network handlers can validate the
+/// header and hand the two slices to decoders without allocating or copying a
+/// potentially multi-megabyte relation archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RistrettoAirV2SubmissionPackageRef<'a> {
+    pub request: &'a [u8],
+    pub relation_archive: &'a [u8],
+}
+
+impl RistrettoAirV2SubmissionPackage {
+    pub fn from_parts(request: Vec<u8>, relation_archive: Vec<u8>) -> Self {
+        Self {
+            request,
+            relation_archive,
+        }
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, AbiError> {
+        if self.request.len() > MAX_RISTRETTO_AIR_V2_PACKAGE_PART_SIZE
+            || self.relation_archive.len() > MAX_RISTRETTO_AIR_V2_PACKAGE_PART_SIZE
+        {
+            return Err(AbiError::InvalidProofSize);
+        }
+        let request_len =
+            u32::try_from(self.request.len()).map_err(|_| AbiError::InvalidProofSize)?;
+        let archive_len =
+            u32::try_from(self.relation_archive.len()).map_err(|_| AbiError::InvalidProofSize)?;
+        let mut out =
+            Vec::with_capacity(4 + 1 + 8 + self.request.len() + self.relation_archive.len());
+        out.extend_from_slice(&RISTRETTO_AIR_V2_PACKAGE_MAGIC);
+        out.push(RISTRETTO_AIR_V2_PACKAGE_VERSION);
+        out.extend_from_slice(&request_len.to_le_bytes());
+        out.extend_from_slice(&archive_len.to_le_bytes());
+        out.extend_from_slice(&self.request);
+        out.extend_from_slice(&self.relation_archive);
+        Ok(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, AbiError> {
+        let view = Self::decode_ref(bytes)?;
+        let package = Self {
+            request: view.request.to_vec(),
+            relation_archive: view.relation_archive.to_vec(),
+        };
+        if package.encode()? != bytes {
+            return Err(AbiError::TrailingBytes);
+        }
+        Ok(package)
+    }
+
+    pub fn decode_ref(bytes: &[u8]) -> Result<RistrettoAirV2SubmissionPackageRef<'_>, AbiError> {
+        if bytes.len() < 13 || bytes[..4] != RISTRETTO_AIR_V2_PACKAGE_MAGIC {
+            return Err(AbiError::InvalidMagic);
+        }
+        if bytes[4] != RISTRETTO_AIR_V2_PACKAGE_VERSION {
+            return Err(AbiError::UnsupportedVersion(bytes[4]));
+        }
+        let request_len = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
+        let archive_len = u32::from_le_bytes(bytes[9..13].try_into().unwrap()) as usize;
+        if request_len > MAX_RISTRETTO_AIR_V2_PACKAGE_PART_SIZE
+            || archive_len > MAX_RISTRETTO_AIR_V2_PACKAGE_PART_SIZE
+            || bytes.len() != 13 + request_len + archive_len
+        {
+            return Err(AbiError::InvalidProofSize);
+        }
+        Ok(RistrettoAirV2SubmissionPackageRef {
+            request: &bytes[13..13 + request_len],
+            relation_archive: &bytes[13 + request_len..],
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,12 +257,20 @@ impl ShuffleVerifyRequest {
                 ShuffleProofSystem::RistrettoAirV1,
                 TranscriptId::Poseidon252,
             ) => {}
+            (
+                CurveId::Ristretto255,
+                ShuffleProofSystem::RistrettoAirV2,
+                TranscriptId::FlockBlake3,
+            ) => {}
             (CurveId::Ristretto255, _, _) => {
                 return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8))
             }
             _ => return Err(AbiError::UnsupportedTranscript(self.transcript as u8)),
         }
         if n < 2 || n > MAX_DECK_SIZE || self.output.len() != n {
+            return Err(AbiError::InvalidDeckSize);
+        }
+        if self.curve == CurveId::Ristretto255 && n != RISTRETTO_AIR_DECK_SIZE {
             return Err(AbiError::InvalidDeckSize);
         }
         let point_size = self.curve.point_size();
@@ -263,11 +377,6 @@ impl ReconstructionVerifyRequest {
                 CurveId::Bls12381G1 | CurveId::Bls12377G1,
                 ReconstructionProofSystem::BayerGrothOrderedV2,
                 TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
-            )
-            | (
-                CurveId::Ristretto255,
-                ReconstructionProofSystem::RistrettoAirV1,
-                TranscriptId::Poseidon252,
             ) => {}
             (CurveId::Ristretto255, _, _) => {
                 return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8))
@@ -421,6 +530,11 @@ impl ReconstructionV3VerifyRequest {
                 CurveId::Ristretto255,
                 ReconstructionProofSystem::RistrettoAirV1,
                 TranscriptId::Poseidon252,
+            )
+            | (
+                CurveId::Ristretto255,
+                ReconstructionProofSystem::RistrettoAirV2,
+                TranscriptId::FlockBlake3,
             ) => {}
             (CurveId::Ristretto255, _, _) => {
                 return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8))
@@ -434,6 +548,11 @@ impl ReconstructionV3VerifyRequest {
         let n = self.cards.len();
         let k = self.user_readable_cards.len();
         if n < 2 || n > MAX_DECK_SIZE || k == 0 || k > n || self.contributions.len() != n {
+            return Err(AbiError::InvalidDeckSize);
+        }
+        if self.curve == CurveId::Ristretto255
+            && (n != RISTRETTO_AIR_DECK_SIZE || k != RISTRETTO_AIR_RECONSTRUCTION_READABLE_CARDS)
+        {
             return Err(AbiError::InvalidDeckSize);
         }
         let point_size = self.curve.point_size();
@@ -795,8 +914,12 @@ mod tests {
             context: b"ristretto-air-v2".to_vec(),
             call_context: b"table=1/hand=2/call=3/epoch=2".to_vec(),
             public_key: vec![7u8; 32],
-            input: vec![ristretto_ciphertext(1), ristretto_ciphertext(2)],
-            output: vec![ristretto_ciphertext(3), ristretto_ciphertext(4)],
+            input: (0..RISTRETTO_AIR_DECK_SIZE)
+                .map(|index| ristretto_ciphertext(index as u8))
+                .collect(),
+            output: (0..RISTRETTO_AIR_DECK_SIZE)
+                .map(|index| ristretto_ciphertext(index as u8 + 80))
+                .collect(),
             proof: vec![9u8; 32],
         };
         let encoded = request.encode().expect("Ristretto request shape");
@@ -877,6 +1000,22 @@ mod tests {
         assert_eq!(
             ShuffleVerifyRequest::decode(&encoded).unwrap_err(),
             AbiError::TrailingBytes
+        );
+    }
+
+    #[test]
+    fn ristretto_air_v2_package_roundtrip_binds_parts() {
+        let package = RistrettoAirV2SubmissionPackage::from_parts(vec![1, 2, 3], vec![9; 64]);
+        let encoded = package.encode().expect("package encoding");
+        assert_eq!(
+            RistrettoAirV2SubmissionPackage::decode(&encoded),
+            Ok(package.clone())
+        );
+        let mut altered = encoded.clone();
+        *altered.last_mut().unwrap() ^= 1;
+        assert_ne!(
+            RistrettoAirV2SubmissionPackage::decode(&altered),
+            Ok(package)
         );
     }
 

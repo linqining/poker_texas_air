@@ -468,6 +468,147 @@ proofs, but recursion is a performance feature, not the source of soundness.
 The final admission verifier is allowed to *compute* STARK verification; it
 must not trust an unverified host boolean or native receipt.
 
+## RistrettoAirV2 shuffle route (implemented)
+
+`src/ristretto_shuffle_air.rs` implements the Shuffle row of the matrix above
+under the `RistrettoAirV2` discriminators (`poker/ristretto-air/shuffle/v2`,
+`TranscriptId::FlockBlake3`).
+
+The permutation never enters a STARK trace.  The Fp-program STARKs used by
+the reconstruction relations are transparent: witness rows are serialized in
+the archive and FRI openings reveal queried trace cells, so any
+permutation-dependent witness would leak card positions to every observer.
+A direct "π in the AIR" encoding is therefore unsound for mental poker, in
+addition to costing ~104 scalar-multiplication programs (~35k wide trace
+rows) per shuffle.
+
+Instead the V2 shuffle composes:
+
+1. the curve-generic Bayer--Groth V2 argument (`poker-protocol-bg`) over
+   Ristretto255: Pedersen-style vector commitments, the multi-exponentiation
+   argument, and the product argument prove the output deck is a rerandomized
+   permutation of the input deck while remaining honest-verifier zero
+   knowledge (the permutation and rerandomizers are hidden by masked
+   responses);
+2. `FlockShuffleTranscript`, a `CryptoTranscript` implementation whose state
+   transitions are public `blake3_chain_digest` statements.  Each challenge
+   folds all absorbed public data into the chain state (one Flock chain
+   statement) and squeezes a canonically reduced Ristretto scalar; the new
+   state becomes the accepted image, so every later statement transitively
+   binds every earlier one;
+3. one Flock STARK covering those chain statements, attached to the
+   submission (`ZRS2` envelope).  The server re-derives the same schedule
+   natively, verifies the Bayer--Groth public-equation checks, and verifies
+   the Flock archive.  No host-computed challenge seed is trusted: the only
+   native hashing is the same public preimage processing the server already
+   performs to bind the request statement.
+
+Measured on the reference machine (release): client prove ~0.7 s (dominated
+by the Flock STARK), server verify+admit ~17 ms, request wire ~830 KB
+(argument wire 5.5 KB; the remainder is the six-statement Flock archive,
+within the 1 MiB ABI proof bound).  Shrinking the Flock archive is a
+follow-up optimization, not a soundness item.
+
+The completion gates that apply to this route are covered by
+`ristretto_shuffle_air::tests`: spliced points, scalars, commitments,
+challenge schedules, replayed statements and non-canonical wires all reject,
+and the prover/verifier transcript schedules must match byte for byte.
+
+## RistrettoAirV2 native reconstruction route (implemented)
+
+`src/ristretto_reconstruction_v2_air.rs` implements the ReconstructionV3 row
+of the matrix under the `RistrettoAirV2` discriminators with a `ZR3N` relation
+archive.  It keeps the existing `ZR3P` envelope wire (the sigma wires were
+already part of it) and verifies the complete relation:
+
+- the state/request/hash binding and both openings stay the existing
+  Blake2b-lookup STARK;
+- the Fiat--Shamir challenges of the cross-key and slot-membership sigma
+  proofs are derived from a Flock transcript seeded over
+  `(statement_digest, commitments_digest)` where the commitments digest
+  covers exactly the commitment fields — the standard commit-then-challenge
+  ordering with no digest circularity;
+- the two cross-key negations and all 52 slot-membership disjunctions are
+  verified natively (the same public-equation trust class as the V2 shuffle);
+  the readable-to-canonical mapping never enters any trace, so the OR wires
+  stay witness-hiding;
+- the contribution shuffle (negatives ‖ deterministic zero encryptions →
+  contributions) is a Bayer--Groth argument under its own Flock transcript,
+  with the statement digest absorbed ahead of the schedule;
+- the deck transition `post = prior + contributions` is verified natively
+  against the binding-authenticated openings instead of the 104-row
+  Fp-program accumulator STARK, and the initial-contribution branch derives
+  the prior deck from the public canonical base construction.
+
+The historical bottleneck — 416 scalar-multiplication Fp-program expansions
+per submission — is no longer produced.  Measured (release, single thread):
+prove ~17 s, verify+admit ~7 s, request ~25 KB, `ZR3N` archive ~7.3 MB
+(dominated by the state-binding lookup STARK; the two Flock STARKs account
+for roughly a further 1.6 MB at ~136 KB per chain sub-proof — shrinking those
+fixed-size Ligerito instances requires vendored-flock parameter work and is a
+follow-up, not a soundness item).
+
+## RistrettoAirV2 player sigma routes (implemented)
+
+`src/ristretto_player_proofs_air.rs` completes the mental-poker protocol
+surface referenced from zgame's `poker-protocol-proofs` under the same V2
+trust model (Flock-BLAKE3 Fiat--Shamir + native public-equation checks +
+HVZK witnesses outside every trace):
+
+- `pk_ownership` — Schnorr knowledge of the registered key;
+- `reveal_token` — Chaum--Pedersen proof that `token = sk·ct.c1` with the
+  same `sk` behind the registered `pk`; multi-party decryption composes as
+  `plaintext = c2 − Σ tokens` over the active seats;
+- `remask` / `leave` — batched deck DLEQ over the fixed 52-card deck with
+  per-card commitments (direction-selected `d2 = ±(out.c2 − in.c2)`), the
+  key-layer add/remove transitions of the encrypted universe;
+- `fold_with_proof` V2 crypto layer — the leave DLEQ plus the native
+  aggregate-key update `new_aggregate = aggregate − player_pk`.  Combined
+  with the existing `CanonicalTransitionKind::FoldWithProof` state-machine
+  validation (acting betting turn, folded+acted seat projection, deck
+  commitment replacement), the folded seat's key layer is gone from the
+  encrypted universe, so the seat contributes no reveal token after folding
+  — exactly the `leave_with_proof` semantics of the reference Move flow.
+
+The legacy BLS12-381 `airs::crypto::fold_with_proof` (host-native
+precompile binding) remains for the migration window and must not advance a
+Ristretto/AIR table head.
+
+Path A obligations: each sigma route is two (or 53) fixed public-equation
+scalar-multiplication checks — at most ~106 in-circuit multiplications per
+deck-sized proof — plus its Flock transcript statements.
+
+## Path A: single recursive STARK on-chain
+
+The accepted end state submits one recursive STARK proof on-chain; the chain
+verifier runs only STARK verification.  Host Rust code survives only inside
+provers (witness generation), which is not a trust assumption.  The gap that
+must close is that today's admission decisions evaluate the Bayer--Groth and
+sigma equations natively *outside* any constraint system.
+
+`ristretto_shuffle_air::ristretto_air_v2_shuffle_in_circuit_components`
+extracts the exact recursion input set for the shuffle route after the cheap
+binding checks: canonical decks, aggregate key, decoded proof, the five
+challenge scalars in derivation order, and the transcript chain statements.
+A recursion must then constrain:
+
+1. the transcript chains (binary-field BLAKE3 — the statements the Flock
+   STARKs already cover);
+2. the scalar-side Bayer--Groth schedule over `F_l` (powers table, expected
+   product, final product check) — this needs a `mod l` program AIR; the
+   existing FpProgram AIR constrains `p = 2^255 − 19` only, so a
+   scalar-field variant (23 limbs, 10-bit top limb, `l`-modulus quotients)
+   is the named prerequisite;
+3. the point-side multi-exponentiation equalities (~7 checks over 52-way
+   MSMs, roughly 300 in-circuit scalar multiplications) — the dominant
+   recursion cost, gated on the dedicated fixed-window scalar-multiplication
+   AIR (the standing P0 performance item).
+
+The same component split applies to the native reconstruction route: its
+sigma equations are 4 scalar multiplications per slot plus 6 per cross-key
+proof, its deck transition is 104 point additions, and its transcript
+obligations are already Flock statements.
+
 ## Completion gates
 
 Before a v2 route is enabled, tests must demonstrate all of the following:

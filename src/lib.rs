@@ -135,6 +135,9 @@ pub mod ristretto_fp_sqrt_ratio_air;
 pub mod ristretto_fp_sub_air;
 /// Variable-base Ristretto255 multi-scalar multiplication over batched STARKs.
 pub mod ristretto_msm_air;
+/// RistrettoAirV2 player sigma proofs: ownership, reveal tokens, deck
+/// remasking, and fold/leave transitions.
+pub mod ristretto_player_proofs_air;
 /// Composed host-zero Ristretto255 point-decode proofs.
 pub mod ristretto_point_decode_air;
 /// Composed host-zero Ristretto255 point-encode proofs.
@@ -151,12 +154,17 @@ pub mod ristretto_reconstruction_relation_air;
 pub mod ristretto_reconstruction_slot_or_air;
 /// Canonical Poseidon252 transcript absorption schedule for Reconstruction V3.
 pub mod ristretto_reconstruction_transcript;
+/// RistrettoAirV2 native reconstruction: complete low-latency relation set.
+pub mod ristretto_reconstruction_v2_air;
 /// Canonical Ristretto255 scalar addition modulo the group order.
 pub mod ristretto_scalar_add_air;
 /// Canonical Ristretto255 group-scalar limb AIR.
 pub mod ristretto_scalar_air;
 /// Canonical Ristretto255 scalar 4-bit window AIR.
 pub mod ristretto_scalar_windows_air;
+/// RistrettoAirV2 complete 52-card shuffle: Bayer--Groth argument with a
+/// Flock-BLAKE3 Fiat--Shamir transcript.
+pub mod ristretto_shuffle_air;
 /// Statement-level projection of L1 sparse-Merkle openings onto the shared
 /// hash-prover seam.
 pub mod smt_statements;

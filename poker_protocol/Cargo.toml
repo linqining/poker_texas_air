@@ -34,6 +34,13 @@ legacy-bls381 = [
     "dep:group",
     "dep:ff",
 ]
+# Pure request-construction API for the Ristretto255/AIR protocol epoch.  It
+# deliberately excludes poker-protocol-proofs: Ristretto proof verification is
+# owned by poker_texas_air's AIR verifier, not a native host verifier.
+ristretto-air = [
+    "dep:poker-protocol-core",
+    "dep:poker-protocol-abi",
+]
 borsh = ["dep:borsh"]
 [dependencies]
 poker-protocol-core = { path = "../poker-protocol-core", optional = true }
