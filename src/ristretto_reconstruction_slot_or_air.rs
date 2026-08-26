@@ -698,7 +698,6 @@ pub fn verify_ristretto_reconstruction_slot_or_batch(
             ));
         }
     }
-    verify_ristretto_fp_program_batch(&archive.challenge_nonzero)?;
 
     // Challenge-share additions bind to each slot's shares and global sum.
     for (row, statement) in archive.challenge_additions.rows.iter().zip(expected.iter()) {
@@ -711,9 +710,6 @@ pub fn verify_ristretto_reconstruction_slot_or_batch(
             ));
         }
     }
-    verify_ristretto_scalar_addition_batch(&archive.challenge_additions)?;
-
-    verify_ristretto_scalar_windows_batch(&archive.scalar_windows)?;
 
     // Scalar-multiplication statements bind to per-slot inputs and to the
     // shared window batch rows at `slot * 8 + input`.
@@ -742,9 +738,6 @@ pub fn verify_ristretto_reconstruction_slot_or_batch(
             }
         }
     }
-    verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
-        &archive.scalar_multiplications,
-    )?;
 
     // The merged point-addition batch binds to five rows per slot.
     let outputs_per_slot = (0..SLOT_COUNT)
@@ -764,7 +757,30 @@ pub fn verify_ristretto_reconstruction_slot_or_batch(
             ));
         }
     }
-    verify_ristretto_fp_program_batch(&archive.additions)
+
+    // The five STARK layers are mutually independent (separate archive
+    // fields, separate Fiat–Shamir channels, concurrent-safe memory pool and
+    // twiddle cache); verify them in parallel so the wall clock is the max
+    // instead of the sum.  All binding checks above already ran serially, so
+    // this parallel phase preserves the same fail-closed decision.
+    let stark_results: Vec<TexasAirResult<()>> = [
+        0usize, 1, 2, 3, 4,
+    ]
+    .into_par_iter()
+    .map(|which| match which {
+        0 => verify_ristretto_fp_program_batch(&archive.challenge_nonzero),
+        1 => verify_ristretto_scalar_addition_batch(&archive.challenge_additions),
+        2 => verify_ristretto_scalar_windows_batch(&archive.scalar_windows),
+        3 => verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch(
+            &archive.scalar_multiplications,
+        ),
+        _ => verify_ristretto_fp_program_batch(&archive.additions),
+    })
+    .collect();
+    stark_results
+        .into_iter()
+        .find(|result| result.is_err())
+        .unwrap_or(Ok(()))
 }
 
 #[cfg(test)]

@@ -302,9 +302,10 @@ impl HashProofProvider for FlockProvider {
         // Witness generation over the padded chain/merkle schedules uses
         // deep stacks (and nested rayon workers) in debug builds; run it
         // inside a dedicated large-stack thread pool so callers on default
-        // test/rayon stacks never overflow.
-        let statements = statements.to_vec();
-        flock_pool().install(|| prove_statements_on_stack(&statements))
+        // test/rayon stacks never overflow.  `install` is synchronous, so
+        // the closure borrows the caller's slice directly — no deep copy of
+        // the statement messages before entering the pool.
+        flock_pool().install(|| prove_statements_on_stack(statements))
     }
 
     fn verify_proof(&self, proof: &ArchivedHashProof) -> TexasAirResult<()> {

@@ -126,6 +126,12 @@ pub fn verify_ristretto_compressed_addition_batch(
 
 /// Sequentially fold the per-pair product outputs into one accumulation
 /// batch, threading each partial sum as the next row's left summand.
+///
+/// The accumulation chain is data-serial (row `i`'s left summand is row
+/// `i-1`'s output), but only the *curve arithmetic* needs to run serially.
+/// The expensive Fp-program construction for each row is independent once
+/// the `(left, right)` pair is known, so it runs on rayon after a fast
+/// serial pass precomputes every partial sum with the curve library.
 fn prove_msm_accumulation(
     outputs: &[[u8; LIMBS]],
 ) -> TexasAirResult<ArchivedRistrettoCompressedAdditionBatchProof> {
@@ -134,23 +140,67 @@ fn prove_msm_accumulation(
             "MSM accumulation requires at least two outputs".into(),
         ));
     }
+    use poker_protocol::crypto::curve::{Curve, CurvePoint, RistrettoCurve};
+    type Point = <RistrettoCurve as Curve>::Point;
+    let decode = |encoding: &[u8; LIMBS]| -> TexasAirResult<Point> {
+        Point::from_compressed(encoding).ok_or_else(|| {
+            TexasAirError::SpecViolation("MSM accumulation point failed to decode".into())
+        })
+    };
+    let encode = |point: &Point| -> [u8; LIMBS] {
+        let mut out = [0u8; LIMBS];
+        let bytes = CurvePoint::compress(point);
+        let slice: &[u8] = bytes.as_ref();
+        out.copy_from_slice(&slice[..LIMBS]);
+        out
+    };
+
+    // Fast serial pass: compute every partial sum with plain curve
+    // arithmetic (microseconds per addition).  `partial_sums[i]` is
+    // `outputs[0] + … + outputs[i]`; row `i` proves
+    // `(partial_sums[i], outputs[i+1]) -> partial_sums[i+1]`.
+    let mut partial_sums = Vec::with_capacity(outputs.len());
+    partial_sums.push(outputs[0]);
+    let mut running = decode(&outputs[0])?;
+    for output in &outputs[1..] {
+        running = running + decode(output)?;
+        partial_sums.push(encode(&running));
+    }
+
+    // Warm the decode memo for every input the parallel builders will see
+    // (both the original outputs and the derived partial sums).
+    preheat_canonical_decode_memo(outputs);
+    preheat_canonical_decode_memo(&partial_sums);
+
+    // Parallel pass: build every Fp program from its precomputed pair.  The
+    // builder recomputes the sum internally; a debug assertion confirms the
+    // fast path and the builder agree on the canonical encoding.
+    let built: Vec<TexasAirResult<(crate::ristretto_fp_program_air::RistrettoFpProgram, [u8; LIMBS])>> =
+        (0..outputs.len() - 1)
+            .into_par_iter()
+            .map(|i| {
+                let left = partial_sums[i];
+                let right = outputs[i + 1];
+                let (program, sum) =
+                    build_ristretto_fp_program_compressed_point_addition(&left, &right)?;
+                debug_assert_eq!(
+                    sum, partial_sums[i + 1],
+                    "fast-path curve sum must match the Fp program builder's recomputation"
+                );
+                Ok((program, sum))
+            })
+            .collect();
+
     let mut rows = Vec::with_capacity(outputs.len() - 1);
     let mut programs = Vec::with_capacity(outputs.len() - 1);
-    // The accumulation chain itself is serial (each row's left summand is the
-    // previous row's output), but every right-hand decode is independent:
-    // warm the global decode memo in parallel before the chain starts.
-    preheat_canonical_decode_memo(outputs);
-    let mut partial_sum = outputs[0];
-    for output in &outputs[1..] {
-        let (program, sum) =
-            build_ristretto_fp_program_compressed_point_addition(&partial_sum, output)?;
+    for (i, result) in built.into_iter().enumerate() {
+        let (program, sum) = result?;
         rows.push(ArchivedRistrettoCompressedAdditionRow {
-            left: partial_sum,
-            right: *output,
+            left: partial_sums[i],
+            right: outputs[i + 1],
             output: sum,
         });
         programs.push(program);
-        partial_sum = sum;
     }
     let additions = prove_ristretto_fp_program_batch_owned(programs)?;
     Ok(ArchivedRistrettoCompressedAdditionBatchProof { rows, additions })

@@ -462,22 +462,42 @@ pub fn prove_ristretto_scalar_addition_batch(
     }
     let log_size = batch_log_size(inputs.len());
     let trace = trace_columns_batch(inputs)?;
-    // Three independent canonical micro-STARKs per row; prove them in
-    // parallel instead of paying their PoW/FRI wall clocks sequentially.
-    let rows = inputs
+    // Canonical proofs are deterministic per scalar; prove each distinct
+    // (a, b, c) operand once and clone for duplicates instead of paying a
+    // micro-STARK PoW/FRI cycle per row.
+    let witnesses = inputs
         .par_iter()
-        .map(|(a, b)| {
-            let (c, reduced, _) = add_witness(a, b)?;
+        .map(|(a, b)| add_witness(a, b))
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    let mut unique_scalars: Vec<[u8; LIMBS]> = Vec::with_capacity(inputs.len() * 3);
+    for ((a, b), (c, _, _)) in inputs.iter().zip(witnesses.iter()) {
+        for scalar in [a, b, c] {
+            if !unique_scalars.contains(scalar) {
+                unique_scalars.push(*scalar);
+            }
+        }
+    }
+    let canonical_proofs: std::collections::HashMap<
+        [u8; LIMBS],
+        crate::ristretto_scalar_air::ArchivedRistrettoScalarCanonicalProof,
+    > = unique_scalars
+        .par_iter()
+        .map(|scalar| Ok((*scalar, prove_ristretto_scalar_canonical(scalar)?)))
+        .collect::<TexasAirResult<_>>()?;
+    let rows = inputs
+        .iter()
+        .zip(witnesses.iter())
+        .map(|((a, b), (c, reduced, _))| {
             let canonical = [
-                prove_ristretto_scalar_canonical(a)?,
-                prove_ristretto_scalar_canonical(b)?,
-                prove_ristretto_scalar_canonical(&c)?,
+                canonical_proofs.get(a).expect("cache covers a").clone(),
+                canonical_proofs.get(b).expect("cache covers b").clone(),
+                canonical_proofs.get(c).expect("cache covers c").clone(),
             ];
             Ok(ArchivedRistrettoScalarAdditionRow {
                 a: *a,
                 b: *b,
-                c,
-                reduced,
+                c: *c,
+                reduced: *reduced,
                 canonical,
             })
         })

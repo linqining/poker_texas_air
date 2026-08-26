@@ -417,15 +417,33 @@ pub fn prove_ristretto_scalar_windows_batch(
     }
     let log_size = batch_log_size(scalars.len());
     let trace = trace_columns_batch(scalars);
-    // Per-scalar canonical proofs are independent micro-STARKs; prove them in
-    // parallel instead of paying their PoW/FRI wall clocks sequentially.
-    let rows = scalars
+    // Canonical proofs are deterministic functions of the scalar, so prove
+    // each distinct scalar once and clone for duplicate rows.  Slot-OR
+    // batches repeat responses and challenges across slots; proving every
+    // duplicate independently wastes PoW/FRI wall clock.
+    let mut unique_scalars: Vec<[u8; LIMBS]> = Vec::with_capacity(scalars.len());
+    for scalar in scalars {
+        if !unique_scalars.contains(scalar) {
+            unique_scalars.push(*scalar);
+        }
+    }
+    let canonical_proofs: std::collections::HashMap<
+        [u8; LIMBS],
+        crate::ristretto_scalar_air::ArchivedRistrettoScalarCanonicalProof,
+    > = unique_scalars
         .par_iter()
+        .map(|scalar| Ok((*scalar, prove_ristretto_scalar_canonical(scalar)?)))
+        .collect::<TexasAirResult<_>>()?;
+    let rows = scalars
+        .iter()
         .map(|scalar| {
             Ok(ArchivedRistrettoScalarWindowsRow {
                 scalar: *scalar,
                 windows: windows(scalar),
-                canonical: prove_ristretto_scalar_canonical(scalar)?,
+                canonical: canonical_proofs
+                    .get(scalar)
+                    .expect("canonical proof cache is exhaustive")
+                    .clone(),
             })
         })
         .collect::<TexasAirResult<Vec<_>>>()?;

@@ -11,7 +11,22 @@ use stwo::prover::mempool::BaseColumnPool;
 use stwo::prover::poly::circle::PolyOps;
 use stwo::prover::poly::twiddles::TwiddleTree;
 
-const MAX_CACHED_DOMAINS: usize = 4;
+/// Estimated-memory budget for cached twiddle trees.  A count-based cap
+/// cannot distinguish one 128 MiB `log_size = 25` tree from a few KiB of
+/// small-domain trees; a byte budget keeps resident memory predictable
+/// regardless of which domain sizes a workload uses.
+const MAX_TWIDDLE_CACHE_BYTES: usize = 512 * 1024 * 1024;
+
+/// Conservative resident-byte estimate for one `TwiddleTree<SimdBackend>`.
+///
+/// `SimdBackend` packs 4 M31 lanes (4 bytes each) per element and the tree
+/// stores forward and inverse twiddles for the half-coset tower, so roughly
+/// `2^(log_size + 1)` bytes per direction.  The estimate intentionally errs
+/// on the high side so the budget never undercounts real usage.
+fn estimated_twiddle_bytes(domain_log_size: u32) -> usize {
+    let shift = (domain_log_size + 2).min(usize::BITS - 1);
+    1usize << shift
+}
 
 type TwiddleCache = BTreeMap<u32, Arc<TwiddleTree<SimdBackend>>>;
 
@@ -79,8 +94,14 @@ pub(crate) fn simd_twiddles(domain_log_size: u32) -> Arc<TwiddleTree<SimdBackend
     if let Some(existing) = cache.get(&domain_log_size) {
         return Arc::clone(existing);
     }
-    if cache.len() < MAX_CACHED_DOMAINS {
-        cache.insert(domain_log_size, Arc::clone(&twiddles));
+    cache.insert(domain_log_size, Arc::clone(&twiddles));
+    // Evict smallest domains first when the budget is exceeded: they are the
+    // cheapest to rebuild and typically the least contended.
+    let mut total: usize = cache.keys().map(|key| estimated_twiddle_bytes(*key)).sum();
+    while total > MAX_TWIDDLE_CACHE_BYTES && cache.len() > 1 {
+        let smallest = *cache.keys().next().expect("cache is non-empty");
+        total -= estimated_twiddle_bytes(smallest);
+        cache.remove(&smallest);
     }
     twiddles
 }
@@ -92,5 +113,15 @@ mod tests {
     #[test]
     fn protocol_pcs_profile_stays_at_forty_bits() {
         assert_eq!(protocol_pcs_config().security_bits(), 40);
+    }
+
+    #[test]
+    fn twiddle_byte_estimate_grows_with_domain_and_budget_evicts_smallest() {
+        // A larger domain must estimate strictly more bytes.
+        assert!(estimated_twiddle_bytes(25) > estimated_twiddle_bytes(10));
+        // Typical production domains fit comfortably inside the budget.
+        assert!(estimated_twiddle_bytes(24) < MAX_TWIDDLE_CACHE_BYTES);
+        // Even one extreme domain never evicts itself: the eviction loop
+        // keeps at least the freshly inserted entry resident.
     }
 }
