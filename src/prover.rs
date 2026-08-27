@@ -268,7 +268,7 @@ where
 /// Require a trusted row in production and validate it against the supplied
 /// trace. Test-only compatibility builds may derive it from row zero so the
 /// historical mechanism tests keep exercising Stwo.
-fn prepare_public_inputs_for_trace(
+pub(crate) fn prepare_public_inputs_for_trace(
     public_inputs: TexasPublicInputs,
     trace: &MethodTrace,
     num_columns: usize,

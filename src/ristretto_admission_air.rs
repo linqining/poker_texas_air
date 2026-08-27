@@ -88,6 +88,20 @@ pub struct AdmissionScheduleSpec {
     pub deck_size: usize,
 }
 
+/// The Bayer--Groth product-argument recurrence specification: the final
+/// product challenge and the masked responses whose mod-l derivation
+/// (`recurrence[i] = pc·b[i+1] − b[i]·a[i+1]`, `d = b[0] − a[0]`) rides a
+/// second scalar-program segment.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct AdmissionRecurrenceSpec {
+    /// Final product challenge.
+    pub product_challenge: [u8; LIMBS],
+    /// Masked Sigma responses `b`.
+    pub b_response: Vec<[u8; LIMBS]>,
+    /// Masked Sigma responses `a`.
+    pub a_response: Vec<[u8; LIMBS]>,
+}
+
 /// One public compressed-point accumulation row `left + right = output`.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AdmissionAdditionRow {
@@ -111,8 +125,11 @@ pub struct AdmissionStatement {
     pub ladders: Vec<RistrettoScalarMulLadderStatement>,
     /// Compressed-point accumulation rows (may be empty).
     pub additions: Vec<AdmissionAdditionRow>,
-    /// The single Bayer--Groth scalar schedule of this admission.
-    pub schedule: AdmissionScheduleSpec,
+    /// The Bayer--Groth scalar schedule of this admission, when present
+    /// (player-proof admissions carry none).
+    pub schedule: Option<AdmissionScheduleSpec>,
+    /// The Bayer--Groth product-argument recurrence, when present.
+    pub recurrence: Option<AdmissionRecurrenceSpec>,
 }
 
 /// Serialized unified admission STARK.
@@ -122,13 +139,14 @@ pub struct ArchivedRistrettoAdmissionProof {
     pub statement: AdmissionStatement,
     /// Serialized multi-component Stwo proof.
     pub stark_proof_bytes: Vec<u8>,
-    /// Claimed LogUp sums, one per component, in segment order: ladder,
-    /// scalar schedule, decode, encode, additions (4 M31 coordinates each).
-    pub claimed_sums: [[u32; 4]; 5],
+    /// Claimed LogUp sums, one per LogUp-bearing component, in segment
+    /// order: ladder, schedule?, recurrence?, decode, encode, additions?
+    /// (4 M31 coordinates each).
+    pub claimed_sums: Vec<[u32; 4]>,
 }
 
 const ADMISSION_ARCHIVE_MAGIC: [u8; 4] = *b"RSAD";
-const ADMISSION_ARCHIVE_VERSION: u8 = 2;
+const ADMISSION_ARCHIVE_VERSION: u8 = 4;
 
 impl BorshSerialize for ArchivedRistrettoAdmissionProof {
     fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
@@ -160,7 +178,7 @@ impl BorshDeserialize for ArchivedRistrettoAdmissionProof {
         Ok(Self {
             statement: AdmissionStatement::deserialize_reader(reader)?,
             stark_proof_bytes: Vec::<u8>::deserialize_reader(reader)?,
-            claimed_sums: <[[u32; 4]; 5]>::deserialize_reader(reader)?,
+            claimed_sums: Vec::<[u32; 4]>::deserialize_reader(reader)?,
         })
     }
 }
@@ -202,11 +220,30 @@ fn admission_digest(statement: &AdmissionStatement) -> [u32; BINDING_DIGEST_LIMB
         hasher.update(&addition.right);
         hasher.update(&addition.output);
     }
-    hasher.update(&statement.schedule.powers_challenge);
-    hasher.update(&statement.schedule.product_y);
-    hasher.update(&statement.schedule.product_z);
-    hasher.update(&statement.schedule.product_challenge);
-    hasher.update(&(statement.schedule.deck_size as u64).to_le_bytes());
+    match &statement.schedule {
+        Some(schedule) => {
+            hasher.update(b"schedule");
+            hasher.update(&schedule.powers_challenge);
+            hasher.update(&schedule.product_y);
+            hasher.update(&schedule.product_z);
+            hasher.update(&schedule.product_challenge);
+            hasher.update(&(schedule.deck_size as u64).to_le_bytes());
+        }
+        None => hasher.update(b"no-schedule"),
+    }
+    match &statement.recurrence {
+        Some(recurrence) => {
+            hasher.update(b"recurrence");
+            hasher.update(&recurrence.product_challenge);
+            for value in &recurrence.b_response {
+                hasher.update(value);
+            }
+            for value in &recurrence.a_response {
+                hasher.update(value);
+            }
+        }
+        None => hasher.update(b"no-recurrence"),
+    }
     let digest = hasher.finalize();
     core::array::from_fn(|index| {
         u32::from_le_bytes(
@@ -240,7 +277,10 @@ impl AdmissionBindingAir {
                 .expect("tag splits into eight u32 limbs"),
             ladder_count: statement.ladders.len() as u32,
             addition_count: statement.additions.len() as u32,
-            deck_size: statement.schedule.deck_size as u32,
+            deck_size: statement
+                .schedule
+                .as_ref()
+                .map_or(0, |schedule| schedule.deck_size as u32),
         }
     }
 
@@ -301,7 +341,8 @@ struct AdmissionRebuilt {
     decode_programs: Vec<RistrettoFpProgram>,
     encode_programs: Vec<RistrettoFpProgram>,
     addition_programs: Vec<RistrettoFpProgram>,
-    schedule_program: RistrettoScalarProgram,
+    schedule_program: Option<RistrettoScalarProgram>,
+    recurrence_program: Option<RistrettoScalarProgram>,
 }
 
 fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<AdmissionRebuilt> {
@@ -341,19 +382,37 @@ fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<Admission
             Ok(program)
         })
         .collect::<TexasAirResult<Vec<_>>>()?;
-    let schedule_program = build_bayer_groth_scalar_schedule(
-        &statement.schedule.powers_challenge,
-        &statement.schedule.product_y,
-        &statement.schedule.product_z,
-        &statement.schedule.product_challenge,
-        statement.schedule.deck_size,
-    )?;
+    let schedule_program = statement
+        .schedule
+        .as_ref()
+        .map(|schedule| {
+            build_bayer_groth_scalar_schedule(
+                &schedule.powers_challenge,
+                &schedule.product_y,
+                &schedule.product_z,
+                &schedule.product_challenge,
+                schedule.deck_size,
+            )
+        })
+        .transpose()?;
+    let recurrence_program = statement
+        .recurrence
+        .as_ref()
+        .map(|recurrence| {
+            crate::ristretto_scalar_program_air::build_bayer_groth_recurrence_program(
+                &recurrence.product_challenge,
+                &recurrence.b_response,
+                &recurrence.a_response,
+            )
+        })
+        .transpose()?;
     Ok(AdmissionRebuilt {
         schedules,
         decode_programs,
         encode_programs,
         addition_programs,
-        schedule_program: schedule_program,
+        schedule_program,
+        recurrence_program,
     })
 }
 
@@ -361,17 +420,42 @@ fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<Admission
 /// deterministically (currently only the additions segment can be empty).
 struct AdmissionSegments {
     ladder: LadderSegment,
-    schedule: ScalarProgramSegment,
+    schedule: Option<ScalarProgramSegment>,
+    recurrence: Option<ScalarProgramSegment>,
     decode: FpProgramSegment,
     encode: FpProgramSegment,
     additions: Option<FpProgramSegment>,
+    /// Optional Texas method-AIR trace (Layer-1 fold): trace columns only —
+    /// a method AIR carries no preprocessed columns and no LogUp layer, so
+    /// its component is a zero-claim construction supplied by the generic
+    /// wrapper.
+    texas: Option<(crate::trace_gen::MethodTrace, [u32; BINDING_DIGEST_LIMBS])>,
 }
 
 impl AdmissionSegments {
     fn build(rebuilt: &AdmissionRebuilt) -> TexasAirResult<Self> {
         Ok(Self {
             ladder: LadderSegment::build(&rebuilt.schedules)?,
-            schedule: ScalarProgramSegment::build(&[rebuilt.schedule_program.clone()])?,
+            schedule: rebuilt
+                .schedule_program
+                .as_ref()
+                .map(|program| {
+                    ScalarProgramSegment::build(
+                        &[program.clone()],
+                        "ristretto.admission.scalar.schedule.scope.v1",
+                    )
+                })
+                .transpose()?,
+            recurrence: rebuilt
+                .recurrence_program
+                .as_ref()
+                .map(|program| {
+                    ScalarProgramSegment::build(
+                        &[program.clone()],
+                        "ristretto.admission.scalar.recurrence.scope.v1",
+                    )
+                })
+                .transpose()?,
             decode: FpProgramSegment::build(
                 &rebuilt.decode_programs,
                 "ristretto.admission.fp.decode.scope.v1",
@@ -388,6 +472,7 @@ impl AdmissionSegments {
                     "ristretto.admission.fp.additions.scope.v1",
                 )?)
             },
+            texas: None,
         })
     }
 
@@ -395,12 +480,20 @@ impl AdmissionSegments {
         let mut log = self
             .ladder
             .log_size
-            .max(self.schedule.log_size)
             .max(self.decode.log_size)
             .max(self.encode.log_size)
             .max(BINDING_LOG_SIZE);
         if let Some(additions) = &self.additions {
             log = log.max(additions.log_size);
+        }
+        if let Some(schedule) = &self.schedule {
+            log = log.max(schedule.log_size);
+        }
+        if let Some(recurrence) = &self.recurrence {
+            log = log.max(recurrence.log_size);
+        }
+        if let Some((trace, _)) = &self.texas {
+            log = log.max(trace.log_size);
         }
         log
     }
@@ -411,7 +504,20 @@ impl AdmissionSegments {
         rebuilt: &AdmissionRebuilt,
     ) {
         self.ladder.interact(channel);
-        self.schedule.interact(channel, &rebuilt.schedule_program);
+        if let Some(schedule) = &mut self.schedule {
+            let program = rebuilt
+                .schedule_program
+                .as_ref()
+                .expect("segment implies program");
+            schedule.interact(channel, program);
+        }
+        if let Some(recurrence) = &mut self.recurrence {
+            let program = rebuilt
+                .recurrence_program
+                .as_ref()
+                .expect("segment implies program");
+            recurrence.interact(channel, program);
+        }
         self.decode.interact(channel, &rebuilt.decode_programs[0]);
         self.encode.interact(channel, &rebuilt.encode_programs[0]);
         if let Some(additions) = &mut self.additions {
@@ -421,7 +527,12 @@ impl AdmissionSegments {
 
     fn mirror_draw(&mut self, channel: &mut stwo::core::channel::Poseidon252Channel) {
         self.ladder.mirror_draw(channel);
-        self.schedule.mirror_draw(channel);
+        if let Some(schedule) = &mut self.schedule {
+            schedule.mirror_draw(channel);
+        }
+        if let Some(recurrence) = &mut self.recurrence {
+            recurrence.mirror_draw(channel);
+        }
         self.decode.mirror_draw(channel);
         self.encode.mirror_draw(channel);
         if let Some(additions) = &mut self.additions {
@@ -430,16 +541,21 @@ impl AdmissionSegments {
     }
 
     fn claimed_sum_count(&self) -> usize {
-        if self.additions.is_some() { 5 } else { 4 }
+        3 + usize::from(self.schedule.is_some())
+            + usize::from(self.recurrence.is_some())
+            + usize::from(self.additions.is_some())
     }
 
     fn claimed_sums(&self) -> Vec<SecureField> {
-        let mut sums = vec![
-            self.ladder.claimed_sum,
-            self.schedule.claimed_sum,
-            self.decode.claimed_sum,
-            self.encode.claimed_sum,
-        ];
+        let mut sums = vec![self.ladder.claimed_sum];
+        if let Some(schedule) = &self.schedule {
+            sums.push(schedule.claimed_sum);
+        }
+        if let Some(recurrence) = &self.recurrence {
+            sums.push(recurrence.claimed_sum);
+        }
+        sums.push(self.decode.claimed_sum);
+        sums.push(self.encode.claimed_sum);
         if let Some(additions) = &self.additions {
             sums.push(additions.claimed_sum);
         }
@@ -451,7 +567,12 @@ impl AdmissionSegments {
         tree: &mut stwo::prover::pcs::TreeBuilder<'_, '_, SimdBackend, Poseidon252MerkleChannel>,
     ) {
         tree.extend_evals(self.ladder.scope.to_evaluations());
-        tree.extend_evals(self.schedule.scope.to_evaluations());
+        if let Some(schedule) = &self.schedule {
+            tree.extend_evals(schedule.scope.to_evaluations());
+        }
+        if let Some(recurrence) = &self.recurrence {
+            tree.extend_evals(recurrence.scope.to_evaluations());
+        }
         tree.extend_evals(self.decode.scope.to_evaluations());
         tree.extend_evals(self.encode.scope.to_evaluations());
         if let Some(additions) = &self.additions {
@@ -465,11 +586,19 @@ impl AdmissionSegments {
         binding_trace: &crate::trace_gen::MethodTrace,
     ) {
         tree.extend_evals(self.ladder.trace.to_evaluations());
-        tree.extend_evals(self.schedule.trace.to_evaluations());
+        if let Some(schedule) = &self.schedule {
+            tree.extend_evals(schedule.trace.to_evaluations());
+        }
+        if let Some(recurrence) = &self.recurrence {
+            tree.extend_evals(recurrence.trace.to_evaluations());
+        }
         tree.extend_evals(self.decode.trace.to_evaluations());
         tree.extend_evals(self.encode.trace.to_evaluations());
         if let Some(additions) = &self.additions {
             tree.extend_evals(additions.trace.to_evaluations());
+        }
+        if let Some((trace, _)) = &self.texas {
+            tree.extend_evals(trace.to_evaluations());
         }
         tree.extend_evals(binding_trace.to_evaluations());
     }
@@ -479,7 +608,12 @@ impl AdmissionSegments {
         tree: &mut stwo::prover::pcs::TreeBuilder<'_, '_, SimdBackend, Poseidon252MerkleChannel>,
     ) {
         tree.extend_evals(self.ladder.interaction.clone());
-        tree.extend_evals(self.schedule.interaction.clone());
+        if let Some(schedule) = &self.schedule {
+            tree.extend_evals(schedule.interaction.clone());
+        }
+        if let Some(recurrence) = &self.recurrence {
+            tree.extend_evals(recurrence.interaction.clone());
+        }
         tree.extend_evals(self.decode.interaction.clone());
         tree.extend_evals(self.encode.interaction.clone());
         if let Some(additions) = &self.additions {
@@ -488,13 +622,16 @@ impl AdmissionSegments {
     }
 
     fn scope_sizes(&self) -> Vec<u32> {
-        let mut sizes = vec![
-            vec![self.ladder.log_size; self.ladder.scope.num_columns],
-            vec![self.schedule.log_size; self.schedule.scope.num_columns],
-            vec![self.decode.log_size; self.decode.scope.num_columns],
-            vec![self.encode.log_size; self.encode.scope.num_columns],
-        ]
-        .concat();
+        let mut sizes = vec![vec![self.ladder.log_size; self.ladder.scope.num_columns]];
+        if let Some(schedule) = &self.schedule {
+            sizes.push(vec![schedule.log_size; schedule.scope.num_columns]);
+        }
+        if let Some(recurrence) = &self.recurrence {
+            sizes.push(vec![recurrence.log_size; recurrence.scope.num_columns]);
+        }
+        sizes.push(vec![self.decode.log_size; self.decode.scope.num_columns]);
+        sizes.push(vec![self.encode.log_size; self.encode.scope.num_columns]);
+        let mut sizes = sizes.concat();
         if let Some(additions) = &self.additions {
             sizes.extend(vec![additions.log_size; additions.scope.num_columns]);
         }
@@ -502,37 +639,62 @@ impl AdmissionSegments {
     }
 
     fn trace_sizes(&self) -> Vec<u32> {
-        let mut sizes = vec![
-            vec![self.ladder.log_size; self.ladder.trace.num_columns],
-            vec![self.schedule.log_size; self.schedule.trace.num_columns],
-            vec![self.decode.log_size; self.decode.trace.num_columns],
-            vec![self.encode.log_size; self.encode.trace.num_columns],
-        ]
-        .concat();
+        let mut sizes = vec![vec![self.ladder.log_size; self.ladder.trace.num_columns]];
+        if let Some(schedule) = &self.schedule {
+            sizes.push(vec![schedule.log_size; schedule.trace.num_columns]);
+        }
+        if let Some(recurrence) = &self.recurrence {
+            sizes.push(vec![recurrence.log_size; recurrence.trace.num_columns]);
+        }
+        sizes.push(vec![self.decode.log_size; self.decode.trace.num_columns]);
+        sizes.push(vec![self.encode.log_size; self.encode.trace.num_columns]);
+        let mut sizes = sizes.concat();
         if let Some(additions) = &self.additions {
             sizes.extend(vec![additions.log_size; additions.trace.num_columns]);
+        }
+        if let Some((trace, _)) = &self.texas {
+            sizes.extend(vec![trace.log_size; trace.num_columns]);
         }
         sizes.extend(vec![BINDING_LOG_SIZE; BINDING_COLUMNS]);
         sizes
     }
 
     fn interaction_sizes(&self, rebuilt: &AdmissionRebuilt) -> Vec<u32> {
-        let mut sizes = vec![
-            vec![self.ladder.log_size; self.ladder.interaction_columns()],
-            vec![
-                self.schedule.log_size;
-                self.schedule.interaction_columns(&rebuilt.schedule_program)
-            ],
-            vec![
-                self.decode.log_size;
-                self.decode.interaction_columns(&rebuilt.decode_programs[0])
-            ],
-            vec![
-                self.encode.log_size;
-                self.encode.interaction_columns(&rebuilt.encode_programs[0])
-            ],
-        ]
-        .concat();
+        let mut sizes = vec![vec![
+            self.ladder.log_size;
+            self.ladder.interaction_columns()
+        ]];
+        if let Some(schedule) = &self.schedule {
+            let program = rebuilt
+                .schedule_program
+                .as_ref()
+                .expect("segment implies program");
+            sizes.push(vec![
+                schedule.log_size;
+                schedule.interaction_columns(program)
+            ]);
+        }
+        if let Some(recurrence) = &self.recurrence {
+            let program = rebuilt
+                .recurrence_program
+                .as_ref()
+                .expect("segment implies program");
+            sizes.push(vec![
+                recurrence.log_size;
+                recurrence.interaction_columns(program)
+            ]);
+        }
+        sizes.push(vec![
+            self.decode.log_size;
+            self.decode
+                .interaction_columns(&rebuilt.decode_programs[0])
+        ]);
+        sizes.push(vec![
+            self.encode.log_size;
+            self.encode
+                .interaction_columns(&rebuilt.encode_programs[0])
+        ]);
+        let mut sizes = sizes.concat();
         if let Some(additions) = &self.additions {
             sizes.extend(vec![
                 additions.log_size;
@@ -545,7 +707,20 @@ impl AdmissionSegments {
 
     fn preprocessed_ids(&self, rebuilt: &AdmissionRebuilt) -> Vec<PreProcessedColumnId> {
         let mut ids = self.ladder.preprocessed_ids();
-        ids.extend(self.schedule.preprocessed_ids(&rebuilt.schedule_program));
+        if let Some(schedule) = &self.schedule {
+            let program = rebuilt
+                .schedule_program
+                .as_ref()
+                .expect("segment implies program");
+            ids.extend(schedule.preprocessed_ids(program));
+        }
+        if let Some(recurrence) = &self.recurrence {
+            let program = rebuilt
+                .recurrence_program
+                .as_ref()
+                .expect("segment implies program");
+            ids.extend(recurrence.preprocessed_ids(program));
+        }
         ids.extend(self.decode.preprocessed_ids(&rebuilt.decode_programs[0]));
         ids.extend(self.encode.preprocessed_ids(&rebuilt.encode_programs[0]));
         if let Some(additions) = &self.additions {
@@ -554,30 +729,49 @@ impl AdmissionSegments {
         ids
     }
 
+    #[allow(clippy::type_complexity)]
     fn components(
         &self,
         allocator: &mut TraceLocationAllocator,
         rebuilt: &AdmissionRebuilt,
         binding: AdmissionBindingAir,
+        texas_component: Option<
+            &dyn Fn(&mut TraceLocationAllocator) -> Box<dyn ComponentProver<SimdBackend>>,
+        >,
     ) -> Vec<Box<dyn ComponentProver<SimdBackend>>> {
-        let mut components: Vec<Box<dyn ComponentProver<SimdBackend>>> = vec![
-            Box::new(self.ladder.component(allocator)),
-            Box::new(
-                self.schedule
-                    .component(allocator, &rebuilt.schedule_program),
-            ),
-            Box::new(
-                self.decode
-                    .component(allocator, &rebuilt.decode_programs[0]),
-            ),
-            Box::new(
-                self.encode
-                    .component(allocator, &rebuilt.encode_programs[0]),
-            ),
-        ];
+        let mut components: Vec<Box<dyn ComponentProver<SimdBackend>>> =
+            vec![Box::new(self.ladder.component(allocator))];
+        if let Some(schedule) = &self.schedule {
+            let program = rebuilt
+                .schedule_program
+                .as_ref()
+                .expect("segment implies program");
+            components.push(Box::new(schedule.component(allocator, program)));
+        }
+        if let Some(recurrence) = &self.recurrence {
+            let program = rebuilt
+                .recurrence_program
+                .as_ref()
+                .expect("segment implies program");
+            components.push(Box::new(recurrence.component(allocator, program)));
+        }
+        components.push(Box::new(
+            self.decode
+                .component(allocator, &rebuilt.decode_programs[0]),
+        ));
+        components.push(Box::new(
+            self.encode
+                .component(allocator, &rebuilt.encode_programs[0]),
+        ));
         if let Some(additions) = &self.additions {
             components.push(Box::new(
                 additions.component(allocator, &rebuilt.addition_programs[0]),
+            ));
+        }
+        if self.texas.is_some() {
+            components.push(texas_component
+                .expect("texas trace implies a component factory")(
+                allocator
             ));
         }
         components.push(Box::new(FrameworkComponent::new(
@@ -594,8 +788,22 @@ impl AdmissionSegments {
 pub fn prove_ristretto_admission_stark(
     statement: AdmissionStatement,
 ) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
+    prove_admission_inner(statement, None, None, None)
+}
+
+type TexasFactory<'a> =
+    &'a (dyn Fn(&mut TraceLocationAllocator) -> Box<dyn ComponentProver<SimdBackend>>);
+
+fn prove_admission_inner(
+    statement: AdmissionStatement,
+    texas_trace: Option<crate::trace_gen::MethodTrace>,
+    texas_digest: Option<[u32; BINDING_DIGEST_LIMBS]>,
+    texas_factory: Option<TexasFactory<'_>>,
+) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
     let rebuilt = rebuild_admission(&statement)?;
     let mut segments = AdmissionSegments::build(&rebuilt)?;
+    segments.texas =
+        texas_trace.map(|trace| (trace, texas_digest.expect("texas trace implies a digest")));
     let binding = AdmissionBindingAir::new(&statement);
     let binding_trace = binding.trace_columns();
 
@@ -606,6 +814,10 @@ pub fn prove_ristretto_admission_stark(
     let mut channel = stwo::core::channel::Poseidon252Channel::default();
     channel.mix_u64(0x7a63_6861_646d_6973);
     channel.mix_u32s(&admission_digest(&statement));
+    if let Some(digest) = texas_digest {
+        channel.mix_u64(0x7a63_6861_7465_7861);
+        channel.mix_u32s(&digest);
+    }
     let mut scheme =
         CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::with_memory_pool(
             config,
@@ -633,7 +845,7 @@ pub fn prove_ristretto_admission_stark(
 
     let ids = segments.preprocessed_ids(&rebuilt);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let components = segments.components(&mut allocator, &rebuilt, binding);
+    let components = segments.components(&mut allocator, &rebuilt, binding, texas_factory);
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
         components.iter().map(|component| &**component).collect();
     let proof = prove(&component_refs, &mut channel, scheme)
@@ -641,10 +853,10 @@ pub fn prove_ristretto_admission_stark(
     let stark_proof_bytes = options()
         .serialize(&proof)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
-    let mut claimed_sums = [[0u32; 4]; 5];
-    for (slot, sum) in sums.iter().enumerate() {
-        claimed_sums[slot] = sum.to_m31_array().map(|limb| limb.0);
-    }
+    let claimed_sums = sums
+        .iter()
+        .map(|sum| sum.to_m31_array().map(|limb| limb.0))
+        .collect::<Vec<_>>();
     Ok(ArchivedRistrettoAdmissionProof {
         statement,
         stark_proof_bytes,
@@ -658,9 +870,20 @@ pub fn prove_ristretto_admission_stark(
 pub fn verify_ristretto_admission_stark(
     archive: &ArchivedRistrettoAdmissionProof,
 ) -> TexasAirResult<()> {
+    verify_admission_inner(archive, None, None, None)
+}
+
+fn verify_admission_inner(
+    archive: &ArchivedRistrettoAdmissionProof,
+    texas_trace: Option<crate::trace_gen::MethodTrace>,
+    texas_digest: Option<[u32; BINDING_DIGEST_LIMBS]>,
+    texas_factory: Option<TexasFactory<'_>>,
+) -> TexasAirResult<()> {
     type Proof = StarkProof<Poseidon252MerkleHasher>;
     let rebuilt = rebuild_admission(&archive.statement)?;
     let mut segments = AdmissionSegments::build(&rebuilt)?;
+    segments.texas =
+        texas_trace.map(|trace| (trace, texas_digest.expect("texas trace implies a digest")));
     let binding = AdmissionBindingAir::new(&archive.statement);
     let proof: Proof = options()
         .deserialize(&archive.stark_proof_bytes)
@@ -691,6 +914,10 @@ pub fn verify_ristretto_admission_stark(
     let mut channel = stwo::core::channel::Poseidon252Channel::default();
     channel.mix_u64(0x7a63_6861_646d_6973);
     channel.mix_u32s(&admission_digest(&archive.statement));
+    if let Some(digest) = texas_digest {
+        channel.mix_u64(0x7a63_6861_7465_7861);
+        channel.mix_u32s(&digest);
+    }
     let mut scheme =
         stwo::core::pcs::CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
     scheme.commit(proof.commitments[0], &segments.scope_sizes(), &mut channel);
@@ -699,6 +926,11 @@ pub fn verify_ristretto_admission_stark(
     // are never materialized on the verifier side, only their counts.
     segments.mirror_draw(&mut channel);
     let sum_count = segments.claimed_sum_count();
+    if archive.claimed_sums.len() != sum_count {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "admission claimed-sum count is detached from its segment set".into(),
+        ));
+    }
     let sums: Vec<SecureField> = (0..sum_count)
         .map(|slot| {
             SecureField::from_m31_array(core::array::from_fn(|index| {
@@ -715,7 +947,7 @@ pub fn verify_ristretto_admission_stark(
 
     let ids = segments.preprocessed_ids(&rebuilt);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let components = segments.components(&mut allocator, &rebuilt, binding);
+    let components = segments.components(&mut allocator, &rebuilt, binding, texas_factory);
     let component_refs: Vec<&dyn stwo::core::air::Component> = components
         .iter()
         .map(|component| component.as_ref() as &dyn stwo::core::air::Component)
@@ -1042,13 +1274,18 @@ fn decompose_bg_admission(
                 output,
             })
             .collect(),
-        schedule: AdmissionScheduleSpec {
+        schedule: Some(AdmissionScheduleSpec {
             powers_challenge: bg_scalar_bytes(&powers_challenge),
             product_y: bg_scalar_bytes(&product_y),
             product_z: bg_scalar_bytes(&product_z),
             product_challenge: bg_scalar_bytes(&product_challenge),
             deck_size: n,
-        },
+        }),
+        recurrence: Some(AdmissionRecurrenceSpec {
+            product_challenge: bg_scalar_bytes(&product_challenge),
+            b_response: product.b_response.iter().map(bg_scalar_bytes).collect(),
+            a_response: product.a_response.iter().map(bg_scalar_bytes).collect(),
+        }),
     };
     Ok((statement, builder.equalities))
 }
@@ -1131,6 +1368,322 @@ fn ristretto_shuffle_components(request_bytes: &[u8]) -> TexasAirResult<BgAdmiss
     })
 }
 
+// ===========================================================================
+// Player proofs admission wiring (pk ownership, reveal token, deck DLEQ).
+// ===========================================================================
+
+use crate::ristretto_player_proofs_air::{
+    ArchivedRistrettoPlayerProof, RistrettoDeckDleqDirection, RistrettoDeckDleqWire,
+    RistrettoPkOwnershipWire, RistrettoRevealTokenWire, derive_deck_dleq_challenge,
+    derive_pk_ownership_challenge, derive_reveal_token_challenge, verify_deck_dleq,
+    verify_pk_ownership, verify_reveal_token,
+};
+
+/// One pk-ownership equation admission entry: `G·response == commitment +
+/// pk·challenge`.
+#[derive(Clone)]
+pub struct PlayerPkOwnershipEntry<'a> {
+    /// Public key behind the ownership claim.
+    pub pk: &'a BgPoint,
+    /// Transcript context bytes.
+    pub context: &'a [u8],
+    /// The Schnorr wire under admission.
+    pub wire: &'a RistrettoPkOwnershipWire,
+    /// The Flock transcript proof binding the challenge.
+    pub proof: &'a ArchivedRistrettoPlayerProof,
+}
+
+/// One reveal-token equation pair: `G·response == t1 + pk·challenge` and
+/// `ct.c1·response == t2 + reveal_token·challenge`.
+#[derive(Clone)]
+pub struct PlayerRevealTokenEntry<'a> {
+    /// Public key.
+    pub pk: &'a BgPoint,
+    /// The ciphertext whose `c1` masks the token.
+    pub ciphertext: &'a BgCiphertext,
+    /// The revealed token point.
+    pub reveal_token: &'a BgPoint,
+    /// Transcript context bytes.
+    pub context: &'a [u8],
+    /// The Chaum--Pedersen wire under admission.
+    pub wire: &'a RistrettoRevealTokenWire,
+    /// The Flock transcript proof binding the challenge.
+    pub proof: &'a ArchivedRistrettoPlayerProof,
+}
+
+/// One batched deck-DLEQ equation family (remask or leave): the key
+/// equation `G·response == commitment_pk + pk·challenge` plus one equation
+/// per card `input_i.c1·response == A_i + d2_i·challenge` with `d2_i`
+/// derived from the direction.
+#[derive(Clone)]
+pub struct PlayerDeckDleqEntry<'a> {
+    /// Transition direction.
+    pub direction: RistrettoDeckDleqDirection,
+    /// Input deck.
+    pub input: &'a [BgCiphertext],
+    /// Output deck.
+    pub output: &'a [BgCiphertext],
+    /// The acting public key.
+    pub pk: &'a BgPoint,
+    /// Transcript context bytes.
+    pub context: &'a [u8],
+    /// The batched DLEQ wire under admission.
+    pub wire: &'a RistrettoDeckDleqWire,
+    /// The Flock transcript proof binding the challenge.
+    pub proof: &'a ArchivedRistrettoPlayerProof,
+}
+
+/// The full player-proof component set of one admission.
+pub struct PlayerAdmissionInputs<'a> {
+    /// Caller-domain statement digest used as the admission tag.
+    pub statement_digest: [u8; 32],
+    /// Key-ownership equations.
+    pub pk_ownership: Vec<PlayerPkOwnershipEntry<'a>>,
+    /// Reveal-token equation pairs.
+    pub reveal_tokens: Vec<PlayerRevealTokenEntry<'a>>,
+    /// Batched deck-DLEQ families (remask, leave, or fold-with-proof's
+    /// leave; the fold key-update subtraction stays a caller-side native
+    /// check).
+    pub deck_dleqs: Vec<PlayerDeckDleqEntry<'a>>,
+}
+
+fn checked_scalar(bytes: &[u8; LIMBS], label: &str) -> TexasAirResult<BgScalar> {
+    <BgScalar as CurveScalar>::from_canonical_bytes(bytes)
+        .ok_or_else(|| TexasAirError::ConstraintUnsatisfied(format!("{label} is not canonical")))
+}
+
+/// Decompose the player-proof component set into the unified admission
+/// statement: every equation becomes ladder statements plus accumulation
+/// rows, with native encoding equalities completing each check.
+fn decompose_player_admission(
+    inputs: &PlayerAdmissionInputs,
+) -> TexasAirResult<AdmissionStatement> {
+    let g = base_point_value();
+    let mut builder = PointEquationBuilder::default();
+
+    for entry in &inputs.pk_ownership {
+        let challenge = derive_pk_ownership_challenge(entry.pk, entry.context, entry.wire);
+        let response = checked_scalar(&entry.wire.response, "pk-ownership response")?;
+        let commitment = bg_decode_point(&entry.wire.commitment)?;
+        let lhs = builder.mul(&response, &g);
+        let pk_scaled = builder.mul(&challenge, entry.pk);
+        let rhs = builder.add(&pk_scaled, &bg_encode_point(&commitment))?;
+        builder.eq(lhs, rhs);
+    }
+
+    for entry in &inputs.reveal_tokens {
+        let challenge = derive_reveal_token_challenge(
+            entry.pk,
+            entry.ciphertext,
+            entry.reveal_token,
+            entry.context,
+            entry.wire,
+        );
+        let response = checked_scalar(&entry.wire.response, "reveal-token response")?;
+        let t1 = bg_decode_point(&entry.wire.commitment_t1)?;
+        let t2 = bg_decode_point(&entry.wire.commitment_t2)?;
+        // G·response == t1 + pk·challenge
+        let lhs = builder.mul(&response, &g);
+        let pk_scaled = builder.mul(&challenge, entry.pk);
+        let rhs = builder.add(&pk_scaled, &bg_encode_point(&t1))?;
+        builder.eq(lhs, rhs);
+        // ct.c1·response == t2 + reveal_token·challenge
+        let lhs = builder.mul(&response, &entry.ciphertext.c1);
+        let token_scaled = builder.mul(&challenge, entry.reveal_token);
+        let rhs = builder.add(&token_scaled, &bg_encode_point(&t2))?;
+        builder.eq(lhs, rhs);
+    }
+
+    for entry in &inputs.deck_dleqs {
+        let challenge = derive_deck_dleq_challenge(
+            entry.direction,
+            entry.input,
+            entry.output,
+            entry.pk,
+            entry.context,
+            entry.wire,
+        )?;
+        let response = checked_scalar(&entry.wire.response, "deck DLEQ response")?;
+        let commitment_pk = bg_decode_point(&entry.wire.commitment_pk)?;
+        // Key equation: G·response == commitment_pk + pk·challenge.
+        let lhs = builder.mul(&response, &g);
+        let pk_scaled = builder.mul(&challenge, entry.pk);
+        let rhs = builder.add(&pk_scaled, &bg_encode_point(&commitment_pk))?;
+        builder.eq(lhs, rhs);
+        // Per-card equations.
+        for index in 0..entry.input.len() {
+            let d2 = entry
+                .direction
+                .compute_d2(&entry.input[index].c2, &entry.output[index].c2);
+            let commitment = bg_decode_point(&entry.wire.per_card_commitments[index])?;
+            let lhs = builder.mul(&response, &entry.input[index].c1);
+            let d2_scaled = builder.mul(&challenge, &d2);
+            let rhs = builder.add(&d2_scaled, &bg_encode_point(&commitment))?;
+            builder.eq(lhs, rhs);
+        }
+    }
+    builder.check_equalities()?;
+
+    Ok(AdmissionStatement {
+        tag: inputs.statement_digest,
+        ladders: builder.ladders,
+        additions: builder
+            .additions
+            .into_iter()
+            .map(|(left, right, output)| AdmissionAdditionRow {
+                left,
+                right,
+                output,
+            })
+            .collect(),
+        schedule: None,
+        recurrence: None,
+    })
+}
+
+/// Run every native player-proof verification (the fail-closed gate; each
+/// includes the Flock transcript STARK).
+fn verify_player_inputs_native(inputs: &PlayerAdmissionInputs) -> TexasAirResult<()> {
+    for entry in &inputs.pk_ownership {
+        verify_pk_ownership(entry.pk, entry.context, entry.wire, entry.proof)?;
+    }
+    for entry in &inputs.reveal_tokens {
+        verify_reveal_token(
+            entry.pk,
+            entry.ciphertext,
+            entry.reveal_token,
+            entry.context,
+            entry.wire,
+            entry.proof,
+        )?;
+    }
+    for entry in &inputs.deck_dleqs {
+        verify_deck_dleq(
+            entry.direction,
+            entry.input,
+            entry.output,
+            entry.pk,
+            entry.context,
+            entry.wire,
+            entry.proof,
+        )?;
+    }
+    Ok(())
+}
+
+/// Prove the unified admission STARK for one player-proof component set.
+pub fn prove_player_admission_components(
+    inputs: &PlayerAdmissionInputs,
+) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
+    verify_player_inputs_native(inputs)?;
+    let statement = decompose_player_admission(inputs)?;
+    prove_ristretto_admission_stark(statement)
+}
+
+/// Verify the unified admission STARK for one player-proof component set.
+pub fn verify_player_admission_components(
+    inputs: &PlayerAdmissionInputs,
+    archive: &ArchivedRistrettoAdmissionProof,
+) -> TexasAirResult<()> {
+    verify_player_inputs_native(inputs)?;
+    let statement = decompose_player_admission(inputs)?;
+    if archive.statement != statement {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "player admission statement is detached from its component set".into(),
+        ));
+    }
+    verify_ristretto_admission_stark(archive)
+}
+
+// ===========================================================================
+// Texas Layer-1 fold (method AIR as an admission component).
+// ===========================================================================
+
+/// One Texas method-AIR ingredient set for Layer-1 folding: the rebuilt
+/// method trace, the method AIR, and its verifier-trusted expected trace
+/// row.  A method AIR contributes only original trace columns (no
+/// preprocessed columns, no LogUp layer), so its component is a zero-claim
+/// construction bound into the admission channel through a domain-separated
+/// digest of the expected row.
+pub struct TexasMethodIngredient<A: crate::airs::TexasAir + 'static> {
+    /// The method's rebuilt trace columns.
+    pub trace: crate::trace_gen::MethodTrace,
+    /// The method AIR.
+    pub air: A,
+    /// Verifier-trusted expected trace row (from
+    /// `TexasPublicInputs::require_expected_trace_row`).
+    pub expected_trace_row: Vec<M31>,
+}
+
+fn texas_ingredient_digest<A: crate::airs::TexasAir>(
+    trace_log_size: u32,
+    air: &A,
+    expected_trace_row: &[M31],
+) -> [u32; BINDING_DIGEST_LIMBS] {
+    use blake2::digest::Digest;
+    let mut hasher = blake2::Blake2b512::new();
+    hasher.update(b"zchain.poker.admission.texas.v1");
+    hasher.update(&trace_log_size.to_le_bytes());
+    hasher.update(&(air.trace_num_columns() as u64).to_le_bytes());
+    for limb in expected_trace_row {
+        hasher.update(&limb.0.to_le_bytes());
+    }
+    let digest = hasher.finalize();
+    core::array::from_fn(|index| {
+        u32::from_le_bytes(
+            digest[4 * index..4 * index + 4]
+                .try_into()
+                .expect("4 bytes"),
+        )
+    })
+}
+
+/// Prove one unified admission STARK that additionally folds a Texas method
+/// AIR (Layer-1 component) alongside the crypto segments.
+pub fn prove_ristretto_admission_stark_with_texas<A: crate::airs::TexasAir + 'static>(
+    statement: AdmissionStatement,
+    texas: TexasMethodIngredient<A>,
+) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
+    let TexasMethodIngredient {
+        trace,
+        air,
+        expected_trace_row,
+    } = texas;
+    let digest = texas_ingredient_digest(trace.log_size, &air, &expected_trace_row);
+    let factory =
+        |allocator: &mut TraceLocationAllocator| -> Box<dyn ComponentProver<SimdBackend>> {
+            Box::new(FrameworkComponent::new(
+                allocator,
+                crate::airs::bound::BoundAir::new(air.clone(), expected_trace_row.clone()),
+                SecureField::from(0u32),
+            ))
+        };
+    prove_admission_inner(statement, Some(trace), Some(digest), Some(&factory))
+}
+
+/// Verify one unified admission STARK that additionally folds a Texas
+/// method AIR; the ingredient set must be the caller's rebuilt one.
+pub fn verify_ristretto_admission_stark_with_texas<A: crate::airs::TexasAir + 'static>(
+    archive: &ArchivedRistrettoAdmissionProof,
+    texas: TexasMethodIngredient<A>,
+) -> TexasAirResult<()> {
+    let TexasMethodIngredient {
+        trace,
+        air,
+        expected_trace_row,
+    } = texas;
+    let digest = texas_ingredient_digest(trace.log_size, &air, &expected_trace_row);
+    let factory =
+        |allocator: &mut TraceLocationAllocator| -> Box<dyn ComponentProver<SimdBackend>> {
+            Box::new(FrameworkComponent::new(
+                allocator,
+                crate::airs::bound::BoundAir::new(air.clone(), expected_trace_row.clone()),
+                SecureField::from(0u32),
+            ))
+        };
+    verify_admission_inner(archive, Some(trace), Some(digest), Some(&factory))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1186,13 +1739,14 @@ mod tests {
                 right: output_two,
                 output: curve_add(&output_one, &output_two),
             }],
-            schedule: AdmissionScheduleSpec {
+            schedule: Some(AdmissionScheduleSpec {
                 powers_challenge: scalar_bytes(7),
                 product_y: scalar_bytes(9),
                 product_z: scalar_bytes(11),
                 product_challenge: scalar_bytes(13),
                 deck_size: 12,
-            },
+            }),
+            recurrence: None,
         }
     }
 
@@ -1212,7 +1766,9 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let permutation = vec![2usize, 0, 3, 1];
+        let mut permutation = (0..deck).collect::<Vec<_>>();
+        use rand::seq::SliceRandom;
+        permutation.shuffle(&mut rng);
         let rerandomizers = (0..deck)
             .map(|_| BgScalar::random(&mut rng))
             .collect::<Vec<_>>();
@@ -1264,6 +1820,389 @@ mod tests {
         }
     }
 
+    struct PlayerFixture {
+        pk_ownership: Vec<(
+            BgPoint,
+            crate::ristretto_player_proofs_air::RistrettoPkOwnershipWire,
+            crate::ristretto_player_proofs_air::ArchivedRistrettoPlayerProof,
+        )>,
+        reveal_tokens: Vec<(
+            BgPoint,
+            BgCiphertext,
+            BgPoint,
+            crate::ristretto_player_proofs_air::RistrettoRevealTokenWire,
+            crate::ristretto_player_proofs_air::ArchivedRistrettoPlayerProof,
+        )>,
+        deck_dleqs: Vec<(
+            Vec<BgCiphertext>,
+            Vec<BgCiphertext>,
+            BgPoint,
+            crate::ristretto_player_proofs_air::RistrettoDeckDleqWire,
+            crate::ristretto_player_proofs_air::ArchivedRistrettoPlayerProof,
+        )>,
+    }
+
+    fn player_roundtrip_fixture(with_dleq: bool) -> &'static PlayerFixture {
+        // Leaked on purpose: the admission inputs borrow the freshly proven
+        // wires and Flock proofs for the test's lifetime.
+        use crate::ristretto_player_proofs_air::{
+            prove_deck_dleq, prove_pk_ownership, prove_reveal_token,
+        };
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+        let mut rng = StdRng::seed_from_u64(0x0F01_D2A3);
+        Box::leak(Box::new(PlayerFixture {
+            pk_ownership: {
+                let sk = BgScalar::random(&mut rng);
+                let pk = base_point_value() * sk;
+                let (wire, proof) =
+                    prove_pk_ownership(&sk, &pk, b"table7-hand3", &mut rng).expect("pk proof");
+                vec![(pk, wire, proof)]
+            },
+            reveal_tokens: {
+                let sk = BgScalar::random(&mut rng);
+                let pk = base_point_value() * sk;
+                let card = RistrettoCurve::hash_to_curve(b"bench/card/17");
+                let randomness = BgScalar::random(&mut rng);
+                let ciphertext = BgCiphertext::encrypt(&card, &pk, &randomness);
+                let reveal_token = ciphertext.c1 * sk;
+                let (wire, proof) = prove_reveal_token(
+                    &sk,
+                    &pk,
+                    &ciphertext,
+                    &reveal_token,
+                    b"table7-hand3",
+                    &mut rng,
+                )
+                .expect("reveal proof");
+                vec![(pk, ciphertext, reveal_token, wire, proof)]
+            },
+            deck_dleqs: if with_dleq {
+                let sk = BgScalar::random(&mut rng);
+                let pk = base_point_value() * sk;
+                let input = (0..52)
+                    .map(|index| {
+                        let card =
+                            RistrettoCurve::hash_to_curve(format!("bench/card/{index}").as_bytes());
+                        let randomness = BgScalar::random(&mut rng);
+                        BgCiphertext::encrypt(&card, &pk, &randomness)
+                    })
+                    .collect::<Vec<_>>();
+                let output = input
+                    .iter()
+                    .map(|ct| BgCiphertext {
+                        c1: ct.c1,
+                        c2: ct.c2 + ct.c1 * sk,
+                    })
+                    .collect::<Vec<_>>();
+                let (wire, proof) = prove_deck_dleq(
+                    RistrettoDeckDleqDirection::Remask,
+                    &input,
+                    &output,
+                    &sk,
+                    &pk,
+                    b"table7-hand3",
+                    &mut rng,
+                )
+                .expect("dleq proof");
+                vec![(input, output, pk, wire, proof)]
+            } else {
+                Vec::new()
+            },
+        }))
+    }
+
+    fn texas_create_table_ingredient()
+    -> TexasMethodIngredient<crate::airs::lifecycle::create_table::CreateTableAir> {
+        use poker_l1::object_model::ObjectID;
+        use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+        let mut pre_table = TexasPokerTable::new(
+            ObjectID::new([0xAA; 20], 42),
+            String::new(),
+            EMPTY_PLAYER,
+            2,
+            1,
+            1,
+        );
+        pre_table.call_seq = 0;
+        let mut post_table = TexasPokerTable::new(
+            ObjectID::new([0xAA; 20], 42),
+            "test_table".to_string(),
+            [0xCC; 20],
+            6,
+            10,
+            20,
+        );
+        post_table.call_seq = 1;
+        let input = crate::airs::lifecycle::create_table::CreateTableInput {
+            name: "test_table".to_string(),
+            max_players: 6,
+            small_blind: 10,
+            big_blind: 20,
+        };
+        let trace = crate::trace_gen::create_table_trace::gen_create_table_trace(
+            input,
+            &pre_table,
+            &post_table,
+            42,
+            0,
+            1,
+        )
+        .expect("create table trace");
+        let public_inputs = crate::public_inputs::TexasPublicInputs::from_tables(
+            &pre_table,
+            &post_table,
+            crate::method_kind::MethodKind::CreateTable,
+            42,
+            0,
+            1,
+        )
+        .expect("public inputs");
+        let public_inputs = crate::prover::prepare_public_inputs_for_trace(
+            public_inputs,
+            &trace.trace,
+            crate::airs::lifecycle::create_table::CreateTableAir::num_columns(),
+        )
+        .expect("prepared inputs");
+        let expected_trace_row = public_inputs
+            .require_expected_trace_row(
+                crate::airs::lifecycle::create_table::CreateTableAir::num_columns(),
+            )
+            .expect("expected row");
+        TexasMethodIngredient {
+            trace: trace.trace,
+            air: trace.air,
+            expected_trace_row,
+        }
+    }
+
+    #[test]
+    fn texas_layer1_fold_proves_and_verifies() {
+        // Crypto side: the pk + reveal player equations.
+        let owned = player_roundtrip_fixture(false);
+        let inputs = PlayerAdmissionInputs {
+            statement_digest: [0x79; 32],
+            pk_ownership: owned
+                .pk_ownership
+                .iter()
+                .map(|(pk, wire, proof)| PlayerPkOwnershipEntry {
+                    pk,
+                    context: b"table7-hand3",
+                    wire,
+                    proof,
+                })
+                .collect(),
+            reveal_tokens: owned
+                .reveal_tokens
+                .iter()
+                .map(
+                    |(pk, ciphertext, reveal_token, wire, proof)| PlayerRevealTokenEntry {
+                        pk,
+                        ciphertext,
+                        reveal_token,
+                        context: b"table7-hand3",
+                        wire,
+                        proof,
+                    },
+                )
+                .collect(),
+            deck_dleqs: Vec::new(),
+        };
+        let statement = decompose_player_admission(&inputs).expect("decomposition");
+        let ingredient = texas_create_table_ingredient();
+        let started = std::time::Instant::now();
+        let archive = prove_ristretto_admission_stark_with_texas(statement.clone(), ingredient)
+            .expect("texas fold STARK");
+        let prove_elapsed = started.elapsed();
+        let started = std::time::Instant::now();
+        verify_ristretto_admission_stark_with_texas(&archive, texas_create_table_ingredient())
+            .expect("texas fold verify");
+        eprintln!(
+            "texas Layer-1 fold (pk + reveal + create_table): prove {prove_elapsed:?}, verify {:?}, proof {} bytes",
+            started.elapsed(),
+            archive.stark_proof_bytes.len()
+        );
+
+        // A tampered expected row detaches the method digest.
+        let mut wrong = texas_create_table_ingredient();
+        wrong.expected_trace_row[0] = wrong.expected_trace_row[0] + M31::from(1u32);
+        assert!(
+            verify_ristretto_admission_stark_with_texas(&archive, wrong).is_err(),
+            "tampered texas expected row must fail"
+        );
+
+        // A spliced crypto statement still rejects.
+        let mut spliced = archive.clone();
+        spliced.statement.ladders[0].output[4] ^= 1;
+        assert!(
+            verify_ristretto_admission_stark_with_texas(&spliced, texas_create_table_ingredient())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn player_admission_stark_proves_and_verifies() {
+        let owned = player_roundtrip_fixture(false);
+        let inputs = PlayerAdmissionInputs {
+            statement_digest: [0x77; 32],
+            pk_ownership: owned
+                .pk_ownership
+                .iter()
+                .map(|(pk, wire, proof)| PlayerPkOwnershipEntry {
+                    pk,
+                    context: b"table7-hand3",
+                    wire,
+                    proof,
+                })
+                .collect(),
+            reveal_tokens: owned
+                .reveal_tokens
+                .iter()
+                .map(
+                    |(pk, ciphertext, reveal_token, wire, proof)| PlayerRevealTokenEntry {
+                        pk,
+                        ciphertext,
+                        reveal_token,
+                        context: b"table7-hand3",
+                        wire,
+                        proof,
+                    },
+                )
+                .collect(),
+            deck_dleqs: Vec::new(),
+        };
+        let statement = decompose_player_admission(&inputs).expect("decomposition");
+        eprintln!(
+            "player admission decomposition (pk + reveal): {} ladders, {} additions",
+            statement.ladders.len(),
+            statement.additions.len()
+        );
+        let started = std::time::Instant::now();
+        let archive = prove_player_admission_components(&inputs).expect("player STARK");
+        let prove_elapsed = started.elapsed();
+        let started = std::time::Instant::now();
+        verify_player_admission_components(&inputs, &archive).expect("player verify");
+        eprintln!(
+            "player admission STARK (pk + reveal): prove {prove_elapsed:?}, verify {:?}, proof {} bytes",
+            started.elapsed(),
+            archive.stark_proof_bytes.len()
+        );
+
+        // A spliced admission statement detaches from the component set.
+        let mut spliced = archive.clone();
+        spliced.statement.ladders[0].output[9] ^= 1;
+        assert!(verify_player_admission_components(&inputs, &spliced).is_err());
+
+        // Spliced proof bytes fail the STARK.
+        let proof_len = archive.stark_proof_bytes.len();
+        let mut spliced = archive.clone();
+        spliced.stark_proof_bytes[proof_len / 2] ^= 1;
+        assert!(verify_player_admission_components(&inputs, &spliced).is_err());
+    }
+
+    #[test]
+    fn player_admission_deck_dleq_proves_and_verifies() {
+        let owned = player_roundtrip_fixture(true);
+        let inputs = PlayerAdmissionInputs {
+            statement_digest: [0x78; 32],
+            pk_ownership: owned
+                .pk_ownership
+                .iter()
+                .map(|(pk, wire, proof)| PlayerPkOwnershipEntry {
+                    pk,
+                    context: b"table7-hand3",
+                    wire,
+                    proof,
+                })
+                .collect(),
+            reveal_tokens: owned
+                .reveal_tokens
+                .iter()
+                .map(
+                    |(pk, ciphertext, reveal_token, wire, proof)| PlayerRevealTokenEntry {
+                        pk,
+                        ciphertext,
+                        reveal_token,
+                        context: b"table7-hand3",
+                        wire,
+                        proof,
+                    },
+                )
+                .collect(),
+            deck_dleqs: owned
+                .deck_dleqs
+                .iter()
+                .map(|(input, output, pk, wire, proof)| PlayerDeckDleqEntry {
+                    direction: RistrettoDeckDleqDirection::Remask,
+                    input,
+                    output,
+                    pk,
+                    context: b"table7-hand3",
+                    wire,
+                    proof,
+                })
+                .collect(),
+        };
+        let statement = decompose_player_admission(&inputs).expect("decomposition");
+        eprintln!(
+            "player admission decomposition (pk + reveal + deck DLEQ): {} ladders, {} additions",
+            statement.ladders.len(),
+            statement.additions.len()
+        );
+        let started = std::time::Instant::now();
+        let archive = prove_player_admission_components(&inputs).expect("player STARK");
+        let prove_elapsed = started.elapsed();
+        let started = std::time::Instant::now();
+        verify_player_admission_components(&inputs, &archive).expect("player verify");
+        eprintln!(
+            "player admission STARK (pk + reveal + deck DLEQ): prove {prove_elapsed:?}, verify {:?}, proof {} bytes",
+            started.elapsed(),
+            archive.stark_proof_bytes.len()
+        );
+
+        // A wrong direction flips the d2 derivation and breaks an equation.
+        let mut wrong = PlayerAdmissionInputs {
+            statement_digest: [0x78; 32],
+            pk_ownership: inputs.pk_ownership.clone(),
+            reveal_tokens: inputs.reveal_tokens.clone(),
+            deck_dleqs: vec![PlayerDeckDleqEntry {
+                direction: RistrettoDeckDleqDirection::Leave,
+                input: inputs.deck_dleqs[0].input,
+                output: inputs.deck_dleqs[0].output,
+                pk: inputs.deck_dleqs[0].pk,
+                context: b"table7-hand3",
+                wire: inputs.deck_dleqs[0].wire,
+                proof: inputs.deck_dleqs[0].proof,
+            }],
+        };
+        let _ = &mut wrong;
+        assert!(decompose_player_admission(&wrong).is_err());
+    }
+
+    #[test]
+    #[ignore = "full-deck BG admission benchmark: minutes of proving and multiple GB of memory"]
+    fn bg_admission_deck52_benchmark() {
+        let components = bg_components_fixture(52);
+        let (statement, _) = decompose_bg_admission(&components).expect("decomposition");
+        eprintln!(
+            "BG admission decomposition (deck 52): {} ladders, {} additions",
+            statement.ladders.len(),
+            statement.additions.len()
+        );
+        let started = std::time::Instant::now();
+        let archive =
+            prove_ristretto_bg_admission_components(&components).expect("BG admission STARK");
+        let prove_elapsed = started.elapsed();
+        let started = std::time::Instant::now();
+        verify_ristretto_bg_admission_components(&components, &archive)
+            .expect("BG admission verify");
+        let verify_elapsed = started.elapsed();
+        eprintln!(
+            "BG admission STARK (deck 52): prove {prove_elapsed:?}, verify {verify_elapsed:?}, proof {} bytes",
+            archive.stark_proof_bytes.len()
+        );
+    }
+
     #[test]
     fn bg_admission_stark_proves_and_verifies() {
         let components = bg_components_fixture(4);
@@ -1274,7 +2213,7 @@ mod tests {
             statement.additions.len(),
             equalities.len()
         );
-        assert_eq!(statement.schedule.deck_size, 4);
+        assert_eq!(statement.schedule.expect("bg schedule").deck_size, 4);
         let started = std::time::Instant::now();
         let archive =
             prove_ristretto_bg_admission_components(&components).expect("BG admission STARK");
@@ -1346,7 +2285,7 @@ mod tests {
         )
         .expect("separate ladder proof");
         let separate_schedule = prove_ristretto_scalar_program(&{
-            let spec = &statement.schedule;
+            let spec = statement.schedule.as_ref().expect("bg schedule");
             build_bayer_groth_scalar_schedule(
                 &spec.powers_challenge,
                 &spec.product_y,
@@ -1404,7 +2343,12 @@ mod tests {
 
         // A detached schedule challenge rebuilds a different program.
         let mut spliced = archive.clone();
-        spliced.statement.schedule.product_y[0] ^= 1;
+        spliced
+            .statement
+            .schedule
+            .as_mut()
+            .expect("bg schedule")
+            .product_y[0] ^= 1;
         assert!(verify_ristretto_admission_stark(&spliced).is_err());
 
         // A detached ladder output fails the native rebuild.

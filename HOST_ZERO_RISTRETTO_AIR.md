@@ -661,10 +661,24 @@ A recursion must then constrain:
    reject.  The recurrence scalars and the `b_response[0]` check stay
    native (a mod-l program segment is the follow-up), and deck-52 (428
    ladders, under the 512 batch cap) awaits a follow-up benchmark.
-   Remaining recursion work: Texas state-transition STARKs as Layer-1
-   components; in-circuit FRI verification remains out of scope for
-   stwo 2.3, so this skeleton is the folding half of recursion, not yet
-   a proof-verifies-proof verifier.
+   The remaining roadmap items landed on top: the player-proof family
+   (`prove/verify_player_admission_components`) decomposes pk-ownership,
+   reveal-token, and the batched deck DLEQ (remask/leave; fold's key
+   update stays a caller-side native check) through the same
+   ladder/addition/equality pattern behind a native Flock gate; the
+   product-argument recurrence rides a second namespaced scalar-program
+   segment (`build_bayer_groth_recurrence_program`, wire v4; deck-52
+   with the recurrence segment: prove 271.9 s / verify 35.3 s / 43.0 MB,
+   without it 140.4 s / 17.2 s / 29.6 MB); and Texas Layer-1 folding is
+   prototyped (`prove/verify_ristretto_admission_stark_with_texas`):
+   any method AIR joins as a BoundAir component — its trace columns in
+   shared tree 1, a domain-separated expected-row digest in the channel,
+   a zero-claim component — demonstrated with CreateTable plus the
+   player equations in one STARK (tampered expected rows reject).
+   Remaining work: dual-proof full-method wiring, single-envelope
+   column packing, and in-circuit FRI verification (out of scope for
+   stwo 2.3 — this remains the folding half of recursion, not a
+   proof-verifies-proof verifier).
 
    Follow-up roadmap (recorded in `PERFORMANCE_V2_PROTOCOL.md` §4.1 as
    well): incremental ladder optimizations (doubling specialization for

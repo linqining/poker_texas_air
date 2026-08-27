@@ -2090,6 +2090,9 @@ pub(crate) type ScalarEval = stwo::prover::poly::circle::CircleEvaluation<
 pub(crate) struct ScalarProgramSegment {
     /// Log size of this segment's columns.
     pub(crate) log_size: u32,
+    /// Distinct scope-id namespace (several scalar segments can share one
+    /// admission allocator).
+    scope_prefix: String,
     /// Preprocessed scope columns (shared tree 0).
     pub(crate) scope: MethodTrace,
     /// Original trace columns (shared tree 1).
@@ -2104,12 +2107,16 @@ pub(crate) struct ScalarProgramSegment {
 impl ScalarProgramSegment {
     /// Build the scope and original trace columns without touching the
     /// channel. Every program must share the template's shape.
-    pub(crate) fn build(programs: &[RistrettoScalarProgram]) -> TexasAirResult<Self> {
+    pub(crate) fn build(
+        programs: &[RistrettoScalarProgram],
+        scope_prefix: &str,
+    ) -> TexasAirResult<Self> {
         let log_size = batch_log_size(programs.len())?;
         let trace = trace_columns_batch(programs)?;
         let scope = scope_columns_batch(programs)?;
         Ok(Self {
             log_size,
+            scope_prefix: scope_prefix.to_string(),
             scope,
             trace,
             interaction: Vec::new(),
@@ -2153,16 +2160,20 @@ impl ScalarProgramSegment {
             .relations
             .as_ref()
             .expect("ScalarProgramSegment::interact runs before component construction");
-        FrameworkComponent::new(
-            allocator,
-            ScalarProgramAir::new(
-                self.log_size,
-                template.clone(),
-                range.clone(),
-                carry.clone(),
-            ),
-            self.claimed_sum,
-        )
+        let mut air = ScalarProgramAir::new(
+            self.log_size,
+            template.clone(),
+            range.clone(),
+            carry.clone(),
+        );
+        // Re-namespace the AIR's internal scope ids so several scalar
+        // segments can share one admission allocator.
+        air.scope_ids = (0..air.scope_ids.len())
+            .map(|column| PreProcessedColumnId {
+                id: format!("{}.{}", self.scope_prefix, column).into(),
+            })
+            .collect();
+        FrameworkComponent::new(allocator, air, self.claimed_sum)
     }
 
     /// Mirror the prover's relation draws on a verifier channel without
@@ -2190,8 +2201,67 @@ impl ScalarProgramSegment {
         &self,
         template: &RistrettoScalarProgram,
     ) -> Vec<PreProcessedColumnId> {
-        preprocessed_ids(template)
+        let count = preprocessed_ids(template).len();
+        (0..count)
+            .map(|column| PreProcessedColumnId {
+                id: format!("{}.{}", self.scope_prefix, column).into(),
+            })
+            .collect()
     }
+}
+
+/// The Bayer--Groth product-argument recurrence over the scalar field.
+///
+/// Given the final product challenge `pc` and the masked responses
+/// `b_response`/`a_response`, one program proves
+/// `recurrence[i] = pc·b[i+1] − b[i]·a[i+1]` for every `i` plus the initial
+/// value `d = b[0] − a[0]`, so the unified admission STARK covers the scalar
+/// derivation the second product check consumes (the `d == 0` and
+/// `b[n-1]` comparisons stay native on the pinned outputs).
+pub fn build_bayer_groth_recurrence_program(
+    product_challenge: &[u8; LIMBS],
+    b_response: &[[u8; LIMBS]],
+    a_response: &[[u8; LIMBS]],
+) -> TexasAirResult<RistrettoScalarProgram> {
+    let n = b_response.len();
+    if n < 2 || n > 128 || a_response.len() != n {
+        return Err(TexasAirError::SpecViolation(
+            "Bayer-Groth recurrence response length is out of the supported range".into(),
+        ));
+    }
+    let group_order = modulus().clone();
+    for (label, value) in [("product challenge", product_challenge)] {
+        if BigUint::from_bytes_le(value) >= group_order {
+            return Err(TexasAirError::SpecViolation(format!(
+                "Bayer-Groth recurrence {label} is not below the Ristretto group order"
+            )));
+        }
+    }
+    for (label, responses) in [("b", b_response), ("a", a_response)] {
+        for value in responses {
+            if BigUint::from_bytes_le(value) >= group_order {
+                return Err(TexasAirError::SpecViolation(format!(
+                    "Bayer-Groth recurrence {label} response is not below the group order"
+                )));
+            }
+        }
+    }
+    let mut builder =
+        RistrettoScalarProgramBuilder::new(&[*product_challenge, b_response[0], a_response[0]]);
+    let pc = 0u16;
+    let mut outputs = vec![builder.subtract(1, 2)?];
+    let mut b_index = 1u16;
+    let mut a_index = 2u16;
+    for index in 1..n {
+        let next_b = builder.constant(&b_response[index])?;
+        let next_a = builder.constant(&a_response[index])?;
+        let scaled = builder.multiply(pc, next_b)?;
+        let cross = builder.multiply(b_index, next_a)?;
+        outputs.push(builder.subtract(scaled, cross)?);
+        b_index = next_b;
+        a_index = next_a;
+    }
+    builder.finish(&outputs)
 }
 
 #[cfg(test)]

@@ -103,8 +103,8 @@ reveal 阶段已按证明 rayon 并行（181→13.2 ms）。整手 verify 297→
 | --- | --- | --- |
 | 洗牌 BG 点方程 | ~7 组 52-way MSM 等式 | ✅ 已落地：`ristretto_scalar_mul_air` 专用 fixed-window 梯子 AIR（N=52 批量 prove 19.0s / verify 1.7s，边际 ~0.34s/次；对比 FpProgram 压缩行路线 172.3s / 8.8s，**prove 9.1× / verify 5.2×**） |
 | BG 标量侧调度 | 幂表 + 期望乘积（mod l） | ✅ 已落地：`ristretto_scalar_program_air`（单条 prove 2.7s / verify 1.7s / 17.9MB；**跨调度批摊销实测**：52 条同形状调度一批 prove 2.8s / 证明 18.2MB = **0.35MB/条**，已达 <1MB 目标，无需新代码——结算层按窗口合批即可） |
-| pk_ownership / reveal_token | 各 2 条点方程 | 各 2 次标量乘 |
-| remask / leave / fold | 53 条点方程 | ~106 次标量乘（52 卡批量 DLEQ） |
+| pk_ownership / reveal_token | 各 2 条点方程 | ✅ 已接入：player admission 分解器（各 2 / 4 次标量乘 + 原生等式，含 Flock 原生门） |
+| remask / leave / fold | 53 条点方程 | ✅ 已接入：deck DLEQ 分解（106 次标量乘 + 53 等式；fold 的密钥更新减法仍为调用方原生检查） |
 | transcript 链 | BLAKE3 二元域约束 | 即 Flock 已覆盖的语句 |
 | 状态绑定 / openings | Blake2b lookup | 已是 M31 栈 STARK |
 
@@ -156,11 +156,21 @@ ZRS2 信封的场景（单调度 17.9MB / 单梯子 6.2MB）才需要进一步�
    公式分解为 [梯子语句 + 累加行 + 编码等式（原生）+ 标量调度 STARK]，
    deck-4 实测：46 梯子 + 38 累加 + 8 等式，一份 STARK prove 11.8s /
    verify 2.37s / 15.5MB；篡改响应标量/承诺点/语句/证明字节全拒。
-   deck-52（428 梯子，≤512 上限）待后续基准；recurrence 标量侧与
-   b_response[0] 检查仍为原生（mod-l 程序段是后续项）；
-4. **Texas 状态转移 STARK 作为 Layer 1 组件接入**（聚合计划
-   Layer 0/1/2/3 中的 1/3 层）；
-5. **边界**：电路内 FRI 验证超出 stwo 2.3 能力（无 verifier-air/
+   deck-52 实测（含 recurrence 标量段，见下）：430 梯子 + 422 累加，一份
+   STARK prove 271.9s / verify 35.3s / 43.0MB（不含 recurrence 段时
+   140.4s / 17.2s / 29.6MB——recurrence 宽行段是主要增量，列打包适用）；
+4. ✅ **recurrence 标量段**（已完成）：`build_bayer_groth_recurrence_
+   program` 把 `recurrence[i] = pc·b[i+1] − b[i]·a[i+1]` 与 `d = b[0] −
+   a[0]` 的 mod-l 推导并入 admission STARK 第二标量段（语句携带
+   AdmissionRecurrenceSpec，wire v4；`d == 0` 与 `b[n-1]` 比较仍为对
+   pinned 输出的原生检查）；
+5. ✅ **Texas Layer-1 折叠**（已完成，原型）：`prove/verify_
+   ristretto_admission_stark_with_texas` 把任一方法 AIR（BoundAir 包装，
+   trace 列进共享 tree 1、期望行摘要素入通道、零 claim 组件）折进
+   admission STARK——CreateTable 与 pk+reveal 点方程一份证明验证通过，
+   篡改期望行拒绝；dual-proof 全方法接线是后续项；
+6. **边界**：电路内 FRI 验证超出 stwo 2.3 能力（无 verifier-air/
    recursion crate），当前骨架是递归的"折叠"半边（多组件单 FRI +
    摘要绑定），非 proof-verifies-proof；真正的电路内验证需升级
    stwo 或自研 verifier AIR。
+

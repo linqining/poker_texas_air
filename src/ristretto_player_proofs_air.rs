@@ -144,6 +144,66 @@ fn verify_player_proof(
     Ok(scalar)
 }
 
+/// Derive the pk-ownership challenge exactly as [`verify_pk_ownership`]
+/// does (same absorb order), without running the Flock verification.  The
+/// unified admission STARK consumes this for its ladder decomposition; the
+/// native verify remains the fail-closed gate.
+pub(crate) fn derive_pk_ownership_challenge(
+    pk: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoPkOwnershipWire,
+) -> RistrettoScalar {
+    let mut transcript = FlockShuffleTranscript::new(PK_OWNERSHIP_PROTOCOL);
+    transcript.absorb(b"context", context);
+    transcript.absorb(b"pk", &point_bytes(pk));
+    transcript.absorb(b"commitment", &wire.commitment);
+    transcript.challenge::<RistrettoCurve>(b"challenge").scalar
+}
+
+/// Derive the reveal-token challenge exactly as [`verify_reveal_token`]
+/// does (same absorb order), without running the Flock verification.
+pub(crate) fn derive_reveal_token_challenge(
+    pk: &RistrettoPoint,
+    ciphertext: &RistrettoCiphertext,
+    reveal_token: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoRevealTokenWire,
+) -> RistrettoScalar {
+    let mut transcript = FlockShuffleTranscript::new(REVEAL_TOKEN_PROTOCOL);
+    absorb_reveal_statement(&mut transcript, context, pk, ciphertext, reveal_token);
+    transcript.absorb(b"t1", &wire.commitment_t1);
+    transcript.absorb(b"t2", &wire.commitment_t2);
+    transcript.challenge::<RistrettoCurve>(b"challenge").scalar
+}
+
+/// Derive the deck-DLEQ challenge exactly as [`verify_deck_dleq`] does
+/// (same absorb order), without running the Flock verification.
+pub(crate) fn derive_deck_dleq_challenge(
+    direction: RistrettoDeckDleqDirection,
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    pk: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoDeckDleqWire,
+) -> TexasAirResult<RistrettoScalar> {
+    if input.len() != RISTRETTO_PLAYER_PROOF_DECK_SIZE || output.len() != input.len() {
+        return Err(TexasAirError::SpecViolation(
+            "deck DLEQ requires the fixed 52-card deck".into(),
+        ));
+    }
+    let mut transcript = FlockShuffleTranscript::new(direction.protocol());
+    absorb_deck_dleq_statement(
+        &mut transcript,
+        context,
+        pk,
+        input,
+        output,
+        &wire.per_card_commitments,
+        &wire.commitment_pk,
+    );
+    Ok(transcript.challenge::<RistrettoCurve>(b"challenge").scalar)
+}
+
 // ============================================================================
 // Key ownership
 // ============================================================================
@@ -364,7 +424,11 @@ impl RistrettoDeckDleqDirection {
         }
     }
 
-    fn compute_d2(self, input_c2: &RistrettoPoint, output_c2: &RistrettoPoint) -> RistrettoPoint {
+    pub(crate) fn compute_d2(
+        self,
+        input_c2: &RistrettoPoint,
+        output_c2: &RistrettoPoint,
+    ) -> RistrettoPoint {
         match self {
             Self::Remask => *output_c2 - *input_c2,
             Self::Leave => *input_c2 - *output_c2,
