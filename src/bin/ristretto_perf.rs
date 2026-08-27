@@ -19,6 +19,9 @@ use poker_texas_air::ristretto_fp_program_air::{
     verify_ristretto_fp_program_compressed_fixed_window_scalar_mul_batch,
 };
 use poker_texas_air::ristretto_msm_air::{prove_ristretto_msm, verify_ristretto_msm};
+use poker_texas_air::ristretto_scalar_mul_air::{
+    prove_ristretto_scalar_mul_ladder_batch, verify_ristretto_scalar_mul_ladder_batch,
+};
 
 const LIMBS: usize = 32;
 const WINDOWS: usize = 64;
@@ -127,6 +130,31 @@ fn main() {
         let prove_elapsed = started.elapsed();
         let started = Instant::now();
         verify_ristretto_msm(&archive).unwrap();
+        let verify_elapsed = started.elapsed();
+        println!(
+            "prove {:>9.1?}  verify {:>8.1?}  proof bytes {}",
+            prove_elapsed,
+            verify_elapsed,
+            borsh_len(&archive)
+        );
+    }
+
+    // Dedicated fixed-window scalar-multiplication ladder AIR: same inputs as
+    // the compressed fixed-window sections above, for a head-to-head
+    // comparison (decode/encode once per statement instead of per row).
+    for pairs in [1usize, 2, 8, 52] {
+        println!("=== dedicated scalar-mul ladder batch N={pairs} ===");
+        let inputs = (1..=pairs)
+            .map(|index| {
+                let scalar = scalar(index as u8);
+                (scalar, nibbles(&scalar), basepoint())
+            })
+            .collect::<Vec<_>>();
+        let started = Instant::now();
+        let archive = prove_ristretto_scalar_mul_ladder_batch(inputs).unwrap();
+        let prove_elapsed = started.elapsed();
+        let started = Instant::now();
+        verify_ristretto_scalar_mul_ladder_batch(&archive).unwrap();
         let verify_elapsed = started.elapsed();
         println!(
             "prove {:>9.1?}  verify {:>8.1?}  proof bytes {}",

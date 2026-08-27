@@ -669,13 +669,15 @@ fn full_hand_v2() {
         RistrettoAirCiphertext, RistrettoShuffleSubmission, RistrettoTexasDeck,
     };
     use poker_texas_air::ristretto_player_proofs_air::{
-        RistrettoCiphertext, prove_fold_with_proof_v2, prove_pk_ownership, prove_reveal_token,
-        verify_fold_with_proof_v2, verify_pk_ownership, verify_reveal_token,
+        RistrettoCiphertext, prove_fold_with_proof_v2, prove_pk_ownership,
+        prove_reveal_tokens_batched, verify_fold_with_proof_v2, verify_pk_ownership,
+        verify_reveal_tokens_batched,
     };
     use poker_texas_air::ristretto_shuffle_air::{
         admit_ristretto_air_v2_shuffle_submission, prove_ristretto_air_v2_shuffle,
     };
     use rand::SeedableRng;
+    use rayon::prelude::*;
 
     type Point = <RistrettoCurve as Curve>::Point;
     type Scalar = <RistrettoCurve as Curve>::Scalar;
@@ -717,9 +719,13 @@ fn full_hand_v2() {
         total_bytes += borsh_ser(wire).len() + borsh_ser(proof).len();
     }
     let ownership_verify = started.elapsed();
-    total_prove += ownership_prove;
-    total_verify += ownership_verify;
-    println!("ownership x{PLAYERS}: prove {ownership_prove:?}, verify {ownership_verify:?}");
+    println!(
+        "ownership x{PLAYERS}: prove {ownership_prove:?} (includes cold flock setup), verify {ownership_verify:?}"
+    );
+    // P1: preheat the flock setup caches once; every later phase runs warm.
+    let started = Instant::now();
+    poker_texas_air::blake3_flock::preheat_flock_setup().expect("flock preheat");
+    println!("flock preheat: {:?}", started.elapsed());
 
     // ---- Phase 2: canonical base deck under the aggregate key ------------
     let aggregate: Point = public_keys.iter().copied().sum();
@@ -881,45 +887,59 @@ fn full_hand_v2() {
         .flat_map(|&seat| hole_cards[seat].clone())
         .chain(board.clone())
         .collect();
+    // P0: one batched DLEQ per player over every revealed card (33 -> 3
+    // proofs); P3: the per-player proofs verify in parallel.
     let started = Instant::now();
-    let mut token_wires = Vec::new();
+    let mut token_batches = Vec::new();
     for &seat in &active {
-        for (card_index, card) in revealed.iter().enumerate() {
-            let context = format!("reveal-seat{seat}-card{card_index}");
-            let token = card.c1 * secret_keys[seat];
-            let (wire, proof) = prove_reveal_token(
-                &secret_keys[seat],
-                &public_keys[seat],
-                card,
-                &token,
-                context.as_bytes(),
-                &mut rng,
-            )
-            .expect("reveal token proof");
-            token_wires.push((seat, card_index, context, wire, proof));
-        }
+        let tokens: Vec<Point> = revealed
+            .iter()
+            .map(|card| card.c1 * secret_keys[seat])
+            .collect();
+        let context = format!("showdown-seat{seat}");
+        let (wire, proof) = prove_reveal_tokens_batched(
+            &secret_keys[seat],
+            &public_keys[seat],
+            &revealed,
+            &tokens,
+            context.as_bytes(),
+            &mut rng,
+        )
+        .expect("batched reveal token proof");
+        token_batches.push((seat, context, wire, proof));
     }
     let reveal_prove = started.elapsed();
     let started = Instant::now();
-    for (seat, card_index, context, wire, proof) in &token_wires {
-        let token = revealed[*card_index].c1 * secret_keys[*seat];
-        verify_reveal_token(
-            &public_keys[*seat],
-            &revealed[*card_index],
-            &token,
-            context.as_bytes(),
-            wire,
-            proof,
-        )
-        .expect("reveal verify");
-        total_bytes += borsh_ser(wire).len() + borsh_ser(proof).len();
+    let verify_results: Vec<_> = token_batches
+        .par_iter()
+        .map(|(seat, context, wire, proof)| {
+            let tokens: Vec<Point> = revealed
+                .iter()
+                .map(|card| card.c1 * secret_keys[*seat])
+                .collect();
+            verify_reveal_tokens_batched(
+                &public_keys[*seat],
+                &revealed,
+                &tokens,
+                context.as_bytes(),
+                wire,
+                proof,
+            )
+            .map_err(|error| format!("seat {seat}: {error}"))
+        })
+        .collect();
+    for result in &verify_results {
+        result.clone().expect("batched reveal verify");
     }
     let reveal_verify = started.elapsed();
+    for (_, _, wire, proof) in &token_batches {
+        total_bytes += borsh_ser(wire).len() + borsh_ser(proof).len();
+    }
     total_prove += reveal_prove;
     total_verify += reveal_verify;
     println!(
-        "reveal tokens x{} ({} cards x {} active players): prove {reveal_prove:?}, verify {reveal_verify:?}",
-        token_wires.len(),
+        "reveal tokens (batched: {} proofs over {} cards x {} active players): prove {reveal_prove:?}, verify {reveal_verify:?} (parallel)",
+        token_batches.len(),
         revealed.len(),
         active.len()
     );

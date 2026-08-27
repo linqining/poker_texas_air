@@ -594,15 +594,35 @@ A recursion must then constrain:
 
 1. the transcript chains (binary-field BLAKE3 — the statements the Flock
    STARKs already cover);
-2. the scalar-side Bayer--Groth schedule over `F_l` (powers table, expected
-   product, final product check) — this needs a `mod l` program AIR; the
-   existing FpProgram AIR constrains `p = 2^255 − 19` only, so a
-   scalar-field variant (23 limbs, 10-bit top limb, `l`-modulus quotients)
-   is the named prerequisite;
-3. the point-side multi-exponentiation equalities (~7 checks over 52-way
-   MSMs, roughly 300 in-circuit scalar multiplications) — the dominant
-   recursion cost, gated on the dedicated fixed-window scalar-multiplication
-   AIR (the standing P0 performance item).
+2. ~~the scalar-side Bayer--Groth schedule over `F_l`~~ **implemented**:
+   `ristretto_scalar_program_air` is a faithful `mod l` port of the Fp
+   program AIR (same 24×11-bit limb layout, carry bounds and LogUp tables;
+   the modulus is encoded by `L_BYTES` and its `2^256 − l` complement), and
+   `build_bayer_groth_scalar_schedule` proves the powers/product/final
+   schedule in one STARK.  Measured (release): prove 2.4 s, verify 1.65 s,
+   proof 17.9 MB for the 470-value/259-op program — correct but wide; the
+   wide-trace FRI cost is the follow-up (column packing, batch amortization
+   across a hand's schedules) before it is attached to the `ZRS2` envelope
+   by default;
+3. ~~the point-side multi-exponentiation equalities (~7 checks over 52-way
+   MSMs, roughly 300 in-circuit scalar multiplications)~~ **implemented**:
+   `ristretto_scalar_mul_air` is the dedicated fixed-window
+   scalar-multiplication ladder AIR (the standing P0 performance item).  One
+   trace row is one projective Edwards addition (twenty-six pinned values,
+   eight quotient witnesses, eight add/sub chains, a `2·Z1` doubling chain,
+   a hardcoded `2d·T1` constant multiplication, and seven general
+   multiplications); the base is decoded once and the final accumulator
+   encoded once, each as a fixed-shape Fp program batch row.  Row values are
+   pinned to preprocessed scope columns that the verifier recomputes from
+   its deterministic schedule rebuild, so pinned limbs need no in-circuit
+   range or canonicity witnesses — only quotient limbs (11-bit singles) and
+   multiplication carries (17-bit pairs) enter the shared LogUp tables.
+   Measured against the compressed-row Fp program route on identical inputs
+   (ristretto_perf, release): N=52 batch prove 19.0 s vs 172.3 s (9.1x),
+   verify 1.7 s vs 8.8 s (5.2x), proof 6.24 MB vs 6.54 MB; marginal cost
+   ~0.34 s per multiplication.  The wide-trace FRI cost (multi-MB proofs)
+   remains the follow-up compression item alongside the scalar-schedule
+   STARK.
 
 The same component split applies to the native reconstruction route: its
 sigma equations are 4 scalar multiplications per slot plus 6 per cross-key

@@ -319,6 +319,20 @@ impl HashProofProvider for FlockProvider {
 /// `canonical_state_hash`, `state_root_binding`) avoid the per-statement
 /// `Vec<u8>` clone that the trait-object route would otherwise pay on the
 /// `ArchivedFlockHashesProof` archive.
+/// Warm the flock prover's setup caches with one trivial chain statement.
+///
+/// The first Flock STARK of a process pays the full setup cost (hundreds of
+/// milliseconds); every later proof reuses the cached twiddle/table state and
+/// drops to milliseconds.  Clients that expect to produce proofs (a poker
+/// client proving a whole hand) should call this once at startup so no
+/// individual user action absorbs the cold-start latency.
+pub fn preheat_flock_setup() -> TexasAirResult<()> {
+    let message = b"zchain.texas.flock.preheat".to_vec();
+    let digest = blake3_chain_digest(&message);
+    let statement = crate::hash_prover::Blake2bStatement::new(message, digest);
+    FlockProvider.prove_statements(&[statement]).map(|_| ())
+}
+
 pub fn verify_flock_archive(inner: &ArchivedFlockHashesProof) -> TexasAirResult<()> {
     // Re-derive the segmentation from the covered statements; it must
     // reproduce the archived chain/merkle layout exactly.  Each sub-proof

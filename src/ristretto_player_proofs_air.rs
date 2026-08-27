@@ -931,6 +931,50 @@ mod tests {
     }
 
     #[test]
+    fn reveal_tokens_batched_roundtrip_and_tamper() {
+        let mut rng = test_rng();
+        let (sk, pk) = keypair(&mut rng);
+        let cards = sample_deck(&pk, &mut rng)[..11].to_vec();
+        let tokens: Vec<RistrettoPoint> = cards.iter().map(|card| card.c1 * sk).collect();
+        let (wire, proof) =
+            prove_reveal_tokens_batched(&sk, &pk, &cards, &tokens, b"showdown-ctx", &mut rng)
+                .unwrap();
+        verify_reveal_tokens_batched(&pk, &cards, &tokens, b"showdown-ctx", &wire, &proof).unwrap();
+
+        // One tampered token breaks its per-card equation.
+        let mut swapped = tokens.clone();
+        swapped[4] = tokens[5];
+        assert!(
+            verify_reveal_tokens_batched(&pk, &cards, &swapped, b"showdown-ctx", &wire, &proof)
+                .is_err()
+        );
+
+        // A token list from another key fails.
+        let (other_sk, _) = keypair(&mut rng);
+        let wrong: Vec<RistrettoPoint> = cards.iter().map(|card| card.c1 * other_sk).collect();
+        assert!(
+            verify_reveal_tokens_batched(&pk, &cards, &wrong, b"showdown-ctx", &wire, &proof)
+                .is_err()
+        );
+
+        // Spliced per-card commitment.
+        let mut tampered = wire.clone();
+        tampered.commitment_t2[7][20] ^= 1;
+        assert!(
+            verify_reveal_tokens_batched(&pk, &cards, &tokens, b"showdown-ctx", &tampered, &proof)
+                .is_err()
+        );
+
+        // Spliced response.
+        let mut tampered = wire;
+        tampered.response[20] ^= 1;
+        assert!(
+            verify_reveal_tokens_batched(&pk, &cards, &tokens, b"showdown-ctx", &tampered, &proof)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn fold_with_proof_roundtrip_and_tamper() {
         let mut rng = test_rng();
         let (sk, pk) = keypair(&mut rng);
@@ -963,4 +1007,188 @@ mod tests {
         tampered.deck.response[20] ^= 1;
         assert!(verify_fold_with_proof_v2(&pk, &aggregate, &input, &output, &tampered).is_err());
     }
+}
+
+// ============================================================================
+// Batched reveal tokens (one proof per player over every revealed card)
+// ============================================================================
+
+/// Batched reveal-token wire: one Schnorr-style response shared by every
+/// revealed card of one player.  Per-card commitments `T2_i = card_i.c1·ω`
+/// prevent aggregate attacks across cards.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct RistrettoRevealTokensBatchWire {
+    /// `T1 = G·ω`.
+    pub commitment_t1: [u8; 32],
+    /// One `T2_i = cards[i].c1·ω` per revealed card, in statement order.
+    pub commitment_t2: Vec<[u8; 32]>,
+    /// `s = ω + c·sk`.
+    pub response: [u8; 32],
+}
+
+fn absorb_reveal_batch_statement(
+    transcript: &mut FlockShuffleTranscript,
+    context: &[u8],
+    pk: &RistrettoPoint,
+    cards: &[RistrettoCiphertext],
+    tokens: &[RistrettoPoint],
+    commitment_t1: &[u8; 32],
+    commitment_t2: &[[u8; 32]],
+) {
+    transcript.absorb(b"context", context);
+    transcript.absorb(b"pk", &point_bytes(pk));
+    for ciphertext in cards {
+        transcript.absorb(b"c1", &point_bytes(&ciphertext.c1));
+        transcript.absorb(b"c2", &point_bytes(&ciphertext.c2));
+    }
+    for token in tokens {
+        transcript.absorb(b"reveal_token", &point_bytes(token));
+    }
+    transcript.absorb(b"t1", commitment_t1);
+    for commitment in commitment_t2 {
+        transcript.absorb(b"t2", commitment);
+    }
+}
+
+/// Prove, in one batched DLEQ, that the same registered `sk` behind
+/// `pk = sk·G` produces every `tokens[i] = sk·cards[i].c1`.
+///
+/// This collapses a player's whole showdown submission (one proof per
+/// revealed card) into a single proof: one Flock transcript, one challenge,
+/// one response — an order-of-magnitude size and latency win on the reveal
+/// phase.
+pub fn prove_reveal_tokens_batched(
+    sk: &RistrettoScalar,
+    pk: &RistrettoPoint,
+    cards: &[RistrettoCiphertext],
+    tokens: &[RistrettoPoint],
+    context: &[u8],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(RistrettoRevealTokensBatchWire, ArchivedRistrettoPlayerProof)> {
+    if cards.is_empty() || cards.len() != tokens.len() {
+        return Err(TexasAirError::SpecViolation(
+            "batched reveal tokens require matching non-empty card/token lists".into(),
+        ));
+    }
+    if *sk == RistrettoScalar::zero() || pk.is_identity() || RistrettoCurve::base_g() * *sk != *pk {
+        return Err(TexasAirError::SpecViolation(
+            "batched reveal-token witness does not match the public key".into(),
+        ));
+    }
+    for (card, token) in cards.iter().zip(tokens) {
+        if !card.is_valid() || token.is_identity() || *token != card.c1 * *sk {
+            return Err(TexasAirError::SpecViolation(
+                "batched reveal-token witness does not match a statement entry".into(),
+            ));
+        }
+    }
+    let (nonce, t1) = loop {
+        let nonce = RistrettoScalar::random(rng);
+        if nonce == RistrettoScalar::zero() {
+            continue;
+        }
+        let t1 = RistrettoCurve::base_g() * nonce;
+        if !t1.is_identity() {
+            break (nonce, t1);
+        }
+    };
+    let mut commitment_t2 = Vec::with_capacity(cards.len());
+    let mut degenerate = false;
+    for card in cards {
+        let point = card.c1 * nonce;
+        degenerate |= point.is_identity();
+        commitment_t2.push(point_bytes(&point));
+    }
+    if degenerate {
+        return Err(TexasAirError::SpecViolation(
+            "batched reveal-token commitment degenerated to the identity; reseed".into(),
+        ));
+    }
+    let mut transcript = FlockShuffleTranscript::new(REVEAL_TOKEN_PROTOCOL);
+    absorb_reveal_batch_statement(
+        &mut transcript,
+        context,
+        pk,
+        cards,
+        tokens,
+        &point_bytes(&t1),
+        &commitment_t2,
+    );
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    let response = nonce + challenge * *sk;
+    let wire = RistrettoRevealTokensBatchWire {
+        commitment_t1: point_bytes(&t1),
+        commitment_t2,
+        response: scalar_bytes(&response),
+    };
+    Ok((wire, finish_player_proof(&transcript)?))
+}
+
+/// Verify one batched reveal-token proof.
+pub fn verify_reveal_tokens_batched(
+    pk: &RistrettoPoint,
+    cards: &[RistrettoCiphertext],
+    tokens: &[RistrettoPoint],
+    context: &[u8],
+    wire: &RistrettoRevealTokensBatchWire,
+    proof: &ArchivedRistrettoPlayerProof,
+) -> TexasAirResult<()> {
+    if cards.is_empty() || cards.len() != tokens.len() || wire.commitment_t2.len() != cards.len() {
+        return Err(TexasAirError::SpecViolation(
+            "batched reveal-token statement shapes disagree".into(),
+        ));
+    }
+    if pk.is_identity() {
+        return Err(TexasAirError::SpecViolation(
+            "batched reveal-token public key is the identity".into(),
+        ));
+    }
+    for (card, token) in cards.iter().zip(tokens) {
+        if !card.is_valid() || token.is_identity() {
+            return Err(TexasAirError::SpecViolation(
+                "batched reveal-token statement contains identity points".into(),
+            ));
+        }
+    }
+    let t1 = decode_point(&wire.commitment_t1, "batched reveal-token commitment")?;
+    let response = decode_scalar(&wire.response, "batched reveal-token response")?;
+    if t1.is_identity() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "batched reveal-token commitment is the identity".into(),
+        ));
+    }
+    let mut commitments = Vec::with_capacity(cards.len());
+    for bytes in &wire.commitment_t2 {
+        let point = decode_point(bytes, "batched reveal-token per-card commitment")?;
+        if point.is_identity() {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "batched reveal-token per-card commitment is the identity".into(),
+            ));
+        }
+        commitments.push(point);
+    }
+    let mut transcript = FlockShuffleTranscript::new(REVEAL_TOKEN_PROTOCOL);
+    absorb_reveal_batch_statement(
+        &mut transcript,
+        context,
+        pk,
+        cards,
+        tokens,
+        &wire.commitment_t1,
+        &wire.commitment_t2,
+    );
+    let challenge = verify_player_proof(proof, &mut transcript)?;
+    if RistrettoCurve::base_g() * response != t1 + *pk * challenge {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "batched reveal-token key equation is not satisfied".into(),
+        ));
+    }
+    for ((card, token), commitment) in cards.iter().zip(tokens).zip(&commitments) {
+        if card.c1 * response != *commitment + *token * challenge {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "batched reveal-token per-card equation is not satisfied".into(),
+            ));
+        }
+    }
+    Ok(())
 }

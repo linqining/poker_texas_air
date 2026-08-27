@@ -160,6 +160,12 @@ pub mod ristretto_reconstruction_v2_air;
 pub mod ristretto_scalar_add_air;
 /// Canonical Ristretto255 group-scalar limb AIR.
 pub mod ristretto_scalar_air;
+/// Dedicated fixed-window Ristretto255 scalar-multiplication ladder AIR (the
+/// point-side Path A prerequisite).
+pub mod ristretto_scalar_mul_air;
+/// Single-STARK Ristretto255 scalar-field (`mod l`) program AIR: the Path A
+/// constraints for the Bayer--Groth scalar-side schedule.
+pub mod ristretto_scalar_program_air;
 /// Canonical Ristretto255 scalar 4-bit window AIR.
 pub mod ristretto_scalar_windows_air;
 /// RistrettoAirV2 complete 52-card shuffle: Bayer--Groth argument with a

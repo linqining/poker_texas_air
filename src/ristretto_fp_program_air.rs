@@ -72,13 +72,13 @@ const P_BYTES: [u8; LIMBS] = {
     bytes
 };
 
-const ONE_BYTES: [u8; LIMBS] = {
+pub(crate) const ONE_BYTES: [u8; LIMBS] = {
     let mut bytes = [0u8; LIMBS];
     bytes[0] = 1;
     bytes
 };
 
-const ZERO_BYTES: [u8; LIMBS] = [0u8; LIMBS];
+pub(crate) const ZERO_BYTES: [u8; LIMBS] = [0u8; LIMBS];
 
 /// `2^256 − p` little-endian: `value + C < 2^256 ⟺ value < p`, proven by a
 /// carry-chain adder with no per-limb nonzero/inverse flags.
@@ -123,14 +123,14 @@ const CANONICITY_COMPLEMENT_LIMBS: [u16; LIMB_COUNT] = base_limbs(&CANONICITY_CO
 /// 11-bit limbs and every relation stays far below the M31 wraparound bound.
 const MAX_MUL_CARRY_MAGNITUDE: u32 = 1 << 17;
 
-const TWO_BYTES: [u8; LIMBS] = {
+pub(crate) const TWO_BYTES: [u8; LIMBS] = {
     let mut bytes = [0u8; LIMBS];
     bytes[0] = 2;
     bytes
 };
 
 /// `2*d mod p` for the unified Edwards addition formula.
-const EDWARDS_TWO_D_BYTES: [u8; LIMBS] = [
+pub(crate) const EDWARDS_TWO_D_BYTES: [u8; LIMBS] = [
     0x59, 0xf1, 0xb2, 0x26, 0x94, 0x9b, 0xd6, 0xeb, 0x56, 0xb1, 0x83, 0x82, 0x9a, 0x14, 0xe0, 0x00,
     0x30, 0xd1, 0xf3, 0xee, 0xf2, 0x80, 0x8e, 0x19, 0xe7, 0xfc, 0xdf, 0x56, 0xdc, 0xd9, 0x06, 0x24,
 ];
@@ -142,13 +142,13 @@ const EDWARDS_D_BYTES: [u8; LIMBS] = [
 ];
 
 /// Nonnegative `sqrt(-1)` in the Ristretto255 field.
-const SQRT_M1_BYTES: [u8; LIMBS] = [
+pub(crate) const SQRT_M1_BYTES: [u8; LIMBS] = [
     0xb0, 0xa0, 0x0e, 0x4a, 0x27, 0x1b, 0xee, 0xc4, 0x78, 0xe4, 0x2f, 0xad, 0x06, 0x18, 0x43, 0x2f,
     0xa7, 0xd7, 0xfb, 0x3d, 0x99, 0x00, 0x4d, 0x2b, 0x0b, 0xdf, 0xc1, 0x4f, 0x80, 0x24, 0x83, 0x2b,
 ];
 
 /// `1/sqrt(a-d)` for the Ristretto compression branch.
-const INVSQRT_A_MINUS_D_BYTES: [u8; LIMBS] = [
+pub(crate) const INVSQRT_A_MINUS_D_BYTES: [u8; LIMBS] = [
     0xea, 0x40, 0x5d, 0x80, 0xaa, 0xfd, 0xc8, 0x99, 0xbe, 0x72, 0x41, 0x5a, 0x17, 0x16, 0x2f, 0x9d,
     0x40, 0xd8, 0x01, 0xfe, 0x91, 0x7b, 0xc2, 0x16, 0xa2, 0xfc, 0xaf, 0xcf, 0x05, 0x89, 0x6c, 0x78,
 ];
@@ -2615,7 +2615,7 @@ pub(crate) mod fp25519 {
 
 static NEGATIVE_EDWARDS_D: std::sync::OnceLock<[u8; LIMBS]> = std::sync::OnceLock::new();
 
-fn negative_edwards_d() -> [u8; LIMBS] {
+pub(crate) fn negative_edwards_d() -> [u8; LIMBS] {
     *NEGATIVE_EDWARDS_D
         .get_or_init(|| limbs(&subtract_big(&modulus(), &big_uint(&EDWARDS_D_BYTES))))
 }
@@ -2628,7 +2628,7 @@ static CANONICAL_DECODE_INVERSE_SQRT_MEMO: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<[u8; LIMBS], [u8; LIMBS]>>,
 > = std::sync::OnceLock::new();
 
-fn canonical_decode_inverse_sqrt(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
+pub(crate) fn canonical_decode_inverse_sqrt(encoding: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
     let memo = CANONICAL_DECODE_INVERSE_SQRT_MEMO
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Ok(cached) = memo.lock() {
@@ -2727,7 +2727,9 @@ fn canonical_decode_inverse_sqrt_uncached(encoding: &[u8; LIMBS]) -> TexasAirRes
     Ok(inverse_sqrt.to_bytes())
 }
 
-fn projective_encode_inverse_sqrt(point: &[[u8; LIMBS]; 4]) -> TexasAirResult<[u8; LIMBS]> {
+pub(crate) fn projective_encode_inverse_sqrt(
+    point: &[[u8; LIMBS]; 4],
+) -> TexasAirResult<[u8; LIMBS]> {
     let x = fp25519::Fe::from_bytes(&point[0]);
     let y = fp25519::Fe::from_bytes(&point[1]);
     let z = fp25519::Fe::from_bytes(&point[2]);
@@ -2923,7 +2925,10 @@ pub fn prove_ristretto_fp_program_point_decode(
     })
 }
 
-fn builder_values(builder: &RistrettoFpProgramBuilder, index: u16) -> TexasAirResult<[u8; LIMBS]> {
+pub(crate) fn builder_values(
+    builder: &RistrettoFpProgramBuilder,
+    index: u16,
+) -> TexasAirResult<[u8; LIMBS]> {
     builder
         .values
         .get(usize::from(index))
@@ -4482,15 +4487,15 @@ fn append_projective_addition(
 }
 
 #[derive(Clone, Copy)]
-struct AppendedCanonicalPointDecode {
-    coordinates: [u16; 4],
-    inverse_check: u16,
+pub(crate) struct AppendedCanonicalPointDecode {
+    pub(crate) coordinates: [u16; 4],
+    pub(crate) inverse_check: u16,
 }
 
 #[derive(Clone, Copy)]
-struct AppendedProjectivePointEncode {
-    encoding: u16,
-    inverse_check: u16,
+pub(crate) struct AppendedProjectivePointEncode {
+    pub(crate) encoding: u16,
+    pub(crate) inverse_check: u16,
 }
 
 fn parity_selector(value: &[u8; LIMBS]) -> [u8; LIMBS] {
@@ -4512,7 +4517,7 @@ fn append_fixed_select(
     builder.add(when_false, selected_delta)
 }
 
-fn append_fixed_canonical_point_decode(
+pub(crate) fn append_fixed_canonical_point_decode(
     builder: &mut RistrettoFpProgramBuilder,
     encoding: u16,
     inverse_sqrt: u16,
@@ -4561,7 +4566,7 @@ fn append_fixed_canonical_point_decode(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn append_fixed_projective_point_encode(
+pub(crate) fn append_fixed_projective_point_encode(
     builder: &mut RistrettoFpProgramBuilder,
     point: [u16; 4],
     inverse_sqrt: u16,
