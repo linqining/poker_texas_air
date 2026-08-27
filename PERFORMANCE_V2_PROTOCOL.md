@@ -16,7 +16,7 @@ RistrettoAirV2 有两条性能上完全不同的路径，本文档的所有数�
 | 路径 | 执行方 | 内容 | 成本量级 |
 | --- | --- | --- | --- |
 | **部署路径（生产）** | 客户端 **native prove** + 服务端 **AIR verify** | 客户端用 poker_protocol 原生密码学证明（ownership/洗牌/fold/reveal，交互级毫秒延迟）；服务端只执行验证器（`verify_*` / `admit_*`：BG 公式原生复核 + Flock transcript STARK 验证） | **整手 ~2s 墙钟，服务端 447ms**（§4.0 九人基准） |
-| **递归工件路径（Path A 预留）** | （未来）聚合器/链上 | `prove_*_admission_components` 等统一 admission STARK——把服务端的验证义务折叠为单份多组件证明，供链上验证或递归聚合消费 | deck-52 prove 271.9s（§4.1） |
+| **递归工件路径（Path A 预留）** | （未来）聚合器/链上 | `prove_*_admission_components` 等统一 admission STARK——把服务端的验证义务折叠为单份多组件证明，供链上验证或递归聚合消费 | deck-52 prove ~197–272s（会话波动，§4.1） |
 
 关键澄清：`prove_ristretto_bg_admission_components` / `prove_player_
 admission_components` / `prove_ristretto_admission_stark_with_texas` 等
@@ -186,34 +186,53 @@ AIR 验证器（verify_*/admit_*）：
 
 ### 4.1 后续工作（增量优化 + 递归路线图）
 
-**递归工件（admission STARK）成本结构与优化分析**——非生产关键路径
-（§0），仅当需要链上单证明/递归聚合时排期。2026-08 实测基线：含
-recurrence 段 prove 271.9s / verify 35.3s / 43.0MB：
+**递归工件（admission STARK）成本归因（✅ 2026-08-27 实测修正）**——非生产关键路径
+（§0），仅当需要链上单证明/递归聚合时排期。归因方法：`bg_admission_deck52_
+attribution` 基准（同进程四变体 A/B：完整 / 去 recurrence / 去调度 / 仅梯子），
+`TEXAS_PROVE_TIMING=1` 输出按段按相位记录，`TEXAS_STWO_TRACING=1` 激活 stwo
+内部 span（Extension/Merkle/Composition/FRI）。同会话基准：**prove 197.5s /
+verify 24.9s / 42.7MB**（会话间波动大：历史 271.9s/35.3s 与本次同工况差 ~28%，
+跨会话数字不可作归因依据——历史"recurrence 段 +131.5s"的结论**不可复现**，
+系跨会话对比伪影）。
 
-stwo 的证明成本近似按**列数**而非单元数计费——recurrence 段只有
-4M 单元（梯子段的 1/150）却花掉约一半 prove 时间（~131s），因为其
-列数（~31K）是梯子（~2.4K）的 13 倍；这是通用标量程序 AIR 的结构性
-成本（canonicity 列 ~360 值 × 51 列 + 每值 24 肢 + 每乘 141 列）。
-参照系（§0）：部署路径整手墙钟 ~2s、服务端 447ms；271.9s 是
-递归信封的 prove 成本，客户端 native 证明不受影响。
+**修正后的成本模型**（同会话 A/B + 相位分解）：
 
-| 优化点 | 做法 | 预估收益 | 复杂度 |
+- **prove 时间 ∝ 单元数**（每列按 `2^(自身log+blowup)` 扩展 + Poseidon Merkle）：
+  梯子段 3,850 个 log-18 列（trace 2,398 + interaction 1,140 + scope 312）贡献
+  ~148s（Merkle 占绝对主导：trace 树 91s + interaction 树 46s + scope 树 12.5s，
+  每列 ~40ms）；Composition 约束逐点求值 ~19s；见证生成（build 5.6s +
+  interact 3.8s）~10s；serialize 1.5s。**宽标量段（调度 117.6K 列 + recurrence
+  87.8K 列，全在 log 7–8）合计只花 ~5s 时间**——去掉 recurrence prove 仅
+  197.5→196.7s，去掉调度 193.0s，仅梯子（保留 codec+累加）198.6s。
+- **证明字节 ∝ 总列数**（每列 ~150B，与列所在 log 无关；FRI 查询覆盖全部三树）：
+  调度段 17.9MB + recurrence 段 13.3MB + 累加段 ~6.5MB + codec 段 ~4MB +
+  梯子核 ~1MB；四变体字节完美可加（11.52 + 13.34 + 17.88 = 42.74MB）。
+- **verify ≈ scope 树重承诺（12.9s，梯子 312 个 log-18 列的扩展+Merkle，刚性）
+  + segments.build（6.4s，验证端在物化完整见证 trace，可改 shape-only）
+  + stwo verify（1.4–4.8s，随字节线性）**。
+
+| 优化点 | 做法 | 预估收益（修正后） | 复杂度 |
 | --- | --- | --- | --- |
-| ① 专用 recurrence AIR | 梯子式固定布局：每步 7 个 pinned 值 + 2 乘 + 1 减链 ≈ 550 列/行（现 31K 列），值全部由公开响应确定性推导 → scope 钉死免 canonicity | recurrence 段 ~131s → 2–5s（**整体约 -45%**） | 中 |
-| ② 专用 BG 调度 AIR | 幂表/累乘拆固定行（~600 列，现 15K 列），同法 | 再 -10–15% | 中 |
-| ③ 梯子倍乘特化 | 4/5 Horner 行是倍乘，无 T 坐标专用公式（A=X², B=Y², C=2Z², E=(X+Y)²−A−B…）省 ~2–3 乘/行，宽度 -30% 覆盖 80% 行，LogUp carry 对同步减少 | ❌ **两个方向均已实测否决**（2026-08）：(a) 独立段——HWCD 倍乘行拆第二组件（窄 36%、4 输出乘 + 预平方 scope 钉死）后 N=52 prove 27.0s / verify 2.7s（原 18.3s / 1.8s），stwo 按列数计费，+1539 列净增；(b) 单组件选择子——stwo 的 FrameworkEval 行均匀（约束集对全定义域一致，无法按行跳过），选择子只能**增加** ~800 项/行而列数不变；实测约束斜率：+936 条满足约束/行仅 +2–4% prove（说明约束求值本就不是大头），故选择子方案严格为负。③ 在 stwo 2.3 上无可行实现，关闭 | ~~中~~ 不可行 |
-| ④ 定基混合加法 | 表生成行右操作数 Z₂=1，混合加法省 D 乘链 | ~3–5% | 低 |
-| ⑤ codec 段优化 | ✅ **decode+encode 已合并为单条 codec 程序批**（2026-08，`build_ladder_codec_program`，admission 侧 decode/encode 段同步合一）：省一次独立 FRI 固定成本，梯子批 N=52 prove 18.3→16.0s / verify 1.8→1.5s / 证明 6.24→5.60MB，N=1 prove 1.6→1.4s / 证明 −12%；剩余方向：重复基点（G/H/生成元）decode 去重、固定布局专用行 | 剩余 ~5% | 低-中 |
-| ⑥ 双手合批 | log 18 填充率仅 55%，两手 860 梯子共一次 FRI | 每手 -30–40%（摊销） | 低（结算层合批） |
-| ⑦ 见证生成定宽算术 | 430×335×8 次 BigUint 商计算换 4×u64 定点除法 | ~5–10s | 低 |
-| ⑧ 跨手预计算 | G/H/生成元 decode 列每证明重复重证；真正摊销需递归折叠或共享预计算列协议 | 长期/架构型 | 高 |
-| ⑨ 测量先行 | `TEXAS_PROVE_TIMING` 拆分 log-18 下 trace/承诺/FRI 占比与 rayon 并行度 | 定位剩余串行相位 | 低 |
+| ⑨ 测量归因 | ✅ **已完成**（2026-08-27，见上）：相位计时进 `prove_admission_inner`/`verify_admission_inner`（`admission.*` 记录），stwo tracing 走 `TEXAS_STWO_TRACING` | 成本模型修正为"时间∝单元数、字节∝列数"；①②⑥收益全部重估 | — |
+| ⑩ Pippenger 桶化 MSM AIR | 430 条独立梯子（144K 行，log 18）改为 ~7 组 52-way MSM 桶化（c=4–6 ≈ 30–35K 行，log 16）：Merkle/扩展 ~148→~37s、Composition ~19→~6s | **prove ~197→~65–80s（唯一的大时间杠杆）**；verify 的 scope 重承诺同步 ÷4 | 高 |
+| ⑩b 梯子 pinned 肢列消除 | 624 个 pinned 肢 trace 列与 312 个打包 scope 列重复——约束改读打包 scope（度 1 线性解包，pinned 肢不进 LogUp），删除 trace 侧肢列 | -624 个 log-18 列 ≈ **prove -24s**（每列 ~38ms）；不受③类"列计费"约束 | 中 |
+| ① 专用 recurrence AIR | 梯子式固定布局 ~550 列/步（现 87.8K 列），全值公开可推导 → 零 canonicity、scope 钉死 | **时间 ~0**（修正：原估 -45% 基于伪影）；**字节 -13.3MB、verify -~1.5s** | 中 |
+| ② 专用 BG 调度 AIR | 幂表/累乘拆固定行（~600 列，现 117.6K 列，最大字节单项），与①可统一为一个 BG 标量 AIR | **字节 -17.9MB**、verify -~2s | 中 |
+| ②b 累加段专用行 AIR | 422 条压缩点加法现为 Fp 程序批（42.6K 列 ≈ 6.5MB）——梯子式共享行布局（每行一次 Edwards 加法 ~2.4K 列共享） | 字节 -~6MB | 中 |
+| ④ 定基混合加法 | 表生成行右操作数 Z₂=1，混合加法省 D 乘链（减少 log-18 carry 对列） | prove -5~7s | 低 |
+| ⑤ codec 段合并 | ✅ 已完成（2026-08，`build_ladder_codec_program`）：decode+encode 合一，梯子批 N=52 prove 18.3→16.0s / 证明 6.24→5.60MB；剩余方向见⑧ | 已兑现 | — |
+| ⑧ codec 段瘦身 | 430 个 decode+encode 程序批 26.9K 列：重复基点 decode 去重 + 固定布局专用行 | 字节 -~3–4MB | 低-中 |
+| ⑦ 见证生成定宽算术 | build+interact 共 ~10s 的 BigUint 商/乘换 4×u64 定点 | prove -5~8s | 低 |
+| ⑥b 验证端 shape-only 段构建 | `AdmissionSegments::build` 在 verify 侧只需尺寸/ID，却物化了完整见证 trace | **verify -6.4s**（24.9→~18s） | 低 |
+| ⑥ 双手合批 | 修正：时间上**近零收益**（梯子行数翻倍→Merkle 严格线性，+1 层 FRI ≈ +3%）；字节上宽段列数恒定、梯子查询微增，**每手字节约减半** | 字节 -~50%/手（摊销）；时间 ~0 | 低 |
+| ③ 梯子倍乘特化 | ❌ 维持关闭（2026-08 实测否决，见历史表） | — | 不可行 |
 
-叠加预估：①+②+③ 后 deck-52 约 **60–90s**，再加⑥约 **40–60s/手**；
-进 10s 量级需 proof-verifies-proof 递归（超出 stwo 2.3）或专用后端
-（GPU/GPU-FRI），属下一架构阶段。**不建议动**：肢宽（11→12 位仅
-~10% 且 carry 表翻倍）、FRI 安全参数（协议决策）、carry 表拆分与
-LOG_SIZE（历史红线）。
+叠加预估（修正后）：**⑩+⑩b+⑦ → prove ~40–55s**（Merkle ~37s 主导）；
+**①+②+②b+⑧ → 字节 42.7→~5–8MB**；**⑥b+①② → verify 24.9→~13s**（剩余
+12.9s 为梯子 scope 重承诺刚性，除非 scope 设计改为摘要绑定）。进 10s 量级需
+proof-verifies-proof 递归（超出 stwo 2.3）或专用后端（GPU-FRI），属下一架构
+阶段。**不建议动**：肢宽（11→12 位仅 ~10% 且 carry 表翻倍）、FRI 安全参数
+（协议决策）、carry 表拆分与 LOG_SIZE（历史红线）。
 
 **其余增量优化（不阻塞主线，按需排期）**：
 
@@ -239,8 +258,10 @@ LOG_SIZE（历史红线）。
    deck-4 实测：46 梯子 + 38 累加 + 8 等式，一份 STARK prove 11.8s /
    verify 2.37s / 15.5MB；篡改响应标量/承诺点/语句/证明字节全拒。
    deck-52 实测（含 recurrence 标量段，见下）：430 梯子 + 422 累加，一份
-   STARK prove 271.9s / verify 35.3s / 43.0MB（不含 recurrence 段时
-   140.4s / 17.2s / 29.6MB——recurrence 宽行段是主要增量，列打包适用）；
+   STARK prove 271.9s / verify 35.3s / 43.0MB（跨会话波动 ±25–30%：2026-08-27
+   同会话 A/B 四变体为 197.5s / 24.9s / 42.7MB，且证明时间对 recurrence/调度
+   段不敏感——时间∝单元数由梯子 log-18 列主导，宽标量段只贡献字节与 FRI
+   验证成本，见 §4.1 修正后的成本模型）；
 4. ✅ **recurrence 标量段**（已完成）：`build_bayer_groth_recurrence_
    program` 把 `recurrence[i] = pc·b[i+1] − b[i]·a[i+1]` 与 `d = b[0] −
    a[0]` 的 mod-l 推导并入 admission STARK 第二标量段（语句携带

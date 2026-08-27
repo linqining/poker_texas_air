@@ -53,6 +53,7 @@ use stwo_constraint_framework::{
 };
 
 use crate::error::{TexasAirError, TexasAirResult};
+use crate::prove_timing::TimingKind;
 use crate::ristretto_fp_program_air::{
     FpProgramSegment, RistrettoFpProgram, build_ristretto_fp_program_compressed_point_addition,
 };
@@ -410,6 +411,61 @@ fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<Admission
     })
 }
 
+// ---------------------------------------------------------------------------
+// Phase timing (TEXAS_PROVE_TIMING): per-segment attribution of the shared
+// tree commits (evaluation conversion + interpolation), the LogUp
+// interaction build, and the outer prove/verify phases. Inert — a single
+// relaxed atomic read per phase — when the env var is absent.
+// ---------------------------------------------------------------------------
+
+type AdmissionTreeBuilder<'a, 'b> =
+    stwo::prover::pcs::TreeBuilder<'a, 'b, SimdBackend, Poseidon252MerkleChannel>;
+
+type AdmissionEval = stwo::prover::poly::circle::CircleEvaluation<
+    SimdBackend,
+    M31,
+    stwo::prover::poly::BitReversedOrder,
+>;
+
+fn timed_phase<T>(
+    label: &str,
+    kind: TimingKind,
+    columns: Option<usize>,
+    body: impl FnOnce() -> T,
+) -> T {
+    if !crate::prove_timing::enabled() {
+        return body();
+    }
+    let started = std::time::Instant::now();
+    let outcome = body();
+    crate::prove_timing::record(format!("admission.{label}"), kind, started, columns);
+    outcome
+}
+
+/// Commit one segment's columns into a shared tree under timing: the label
+/// covers both the evaluation conversion and the per-column interpolation.
+fn extend_timed(
+    tree: &mut AdmissionTreeBuilder<'_, '_>,
+    label: &str,
+    kind: TimingKind,
+    make_evals: impl FnOnce() -> Vec<AdmissionEval>,
+) {
+    if !crate::prove_timing::enabled() {
+        tree.extend_evals(make_evals());
+        return;
+    }
+    let started = std::time::Instant::now();
+    let evals = make_evals();
+    let columns = evals.len();
+    tree.extend_evals(evals);
+    crate::prove_timing::record(
+        format!("admission.commit.{label}"),
+        kind,
+        started,
+        Some(columns),
+    );
+}
+
 /// The ordered segment set of one admission. Empty Fp segments are skipped
 /// deterministically (currently only the additions segment can be empty).
 struct AdmissionSegments {
@@ -491,24 +547,33 @@ impl AdmissionSegments {
         channel: &mut stwo::core::channel::Poseidon252Channel,
         rebuilt: &AdmissionRebuilt,
     ) {
-        self.ladder.interact(channel);
+        let kind = TimingKind::Prove;
+        timed_phase("interact.ladder", kind, None, || self.ladder.interact(channel));
         if let Some(schedule) = &mut self.schedule {
             let program = rebuilt
                 .schedule_program
                 .as_ref()
                 .expect("segment implies program");
-            schedule.interact(channel, program);
+            timed_phase("interact.schedule", kind, None, || {
+                schedule.interact(channel, program)
+            });
         }
         if let Some(recurrence) = &mut self.recurrence {
             let program = rebuilt
                 .recurrence_program
                 .as_ref()
                 .expect("segment implies program");
-            recurrence.interact(channel, program);
+            timed_phase("interact.recurrence", kind, None, || {
+                recurrence.interact(channel, program)
+            });
         }
-        self.codec.interact(channel, &rebuilt.codec_programs[0]);
+        timed_phase("interact.codec", kind, None, || {
+            self.codec.interact(channel, &rebuilt.codec_programs[0])
+        });
         if let Some(additions) = &mut self.additions {
-            additions.interact(channel, &rebuilt.addition_programs[0]);
+            timed_phase("interact.additions", kind, None, || {
+                additions.interact(channel, &rebuilt.addition_programs[0])
+            });
         }
     }
 
@@ -547,59 +612,69 @@ impl AdmissionSegments {
         sums
     }
 
-    fn commit_scope(
-        &self,
-        tree: &mut stwo::prover::pcs::TreeBuilder<'_, '_, SimdBackend, Poseidon252MerkleChannel>,
-    ) {
-        tree.extend_evals(self.ladder.scope.to_evaluations());
+    fn commit_scope(&self, tree: &mut AdmissionTreeBuilder<'_, '_>, kind: TimingKind) {
+        extend_timed(tree, "scope.ladder", kind, || self.ladder.scope.to_evaluations());
         if let Some(schedule) = &self.schedule {
-            tree.extend_evals(schedule.scope.to_evaluations());
+            extend_timed(tree, "scope.schedule", kind, || schedule.scope.to_evaluations());
         }
         if let Some(recurrence) = &self.recurrence {
-            tree.extend_evals(recurrence.scope.to_evaluations());
+            extend_timed(tree, "scope.recurrence", kind, || {
+                recurrence.scope.to_evaluations()
+            });
         }
-        tree.extend_evals(self.codec.scope.to_evaluations());
+        extend_timed(tree, "scope.codec", kind, || self.codec.scope.to_evaluations());
         if let Some(additions) = &self.additions {
-            tree.extend_evals(additions.scope.to_evaluations());
+            extend_timed(tree, "scope.additions", kind, || additions.scope.to_evaluations());
         }
     }
 
     fn commit_trace(
         &self,
-        tree: &mut stwo::prover::pcs::TreeBuilder<'_, '_, SimdBackend, Poseidon252MerkleChannel>,
+        tree: &mut AdmissionTreeBuilder<'_, '_>,
         binding_trace: &crate::trace_gen::MethodTrace,
+        kind: TimingKind,
     ) {
-        tree.extend_evals(self.ladder.trace.to_evaluations());
+        extend_timed(tree, "trace.ladder", kind, || self.ladder.trace.to_evaluations());
         if let Some(schedule) = &self.schedule {
-            tree.extend_evals(schedule.trace.to_evaluations());
+            extend_timed(tree, "trace.schedule", kind, || schedule.trace.to_evaluations());
         }
         if let Some(recurrence) = &self.recurrence {
-            tree.extend_evals(recurrence.trace.to_evaluations());
+            extend_timed(tree, "trace.recurrence", kind, || {
+                recurrence.trace.to_evaluations()
+            });
         }
-        tree.extend_evals(self.codec.trace.to_evaluations());
+        extend_timed(tree, "trace.codec", kind, || self.codec.trace.to_evaluations());
         if let Some(additions) = &self.additions {
-            tree.extend_evals(additions.trace.to_evaluations());
+            extend_timed(tree, "trace.additions", kind, || additions.trace.to_evaluations());
         }
         if let Some((trace, _)) = &self.texas {
-            tree.extend_evals(trace.to_evaluations());
+            extend_timed(tree, "trace.texas", kind, || trace.to_evaluations());
         }
-        tree.extend_evals(binding_trace.to_evaluations());
+        extend_timed(tree, "trace.binding", kind, || binding_trace.to_evaluations());
     }
 
-    fn commit_interaction(
-        &self,
-        tree: &mut stwo::prover::pcs::TreeBuilder<'_, '_, SimdBackend, Poseidon252MerkleChannel>,
-    ) {
-        tree.extend_evals(self.ladder.interaction.clone());
+    fn commit_interaction(&self, tree: &mut AdmissionTreeBuilder<'_, '_>) {
+        let kind = TimingKind::Prove;
+        extend_timed(tree, "interaction.ladder", kind, || {
+            self.ladder.interaction.clone()
+        });
         if let Some(schedule) = &self.schedule {
-            tree.extend_evals(schedule.interaction.clone());
+            extend_timed(tree, "interaction.schedule", kind, || {
+                schedule.interaction.clone()
+            });
         }
         if let Some(recurrence) = &self.recurrence {
-            tree.extend_evals(recurrence.interaction.clone());
+            extend_timed(tree, "interaction.recurrence", kind, || {
+                recurrence.interaction.clone()
+            });
         }
-        tree.extend_evals(self.codec.interaction.clone());
+        extend_timed(tree, "interaction.codec", kind, || {
+            self.codec.interaction.clone()
+        });
         if let Some(additions) = &self.additions {
-            tree.extend_evals(additions.interaction.clone());
+            extend_timed(tree, "interaction.additions", kind, || {
+                additions.interaction.clone()
+            });
         }
     }
 
@@ -769,12 +844,14 @@ fn prove_admission_inner(
     texas_digest: Option<[u32; BINDING_DIGEST_LIMBS]>,
     texas_factory: Option<TexasFactory<'_>>,
 ) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
-    let rebuilt = rebuild_admission(&statement)?;
-    let mut segments = AdmissionSegments::build(&rebuilt)?;
+    let kind = TimingKind::Prove;
+    let rebuilt = timed_phase("rebuild", kind, None, || rebuild_admission(&statement))?;
+    let mut segments =
+        timed_phase("segments.build", kind, None, || AdmissionSegments::build(&rebuilt))?;
     segments.texas =
         texas_trace.map(|trace| (trace, texas_digest.expect("texas trace implies a digest")));
     let binding = AdmissionBindingAir::new(&statement);
-    let binding_trace = binding.trace_columns();
+    let binding_trace = timed_phase("binding.trace", kind, None, || binding.trace_columns());
 
     let config = crate::prover_context::protocol_pcs_config();
     let twiddles = crate::prover_context::simd_twiddles(
@@ -795,21 +872,23 @@ fn prove_admission_inner(
         );
     {
         let mut tree = scheme.tree_builder();
-        segments.commit_scope(&mut tree);
-        tree.commit(&mut channel);
+        segments.commit_scope(&mut tree, kind);
+        timed_phase("tree-commit.scope", kind, None, || tree.commit(&mut channel));
     }
     {
         let mut tree = scheme.tree_builder();
-        segments.commit_trace(&mut tree, &binding_trace);
-        tree.commit(&mut channel);
+        segments.commit_trace(&mut tree, &binding_trace, kind);
+        timed_phase("tree-commit.trace", kind, None, || tree.commit(&mut channel));
     }
-    segments.interact(&mut channel, &rebuilt);
+    timed_phase("interact-total", kind, None, || {
+        segments.interact(&mut channel, &rebuilt)
+    });
     let sums = segments.claimed_sums();
     channel.mix_felts(&sums);
     {
         let mut tree = scheme.tree_builder();
         segments.commit_interaction(&mut tree);
-        tree.commit(&mut channel);
+        timed_phase("tree-commit.interaction", kind, None, || tree.commit(&mut channel));
     }
 
     let ids = segments.preprocessed_ids(&rebuilt);
@@ -817,11 +896,14 @@ fn prove_admission_inner(
     let components = segments.components(&mut allocator, &rebuilt, binding, texas_factory);
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
         components.iter().map(|component| &**component).collect();
-    let proof = prove(&component_refs, &mut channel, scheme)
-        .map_err(|error| TexasAirError::StwoProverError(error.to_string()))?;
-    let stark_proof_bytes = options()
-        .serialize(&proof)
-        .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+    let proof = timed_phase("prove.stwo", kind, None, || {
+        prove(&component_refs, &mut channel, scheme)
+    })
+    .map_err(|error| TexasAirError::StwoProverError(error.to_string()))?;
+    let stark_proof_bytes = timed_phase("serialize", kind, None, || {
+        options().serialize(&proof)
+    })
+    .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
     let claimed_sums = sums
         .iter()
         .map(|sum| sum.to_m31_array().map(|limb| limb.0))
@@ -849,14 +931,17 @@ fn verify_admission_inner(
     texas_factory: Option<TexasFactory<'_>>,
 ) -> TexasAirResult<()> {
     type Proof = StarkProof<Poseidon252MerkleHasher>;
-    let rebuilt = rebuild_admission(&archive.statement)?;
-    let mut segments = AdmissionSegments::build(&rebuilt)?;
+    let kind = TimingKind::Verify;
+    let rebuilt = timed_phase("rebuild", kind, None, || rebuild_admission(&archive.statement))?;
+    let mut segments =
+        timed_phase("segments.build", kind, None, || AdmissionSegments::build(&rebuilt))?;
     segments.texas =
         texas_trace.map(|trace| (trace, texas_digest.expect("texas trace implies a digest")));
     let binding = AdmissionBindingAir::new(&archive.statement);
-    let proof: Proof = options()
-        .deserialize(&archive.stark_proof_bytes)
-        .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+    let proof: Proof = timed_phase("deserialize", kind, None, || {
+        options().deserialize(&archive.stark_proof_bytes)
+    })
+    .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
 
     let config = crate::prover_context::protocol_pcs_config();
     let twiddles = crate::prover_context::simd_twiddles(
@@ -871,8 +956,8 @@ fn verify_admission_inner(
     let mut scope_channel = stwo::core::channel::Poseidon252Channel::default();
     {
         let mut tree = trusted.tree_builder();
-        segments.commit_scope(&mut tree);
-        tree.commit(&mut scope_channel);
+        segments.commit_scope(&mut tree, kind);
+        timed_phase("tree-commit.scope", kind, None, || tree.commit(&mut scope_channel));
     }
     if proof.commitments.first().copied() != trusted.roots().first().copied() {
         return Err(TexasAirError::ConstraintUnsatisfied(
@@ -921,8 +1006,10 @@ fn verify_admission_inner(
         .iter()
         .map(|component| component.as_ref() as &dyn stwo::core::air::Component)
         .collect();
-    stwo::core::verifier::verify(&component_refs, &mut channel, &mut scheme, proof)
-        .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))
+    timed_phase("verify.stwo", kind, None, || {
+        stwo::core::verifier::verify(&component_refs, &mut channel, &mut scheme, proof)
+    })
+    .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))
 }
 
 // ===========================================================================
@@ -2170,6 +2257,89 @@ mod tests {
             "BG admission STARK (deck 52): prove {prove_elapsed:?}, verify {verify_elapsed:?}, proof {} bytes",
             archive.stark_proof_bytes.len()
         );
+    }
+
+    /// Cost-attribution A/B matrix for the deck-52 admission STARK: the same
+    /// statement with the wide scalar segments (schedule, recurrence) removed,
+    /// proved and verified in one process with `TEXAS_PROVE_TIMING` phase
+    /// records.  Deltas between variants attribute prove/verify/bytes to each
+    /// segment; the phase records attribute each segment's cost to rebuild /
+    /// tree commits / LogUp interaction / the shared stwo prove.  Set
+    /// `TEXAS_STWO_TRACING=1` to additionally print stwo's internal spans
+    /// (interpolation, composition, FRI) with busy times.
+    #[test]
+    #[ignore = "full-deck BG admission attribution matrix: ~4 proves at minutes each"]
+    fn bg_admission_deck52_attribution() {
+        if std::env::var_os("TEXAS_STWO_TRACING").is_some() {
+            use tracing_subscriber::fmt::format::FmtSpan;
+            let _ = tracing_subscriber::fmt()
+                .with_span_events(FmtSpan::CLOSE)
+                .with_target(false)
+                .try_init();
+        }
+        // Phase records are emitted only when the recorder was latched by the
+        // environment (`TEXAS_PROVE_TIMING=1` in the test invocation); the
+        // recorder's Once latch makes setting it here unreliable, so warn
+        // instead.
+        if !crate::prove_timing::enabled() {
+            eprintln!(
+                "note: TEXAS_PROVE_TIMING is not set — running without phase attribution; \
+                 re-run with TEXAS_PROVE_TIMING=1 for the phase table"
+            );
+        }
+
+        let components = bg_components_fixture(52);
+        let (statement, _) = decompose_bg_admission(&components).expect("decomposition");
+        eprintln!(
+            "BG admission decomposition (deck 52): {} ladders, {} additions",
+            statement.ladders.len(),
+            statement.additions.len()
+        );
+        // Drop any records accumulated by the fixture/decomposition itself.
+        let _ = crate::prove_timing::take_drain();
+
+        let mut variants: Vec<(&str, AdmissionStatement)> = vec![("full", statement.clone())];
+        let mut no_recurrence = statement.clone();
+        no_recurrence.recurrence = None;
+        variants.push(("no-recurrence", no_recurrence));
+        let mut no_schedule = statement.clone();
+        no_schedule.schedule = None;
+        variants.push(("no-schedule", no_schedule));
+        let mut ladder_only = statement;
+        ladder_only.schedule = None;
+        ladder_only.recurrence = None;
+        variants.push(("ladder-only", ladder_only));
+
+        for (name, variant) in variants {
+            let started = std::time::Instant::now();
+            let archive = prove_ristretto_admission_stark(variant).expect("admission STARK");
+            let prove_elapsed = started.elapsed();
+            let prove_records = crate::prove_timing::take_drain();
+            let started = std::time::Instant::now();
+            verify_ristretto_admission_stark(&archive).expect("admission verify");
+            let verify_elapsed = started.elapsed();
+            let verify_records = crate::prove_timing::take_drain();
+            eprintln!();
+            eprintln!(
+                "=== variant {name}: prove {prove_elapsed:?}, verify {verify_elapsed:?}, proof {} bytes ===",
+                archive.stark_proof_bytes.len()
+            );
+            print_phase_records("prove", &prove_records);
+            print_phase_records("verify", &verify_records);
+        }
+    }
+
+    fn print_phase_records(side: &str, records: &[crate::prove_timing::TimingRecord]) {
+        let mut sorted = records.to_vec();
+        sorted.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
+        eprintln!("--- {side} phases ({} records, by elapsed) ---", sorted.len());
+        for record in &sorted {
+            let ms = record.elapsed.as_millis();
+            let columns = record
+                .num_columns
+                .map_or_else(String::new, |count| format!(", {count} cols"));
+            eprintln!("  {ms:>8} ms  {}{columns}", record.label);
+        }
     }
 
     #[test]

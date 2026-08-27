@@ -115,6 +115,9 @@ pairing = { workspace = true }
 proptest = { workspace = true }
 rand = { workspace = true }
 secp256k1 = { workspace = true }
+# Bench-only: activates stwo's built-in phase spans (Composition/FRI/commit)
+# behind TEXAS_STWO_TRACING in the admission attribution benchmark.
+tracing-subscriber = "0.3"
 
 # Integration tests opt into untrusted PoC entry points explicitly via
 # `cargo test --features test-helpers` (debug only; the release guard in
