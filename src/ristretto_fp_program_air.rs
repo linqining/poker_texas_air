@@ -768,7 +768,7 @@ relation!(FpRange11, 1);
 relation!(FpCarry17, 2);
 
 #[derive(Clone)]
-struct FpProgramAir {
+pub(crate) struct FpProgramAir {
     log_size: u32,
     program: RistrettoFpProgram,
     range: FpRange11,
@@ -5036,6 +5036,149 @@ pub fn verify_ristretto_fp_program_fixed_window_scalar_mul(
         ));
     }
     verify_ristretto_fp_program(&archive.program)
+}
+
+// ---------------------------------------------------------------------------
+// Unified-admission segment (multi-component folding).
+// ---------------------------------------------------------------------------
+
+/// One circle-domain column evaluation as committed into the shared trees.
+pub(crate) type FpEval = stwo::prover::poly::circle::CircleEvaluation<
+    stwo::prover::backend::simd::SimdBackend,
+    M31,
+    stwo::prover::poly::BitReversedOrder,
+>;
+
+/// The unified-admission segment of one equal-shape Fp program batch (for
+/// example every base-decode program, every accumulator-encode program, or
+/// every compressed-point accumulation row of an admission): scope/trace
+/// columns for the shared preprocessed and original trees, interaction
+/// columns for the shared interaction tree, and (privately) the drawn LogUp
+/// relations needed for the component.
+pub(crate) struct FpProgramSegment {
+    /// Log size of this segment's columns.
+    pub(crate) log_size: u32,
+    /// Distinct scope-id namespace for this segment (several Fp segments
+    /// share one admission allocator, so their preprocessed-column ids must
+    /// not collide).
+    scope_prefix: String,
+    /// Preprocessed scope columns (shared tree 0).
+    pub(crate) scope: MethodTrace,
+    /// Original trace columns (shared tree 1).
+    pub(crate) trace: MethodTrace,
+    /// Interaction columns (shared tree 2); empty until `interact`.
+    pub(crate) interaction: Vec<FpEval>,
+    /// Claimed LogUp sum; zero until `interact`.
+    pub(crate) claimed_sum: SecureField,
+    relations: Option<(FpRange11, FpCarry17)>,
+}
+
+impl FpProgramSegment {
+    /// Build the scope and original trace columns without touching the
+    /// channel. Every program must share the template's shape. `scope_prefix`
+    /// namespaces this segment's preprocessed-column ids inside a shared
+    /// multi-component allocator.
+    pub(crate) fn build(
+        programs: &[RistrettoFpProgram],
+        scope_prefix: &str,
+    ) -> TexasAirResult<Self> {
+        let log_size = batch_log_size(programs.len())?;
+        let trace = trace_columns_batch(programs)?;
+        let scope = scope_columns_batch(programs)?;
+        Ok(Self {
+            log_size,
+            scope_prefix: scope_prefix.to_string(),
+            scope,
+            trace,
+            interaction: Vec::new(),
+            claimed_sum: SecureField::from(0u32),
+            relations: None,
+        })
+    }
+
+    /// Draw this segment's LogUp relations from the channel (after the
+    /// original-tree commit) and build the paired interaction columns.
+    pub(crate) fn interact(
+        &mut self,
+        channel: &mut stwo::core::channel::Poseidon252Channel,
+        template: &RistrettoFpProgram,
+    ) {
+        let range = FpRange11::draw(channel);
+        let carry = FpCarry17::draw(channel);
+        let (limb_columns, carry_pair_columns) = trace_tracked_columns(template);
+        let program_width = self.trace.cols.len() - range_table_column_count(self.log_size);
+        let (interaction, claimed_sum) = fp_range_interaction(
+            &self.trace,
+            self.log_size,
+            &range,
+            &carry,
+            &limb_columns,
+            &carry_pair_columns,
+            program_width,
+        );
+        self.interaction = interaction;
+        self.claimed_sum = claimed_sum;
+        self.relations = Some((range, carry));
+    }
+
+    /// Mirror the prover's relation draws on a verifier channel without
+    /// materializing interaction columns; stores the drawn relations for
+    /// component construction.
+    pub(crate) fn mirror_draw(&mut self, channel: &mut stwo::core::channel::Poseidon252Channel) {
+        let range = FpRange11::draw(channel);
+        let carry = FpCarry17::draw(channel);
+        self.relations = Some((range, carry));
+    }
+
+    /// Interaction-column count of this segment (paired fractions, four M31
+    /// columns per secure column), derivable from the template layout.
+    pub(crate) fn interaction_columns(&self, template: &RistrettoFpProgram) -> usize {
+        let (limb_columns, carry_pair_columns) = trace_tracked_columns(template);
+        let range_stripes = range_table_stripes(self.log_size);
+        let carry_stripes = carry_table_stripes(self.log_size);
+        (limb_columns.len() + carry_pair_columns.len() + range_stripes + carry_stripes).div_ceil(2)
+            * 4
+    }
+
+    /// Construct this segment's component against the shared allocator.
+    pub(crate) fn component(
+        &self,
+        allocator: &mut TraceLocationAllocator,
+        template: &RistrettoFpProgram,
+    ) -> FrameworkComponent<FpProgramAir> {
+        let (range, carry) = self
+            .relations
+            .as_ref()
+            .expect("FpProgramSegment::interact runs before component construction");
+        let mut air = FpProgramAir::new(
+            self.log_size,
+            template.clone(),
+            range.clone(),
+            carry.clone(),
+        );
+        // Re-namespace the AIR's internal scope ids so several Fp segments
+        // can share one admission allocator without duplicate ids.
+        air.scope_ids = (0..air.scope_ids.len())
+            .map(|column| PreProcessedColumnId {
+                id: format!("{}.{}", self.scope_prefix, column).into(),
+            })
+            .collect();
+        FrameworkComponent::new(allocator, air, self.claimed_sum)
+    }
+
+    /// Preprocessed-column identifiers of this segment's scope, namespaced
+    /// by the segment prefix exactly like [`FpProgramSegment::component`].
+    pub(crate) fn preprocessed_ids(
+        &self,
+        template: &RistrettoFpProgram,
+    ) -> Vec<PreProcessedColumnId> {
+        let count = preprocessed_ids(template).len();
+        (0..count)
+            .map(|column| PreProcessedColumnId {
+                id: format!("{}.{}", self.scope_prefix, column).into(),
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

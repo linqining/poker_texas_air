@@ -630,23 +630,52 @@ A recursion must then constrain:
 
    On top of both prerequisites, `ristretto_admission_air` is the unified
    admission STARK skeleton (the recursive-aggregator prototype): one
-   multi-component proof folding the ladder component, the Bayer--Groth
-   scalar-schedule component, and an admission binding row (the
-   domain-separated statement digest pinned inside the constrained trace)
-   into stwo's forced three-tree layout (tree 0 = every component's
-   preprocessed scope, tree 1 = every original trace, tree 2 = every LogUp
-   interaction) with a single FRI.  Measured (2 ladders + a deck-12
-   schedule): merged prove 1.78 s / verify 586 ms / 5.54 MB versus separate
-   proofs 2.97 s / 1012 ms / 5.04 MB — prove -40%, verify -42%, size +10%.
-   Verification keeps the fail-closed discipline: every ladder schedule and
-   the scalar schedule are rebuilt natively, the shared scope tree is
-   recomputed and compared, and only then does the single multi-component
-   STARK run.  The decode/encode Fp program segments of a full point
-   equation plug into the same three-tree layout as additional components
-   (follow-up), as do the Texas state-transition STARKs (Layer 1/3 of the
-   aggregation plan); in-circuit FRI verification remains out of scope for
-   stwo 2.3, so this skeleton is the folding half of recursion, not yet a
-   proof-verifies-proof verifier.
+   multi-component proof folding six component families — the ladder, the
+   Bayer--Groth scalar schedule, the base-decode and accumulator-encode Fp
+   program batches, the compressed-point accumulation rows, and an admission
+   binding row (the domain-separated statement digest pinned inside the
+   constrained trace) — into stwo's forced three-tree layout (tree 0 =
+   every component's preprocessed scope, tree 1 = every original trace,
+   tree 2 = every LogUp interaction) with a single FRI.  Measured with full
+   accounting on both sides (2 ladders + 1 accumulation row + a deck-12
+   schedule; the separate side counts all five proofs): merged prove
+   3.40 s / verify 1.69 s / 18.12 MB versus separate 3.58 s / 1.55 s /
+   17.11 MB — roughly neutral cost (prove -5%, verify +9%, size +6%); the
+   folding's value is the single unified artifact, the single verification
+   entry point, and the recursion skeleton, not compression.  Verification
+   keeps the fail-closed discipline: every ladder schedule (with its
+   decode/encode programs), every accumulation row, and the scalar schedule
+   are rebuilt natively, the shared scope tree is recomputed and compared,
+   and only then does the single multi-component STARK run.  The real
+   Bayer--Groth wiring is done on top: `prove/verify_
+   ristretto_bg_admission_components` (plus a request-bytes wrapper over
+   `ristretto_air_v2_shuffle_in_circuit_components`) decomposes every
+   public equation of `BayerGrothShuffleProof::verify` — the
+   multi-exponentiation ciphertext MSMs, both commitment-key vector
+   commitments, the scalar commitment, the re-randomization ciphertext
+   identity, and both product-argument checks — into ladder statements,
+   accumulation rows, native encoding equalities, and the mod-l scalar
+   schedule STARK.  Measured (deck 4): 46 ladders + 38 additions + 8
+   equalities in one STARK, prove 11.8 s / verify 2.37 s / 15.5 MB;
+   tampered responses, commitment points, statements, and proof bytes all
+   reject.  The recurrence scalars and the `b_response[0]` check stay
+   native (a mod-l program segment is the follow-up), and deck-52 (428
+   ladders, under the 512 batch cap) awaits a follow-up benchmark.
+   Remaining recursion work: Texas state-transition STARKs as Layer-1
+   components; in-circuit FRI verification remains out of scope for
+   stwo 2.3, so this skeleton is the folding half of recursion, not yet
+   a proof-verifies-proof verifier.
+
+   Follow-up roadmap (recorded in `PERFORMANCE_V2_PROTOCOL.md` §4.1 as
+   well): incremental ladder optimizations (doubling specialization for
+   the 4/5 Horner doubling rows, ~1.5–2x; folding the codec segments'
+   columns tighter; column packing for single-envelope proofs); recursion
+   work (wiring a real Bayer--Groth admission from
+   `RistrettoAirV2ShuffleInCircuitComponents`, deck-4 first; Texas
+   state-transition STARKs as Layer-1 components).  The
+   decode/encode/accumulation folding is done (admission STARK v2).  In-circuit FRI
+   verification is out of scope for stwo 2.3 — the skeleton is the
+   folding half of recursion, not a proof-verifies-proof verifier.
 
 The same component split applies to the native reconstruction route: its
 sigma equations are 4 scalar multiplications per slot plus 6 per cross-key

@@ -111,13 +111,14 @@ reveal 阶段已按证明 rayon 并行（181→13.2 ms）。整手 verify 297→
 结论：每手牌的完整递归义务 ≈ 500–700 次电路内标量乘 + 哈希约束 + 标量侧调度
 （✅ 已有 STARK：mod l program AIR）。**统一 admission STARK 骨架也已落地**
 （✅ `ristretto_admission_air`，递归聚合器原型）：一份多组件证明把
-[梯子 AIR 组件 + BG 标量调度组件 + admission 绑定行] 折进共享的三棵树
-（tree 0 = 各组件 scope、tree 1 = 各原始 trace、tree 2 = 各 LogUp 交互层，
-由 stwo 固定索引强制）与单次 FRI；实测（2 梯子 + deck-12 调度）：合并
-prove 1.78s / verify 586ms / 5.54MB，对比分离证明 prove 2.97s / verify
-1012ms / 5.04MB —— **prove -40% / verify -42%，体积 +10%**（合并 FRI 以最大
-log 域运行）。验证端沿用 fail-closed 纪律：原生重建全部语句 + 可信 scope
-比较 + 单次 STARK 验证。点侧的专用 fixed-window scalar-mul AIR
+[梯子 AIR + BG 标量调度 + 基点 decode + 终值 encode + 压缩点累加 + admission
+绑定行] 六类组件折进共享的三棵树（tree 0 = 各组件 scope、tree 1 = 各原始
+trace、tree 2 = 各 LogUp 交互层，由 stwo 固定索引强制）与单次 FRI。完整口径
+实测（2 梯子 + 1 累加行 + deck-12 调度，分离侧计入全部 5 份证明）：合并
+prove 3.40s / verify 1.69s / 18.12MB，分离 prove 3.58s / verify 1.55s /
+17.11MB —— **成本大致中性（prove -5% / verify +9% / 体积 +6%）**；折叠的
+价值在统一单工件、单次验证入口与递归骨架，而非压缩。验证端沿用
+fail-closed 纪律：原生重建全部语句 + 可信 scope 比较 + 单次 STARK 验证。点侧的专用 fixed-window scalar-mul AIR
 也已落地（✅ `ristretto_scalar_mul_air`）：trace 每行是一次射影 Edwards 加法
 （26 个 pinned 值 + 8 个商 witness + 8 条加减链 + `2·Z1` 倍乘链 + `2d·T1`
 常数乘 + 7 个一般乘法），基点只 decode 一次、终值只 encode 一次（各一条
@@ -130,3 +131,36 @@ fixed-shape Fp program 批行）；行内值经预计算 scope 列钉死到验�
 52 条一批 0.35MB/条（`prove_ristretto_scalar_program_batch`，prove 几乎零增长——
 宽度主导 FRI，行数只贡献 log 因子）；梯子路线 N=52 全批 6.24MB。仍按单条入
 ZRS2 信封的场景（单调度 17.9MB / 单梯子 6.2MB）才需要进一步的列打包压缩。
+
+### 4.1 后续工作（增量优化 + 递归路线图）
+
+**增量性能优化（均不阻塞主线，按需排期）**：
+
+1. **梯子倍乘特化**（预估 1.5–2×）：Horner 梯子中 4/5 的行是倍乘
+   （left==right），用无 T 坐标的专用倍乘公式（A=X², B=Y², C=2Z²,
+   E=(X+Y)²−A−B…）可再省 ~2 次乘/行；需要行类型分发（选择子约束或
+   独立段），复杂度中等。
+2. **decode/encode 段并入梯子 AIR**：小批量场景省去 codec 的独立
+   FRI 固定成本（N=1 时 codec 占 ~1s/1.8s）；作为特殊行或额外组件。
+3. **单条信封列打包**：仅影响"单条入 ZRS2 信封"场景（单调度
+   17.9MB / 单梯子 6.2MB）；受 range-check 线性抽取限制，需要新表
+   设计，收益不确定。
+
+**递归路线图（Path A 聚合器，骨架已就位）**：
+
+1. ✅ 统一 admission STARK 骨架（`ristretto_admission_air`，已完成）；
+2. ✅ **decode/encode/累加 Fp 段并入**（已完成，admission STARK v2）：
+   完整 BG 点方程族（decode→梯子→encode→累加）六类组件进同一三树布局；
+3. ✅ **真实 BG admission 接线**（已完成）：`prove/verify_
+   ristretto_bg_admission_components` + request 包装把 BG 验证器的全部
+   公式分解为 [梯子语句 + 累加行 + 编码等式（原生）+ 标量调度 STARK]，
+   deck-4 实测：46 梯子 + 38 累加 + 8 等式，一份 STARK prove 11.8s /
+   verify 2.37s / 15.5MB；篡改响应标量/承诺点/语句/证明字节全拒。
+   deck-52（428 梯子，≤512 上限）待后续基准；recurrence 标量侧与
+   b_response[0] 检查仍为原生（mod-l 程序段是后续项）；
+4. **Texas 状态转移 STARK 作为 Layer 1 组件接入**（聚合计划
+   Layer 0/1/2/3 中的 1/3 层）；
+5. **边界**：电路内 FRI 验证超出 stwo 2.3 能力（无 verifier-air/
+   recursion crate），当前骨架是递归的"折叠"半边（多组件单 FRI +
+   摘要绑定），非 proof-verifies-proof；真正的电路内验证需升级
+   stwo 或自研 verifier AIR。

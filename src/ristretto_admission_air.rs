@@ -9,24 +9,29 @@
 //! 2. the Bayer--Groth scalar-schedule component
 //!    ([`crate::ristretto_scalar_program_air::ScalarProgramAir`]) proving the
 //!    powers table / expected product / final check value;
-//! 3. an admission binding row pinning the domain-separated admission digest
+//! 3. the base-decode, accumulator-encode, and compressed-point accumulation
+//!    Fp program components ([`crate::ristretto_fp_program_air`]) — together
+//!    with the ladder segment these cover one complete point-equation family
+//!    (decode → ladder → encode → accumulate) inside a single proof;
+//! 4. an admission binding row pinning the domain-separated admission digest
 //!    (and its public scalars) inside the constrained trace.
 //!
 //! stwo's multi-component layout is forced by the constraint framework's
 //! fixed indices, so the three trees are shared by kind: tree 0 carries every
 //! component's preprocessed scope columns, tree 1 every original trace, tree
 //! 2 every LogUp interaction layer.  The Fiat--Shamir sequence is therefore
-//! `mix admission digest → tree 0 → tree 1 → draw both relation pairs → mix
-//! both claimed sums → tree 2 → prove([ladder, scalar, binding])`, mirrored
+//! `mix admission digest → tree 0 → tree 1 → draw each segment's relation
+//! pair → mix every claimed sum → tree 2 → prove(all components)`, mirrored
 //! exactly by the verifier.
 //!
 //! Trust model (the codebase's fail-closed discipline): the admission
 //! statement is a deterministic function of its public fields, so the
-//! verifier rebuilds every ladder schedule and the scalar schedule natively,
+//! verifier rebuilds every ladder schedule (with its decode/encode
+//! programs), every accumulation addition, and the scalar schedule natively,
 //! recomputes the shared scope tree, and rejects any detached statement
-//! before running the single STARK.  The decode/encode Fp program segments
-//! of a full Bayer--Groth point equation are not part of this skeleton yet;
-//! they plug into the same three-tree layout as additional components.
+//! before running the single STARK.  The accumulation-chain semantics (which
+//! ladder outputs feed which additions, and what the final MSM value is)
+//! stay with the caller's admission logic, exactly like the MSM layer.
 
 #![allow(missing_docs)]
 
@@ -48,6 +53,9 @@ use stwo_constraint_framework::{
 };
 
 use crate::error::{TexasAirError, TexasAirResult};
+use crate::ristretto_fp_program_air::{
+    FpProgramSegment, RistrettoFpProgram, build_ristretto_fp_program_compressed_point_addition,
+};
 use crate::ristretto_scalar_mul_air::{
     LadderSegment, RistrettoScalarMulLadderStatement, rebuild_statement,
 };
@@ -59,11 +67,10 @@ const LIMBS: usize = 32;
 /// Single-row binding trace replicated over the 128-row domain floor.
 const BINDING_LOG_SIZE: u32 = 7;
 /// Sixteen digest limbs plus the admission tag (eight u32 limbs), the ladder
-/// statement count, and the schedule deck size.
+/// statement count, the addition-row count, and the schedule deck size.
 const BINDING_DIGEST_LIMBS: usize = 16;
 const BINDING_TAG_LIMBS: usize = 8;
-const BINDING_COLUMNS: usize = BINDING_DIGEST_LIMBS + BINDING_TAG_LIMBS + 2;
-const ADMISSION_LOG_SIZE_FLOOR: u32 = 7;
+const BINDING_COLUMNS: usize = BINDING_DIGEST_LIMBS + BINDING_TAG_LIMBS + 4;
 
 /// One Bayer--Groth scalar-schedule specification: the transcript challenges
 /// `(x, y, z, pc)` and the deck size.
@@ -81,8 +88,19 @@ pub struct AdmissionScheduleSpec {
     pub deck_size: usize,
 }
 
+/// One public compressed-point accumulation row `left + right = output`.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct AdmissionAdditionRow {
+    /// Compressed left operand.
+    pub left: [u8; LIMBS],
+    /// Compressed right operand.
+    pub right: [u8; LIMBS],
+    /// Compressed output.
+    pub output: [u8; LIMBS],
+}
+
 /// The public admission statement: a caller tag, the point-equation ladder
-/// statements, and one Bayer--Groth scalar schedule.
+/// statements, the accumulation rows, and one Bayer--Groth scalar schedule.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AdmissionStatement {
     /// Caller-domain admission tag (for example a shuffle statement digest);
@@ -91,6 +109,8 @@ pub struct AdmissionStatement {
     /// Point-equation scalar multiplications; the scalar-window decomposition
     /// proofs stay owned by the caller.
     pub ladders: Vec<RistrettoScalarMulLadderStatement>,
+    /// Compressed-point accumulation rows (may be empty).
+    pub additions: Vec<AdmissionAdditionRow>,
     /// The single Bayer--Groth scalar schedule of this admission.
     pub schedule: AdmissionScheduleSpec,
 }
@@ -102,14 +122,13 @@ pub struct ArchivedRistrettoAdmissionProof {
     pub statement: AdmissionStatement,
     /// Serialized multi-component Stwo proof.
     pub stark_proof_bytes: Vec<u8>,
-    /// Claimed LogUp sum of the ladder component (4 M31 coordinates).
-    pub ladder_claimed_sum: [u32; 4],
-    /// Claimed LogUp sum of the scalar-schedule component (4 M31 coordinates).
-    pub scalar_claimed_sum: [u32; 4],
+    /// Claimed LogUp sums, one per component, in segment order: ladder,
+    /// scalar schedule, decode, encode, additions (4 M31 coordinates each).
+    pub claimed_sums: [[u32; 4]; 5],
 }
 
 const ADMISSION_ARCHIVE_MAGIC: [u8; 4] = *b"RSAD";
-const ADMISSION_ARCHIVE_VERSION: u8 = 1;
+const ADMISSION_ARCHIVE_VERSION: u8 = 2;
 
 impl BorshSerialize for ArchivedRistrettoAdmissionProof {
     fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
@@ -117,8 +136,7 @@ impl BorshSerialize for ArchivedRistrettoAdmissionProof {
         ADMISSION_ARCHIVE_VERSION.serialize(writer)?;
         self.statement.serialize(writer)?;
         self.stark_proof_bytes.serialize(writer)?;
-        self.ladder_claimed_sum.serialize(writer)?;
-        self.scalar_claimed_sum.serialize(writer)
+        self.claimed_sums.serialize(writer)
     }
 }
 
@@ -142,8 +160,7 @@ impl BorshDeserialize for ArchivedRistrettoAdmissionProof {
         Ok(Self {
             statement: AdmissionStatement::deserialize_reader(reader)?,
             stark_proof_bytes: Vec::<u8>::deserialize_reader(reader)?,
-            ladder_claimed_sum: <[u32; 4]>::deserialize_reader(reader)?,
-            scalar_claimed_sum: <[u32; 4]>::deserialize_reader(reader)?,
+            claimed_sums: <[[u32; 4]; 5]>::deserialize_reader(reader)?,
         })
     }
 }
@@ -166,11 +183,11 @@ fn u32_words(bytes: &[u8]) -> Vec<u32> {
 }
 
 /// Domain-separated Blake2b digest of the admission statement, split into
-/// sixteen M31 limbs.
+/// sixteen u32 limbs.
 fn admission_digest(statement: &AdmissionStatement) -> [u32; BINDING_DIGEST_LIMBS] {
     use blake2::digest::Digest;
     let mut hasher = blake2::Blake2b512::new();
-    hasher.update(b"zchain.poker.admission.statement.v1");
+    hasher.update(b"zchain.poker.admission.statement.v2");
     hasher.update(&statement.tag);
     hasher.update(&(statement.ladders.len() as u64).to_le_bytes());
     for ladder in &statement.ladders {
@@ -178,6 +195,12 @@ fn admission_digest(statement: &AdmissionStatement) -> [u32; BINDING_DIGEST_LIMB
         hasher.update(&ladder.windows);
         hasher.update(&ladder.base);
         hasher.update(&ladder.output);
+    }
+    hasher.update(&(statement.additions.len() as u64).to_le_bytes());
+    for addition in &statement.additions {
+        hasher.update(&addition.left);
+        hasher.update(&addition.right);
+        hasher.update(&addition.output);
     }
     hasher.update(&statement.schedule.powers_challenge);
     hasher.update(&statement.schedule.product_y);
@@ -203,6 +226,7 @@ struct AdmissionBindingAir {
     digest: [u32; BINDING_DIGEST_LIMBS],
     tag: [u32; BINDING_TAG_LIMBS],
     ladder_count: u32,
+    addition_count: u32,
     deck_size: u32,
 }
 
@@ -215,11 +239,12 @@ impl AdmissionBindingAir {
                 .try_into()
                 .expect("tag splits into eight u32 limbs"),
             ladder_count: statement.ladders.len() as u32,
+            addition_count: statement.additions.len() as u32,
             deck_size: statement.schedule.deck_size as u32,
         }
     }
 
-    fn trace_row(&self) -> Vec<M31> {
+    fn trace_columns(&self) -> crate::trace_gen::MethodTrace {
         let mut row = Vec::with_capacity(BINDING_COLUMNS);
         for limb in self.digest {
             row.push(M31::from(limb));
@@ -228,12 +253,9 @@ impl AdmissionBindingAir {
             row.push(M31::from(limb));
         }
         row.push(M31::from(self.ladder_count));
+        row.push(M31::from(self.addition_count));
         row.push(M31::from(self.deck_size));
-        row
-    }
-
-    fn trace_columns(&self) -> crate::trace_gen::MethodTrace {
-        let row = self.trace_row();
+        row.push(M31::from(u32::from(ADMISSION_ARCHIVE_VERSION)));
         let rows = 1usize << self.log_size;
         crate::trace_gen::MethodTrace::from_columns(
             self.log_size,
@@ -257,7 +279,12 @@ impl FrameworkEval for AdmissionBindingAir {
             .iter()
             .copied()
             .chain(self.tag.iter().copied())
-            .chain([self.ladder_count, self.deck_size]);
+            .chain([
+                self.ladder_count,
+                self.addition_count,
+                self.deck_size,
+                u32::from(ADMISSION_ARCHIVE_VERSION),
+            ]);
         for expected in constants {
             let limb = eval.next_trace_mask();
             eval.add_constraint(limb - E::F::from(M31::from(expected)));
@@ -266,64 +293,316 @@ impl FrameworkEval for AdmissionBindingAir {
     }
 }
 
-/// Rebuild every ladder schedule of the statement (rejecting detached
-/// scalars, windows, bases, and outputs) plus the scalar schedule program.
-fn rebuild_admission(
-    statement: &AdmissionStatement,
-) -> TexasAirResult<(
-    Vec<Vec<crate::ristretto_scalar_mul_air::LadderStep>>,
-    RistrettoScalarProgram,
-)> {
+/// The deterministic rebuild of one admission statement: every ladder
+/// schedule (with its decode/encode programs), every accumulation addition
+/// program, and the scalar schedule program.
+struct AdmissionRebuilt {
+    schedules: Vec<Vec<crate::ristretto_scalar_mul_air::LadderStep>>,
+    decode_programs: Vec<RistrettoFpProgram>,
+    encode_programs: Vec<RistrettoFpProgram>,
+    addition_programs: Vec<RistrettoFpProgram>,
+    schedule_program: RistrettoScalarProgram,
+}
+
+fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<AdmissionRebuilt> {
     if statement.ladders.is_empty() {
         return Err(TexasAirError::ConstraintUnsatisfied(
             "admission ladder statement set is empty".into(),
         ));
     }
-    let schedules = statement
+    let rebuilt_ladders = statement
         .ladders
         .par_iter()
         .map(rebuild_statement)
-        .map(|result| result.map(|(_, _, schedule)| schedule))
         .collect::<TexasAirResult<Vec<_>>>()?;
-    let program = build_bayer_groth_scalar_schedule(
+    let schedules = rebuilt_ladders
+        .iter()
+        .map(|(_, _, schedule)| schedule.clone())
+        .collect::<Vec<_>>();
+    let decode_programs = rebuilt_ladders
+        .iter()
+        .map(|(decode, _, _)| decode.clone())
+        .collect::<Vec<_>>();
+    let encode_programs = rebuilt_ladders
+        .iter()
+        .map(|(_, encode, _)| encode.clone())
+        .collect::<Vec<_>>();
+    let addition_programs = statement
+        .additions
+        .par_iter()
+        .map(|row| {
+            let (program, expected_output) =
+                build_ristretto_fp_program_compressed_point_addition(&row.left, &row.right)?;
+            if row.output != expected_output {
+                return Err(TexasAirError::ConstraintUnsatisfied(
+                    "admission accumulation row is detached from its operands".into(),
+                ));
+            }
+            Ok(program)
+        })
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    let schedule_program = build_bayer_groth_scalar_schedule(
         &statement.schedule.powers_challenge,
         &statement.schedule.product_y,
         &statement.schedule.product_z,
         &statement.schedule.product_challenge,
         statement.schedule.deck_size,
     )?;
-    Ok((schedules, program))
+    Ok(AdmissionRebuilt {
+        schedules,
+        decode_programs,
+        encode_programs,
+        addition_programs,
+        schedule_program: schedule_program,
+    })
 }
 
-/// Interaction-column count of one LogUp segment (paired fractions, four M31
-/// columns per secure column).
-fn interaction_column_count(
-    singles: usize,
-    pairs: usize,
-    range_stripes: usize,
-    carry_stripes: usize,
-) -> usize {
-    (singles + pairs + range_stripes + carry_stripes).div_ceil(2) * 4
+/// The ordered segment set of one admission. Empty Fp segments are skipped
+/// deterministically (currently only the additions segment can be empty).
+struct AdmissionSegments {
+    ladder: LadderSegment,
+    schedule: ScalarProgramSegment,
+    decode: FpProgramSegment,
+    encode: FpProgramSegment,
+    additions: Option<FpProgramSegment>,
 }
 
-/// Prove one unified admission STARK over the ladder and scalar-schedule
-/// components plus the binding row.
+impl AdmissionSegments {
+    fn build(rebuilt: &AdmissionRebuilt) -> TexasAirResult<Self> {
+        Ok(Self {
+            ladder: LadderSegment::build(&rebuilt.schedules)?,
+            schedule: ScalarProgramSegment::build(&[rebuilt.schedule_program.clone()])?,
+            decode: FpProgramSegment::build(
+                &rebuilt.decode_programs,
+                "ristretto.admission.fp.decode.scope.v1",
+            )?,
+            encode: FpProgramSegment::build(
+                &rebuilt.encode_programs,
+                "ristretto.admission.fp.encode.scope.v1",
+            )?,
+            additions: if rebuilt.addition_programs.is_empty() {
+                None
+            } else {
+                Some(FpProgramSegment::build(
+                    &rebuilt.addition_programs,
+                    "ristretto.admission.fp.additions.scope.v1",
+                )?)
+            },
+        })
+    }
+
+    fn max_log(&self) -> u32 {
+        let mut log = self
+            .ladder
+            .log_size
+            .max(self.schedule.log_size)
+            .max(self.decode.log_size)
+            .max(self.encode.log_size)
+            .max(BINDING_LOG_SIZE);
+        if let Some(additions) = &self.additions {
+            log = log.max(additions.log_size);
+        }
+        log
+    }
+
+    fn interact(
+        &mut self,
+        channel: &mut stwo::core::channel::Poseidon252Channel,
+        rebuilt: &AdmissionRebuilt,
+    ) {
+        self.ladder.interact(channel);
+        self.schedule.interact(channel, &rebuilt.schedule_program);
+        self.decode.interact(channel, &rebuilt.decode_programs[0]);
+        self.encode.interact(channel, &rebuilt.encode_programs[0]);
+        if let Some(additions) = &mut self.additions {
+            additions.interact(channel, &rebuilt.addition_programs[0]);
+        }
+    }
+
+    fn mirror_draw(&mut self, channel: &mut stwo::core::channel::Poseidon252Channel) {
+        self.ladder.mirror_draw(channel);
+        self.schedule.mirror_draw(channel);
+        self.decode.mirror_draw(channel);
+        self.encode.mirror_draw(channel);
+        if let Some(additions) = &mut self.additions {
+            additions.mirror_draw(channel);
+        }
+    }
+
+    fn claimed_sum_count(&self) -> usize {
+        if self.additions.is_some() { 5 } else { 4 }
+    }
+
+    fn claimed_sums(&self) -> Vec<SecureField> {
+        let mut sums = vec![
+            self.ladder.claimed_sum,
+            self.schedule.claimed_sum,
+            self.decode.claimed_sum,
+            self.encode.claimed_sum,
+        ];
+        if let Some(additions) = &self.additions {
+            sums.push(additions.claimed_sum);
+        }
+        sums
+    }
+
+    fn commit_scope(
+        &self,
+        tree: &mut stwo::prover::pcs::TreeBuilder<'_, '_, SimdBackend, Poseidon252MerkleChannel>,
+    ) {
+        tree.extend_evals(self.ladder.scope.to_evaluations());
+        tree.extend_evals(self.schedule.scope.to_evaluations());
+        tree.extend_evals(self.decode.scope.to_evaluations());
+        tree.extend_evals(self.encode.scope.to_evaluations());
+        if let Some(additions) = &self.additions {
+            tree.extend_evals(additions.scope.to_evaluations());
+        }
+    }
+
+    fn commit_trace(
+        &self,
+        tree: &mut stwo::prover::pcs::TreeBuilder<'_, '_, SimdBackend, Poseidon252MerkleChannel>,
+        binding_trace: &crate::trace_gen::MethodTrace,
+    ) {
+        tree.extend_evals(self.ladder.trace.to_evaluations());
+        tree.extend_evals(self.schedule.trace.to_evaluations());
+        tree.extend_evals(self.decode.trace.to_evaluations());
+        tree.extend_evals(self.encode.trace.to_evaluations());
+        if let Some(additions) = &self.additions {
+            tree.extend_evals(additions.trace.to_evaluations());
+        }
+        tree.extend_evals(binding_trace.to_evaluations());
+    }
+
+    fn commit_interaction(
+        &self,
+        tree: &mut stwo::prover::pcs::TreeBuilder<'_, '_, SimdBackend, Poseidon252MerkleChannel>,
+    ) {
+        tree.extend_evals(self.ladder.interaction.clone());
+        tree.extend_evals(self.schedule.interaction.clone());
+        tree.extend_evals(self.decode.interaction.clone());
+        tree.extend_evals(self.encode.interaction.clone());
+        if let Some(additions) = &self.additions {
+            tree.extend_evals(additions.interaction.clone());
+        }
+    }
+
+    fn scope_sizes(&self) -> Vec<u32> {
+        let mut sizes = vec![
+            vec![self.ladder.log_size; self.ladder.scope.num_columns],
+            vec![self.schedule.log_size; self.schedule.scope.num_columns],
+            vec![self.decode.log_size; self.decode.scope.num_columns],
+            vec![self.encode.log_size; self.encode.scope.num_columns],
+        ]
+        .concat();
+        if let Some(additions) = &self.additions {
+            sizes.extend(vec![additions.log_size; additions.scope.num_columns]);
+        }
+        sizes
+    }
+
+    fn trace_sizes(&self) -> Vec<u32> {
+        let mut sizes = vec![
+            vec![self.ladder.log_size; self.ladder.trace.num_columns],
+            vec![self.schedule.log_size; self.schedule.trace.num_columns],
+            vec![self.decode.log_size; self.decode.trace.num_columns],
+            vec![self.encode.log_size; self.encode.trace.num_columns],
+        ]
+        .concat();
+        if let Some(additions) = &self.additions {
+            sizes.extend(vec![additions.log_size; additions.trace.num_columns]);
+        }
+        sizes.extend(vec![BINDING_LOG_SIZE; BINDING_COLUMNS]);
+        sizes
+    }
+
+    fn interaction_sizes(&self, rebuilt: &AdmissionRebuilt) -> Vec<u32> {
+        let mut sizes = vec![
+            vec![self.ladder.log_size; self.ladder.interaction_columns()],
+            vec![
+                self.schedule.log_size;
+                self.schedule.interaction_columns(&rebuilt.schedule_program)
+            ],
+            vec![
+                self.decode.log_size;
+                self.decode.interaction_columns(&rebuilt.decode_programs[0])
+            ],
+            vec![
+                self.encode.log_size;
+                self.encode.interaction_columns(&rebuilt.encode_programs[0])
+            ],
+        ]
+        .concat();
+        if let Some(additions) = &self.additions {
+            sizes.extend(vec![
+                additions.log_size;
+                additions
+                    .interaction_columns(&rebuilt.addition_programs[0])
+            ]);
+        }
+        sizes
+    }
+
+    fn preprocessed_ids(&self, rebuilt: &AdmissionRebuilt) -> Vec<PreProcessedColumnId> {
+        let mut ids = self.ladder.preprocessed_ids();
+        ids.extend(self.schedule.preprocessed_ids(&rebuilt.schedule_program));
+        ids.extend(self.decode.preprocessed_ids(&rebuilt.decode_programs[0]));
+        ids.extend(self.encode.preprocessed_ids(&rebuilt.encode_programs[0]));
+        if let Some(additions) = &self.additions {
+            ids.extend(additions.preprocessed_ids(&rebuilt.addition_programs[0]));
+        }
+        ids
+    }
+
+    fn components(
+        &self,
+        allocator: &mut TraceLocationAllocator,
+        rebuilt: &AdmissionRebuilt,
+        binding: AdmissionBindingAir,
+    ) -> Vec<Box<dyn ComponentProver<SimdBackend>>> {
+        let mut components: Vec<Box<dyn ComponentProver<SimdBackend>>> = vec![
+            Box::new(self.ladder.component(allocator)),
+            Box::new(
+                self.schedule
+                    .component(allocator, &rebuilt.schedule_program),
+            ),
+            Box::new(
+                self.decode
+                    .component(allocator, &rebuilt.decode_programs[0]),
+            ),
+            Box::new(
+                self.encode
+                    .component(allocator, &rebuilt.encode_programs[0]),
+            ),
+        ];
+        if let Some(additions) = &self.additions {
+            components.push(Box::new(
+                additions.component(allocator, &rebuilt.addition_programs[0]),
+            ));
+        }
+        components.push(Box::new(FrameworkComponent::new(
+            allocator,
+            binding,
+            SecureField::from(0u32),
+        )));
+        components
+    }
+}
+
+/// Prove one unified admission STARK over the ladder, scalar-schedule,
+/// decode, encode, and accumulation components plus the binding row.
 pub fn prove_ristretto_admission_stark(
     statement: AdmissionStatement,
 ) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
-    let (schedules, program) = rebuild_admission(&statement)?;
-    let mut ladder_segment = LadderSegment::build(&schedules)?;
-    let mut scalar_segment = ScalarProgramSegment::build(&[program.clone()])?;
+    let rebuilt = rebuild_admission(&statement)?;
+    let mut segments = AdmissionSegments::build(&rebuilt)?;
     let binding = AdmissionBindingAir::new(&statement);
     let binding_trace = binding.trace_columns();
 
     let config = crate::prover_context::protocol_pcs_config();
-    let max_log = ladder_segment
-        .log_size
-        .max(scalar_segment.log_size)
-        .max(BINDING_LOG_SIZE);
-    let twiddles =
-        crate::prover_context::simd_twiddles(max_log + config.fri_config.log_blowup_factor);
+    let twiddles = crate::prover_context::simd_twiddles(
+        segments.max_log() + config.fri_config.log_blowup_factor,
+    );
     let mut channel = stwo::core::channel::Poseidon252Channel::default();
     channel.mix_u64(0x7a63_6861_646d_6973);
     channel.mix_u32s(&admission_digest(&statement));
@@ -335,52 +614,41 @@ pub fn prove_ristretto_admission_stark(
         );
     {
         let mut tree = scheme.tree_builder();
-        tree.extend_evals(ladder_segment.scope.to_evaluations());
-        tree.extend_evals(scalar_segment.scope.to_evaluations());
+        segments.commit_scope(&mut tree);
         tree.commit(&mut channel);
     }
     {
         let mut tree = scheme.tree_builder();
-        tree.extend_evals(ladder_segment.trace.to_evaluations());
-        tree.extend_evals(scalar_segment.trace.to_evaluations());
-        tree.extend_evals(binding_trace.to_evaluations());
+        segments.commit_trace(&mut tree, &binding_trace);
         tree.commit(&mut channel);
     }
-    ladder_segment.interact(&mut channel);
-    scalar_segment.interact(&mut channel, &program);
-    channel.mix_felts(&[ladder_segment.claimed_sum, scalar_segment.claimed_sum]);
+    segments.interact(&mut channel, &rebuilt);
+    let sums = segments.claimed_sums();
+    channel.mix_felts(&sums);
     {
         let mut tree = scheme.tree_builder();
-        tree.extend_evals(ladder_segment.interaction.clone());
-        tree.extend_evals(scalar_segment.interaction.clone());
+        segments.commit_interaction(&mut tree);
         tree.commit(&mut channel);
     }
 
-    let mut ids: Vec<PreProcessedColumnId> = ladder_segment.preprocessed_ids();
-    ids.extend(scalar_segment.preprocessed_ids(&program));
+    let ids = segments.preprocessed_ids(&rebuilt);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let ladder_component = ladder_segment.component(&mut allocator);
-    let scalar_component = scalar_segment.component(&mut allocator, &program);
-    let binding_component =
-        FrameworkComponent::new(&mut allocator, binding, SecureField::from(0u32));
-    let proof = prove(
-        &[
-            &ladder_component as &dyn ComponentProver<SimdBackend>,
-            &scalar_component as &dyn ComponentProver<SimdBackend>,
-            &binding_component as &dyn ComponentProver<SimdBackend>,
-        ],
-        &mut channel,
-        scheme,
-    )
-    .map_err(|error| TexasAirError::StwoProverError(error.to_string()))?;
+    let components = segments.components(&mut allocator, &rebuilt, binding);
+    let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
+        components.iter().map(|component| &**component).collect();
+    let proof = prove(&component_refs, &mut channel, scheme)
+        .map_err(|error| TexasAirError::StwoProverError(error.to_string()))?;
     let stark_proof_bytes = options()
         .serialize(&proof)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
+    let mut claimed_sums = [[0u32; 4]; 5];
+    for (slot, sum) in sums.iter().enumerate() {
+        claimed_sums[slot] = sum.to_m31_array().map(|limb| limb.0);
+    }
     Ok(ArchivedRistrettoAdmissionProof {
         statement,
         stark_proof_bytes,
-        ladder_claimed_sum: ladder_segment.claimed_sum.to_m31_array().map(|limb| limb.0),
-        scalar_claimed_sum: scalar_segment.claimed_sum.to_m31_array().map(|limb| limb.0),
+        claimed_sums,
     })
 }
 
@@ -391,21 +659,17 @@ pub fn verify_ristretto_admission_stark(
     archive: &ArchivedRistrettoAdmissionProof,
 ) -> TexasAirResult<()> {
     type Proof = StarkProof<Poseidon252MerkleHasher>;
-    let (schedules, program) = rebuild_admission(&archive.statement)?;
-    let mut ladder_segment = LadderSegment::build(&schedules)?;
-    let mut scalar_segment = ScalarProgramSegment::build(&[program.clone()])?;
+    let rebuilt = rebuild_admission(&archive.statement)?;
+    let mut segments = AdmissionSegments::build(&rebuilt)?;
     let binding = AdmissionBindingAir::new(&archive.statement);
     let proof: Proof = options()
         .deserialize(&archive.stark_proof_bytes)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
 
     let config = crate::prover_context::protocol_pcs_config();
-    let max_log = ladder_segment
-        .log_size
-        .max(scalar_segment.log_size)
-        .max(BINDING_LOG_SIZE);
-    let twiddles =
-        crate::prover_context::simd_twiddles(max_log + config.fri_config.log_blowup_factor);
+    let twiddles = crate::prover_context::simd_twiddles(
+        segments.max_log() + config.fri_config.log_blowup_factor,
+    );
     let mut trusted =
         CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::with_memory_pool(
             config,
@@ -415,8 +679,7 @@ pub fn verify_ristretto_admission_stark(
     let mut scope_channel = stwo::core::channel::Poseidon252Channel::default();
     {
         let mut tree = trusted.tree_builder();
-        tree.extend_evals(ladder_segment.scope.to_evaluations());
-        tree.extend_evals(scalar_segment.scope.to_evaluations());
+        segments.commit_scope(&mut tree);
         tree.commit(&mut scope_channel);
     }
     if proof.commitments.first().copied() != trusted.roots().first().copied() {
@@ -430,55 +693,442 @@ pub fn verify_ristretto_admission_stark(
     channel.mix_u32s(&admission_digest(&archive.statement));
     let mut scheme =
         stwo::core::pcs::CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
-    let mut pre_sizes = vec![ladder_segment.log_size; ladder_segment.scope.num_columns];
-    pre_sizes.extend(vec![
-        scalar_segment.log_size;
-        scalar_segment.scope.num_columns
-    ]);
-    scheme.commit(proof.commitments[0], &pre_sizes, &mut channel);
-    let mut trace_sizes = vec![ladder_segment.log_size; ladder_segment.trace.num_columns];
-    trace_sizes.extend(vec![
-        scalar_segment.log_size;
-        scalar_segment.trace.num_columns
-    ]);
-    trace_sizes.extend(vec![BINDING_LOG_SIZE; BINDING_COLUMNS]);
-    scheme.commit(proof.commitments[1], &trace_sizes, &mut channel);
+    scheme.commit(proof.commitments[0], &segments.scope_sizes(), &mut channel);
+    scheme.commit(proof.commitments[1], &segments.trace_sizes(), &mut channel);
     // Mirror the prover's relation draws; the interaction columns themselves
     // are never materialized on the verifier side, only their counts.
-    ladder_segment.mirror_draw(&mut channel);
-    scalar_segment.mirror_draw(&mut channel);
-    let ladder_claimed = SecureField::from_m31_array(core::array::from_fn(|index| {
-        M31::from(archive.ladder_claimed_sum[index])
-    }));
-    let scalar_claimed = SecureField::from_m31_array(core::array::from_fn(|index| {
-        M31::from(archive.scalar_claimed_sum[index])
-    }));
-    channel.mix_felts(&[ladder_claimed, scalar_claimed]);
-    let mut interaction_sizes = vec![ladder_segment.log_size; ladder_segment.interaction_columns()];
-    interaction_sizes.extend(vec![
-        scalar_segment.log_size;
-        scalar_segment.interaction_columns(&program)
-    ]);
-    scheme.commit(proof.commitments[2], &interaction_sizes, &mut channel);
-
-    let mut ids: Vec<PreProcessedColumnId> = ladder_segment.preprocessed_ids();
-    ids.extend(scalar_segment.preprocessed_ids(&program));
-    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let ladder_component = ladder_segment.component(&mut allocator);
-    let scalar_component = scalar_segment.component(&mut allocator, &program);
-    let binding_component =
-        FrameworkComponent::new(&mut allocator, binding, SecureField::from(0u32));
-    stwo::core::verifier::verify(
-        &[
-            &ladder_component as &dyn ComponentProver<SimdBackend>,
-            &scalar_component as &dyn ComponentProver<SimdBackend>,
-            &binding_component as &dyn ComponentProver<SimdBackend>,
-        ],
+    segments.mirror_draw(&mut channel);
+    let sum_count = segments.claimed_sum_count();
+    let sums: Vec<SecureField> = (0..sum_count)
+        .map(|slot| {
+            SecureField::from_m31_array(core::array::from_fn(|index| {
+                M31::from(archive.claimed_sums[slot][index])
+            }))
+        })
+        .collect();
+    channel.mix_felts(&sums);
+    scheme.commit(
+        proof.commitments[2],
+        &segments.interaction_sizes(&rebuilt),
         &mut channel,
-        &mut scheme,
-        proof,
-    )
-    .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))
+    );
+
+    let ids = segments.preprocessed_ids(&rebuilt);
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let components = segments.components(&mut allocator, &rebuilt, binding);
+    let component_refs: Vec<&dyn stwo::core::air::Component> = components
+        .iter()
+        .map(|component| component.as_ref() as &dyn stwo::core::air::Component)
+        .collect();
+    stwo::core::verifier::verify(&component_refs, &mut channel, &mut scheme, proof)
+        .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))
+}
+
+// ===========================================================================
+// Real Bayer--Groth admission wiring (Path A roadmap item 3).
+// ===========================================================================
+
+use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar, RistrettoCurve};
+use poker_protocol_bg::BayerGrothShuffleProof;
+use poker_protocol_core::ElGamalCiphertextGeneric;
+
+type BgPoint = <RistrettoCurve as Curve>::Point;
+type BgScalar = <RistrettoCurve as Curve>::Scalar;
+type BgCiphertext = ElGamalCiphertextGeneric<RistrettoCurve>;
+
+/// The component set one Bayer--Groth admission constrains, matching
+/// [`crate::ristretto_shuffle_air::RistrettoAirV2ShuffleInCircuitComponents`].
+#[derive(Debug, Clone)]
+pub struct BgAdmissionComponents {
+    /// Caller-domain statement digest used as the admission tag.
+    pub statement_digest: [u8; 32],
+    /// Input deck ciphertexts.
+    pub input: Vec<BgCiphertext>,
+    /// Output deck ciphertexts.
+    pub output: Vec<BgCiphertext>,
+    /// Aggregate public key.
+    pub public_key: BgPoint,
+    /// The Bayer--Groth proof under admission.
+    pub proof: BayerGrothShuffleProof<RistrettoCurve>,
+    /// Transcript challenges in derivation order `[x, y, z, mexp, product]`.
+    pub challenges: Vec<BgScalar>,
+}
+
+/// `scalar_pow(base, exponent)` over the Ristretto scalar field (the BG
+/// prover/verifier helper, local because the crate keeps it private).
+fn bg_scalar_pow(mut base: BgScalar, mut exponent: usize) -> BgScalar {
+    let mut result = BgScalar::one();
+    while exponent != 0 {
+        if exponent & 1 == 1 {
+            result = result * base;
+        }
+        base = base * base;
+        exponent >>= 1;
+    }
+    result
+}
+
+fn bg_encode_point(point: &BgPoint) -> [u8; LIMBS] {
+    let mut out = [0u8; LIMBS];
+    let bytes = CurvePoint::compress(point);
+    out.copy_from_slice(&bytes.as_ref()[..LIMBS]);
+    out
+}
+
+fn bg_decode_point(bytes: &[u8; LIMBS]) -> TexasAirResult<BgPoint> {
+    BgPoint::from_compressed(bytes).ok_or_else(|| {
+        TexasAirError::ConstraintUnsatisfied("BG admission point failed to decode".into())
+    })
+}
+
+fn bg_scalar_bytes(scalar: &BgScalar) -> [u8; LIMBS] {
+    let mut out = [0u8; LIMBS];
+    let bytes = CurveScalar::as_bytes(scalar);
+    out.copy_from_slice(&bytes[..LIMBS]);
+    out
+}
+
+/// Host-side builder that decomposes every Bayer--Groth point equation into
+/// ladder statements (scalar multiplications) and compressed-point
+/// accumulation rows, tracking native encoding equalities as it goes.
+#[derive(Default)]
+struct PointEquationBuilder {
+    ladders: Vec<RistrettoScalarMulLadderStatement>,
+    additions: Vec<([u8; LIMBS], [u8; LIMBS], [u8; LIMBS])>,
+    equalities: Vec<([u8; LIMBS], [u8; LIMBS])>,
+}
+
+impl PointEquationBuilder {
+    /// Append one scalar multiplication `scalar · base` and return its
+    /// compressed output.
+    fn mul(&mut self, scalar: &BgScalar, base: &BgPoint) -> [u8; LIMBS] {
+        let scalar = bg_scalar_bytes(scalar);
+        let base = bg_encode_point(base);
+        let output = bg_encode_point(
+            &(bg_decode_point(&base).expect("base decodes") * scalar_value(&scalar)),
+        );
+        let windows = crate::ristretto_scalar_windows_air::windows(&scalar);
+        self.ladders.push(RistrettoScalarMulLadderStatement {
+            scalar,
+            windows,
+            base,
+            output,
+        });
+        output
+    }
+
+    /// Append one compressed-point addition and return its output.
+    fn add(&mut self, left: &[u8; LIMBS], right: &[u8; LIMBS]) -> TexasAirResult<[u8; LIMBS]> {
+        let output = bg_encode_point(&(bg_decode_point(left)? + bg_decode_point(right)?));
+        self.additions.push((*left, *right, output));
+        Ok(output)
+    }
+
+    /// Fold `Σ scalars[i] · bases[i]` through ladder rows and accumulation
+    /// additions, returning the chain's compressed output.
+    fn msm(&mut self, scalars: &[BgScalar], bases: &[BgPoint]) -> TexasAirResult<[u8; LIMBS]> {
+        if scalars.len() != bases.len() || scalars.is_empty() {
+            return Err(TexasAirError::SpecViolation(
+                "BG admission MSM shape mismatch".into(),
+            ));
+        }
+        let mut accumulator = self.mul(&scalars[0], &bases[0]);
+        for (scalar, base) in scalars.iter().zip(bases.iter()).skip(1) {
+            let term = self.mul(scalar, base);
+            accumulator = self.add(&accumulator, &term)?;
+        }
+        Ok(accumulator)
+    }
+
+    /// Record one native encoding equality the admission must check.
+    fn eq(&mut self, lhs: [u8; LIMBS], rhs: [u8; LIMBS]) {
+        self.equalities.push((lhs, rhs));
+    }
+
+    fn check_equalities(&self) -> TexasAirResult<()> {
+        for (index, (lhs, rhs)) in self.equalities.iter().enumerate() {
+            if lhs != rhs {
+                return Err(TexasAirError::ConstraintUnsatisfied(format!(
+                    "BG admission point equality {index} does not hold"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn base_point_value() -> BgPoint {
+    RistrettoCurve::base_g()
+}
+
+fn scalar_value(bytes: &[u8; LIMBS]) -> BgScalar {
+    <BgScalar as CurveScalar>::from_canonical_bytes(bytes)
+        .expect("ladder scalar bytes are canonical")
+}
+
+/// Decompose one Bayer--Groth admission into the unified admission statement
+/// (ladders, accumulation rows, scalar schedule) plus the native encoding
+/// equalities and scalar checks that complete the verification.
+///
+/// The decomposition mirrors every public equation of
+/// `BayerGrothShuffleProof::verify`: the multi-exponentiation ciphertext
+/// check, the commitment-key vector/scalar commitments, the ciphertext
+/// re-randomization identity, and both product-argument checks.  The scalar
+/// product check `b_response[n-1] == pc · ∏(y·i + x^i − z)` rides the BG
+/// scalar schedule STARK; the recurrence values of the second product check
+/// stay native (a mod-l program segment is the follow-up).
+fn decompose_bg_admission(
+    components: &BgAdmissionComponents,
+) -> TexasAirResult<(AdmissionStatement, Vec<([u8; LIMBS], [u8; LIMBS])>)> {
+    let n = components.input.len();
+    if components.output.len() != n || n < 2 || n > 62 {
+        return Err(TexasAirError::SpecViolation(
+            "BG admission deck size is outside the supported range".into(),
+        ));
+    }
+    if components.challenges.len() != 5 {
+        return Err(TexasAirError::SpecViolation(
+            "BG admission requires exactly five transcript challenges".into(),
+        ));
+    }
+    let powers_challenge = components.challenges[0];
+    let product_y = components.challenges[1];
+    let product_z = components.challenges[2];
+    let mexp_challenge = components.challenges[3];
+    let product_challenge = components.challenges[4];
+
+    // Deterministic commitment key (mirrors the BG crate's private derive).
+    let h = RistrettoCurve::hash_to_curve(b"poker/bg12/v2/H");
+    let generators = (0..n)
+        .map(|index| {
+            RistrettoCurve::hash_to_curve(format!("poker/bg12/v2/G/{n}/{index}").as_bytes())
+        })
+        .collect::<Vec<_>>();
+    let g = base_point_value();
+
+    let mut builder = PointEquationBuilder::default();
+    let mexp = &components.proof.multi_exponentiation;
+    let product = &components.proof.product;
+
+    // Equation 1: mexp.ciphertext_1 == ciphertext_msm(input, public powers).
+    let powers = (1..=n)
+        .map(|i| bg_scalar_pow(powers_challenge, i))
+        .collect::<Vec<_>>();
+    let msm_input_c1 = builder.msm(
+        &powers,
+        &components.input.iter().map(|ct| ct.c1).collect::<Vec<_>>(),
+    )?;
+    let msm_input_c2 = builder.msm(
+        &powers,
+        &components.input.iter().map(|ct| ct.c2).collect::<Vec<_>>(),
+    )?;
+    builder.eq(msm_input_c1, bg_encode_point(&mexp.ciphertext_1.c1));
+    builder.eq(msm_input_c2, bg_encode_point(&mexp.ciphertext_1.c2));
+
+    // Equation 2: c_permuted_powers·mc + c_alpha == vector_commit(alpha, cr).
+    let permuted_powers_scaled = builder.mul(&mexp_challenge, &components.proof.c_permuted_powers);
+    let commitment_lhs = builder.add(&permuted_powers_scaled, &bg_encode_point(&mexp.c_alpha))?;
+    let mut commitment_scalars = mexp.alpha_response.clone();
+    commitment_scalars.push(mexp.commitment_response);
+    let mut commitment_bases = generators.clone();
+    commitment_bases.push(h);
+    let commitment_rhs = builder.msm(&commitment_scalars, &commitment_bases)?;
+    builder.eq(commitment_lhs, commitment_rhs);
+
+    // Equation 3: c_beta == G·beta + H·beta_blinding.
+    let beta_scaled = builder.mul(&mexp.beta, &g);
+    let beta_blinding_scaled = builder.mul(&mexp.beta_blinding_response, &h);
+    let scalar_commit = builder.add(&beta_scaled, &beta_blinding_scaled)?;
+    builder.eq(bg_encode_point(&mexp.c_beta), scalar_commit);
+
+    // Equation 4: ciphertext_0 + mc·ciphertext_1 == (G·rerand + msm_alpha(output).c1,
+    //                                           G·beta + pk·rerand + msm_alpha(output).c2).
+    let ciphertext_1_c1_scaled = builder.mul(&mexp_challenge, &mexp.ciphertext_1.c1);
+    let ciphertext_1_c2_scaled = builder.mul(&mexp_challenge, &mexp.ciphertext_1.c2);
+    let lhs_c1 = builder.add(
+        &bg_encode_point(&mexp.ciphertext_0.c1),
+        &ciphertext_1_c1_scaled,
+    )?;
+    let lhs_c2 = builder.add(
+        &bg_encode_point(&mexp.ciphertext_0.c2),
+        &ciphertext_1_c2_scaled,
+    )?;
+    let output_msm_c1 = builder.msm(
+        &mexp.alpha_response,
+        &components.output.iter().map(|ct| ct.c1).collect::<Vec<_>>(),
+    )?;
+    let output_msm_c2 = builder.msm(
+        &mexp.alpha_response,
+        &components.output.iter().map(|ct| ct.c2).collect::<Vec<_>>(),
+    )?;
+    let rerandomization_scaled = builder.mul(&mexp.rerandomization_response, &g);
+    let rhs_c1 = builder.add(&rerandomization_scaled, &output_msm_c1)?;
+    let beta_message_scaled = builder.mul(&mexp.beta, &g);
+    let rerandomization_key_scaled =
+        builder.mul(&mexp.rerandomization_response, &components.public_key);
+    let rhs_c2_inner = builder.add(&beta_message_scaled, &rerandomization_key_scaled)?;
+    let rhs_c2 = builder.add(&rhs_c2_inner, &output_msm_c2)?;
+    builder.eq(lhs_c1, rhs_c1);
+    builder.eq(lhs_c2, rhs_c2);
+
+    // Equation 5: c_d + (c_a + c_minus_z)·pc == vector_commit(a_response, r_response)
+    // with c_a = c_permutation·y + c_permuted_powers and c_minus_z the
+    // constant-vector commitment of −z.
+    let permutation_scaled = builder.mul(&product_y, &components.proof.c_permutation);
+    let c_a = builder.add(
+        &permutation_scaled,
+        &bg_encode_point(&components.proof.c_permuted_powers),
+    )?;
+    let minus_z = vec![-product_z; n];
+    let c_minus_z = builder.msm(&minus_z, &generators)?;
+    let c_a_plus_minus_z = builder.add(&c_a, &c_minus_z)?;
+    let scaled_sum = builder.mul(&product_challenge, &bg_decode_point(&c_a_plus_minus_z)?);
+    let product_lhs = builder.add(&bg_encode_point(&product.c_d), &scaled_sum)?;
+    let mut product_scalars = product.a_response.clone();
+    product_scalars.push(product.r_response);
+    let mut product_bases = generators.clone();
+    product_bases.push(h);
+    let product_rhs = builder.msm(&product_scalars, &product_bases)?;
+    builder.eq(product_lhs, product_rhs);
+
+    // Equation 6: c_delta + c_capital_delta·pc == vector_commit(recurrence, s_response)
+    // with recurrence[i] = pc·b[i+1] − b[i]·a[i+1] (native scalar arithmetic;
+    // a mod-l program segment is the follow-up).
+    let mut recurrence = vec![BgScalar::zero(); n];
+    for index in 0..n - 1 {
+        recurrence[index] = product_challenge * product.b_response[index + 1]
+            - product.b_response[index] * product.a_response[index + 1];
+    }
+    let capital_delta_scaled = builder.mul(&product_challenge, &product.c_capital_delta);
+    let recurrence_lhs = builder.add(&bg_encode_point(&product.c_delta), &capital_delta_scaled)?;
+    let mut recurrence_scalars = recurrence;
+    recurrence_scalars.push(product.s_response);
+    let mut recurrence_bases = generators.clone();
+    recurrence_bases.push(h);
+    let recurrence_rhs = builder.msm(&recurrence_scalars, &recurrence_bases)?;
+    builder.eq(recurrence_lhs, recurrence_rhs);
+
+    // Equation 7 (scalar): b_response[n-1] == pc · ∏(y·i + x^i − z); the
+    // product schedule rides the mod-l program STARK, this checks it natively.
+    let expected_final = (1..=n)
+        .map(|index| {
+            product_y * BgScalar::from_u64(index as u64) + bg_scalar_pow(powers_challenge, index)
+                - product_z
+        })
+        .fold(BgScalar::one(), |accumulator, value| accumulator * value);
+    let expected_final = product_challenge * expected_final;
+    if bg_scalar_bytes(&expected_final) != bg_scalar_bytes(&product.b_response[n - 1]) {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "BG admission scalar product check does not hold".into(),
+        ));
+    }
+    // Equation 8 (scalar): b_response[0] == a_response[0].
+    if bg_scalar_bytes(&product.b_response[0]) != bg_scalar_bytes(&product.a_response[0]) {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "BG admission initial response check does not hold".into(),
+        ));
+    }
+    builder.check_equalities()?;
+
+    let statement = AdmissionStatement {
+        tag: components.statement_digest,
+        ladders: builder.ladders,
+        additions: builder
+            .additions
+            .into_iter()
+            .map(|(left, right, output)| AdmissionAdditionRow {
+                left,
+                right,
+                output,
+            })
+            .collect(),
+        schedule: AdmissionScheduleSpec {
+            powers_challenge: bg_scalar_bytes(&powers_challenge),
+            product_y: bg_scalar_bytes(&product_y),
+            product_z: bg_scalar_bytes(&product_z),
+            product_challenge: bg_scalar_bytes(&product_challenge),
+            deck_size: n,
+        },
+    };
+    Ok((statement, builder.equalities))
+}
+
+/// Prove the unified admission STARK for one Bayer--Groth component set.
+///
+/// The decomposition validates every BG equation natively (point equalities
+/// and scalar checks) before proving, so a detached or invalid proof never
+/// reaches the STARK.
+pub fn prove_ristretto_bg_admission_components(
+    components: &BgAdmissionComponents,
+) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
+    let (statement, _) = decompose_bg_admission(components)?;
+    prove_ristretto_admission_stark(statement)
+}
+
+/// Verify the unified admission STARK for one Bayer--Groth component set:
+/// re-decompose (which re-validates every equation natively), require the
+/// archived statement to be exactly the derived one, and verify the STARK.
+pub fn verify_ristretto_bg_admission_components(
+    components: &BgAdmissionComponents,
+    archive: &ArchivedRistrettoAdmissionProof,
+) -> TexasAirResult<()> {
+    let (statement, _) = decompose_bg_admission(components)?;
+    if archive.statement != statement {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "BG admission statement is detached from its component set".into(),
+        ));
+    }
+    verify_ristretto_admission_stark(archive)
+}
+
+/// Serialized real-BG admission: the canonical shuffle request bytes plus
+/// the unified admission STARK derived from them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArchivedRistrettoBgAdmissionProof {
+    /// Canonical V2 shuffle request bytes (the full admission statement is
+    /// derived deterministically from these).
+    pub request_bytes: Vec<u8>,
+    /// The unified admission STARK over the decomposed equations.
+    pub admission: ArchivedRistrettoAdmissionProof,
+}
+
+/// Prove the unified admission STARK for one complete V2 shuffle request.
+///
+/// The extractor (`ristretto_air_v2_shuffle_in_circuit_components`) runs the
+/// canonical decode, envelope binding, and native Bayer--Groth verification
+/// first; the returned proof then carries every point equation of that
+/// verification inside one multi-component STARK.
+pub fn prove_ristretto_bg_admission_stark(
+    request_bytes: &[u8],
+) -> TexasAirResult<ArchivedRistrettoBgAdmissionProof> {
+    let components = ristretto_shuffle_components(request_bytes)?;
+    let admission = prove_ristretto_bg_admission_components(&components)?;
+    Ok(ArchivedRistrettoBgAdmissionProof {
+        request_bytes: request_bytes.to_vec(),
+        admission,
+    })
+}
+
+/// Verify a real-BG admission proof end to end.
+pub fn verify_ristretto_bg_admission_stark(
+    archive: &ArchivedRistrettoBgAdmissionProof,
+) -> TexasAirResult<()> {
+    let components = ristretto_shuffle_components(&archive.request_bytes)?;
+    verify_ristretto_bg_admission_components(&components, &archive.admission)
+}
+
+fn ristretto_shuffle_components(request_bytes: &[u8]) -> TexasAirResult<BgAdmissionComponents> {
+    let components = crate::ristretto_shuffle_air::ristretto_air_v2_shuffle_in_circuit_components(
+        request_bytes,
+    )?;
+    Ok(BgAdmissionComponents {
+        statement_digest: components.statement_digest,
+        input: components.input,
+        output: components.output,
+        public_key: components.public_key,
+        proof: components.proof,
+        challenges: components.challenges,
+    })
 }
 
 #[cfg(test)]
@@ -502,9 +1152,23 @@ mod tests {
         out
     }
 
+    fn curve_add(left: &[u8; LIMBS], right: &[u8; LIMBS]) -> [u8; LIMBS] {
+        use poker_protocol::crypto::curve::{Curve, CurvePoint, RistrettoCurve};
+        type Point = <RistrettoCurve as Curve>::Point;
+        let decode = |encoding: &[u8; LIMBS]| -> Point {
+            Point::from_compressed(encoding).expect("point decodes")
+        };
+        let sum = decode(left) + decode(right);
+        let mut out = [0u8; LIMBS];
+        out.copy_from_slice(&CurvePoint::compress(&sum).as_ref()[..LIMBS]);
+        out
+    }
+
     fn sample_statement() -> AdmissionStatement {
-        // Two point-equation multiplications against the basepoint plus one
-        // small deck schedule.
+        // Two point-equation multiplications against the basepoint, their
+        // accumulation into one compressed output, and one small deck
+        // schedule. The ladder outputs come from a real ladder batch so the
+        // statements are self-consistent.
         let first = scalar_bytes(7);
         let second = scalar_bytes(0x0123_4567_89ab_cdef);
         let ladder_archives = prove_ristretto_scalar_mul_ladder_batch(vec![
@@ -512,9 +1176,16 @@ mod tests {
             (second, windows(&second), basepoint()),
         ])
         .expect("ladder statements");
+        let output_one = ladder_archives.statements[0].output;
+        let output_two = ladder_archives.statements[1].output;
         AdmissionStatement {
             tag: [0xab; 32],
             ladders: ladder_archives.statements,
+            additions: vec![AdmissionAdditionRow {
+                left: output_one,
+                right: output_two,
+                output: curve_add(&output_one, &output_two),
+            }],
             schedule: AdmissionScheduleSpec {
                 powers_challenge: scalar_bytes(7),
                 product_y: scalar_bytes(9),
@@ -523,6 +1194,130 @@ mod tests {
                 deck_size: 12,
             },
         }
+    }
+
+    fn bg_components_fixture(deck: usize) -> BgAdmissionComponents {
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+        let mut rng = StdRng::seed_from_u64(0x5A1E);
+        let g = RistrettoCurve::base_g();
+        let secret = BgScalar::random(&mut rng);
+        let public_key = g * secret;
+        let input = (0..deck)
+            .map(|_| {
+                let rerandomizer = BgScalar::random(&mut rng);
+                ElGamalCiphertextGeneric {
+                    c1: g * rerandomizer,
+                    c2: public_key * rerandomizer,
+                }
+            })
+            .collect::<Vec<_>>();
+        let permutation = vec![2usize, 0, 3, 1];
+        let rerandomizers = (0..deck)
+            .map(|_| BgScalar::random(&mut rng))
+            .collect::<Vec<_>>();
+        let output = permutation
+            .iter()
+            .zip(&rerandomizers)
+            .map(|(&source, rerandomizer)| input[source].re_encrypt(&public_key, rerandomizer))
+            .collect::<Vec<_>>();
+        let context = poker_protocol::ristretto_air::RISTRETTO_AIR_V2_SHUFFLE_CONTEXT;
+        let mut prove_transcript =
+            crate::ristretto_shuffle_air::FlockShuffleTranscript::new(context);
+        let proof = BayerGrothShuffleProof::<RistrettoCurve>::prove(
+            &input,
+            &output,
+            &permutation,
+            &rerandomizers,
+            &public_key,
+            &mut rng,
+            &mut prove_transcript,
+        )
+        .expect("BG proof");
+        // Derive the verifier-side challenges exactly like the extractor: a
+        // fresh transcript driven by the native verify replay.
+        let mut verify_transcript =
+            crate::ristretto_shuffle_air::FlockShuffleTranscript::new(context);
+        crate::ristretto_shuffle_air::run_bayer_groth_verify(
+            &proof,
+            &input,
+            &output,
+            &public_key,
+            &mut verify_transcript,
+        )
+        .expect("native BG verify");
+        let challenges = verify_transcript
+            .challenges()
+            .iter()
+            .map(|wire| {
+                <BgScalar as CurveScalar>::from_canonical_bytes(&wire.image)
+                    .expect("canonical challenge")
+            })
+            .collect::<Vec<_>>();
+        BgAdmissionComponents {
+            statement_digest: [0x5a; 32],
+            input,
+            output,
+            public_key,
+            proof,
+            challenges,
+        }
+    }
+
+    #[test]
+    fn bg_admission_stark_proves_and_verifies() {
+        let components = bg_components_fixture(4);
+        let (statement, equalities) = decompose_bg_admission(&components).expect("decomposition");
+        eprintln!(
+            "BG admission decomposition (deck 4): {} ladders, {} additions, {} equalities",
+            statement.ladders.len(),
+            statement.additions.len(),
+            equalities.len()
+        );
+        assert_eq!(statement.schedule.deck_size, 4);
+        let started = std::time::Instant::now();
+        let archive =
+            prove_ristretto_bg_admission_components(&components).expect("BG admission STARK");
+        let prove_elapsed = started.elapsed();
+        let started = std::time::Instant::now();
+        verify_ristretto_bg_admission_components(&components, &archive)
+            .expect("BG admission verify");
+        let verify_elapsed = started.elapsed();
+        eprintln!(
+            "BG admission STARK (deck 4): prove {prove_elapsed:?}, verify {verify_elapsed:?}, proof {} bytes",
+            archive.stark_proof_bytes.len()
+        );
+    }
+
+    #[test]
+    fn bg_admission_rejects_tampered_proofs() {
+        let components = bg_components_fixture(4);
+        let archive =
+            prove_ristretto_bg_admission_components(&components).expect("BG admission STARK");
+        assert!(verify_ristretto_bg_admission_components(&components, &archive).is_ok());
+
+        // A tampered response scalar breaks a decomposed equation natively.
+        let mut tampered = components.clone();
+        tampered.proof.multi_exponentiation.alpha_response[0] =
+            tampered.proof.multi_exponentiation.alpha_response[0] + BgScalar::one();
+        assert!(verify_ristretto_bg_admission_components(&tampered, &archive).is_err());
+
+        // A tampered commitment point breaks the multi-exponentiation check.
+        let mut tampered = components.clone();
+        tampered.proof.multi_exponentiation.c_beta =
+            tampered.proof.multi_exponentiation.c_beta + RistrettoCurve::base_g();
+        assert!(verify_ristretto_bg_admission_components(&tampered, &archive).is_err());
+
+        // A spliced admission statement detaches from the component set.
+        let mut spliced = archive.clone();
+        spliced.statement.ladders[0].output[7] ^= 1;
+        assert!(verify_ristretto_bg_admission_components(&components, &spliced).is_err());
+
+        // Spliced proof bytes fail the STARK.
+        let proof_len = archive.stark_proof_bytes.len();
+        let mut spliced = archive.clone();
+        spliced.stark_proof_bytes[proof_len / 2] ^= 1;
+        assert!(verify_ristretto_bg_admission_components(&components, &spliced).is_err());
     }
 
     #[test]
@@ -536,10 +1331,11 @@ mod tests {
         let verify_elapsed = started.elapsed();
         let proof_len = archive.stark_proof_bytes.len();
         eprintln!(
-            "admission STARK (2 ladders + schedule deck 12): prove {prove_elapsed:?}, verify {verify_elapsed:?}, proof {proof_len} bytes"
+            "admission STARK v2 (2 ladders + accumulation + schedule deck 12): prove {prove_elapsed:?}, verify {verify_elapsed:?}, proof {proof_len} bytes"
         );
 
-        // Reference: the same components as separate proofs.
+        // Reference: the same components as separate proofs (ladder batch
+        // with its codec STARKs, then the schedule).
         let started = std::time::Instant::now();
         let separate_ladders = prove_ristretto_scalar_mul_ladder_batch(
             statement
@@ -561,6 +1357,17 @@ mod tests {
             .expect("schedule program")
         })
         .expect("separate schedule proof");
+        // The addition row as its own separate one-row Fp program batch.
+        let separate_addition =
+            crate::ristretto_fp_program_air::prove_ristretto_fp_program_batch(&vec![
+                build_ristretto_fp_program_compressed_point_addition(
+                    &statement.additions[0].left,
+                    &statement.additions[0].right,
+                )
+                .expect("separate addition program")
+                .0,
+            ])
+            .expect("separate addition proof");
         let separate_elapsed = started.elapsed();
         let started = std::time::Instant::now();
         crate::ristretto_scalar_mul_air::verify_ristretto_scalar_mul_ladder_batch(
@@ -569,12 +1376,22 @@ mod tests {
         .expect("separate ladder verify");
         crate::ristretto_scalar_program_air::verify_ristretto_scalar_program(&separate_schedule)
             .expect("separate schedule verify");
+        crate::ristretto_fp_program_air::verify_ristretto_fp_program_batch(&separate_addition)
+            .expect("separate addition verify");
         let separate_verify = started.elapsed();
-        let separate_bytes =
-            separate_ladders.stark_proof_bytes.len() + separate_schedule.stark_proof_bytes.len();
+        // Account for every separate STARK: the ladder proof, its embedded
+        // decode/encode batch proofs, the addition batch, and the schedule.
+        let separate_bytes = separate_ladders.stark_proof_bytes.len()
+            + separate_ladders.decodes.stark_proof_bytes.len()
+            + separate_ladders.encodes.stark_proof_bytes.len()
+            + separate_addition.stark_proof_bytes.len()
+            + separate_schedule.stark_proof_bytes.len();
         eprintln!(
-            "separate proofs: prove {separate_elapsed:?}, verify {separate_verify:?}, proofs {separate_bytes} bytes (ladder {} + schedule {})",
+            "separate proofs: prove {separate_elapsed:?}, verify {separate_verify:?}, proofs {separate_bytes} bytes (ladder {} + decodes {} + encodes {} + addition {} + schedule {})",
             separate_ladders.stark_proof_bytes.len(),
+            separate_ladders.decodes.stark_proof_bytes.len(),
+            separate_ladders.encodes.stark_proof_bytes.len(),
+            separate_addition.stark_proof_bytes.len(),
             separate_schedule.stark_proof_bytes.len()
         );
     }
@@ -593,6 +1410,16 @@ mod tests {
         // A detached ladder output fails the native rebuild.
         let mut spliced = archive.clone();
         spliced.statement.ladders[0].output[3] ^= 1;
+        assert!(verify_ristretto_admission_stark(&spliced).is_err());
+
+        // A detached accumulation row fails its native rebuild.
+        let mut spliced = archive.clone();
+        spliced.statement.additions[0].output[5] ^= 1;
+        assert!(verify_ristretto_admission_stark(&spliced).is_err());
+
+        // Dropping the accumulation row changes the digest and segment set.
+        let mut spliced = archive.clone();
+        spliced.statement.additions.clear();
         assert!(verify_ristretto_admission_stark(&spliced).is_err());
 
         // A detached tag changes the admission digest and the binding row.
@@ -617,11 +1444,13 @@ mod tests {
         }
 
         // Spliced claimed sums fail the interaction commitment.
-        let mut spliced = archive.clone();
-        spliced.ladder_claimed_sum[1] ^= 1;
-        assert!(verify_ristretto_admission_stark(&spliced).is_err());
-        let mut spliced = archive.clone();
-        spliced.scalar_claimed_sum[2] ^= 1;
-        assert!(verify_ristretto_admission_stark(&spliced).is_err());
+        for slot in 0..5 {
+            let mut spliced = archive.clone();
+            spliced.claimed_sums[slot][1] ^= 1;
+            assert!(
+                verify_ristretto_admission_stark(&spliced).is_err(),
+                "splicing claimed sum {slot} must fail"
+            );
+        }
     }
 }
