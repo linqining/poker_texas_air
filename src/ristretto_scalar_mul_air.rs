@@ -350,7 +350,7 @@ fn identity_coords() -> [[u8; LIMBS]; 4] {
 /// One ladder step: the two projective operands, the pinned intermediate
 /// values of the unified addition, and the projective output.
 #[derive(Debug, Clone)]
-struct LadderStep {
+pub(crate) struct LadderStep {
     left: [[u8; LIMBS]; 4],
     right: [[u8; LIMBS]; 4],
     output: [[u8; LIMBS]; 4],
@@ -429,7 +429,7 @@ fn projective_add_step(
 ///
 /// The schedule is a pure function of `(windows, base coordinates)`, so the
 /// verifier rebuilds it byte-for-byte before checking the scope commitment.
-fn build_ladder_schedule(
+pub(crate) fn build_ladder_schedule(
     windows: &[u8; WINDOW_COUNT],
     base_coords: &[[u8; LIMBS]; 4],
 ) -> TexasAirResult<Vec<LadderStep>> {
@@ -1095,7 +1095,7 @@ relation!(LadderRange11, 1);
 relation!(LadderCarry17, 2);
 
 #[derive(Clone)]
-struct ScalarMulLadderAir {
+pub(crate) struct ScalarMulLadderAir {
     log_size: u32,
     range: LadderRange11,
     carry: LadderCarry17,
@@ -1663,7 +1663,7 @@ impl BorshDeserialize for ArchivedRistrettoScalarMulLadderBatchProof {
 
 /// Rebuild one statement's decode program, ladder schedule, and encode
 /// program deterministically from its public fields.
-fn rebuild_statement(
+pub(crate) fn rebuild_statement(
     statement: &RistrettoScalarMulLadderStatement,
 ) -> TexasAirResult<(RistrettoFpProgram, RistrettoFpProgram, Vec<LadderStep>)> {
     if statement.windows != windows(&statement.scalar) {
@@ -1952,6 +1952,118 @@ pub fn verify_ristretto_scalar_mul_ladder(
         ));
     }
     verify_ristretto_scalar_mul_ladder_batch(archive)
+}
+
+// ---------------------------------------------------------------------------
+// Unified-admission segment (multi-component folding).
+// ---------------------------------------------------------------------------
+
+/// One circle-domain column evaluation as committed into the shared trees.
+pub(crate) type LadderEval = stwo::prover::poly::circle::CircleEvaluation<
+    stwo::prover::backend::simd::SimdBackend,
+    M31,
+    stwo::prover::poly::BitReversedOrder,
+>;
+
+/// Everything the unified admission STARK needs from one ladder segment: the
+/// scope/trace columns for the shared preprocessed and original trees, the
+/// interaction columns for the shared interaction tree, and (privately) the
+/// drawn LogUp relations required to construct the component.
+///
+/// The two-phase protocol mirrors the shared Fiat--Shamir sequence: build
+/// the traces first, let the caller commit the scope and original trees,
+/// then draw the relations via [`LadderSegment::interact`] and let the
+/// caller mix the claimed sum before committing the interaction tree.
+pub(crate) struct LadderSegment {
+    /// Log size of this segment's columns.
+    pub(crate) log_size: u32,
+    /// Preprocessed scope columns (shared tree 0).
+    pub(crate) scope: MethodTrace,
+    /// Original trace columns (shared tree 1).
+    pub(crate) trace: MethodTrace,
+    /// Interaction columns (shared tree 2); empty until `interact`.
+    pub(crate) interaction: Vec<LadderEval>,
+    /// Claimed LogUp sum; zero until `interact`.
+    pub(crate) claimed_sum: SecureField,
+    relations: Option<(LadderRange11, LadderCarry17)>,
+}
+
+impl LadderSegment {
+    /// Build the scope and original trace columns for `schedules` without
+    /// touching the channel.
+    pub(crate) fn build(schedules: &[Vec<LadderStep>]) -> TexasAirResult<Self> {
+        let log_size = ladder_log_size(schedules.len())?;
+        let trace = trace_columns_batch(schedules)?;
+        let scope = scope_columns_batch(schedules)?;
+        Ok(Self {
+            log_size,
+            scope,
+            trace,
+            interaction: Vec::new(),
+            claimed_sum: SecureField::from(0u32),
+            relations: None,
+        })
+    }
+
+    /// Draw this segment's LogUp relations from the channel (after the
+    /// original-tree commit) and build the paired interaction columns.
+    pub(crate) fn interact(&mut self, channel: &mut stwo::core::channel::Poseidon252Channel) {
+        let range = LadderRange11::draw(channel);
+        let carry = LadderCarry17::draw(channel);
+        let (_, limb_columns, carry_pair_columns) = trace_layout();
+        let (interaction, claimed_sum) = ladder_range_interaction(
+            &self.trace,
+            self.log_size,
+            &range,
+            &carry,
+            &limb_columns,
+            &carry_pair_columns,
+            PROGRAM_WIDTH,
+        );
+        self.interaction = interaction;
+        self.claimed_sum = claimed_sum;
+        self.relations = Some((range, carry));
+    }
+
+    /// Construct this segment's component against the shared allocator.
+    pub(crate) fn component(
+        &self,
+        allocator: &mut TraceLocationAllocator,
+    ) -> FrameworkComponent<ScalarMulLadderAir> {
+        let (range, carry) = self
+            .relations
+            .as_ref()
+            .expect("LadderSegment::interact runs before component construction");
+        FrameworkComponent::new(
+            allocator,
+            ScalarMulLadderAir::new(self.log_size, range.clone(), carry.clone()),
+            self.claimed_sum,
+        )
+    }
+
+    /// Mirror the prover's relation draws on a verifier channel without
+    /// materializing interaction columns; stores the drawn relations for
+    /// component construction.
+    pub(crate) fn mirror_draw(&mut self, channel: &mut stwo::core::channel::Poseidon252Channel) {
+        let range = LadderRange11::draw(channel);
+        let carry = LadderCarry17::draw(channel);
+        self.relations = Some((range, carry));
+    }
+
+    /// Interaction-column count of this segment (paired fractions, four M31
+    /// columns per secure column), derivable from the fixed layout.
+    pub(crate) fn interaction_columns(&self) -> usize {
+        let (_, limb_columns, carry_pair_columns) = trace_layout();
+        let range_stripes = range_table_stripes(self.log_size);
+        let carry_stripes = carry_table_stripes(self.log_size);
+        (limb_columns.len() + carry_pair_columns.len() + range_stripes + carry_stripes).div_ceil(2)
+            * 4
+    }
+
+    /// Preprocessed-column identifiers of this segment's scope.
+    pub(crate) fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
+        preprocessed_ids()
+    }
 }
 
 #[cfg(test)]

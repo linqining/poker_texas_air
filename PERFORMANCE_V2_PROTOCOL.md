@@ -102,14 +102,22 @@ reveal 阶段已按证明 rayon 并行（181→13.2 ms）。整手 verify 297→
 | 组件 | 电路内义务 | 估算 |
 | --- | --- | --- |
 | 洗牌 BG 点方程 | ~7 组 52-way MSM 等式 | ✅ 已落地：`ristretto_scalar_mul_air` 专用 fixed-window 梯子 AIR（N=52 批量 prove 19.0s / verify 1.7s，边际 ~0.34s/次；对比 FpProgram 压缩行路线 172.3s / 8.8s，**prove 9.1× / verify 5.2×**） |
-| BG 标量侧调度 | 幂表 + 期望乘积（mod l） | ✅ 已落地：`ristretto_scalar_program_air`（prove 2.4s / verify 1.65s / 17.9MB，宽行 FRI 成本是后续压缩项） |
+| BG 标量侧调度 | 幂表 + 期望乘积（mod l） | ✅ 已落地：`ristretto_scalar_program_air`（单条 prove 2.7s / verify 1.7s / 17.9MB；**跨调度批摊销实测**：52 条同形状调度一批 prove 2.8s / 证明 18.2MB = **0.35MB/条**，已达 <1MB 目标，无需新代码——结算层按窗口合批即可） |
 | pk_ownership / reveal_token | 各 2 条点方程 | 各 2 次标量乘 |
 | remask / leave / fold | 53 条点方程 | ~106 次标量乘（52 卡批量 DLEQ） |
 | transcript 链 | BLAKE3 二元域约束 | 即 Flock 已覆盖的语句 |
 | 状态绑定 / openings | Blake2b lookup | 已是 M31 栈 STARK |
 
 结论：每手牌的完整递归义务 ≈ 500–700 次电路内标量乘 + 哈希约束 + 标量侧调度
-（✅ 已有 STARK：mod l program AIR）。点侧的专用 fixed-window scalar-mul AIR
+（✅ 已有 STARK：mod l program AIR）。**统一 admission STARK 骨架也已落地**
+（✅ `ristretto_admission_air`，递归聚合器原型）：一份多组件证明把
+[梯子 AIR 组件 + BG 标量调度组件 + admission 绑定行] 折进共享的三棵树
+（tree 0 = 各组件 scope、tree 1 = 各原始 trace、tree 2 = 各 LogUp 交互层，
+由 stwo 固定索引强制）与单次 FRI；实测（2 梯子 + deck-12 调度）：合并
+prove 1.78s / verify 586ms / 5.54MB，对比分离证明 prove 2.97s / verify
+1012ms / 5.04MB —— **prove -40% / verify -42%，体积 +10%**（合并 FRI 以最大
+log 域运行）。验证端沿用 fail-closed 纪律：原生重建全部语句 + 可信 scope
+比较 + 单次 STARK 验证。点侧的专用 fixed-window scalar-mul AIR
 也已落地（✅ `ristretto_scalar_mul_air`）：trace 每行是一次射影 Edwards 加法
 （26 个 pinned 值 + 8 个商 witness + 8 条加减链 + `2·Z1` 倍乘链 + `2d·T1`
 常数乘 + 7 个一般乘法），基点只 decode 一次、终值只 encode 一次（各一条
@@ -118,5 +126,7 @@ fixed-shape Fp program 批行）；行内值经预计算 scope 列钉死到验�
 （11-bit 单肢）与乘法 carry（17-bit 对）进共享 LogUp 表。同输入实测
 （ristretto_perf）：N=1 prove 1.8s / verify 0.58s；N=8 prove 3.5s；N=52 prove
 19.0s / verify 1.7s / 证明 6.24MB（FpProgram 压缩行路线 172.3s / 8.8s /
-6.54MB）。剩余前置项只有递归聚合器的折叠摊销；标量侧调度的 17.9MB 与梯子
-路线的 ~6.2MB 宽行证明均需列打包/批摊销优化后才适合并入 ZRS2 信封。
+6.54MB）。剩余前置项只有递归聚合器的折叠摊销。宽行证明的批摊销已实测：BG 标量调度
+52 条一批 0.35MB/条（`prove_ristretto_scalar_program_batch`，prove 几乎零增长——
+宽度主导 FRI，行数只贡献 log 因子）；梯子路线 N=52 全批 6.24MB。仍按单条入
+ZRS2 信封的场景（单调度 17.9MB / 单梯子 6.2MB）才需要进一步的列打包压缩。

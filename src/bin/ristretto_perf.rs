@@ -164,6 +164,66 @@ fn main() {
         );
     }
 
+    // Bayer-Groth scalar-side schedule: single vs cross-schedule batch
+    // amortization (equal-shape programs as rows of one STARK).
+    {
+        use poker_texas_air::ristretto_scalar_program_air::{
+            build_bayer_groth_scalar_schedule, prove_ristretto_scalar_program,
+            prove_ristretto_scalar_program_batch, verify_ristretto_scalar_program,
+            verify_ristretto_scalar_program_batch,
+        };
+        let x = scalar(7);
+        let y = scalar(9);
+        let z = scalar(11);
+        let pc = scalar(13);
+        let program = build_bayer_groth_scalar_schedule(&x, &y, &z, &pc, 52).unwrap();
+        println!(
+            "=== BG scalar schedule (deck 52, {} values / {} ops) ===",
+            program.values.len(),
+            program.ops.len()
+        );
+        let started = Instant::now();
+        let archive = prove_ristretto_scalar_program(&program).unwrap();
+        let prove_elapsed = started.elapsed();
+        let started = Instant::now();
+        verify_ristretto_scalar_program(&archive).unwrap();
+        let verify_elapsed = started.elapsed();
+        println!(
+            "single    prove {:>9.1?}  verify {:>8.1?}  proof bytes {}",
+            prove_elapsed,
+            verify_elapsed,
+            borsh_len(&archive)
+        );
+
+        for count in [8usize, 52] {
+            let programs = (0..count)
+                .map(|index| {
+                    let varied = {
+                        let mut bytes = y;
+                        bytes[0] = bytes[0].wrapping_add(index as u8);
+                        bytes
+                    };
+                    build_bayer_groth_scalar_schedule(&x, &varied, &z, &pc, 52).unwrap()
+                })
+                .collect::<Vec<_>>();
+            println!("=== BG scalar schedule batch N={count} ===");
+            let started = Instant::now();
+            let archive = prove_ristretto_scalar_program_batch(&programs).unwrap();
+            let prove_elapsed = started.elapsed();
+            let started = Instant::now();
+            verify_ristretto_scalar_program_batch(&archive).unwrap();
+            let verify_elapsed = started.elapsed();
+            let bytes = borsh_len(&archive);
+            println!(
+                "batch     prove {:>9.1?}  verify {:>8.1?}  proof bytes {}  ({}/schedule)",
+                prove_elapsed,
+                verify_elapsed,
+                bytes,
+                bytes / count
+            );
+        }
+    }
+
     println!(
         "=== per-input 8-batches vs single 8-input batch (simulated per-slot vs global slot-OR muls) ==="
     );

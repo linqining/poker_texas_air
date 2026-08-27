@@ -410,7 +410,7 @@ relation!(ScalarRange11, 1);
 relation!(ScalarCarry17, 2);
 
 #[derive(Clone)]
-struct ScalarProgramAir {
+pub(crate) struct ScalarProgramAir {
     log_size: u32,
     program: RistrettoScalarProgram,
     range: ScalarRange11,
@@ -2070,6 +2070,128 @@ pub fn verify_bayer_groth_scalar_schedule(
     verify_ristretto_scalar_program(archive)?;
     let output_index = expected.outputs[0] as usize;
     Ok(expected.values[output_index])
+}
+
+// ---------------------------------------------------------------------------
+// Unified-admission segment (multi-component folding).
+// ---------------------------------------------------------------------------
+
+/// One circle-domain column evaluation as committed into the shared trees.
+pub(crate) type ScalarEval = stwo::prover::poly::circle::CircleEvaluation<
+    stwo::prover::backend::simd::SimdBackend,
+    M31,
+    stwo::prover::poly::BitReversedOrder,
+>;
+
+/// The unified-admission segment of one (or a batch of equal-shape) scalar
+/// program(s): scope/trace columns for the shared preprocessed and original
+/// trees, interaction columns for the shared interaction tree, and
+/// (privately) the drawn LogUp relations needed for the component.
+pub(crate) struct ScalarProgramSegment {
+    /// Log size of this segment's columns.
+    pub(crate) log_size: u32,
+    /// Preprocessed scope columns (shared tree 0).
+    pub(crate) scope: MethodTrace,
+    /// Original trace columns (shared tree 1).
+    pub(crate) trace: MethodTrace,
+    /// Interaction columns (shared tree 2); empty until `interact`.
+    pub(crate) interaction: Vec<ScalarEval>,
+    /// Claimed LogUp sum; zero until `interact`.
+    pub(crate) claimed_sum: SecureField,
+    relations: Option<(ScalarRange11, ScalarCarry17)>,
+}
+
+impl ScalarProgramSegment {
+    /// Build the scope and original trace columns without touching the
+    /// channel. Every program must share the template's shape.
+    pub(crate) fn build(programs: &[RistrettoScalarProgram]) -> TexasAirResult<Self> {
+        let log_size = batch_log_size(programs.len())?;
+        let trace = trace_columns_batch(programs)?;
+        let scope = scope_columns_batch(programs)?;
+        Ok(Self {
+            log_size,
+            scope,
+            trace,
+            interaction: Vec::new(),
+            claimed_sum: SecureField::from(0u32),
+            relations: None,
+        })
+    }
+
+    /// Draw this segment's LogUp relations from the channel (after the
+    /// original-tree commit) and build the paired interaction columns.
+    pub(crate) fn interact(
+        &mut self,
+        channel: &mut stwo::core::channel::Poseidon252Channel,
+        template: &RistrettoScalarProgram,
+    ) {
+        let range = ScalarRange11::draw(channel);
+        let carry = ScalarCarry17::draw(channel);
+        let (program_width, limb_columns, carry_pair_columns) =
+            trace_layout(template).expect("program shape was validated before trace generation");
+        let (interaction, claimed_sum) = scalar_range_interaction(
+            &self.trace,
+            self.log_size,
+            &range,
+            &carry,
+            &limb_columns,
+            &carry_pair_columns,
+            program_width,
+        );
+        self.interaction = interaction;
+        self.claimed_sum = claimed_sum;
+        self.relations = Some((range, carry));
+    }
+
+    /// Construct this segment's component against the shared allocator.
+    pub(crate) fn component(
+        &self,
+        allocator: &mut TraceLocationAllocator,
+        template: &RistrettoScalarProgram,
+    ) -> FrameworkComponent<ScalarProgramAir> {
+        let (range, carry) = self
+            .relations
+            .as_ref()
+            .expect("ScalarProgramSegment::interact runs before component construction");
+        FrameworkComponent::new(
+            allocator,
+            ScalarProgramAir::new(
+                self.log_size,
+                template.clone(),
+                range.clone(),
+                carry.clone(),
+            ),
+            self.claimed_sum,
+        )
+    }
+
+    /// Mirror the prover's relation draws on a verifier channel without
+    /// materializing interaction columns; stores the drawn relations for
+    /// component construction.
+    pub(crate) fn mirror_draw(&mut self, channel: &mut stwo::core::channel::Poseidon252Channel) {
+        let range = ScalarRange11::draw(channel);
+        let carry = ScalarCarry17::draw(channel);
+        self.relations = Some((range, carry));
+    }
+
+    /// Interaction-column count of this segment (paired fractions, four M31
+    /// columns per secure column), derivable from the template layout.
+    pub(crate) fn interaction_columns(&self, template: &RistrettoScalarProgram) -> usize {
+        let (_, limb_columns, carry_pair_columns) =
+            trace_layout(template).expect("program shape was validated before trace generation");
+        let range_stripes = range_table_stripes(self.log_size);
+        let carry_stripes = carry_table_stripes(self.log_size);
+        (limb_columns.len() + carry_pair_columns.len() + range_stripes + carry_stripes).div_ceil(2)
+            * 4
+    }
+
+    /// Preprocessed-column identifiers of this segment's scope.
+    pub(crate) fn preprocessed_ids(
+        &self,
+        template: &RistrettoScalarProgram,
+    ) -> Vec<PreProcessedColumnId> {
+        preprocessed_ids(template)
+    }
 }
 
 #[cfg(test)]

@@ -599,11 +599,15 @@ A recursion must then constrain:
    program AIR (same 24×11-bit limb layout, carry bounds and LogUp tables;
    the modulus is encoded by `L_BYTES` and its `2^256 − l` complement), and
    `build_bayer_groth_scalar_schedule` proves the powers/product/final
-   schedule in one STARK.  Measured (release): prove 2.4 s, verify 1.65 s,
-   proof 17.9 MB for the 470-value/259-op program — correct but wide; the
-   wide-trace FRI cost is the follow-up (column packing, batch amortization
-   across a hand's schedules) before it is attached to the `ZRS2` envelope
-   by default;
+   schedule in one STARK.  Measured (release): a single 470-value/259-op
+   schedule proves in 2.7 s / verifies in 1.7 s with a 17.9 MB proof, and
+   cross-schedule batch amortization (equal-shape programs as rows of one
+   STARK via `prove_ristretto_scalar_program_batch`) collapses the marginal
+   cost to 0.35 MB per schedule at 52 schedules (18.2 MB total, prove 2.8 s,
+   verify 2.8 s) — below the 1 MB/schedule target with no new code, so a
+   settlement window's schedules should be batched before entering `ZRS2`
+   envelopes.  Column packing remains optional for single-schedule
+   envelopes;
 3. ~~the point-side multi-exponentiation equalities (~7 checks over 52-way
    MSMs, roughly 300 in-circuit scalar multiplications)~~ **implemented**:
    `ristretto_scalar_mul_air` is the dedicated fixed-window
@@ -623,6 +627,26 @@ A recursion must then constrain:
    ~0.34 s per multiplication.  The wide-trace FRI cost (multi-MB proofs)
    remains the follow-up compression item alongside the scalar-schedule
    STARK.
+
+   On top of both prerequisites, `ristretto_admission_air` is the unified
+   admission STARK skeleton (the recursive-aggregator prototype): one
+   multi-component proof folding the ladder component, the Bayer--Groth
+   scalar-schedule component, and an admission binding row (the
+   domain-separated statement digest pinned inside the constrained trace)
+   into stwo's forced three-tree layout (tree 0 = every component's
+   preprocessed scope, tree 1 = every original trace, tree 2 = every LogUp
+   interaction) with a single FRI.  Measured (2 ladders + a deck-12
+   schedule): merged prove 1.78 s / verify 586 ms / 5.54 MB versus separate
+   proofs 2.97 s / 1012 ms / 5.04 MB — prove -40%, verify -42%, size +10%.
+   Verification keeps the fail-closed discipline: every ladder schedule and
+   the scalar schedule are rebuilt natively, the shared scope tree is
+   recomputed and compared, and only then does the single multi-component
+   STARK run.  The decode/encode Fp program segments of a full point
+   equation plug into the same three-tree layout as additional components
+   (follow-up), as do the Texas state-transition STARKs (Layer 1/3 of the
+   aggregation plan); in-circuit FRI verification remains out of scope for
+   stwo 2.3, so this skeleton is the folding half of recursion, not yet a
+   proof-verifies-proof verifier.
 
 The same component split applies to the native reconstruction route: its
 sigma equations are 4 scalar multiplications per slot plus 6 per cross-key

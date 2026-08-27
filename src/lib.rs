@@ -115,6 +115,10 @@ pub mod canonical_state_opening;
 pub mod hash_prover;
 /// Bounded, non-terminal reveal-timeout kick cascade scope.
 pub mod reveal_timeout_cascade;
+/// Unified admission STARK skeleton: the Path A recursive-aggregator
+/// prototype folding the ladder and scalar-schedule components into one
+/// multi-component proof.
+pub mod ristretto_admission_air;
 #[cfg(test)]
 mod ristretto_degree_util;
 /// Composed host-zero extended-Edwards point-addition proofs.
