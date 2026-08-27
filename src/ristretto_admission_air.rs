@@ -338,8 +338,7 @@ impl FrameworkEval for AdmissionBindingAir {
 /// program, and the scalar schedule program.
 struct AdmissionRebuilt {
     schedules: Vec<Vec<crate::ristretto_scalar_mul_air::LadderStep>>,
-    decode_programs: Vec<RistrettoFpProgram>,
-    encode_programs: Vec<RistrettoFpProgram>,
+    codec_programs: Vec<RistrettoFpProgram>,
     addition_programs: Vec<RistrettoFpProgram>,
     schedule_program: Option<RistrettoScalarProgram>,
     recurrence_program: Option<RistrettoScalarProgram>,
@@ -358,15 +357,11 @@ fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<Admission
         .collect::<TexasAirResult<Vec<_>>>()?;
     let schedules = rebuilt_ladders
         .iter()
-        .map(|(_, _, schedule)| schedule.clone())
+        .map(|(_, schedule)| schedule.clone())
         .collect::<Vec<_>>();
-    let decode_programs = rebuilt_ladders
+    let codec_programs = rebuilt_ladders
         .iter()
-        .map(|(decode, _, _)| decode.clone())
-        .collect::<Vec<_>>();
-    let encode_programs = rebuilt_ladders
-        .iter()
-        .map(|(_, encode, _)| encode.clone())
+        .map(|(codec, _)| codec.clone())
         .collect::<Vec<_>>();
     let addition_programs = statement
         .additions
@@ -408,8 +403,7 @@ fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<Admission
         .transpose()?;
     Ok(AdmissionRebuilt {
         schedules,
-        decode_programs,
-        encode_programs,
+        codec_programs,
         addition_programs,
         schedule_program,
         recurrence_program,
@@ -422,8 +416,7 @@ struct AdmissionSegments {
     ladder: LadderSegment,
     schedule: Option<ScalarProgramSegment>,
     recurrence: Option<ScalarProgramSegment>,
-    decode: FpProgramSegment,
-    encode: FpProgramSegment,
+    codec: FpProgramSegment,
     additions: Option<FpProgramSegment>,
     /// Optional Texas method-AIR trace (Layer-1 fold): trace columns only —
     /// a method AIR carries no preprocessed columns and no LogUp layer, so
@@ -456,13 +449,9 @@ impl AdmissionSegments {
                     )
                 })
                 .transpose()?,
-            decode: FpProgramSegment::build(
-                &rebuilt.decode_programs,
-                "ristretto.admission.fp.decode.scope.v1",
-            )?,
-            encode: FpProgramSegment::build(
-                &rebuilt.encode_programs,
-                "ristretto.admission.fp.encode.scope.v1",
+            codec: FpProgramSegment::build(
+                &rebuilt.codec_programs,
+                "ristretto.admission.fp.codec.scope.v1",
             )?,
             additions: if rebuilt.addition_programs.is_empty() {
                 None
@@ -480,8 +469,7 @@ impl AdmissionSegments {
         let mut log = self
             .ladder
             .log_size
-            .max(self.decode.log_size)
-            .max(self.encode.log_size)
+            .max(self.codec.log_size)
             .max(BINDING_LOG_SIZE);
         if let Some(additions) = &self.additions {
             log = log.max(additions.log_size);
@@ -518,8 +506,7 @@ impl AdmissionSegments {
                 .expect("segment implies program");
             recurrence.interact(channel, program);
         }
-        self.decode.interact(channel, &rebuilt.decode_programs[0]);
-        self.encode.interact(channel, &rebuilt.encode_programs[0]);
+        self.codec.interact(channel, &rebuilt.codec_programs[0]);
         if let Some(additions) = &mut self.additions {
             additions.interact(channel, &rebuilt.addition_programs[0]);
         }
@@ -533,15 +520,14 @@ impl AdmissionSegments {
         if let Some(recurrence) = &mut self.recurrence {
             recurrence.mirror_draw(channel);
         }
-        self.decode.mirror_draw(channel);
-        self.encode.mirror_draw(channel);
+        self.codec.mirror_draw(channel);
         if let Some(additions) = &mut self.additions {
             additions.mirror_draw(channel);
         }
     }
 
     fn claimed_sum_count(&self) -> usize {
-        3 + usize::from(self.schedule.is_some())
+        2 + usize::from(self.schedule.is_some())
             + usize::from(self.recurrence.is_some())
             + usize::from(self.additions.is_some())
     }
@@ -554,8 +540,7 @@ impl AdmissionSegments {
         if let Some(recurrence) = &self.recurrence {
             sums.push(recurrence.claimed_sum);
         }
-        sums.push(self.decode.claimed_sum);
-        sums.push(self.encode.claimed_sum);
+        sums.push(self.codec.claimed_sum);
         if let Some(additions) = &self.additions {
             sums.push(additions.claimed_sum);
         }
@@ -573,8 +558,7 @@ impl AdmissionSegments {
         if let Some(recurrence) = &self.recurrence {
             tree.extend_evals(recurrence.scope.to_evaluations());
         }
-        tree.extend_evals(self.decode.scope.to_evaluations());
-        tree.extend_evals(self.encode.scope.to_evaluations());
+        tree.extend_evals(self.codec.scope.to_evaluations());
         if let Some(additions) = &self.additions {
             tree.extend_evals(additions.scope.to_evaluations());
         }
@@ -592,8 +576,7 @@ impl AdmissionSegments {
         if let Some(recurrence) = &self.recurrence {
             tree.extend_evals(recurrence.trace.to_evaluations());
         }
-        tree.extend_evals(self.decode.trace.to_evaluations());
-        tree.extend_evals(self.encode.trace.to_evaluations());
+        tree.extend_evals(self.codec.trace.to_evaluations());
         if let Some(additions) = &self.additions {
             tree.extend_evals(additions.trace.to_evaluations());
         }
@@ -614,8 +597,7 @@ impl AdmissionSegments {
         if let Some(recurrence) = &self.recurrence {
             tree.extend_evals(recurrence.interaction.clone());
         }
-        tree.extend_evals(self.decode.interaction.clone());
-        tree.extend_evals(self.encode.interaction.clone());
+        tree.extend_evals(self.codec.interaction.clone());
         if let Some(additions) = &self.additions {
             tree.extend_evals(additions.interaction.clone());
         }
@@ -629,8 +611,7 @@ impl AdmissionSegments {
         if let Some(recurrence) = &self.recurrence {
             sizes.push(vec![recurrence.log_size; recurrence.scope.num_columns]);
         }
-        sizes.push(vec![self.decode.log_size; self.decode.scope.num_columns]);
-        sizes.push(vec![self.encode.log_size; self.encode.scope.num_columns]);
+        sizes.push(vec![self.codec.log_size; self.codec.scope.num_columns]);
         let mut sizes = sizes.concat();
         if let Some(additions) = &self.additions {
             sizes.extend(vec![additions.log_size; additions.scope.num_columns]);
@@ -646,8 +627,7 @@ impl AdmissionSegments {
         if let Some(recurrence) = &self.recurrence {
             sizes.push(vec![recurrence.log_size; recurrence.trace.num_columns]);
         }
-        sizes.push(vec![self.decode.log_size; self.decode.trace.num_columns]);
-        sizes.push(vec![self.encode.log_size; self.encode.trace.num_columns]);
+        sizes.push(vec![self.codec.log_size; self.codec.trace.num_columns]);
         let mut sizes = sizes.concat();
         if let Some(additions) = &self.additions {
             sizes.extend(vec![additions.log_size; additions.trace.num_columns]);
@@ -685,14 +665,9 @@ impl AdmissionSegments {
             ]);
         }
         sizes.push(vec![
-            self.decode.log_size;
-            self.decode
-                .interaction_columns(&rebuilt.decode_programs[0])
-        ]);
-        sizes.push(vec![
-            self.encode.log_size;
-            self.encode
-                .interaction_columns(&rebuilt.encode_programs[0])
+            self.codec.log_size;
+            self.codec
+                .interaction_columns(&rebuilt.codec_programs[0])
         ]);
         let mut sizes = sizes.concat();
         if let Some(additions) = &self.additions {
@@ -721,8 +696,7 @@ impl AdmissionSegments {
                 .expect("segment implies program");
             ids.extend(recurrence.preprocessed_ids(program));
         }
-        ids.extend(self.decode.preprocessed_ids(&rebuilt.decode_programs[0]));
-        ids.extend(self.encode.preprocessed_ids(&rebuilt.encode_programs[0]));
+        ids.extend(self.codec.preprocessed_ids(&rebuilt.codec_programs[0]));
         if let Some(additions) = &self.additions {
             ids.extend(additions.preprocessed_ids(&rebuilt.addition_programs[0]));
         }
@@ -756,12 +730,7 @@ impl AdmissionSegments {
             components.push(Box::new(recurrence.component(allocator, program)));
         }
         components.push(Box::new(
-            self.decode
-                .component(allocator, &rebuilt.decode_programs[0]),
-        ));
-        components.push(Box::new(
-            self.encode
-                .component(allocator, &rebuilt.encode_programs[0]),
+            self.codec.component(allocator, &rebuilt.codec_programs[0]),
         ));
         if let Some(additions) = &self.additions {
             components.push(Box::new(
@@ -2321,15 +2290,13 @@ mod tests {
         // Account for every separate STARK: the ladder proof, its embedded
         // decode/encode batch proofs, the addition batch, and the schedule.
         let separate_bytes = separate_ladders.stark_proof_bytes.len()
-            + separate_ladders.decodes.stark_proof_bytes.len()
-            + separate_ladders.encodes.stark_proof_bytes.len()
+            + separate_ladders.codecs.stark_proof_bytes.len()
             + separate_addition.stark_proof_bytes.len()
             + separate_schedule.stark_proof_bytes.len();
         eprintln!(
-            "separate proofs: prove {separate_elapsed:?}, verify {separate_verify:?}, proofs {separate_bytes} bytes (ladder {} + decodes {} + encodes {} + addition {} + schedule {})",
+            "separate proofs: prove {separate_elapsed:?}, verify {separate_verify:?}, proofs {separate_bytes} bytes (ladder {} + codecs {} + addition {} + schedule {})",
             separate_ladders.stark_proof_bytes.len(),
-            separate_ladders.decodes.stark_proof_bytes.len(),
-            separate_ladders.encodes.stark_proof_bytes.len(),
+            separate_ladders.codecs.stark_proof_bytes.len(),
             separate_addition.stark_proof_bytes.len(),
             separate_schedule.stark_proof_bytes.len()
         );
@@ -2388,7 +2355,7 @@ mod tests {
         }
 
         // Spliced claimed sums fail the interaction commitment.
-        for slot in 0..5 {
+        for slot in 0..archive.claimed_sums.len() {
             let mut spliced = archive.clone();
             spliced.claimed_sums[slot][1] ^= 1;
             assert!(

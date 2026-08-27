@@ -267,9 +267,11 @@ const PROGRAM_WIDTH: usize = PINNED_LIMB_COLUMNS
     + (CONST_MUL_COUNT + GENERAL_MUL_SPECS.len()) * MUL_COLUMNS;
 
 /// Scope columns pack two 11-bit limbs per M31 column (< 2^22).
+/// Scope columns pack two 11-bit limbs per M31 column (< 2^22).
 const SCOPE_LIMBS_PER_COLUMN: usize = 2;
 const SCOPE_COLUMNS_PER_VALUE: usize = LIMB_COUNT / SCOPE_LIMBS_PER_COLUMN;
 const SCOPE_WIDTH: usize = PINNED_VALUES * SCOPE_COLUMNS_PER_VALUE;
+
 
 /// Bound on a multiplication carry magnitude: `|carry| ≤ (2·L·(2^11−1)² +
 /// terms) / 2^11 < 2^17`, matching the Fp program family bound.
@@ -481,13 +483,11 @@ pub(crate) fn build_ladder_schedule(
 // Fixed-shape decode/encode programs (battle-tested Fp program builders).
 // ---------------------------------------------------------------------------
 
-/// Prove-shape builder for the one-per-statement base decode: the public
-/// encoding is the sole input, the fixed decode relation constrains the
-/// projective coordinates, and the inverse-square-root witness is checked by
-/// its `inverse_check == 1` output.
-fn build_ladder_decode_program(
+/// Decode the base encoding natively, without building a program (the
+/// schedule only needs the projective coordinates).
+fn decode_base_coords(
     base_encoding: &[u8; LIMBS],
-) -> TexasAirResult<(RistrettoFpProgram, [[u8; LIMBS]; 4])> {
+) -> TexasAirResult<[[u8; LIMBS]; 4]> {
     let inverse_sqrt = canonical_decode_inverse_sqrt(base_encoding)?;
     let mut builder = RistrettoFpProgramBuilder::new(&[*base_encoding]);
     let one = builder.constant(&ONE_BYTES)?;
@@ -506,37 +506,56 @@ fn build_ladder_decode_program(
     for (slot, index) in decoded.coordinates.into_iter().enumerate() {
         coordinates[slot] = builder_values(&builder, index)?;
     }
-    let program = builder.finish(&[
-        decoded.inverse_check,
-        decoded.coordinates[0],
-        decoded.coordinates[1],
-        decoded.coordinates[3],
-    ])?;
-    Ok((program, coordinates))
+    Ok(coordinates)
 }
 
-/// Prove-shape builder for the one-per-statement final encode: the projective
-/// accumulator coordinates are the inputs and the compressed encoding is the
-/// public output.
-fn build_ladder_encode_program(
-    coords: &[[u8; LIMBS]; 4],
+/// Prove-shape builder for the one-per-statement codec program: the base
+/// decode and the final-accumulator encode folded into a single fixed-shape
+/// field program, so the ladder batch carries one codec STARK instead of two
+/// (halving the codec FRI fixed cost at small batch sizes).
+///
+/// The public inputs are the base encoding and the four final accumulator
+/// coordinates; the decode branch constrains the schedule's base, the encode
+/// branch constrains the public output, and both inverse-square-root witnesses
+/// are checked by their `inverse_check` outputs.
+fn build_ladder_codec_program(
+    base_encoding: &[u8; LIMBS],
+    final_acc: &[[u8; LIMBS]; 4],
 ) -> TexasAirResult<(RistrettoFpProgram, [u8; LIMBS])> {
-    let inverse_sqrt = projective_encode_inverse_sqrt(coords)?;
-    let mut builder = RistrettoFpProgramBuilder::new(coords);
+    let decode_inverse_sqrt = canonical_decode_inverse_sqrt(base_encoding)?;
+    let encode_inverse_sqrt = projective_encode_inverse_sqrt(final_acc)?;
+    let mut builder = RistrettoFpProgramBuilder::new(&[
+        *base_encoding,
+        final_acc[0],
+        final_acc[1],
+        final_acc[2],
+        final_acc[3],
+    ]);
+    let one = builder.constant(&ONE_BYTES)?;
+    let negative_d = builder.constant(&negative_edwards_d())?;
     let zero = builder.constant(&ZERO_BYTES)?;
+    let decode_inverse_sqrt_index = builder.constant(&decode_inverse_sqrt)?;
+    let decoded = append_fixed_canonical_point_decode(
+        &mut builder,
+        0,
+        decode_inverse_sqrt_index,
+        one,
+        negative_d,
+        zero,
+    )?;
     let sqrt_m1 = builder.constant(&SQRT_M1_BYTES)?;
     let invsqrt_a_minus_d = builder.constant(&INVSQRT_A_MINUS_D_BYTES)?;
-    let inverse_sqrt_index = builder.constant(&inverse_sqrt)?;
+    let encode_inverse_sqrt_index = builder.constant(&encode_inverse_sqrt)?;
     let encoded = append_fixed_projective_point_encode(
         &mut builder,
-        [0, 1, 2, 3],
-        inverse_sqrt_index,
+        [1, 2, 3, 4],
+        encode_inverse_sqrt_index,
         zero,
         sqrt_m1,
         invsqrt_a_minus_d,
     )?;
     let output = builder_values(&builder, encoded.encoding)?;
-    let program = builder.finish(&[encoded.inverse_check, encoded.encoding])?;
+    let program = builder.finish(&[decoded.inverse_check, encoded.inverse_check])?;
     Ok((program, output))
 }
 
@@ -570,6 +589,7 @@ struct DoubleChainWitness {
     k: bool,
     carries: [SignedBit; LIMB_COUNT],
 }
+
 
 struct StepWitness {
     chains: [ChainWitness; CHAIN_SPECS.len()],
@@ -1598,13 +1618,13 @@ pub struct RistrettoScalarMulLadderStatement {
 }
 
 /// Dedicated fixed-window scalar-multiplication batch: one ladder STARK over
-/// all statements' 335-step schedules plus one decode and one encode Fp
+/// all statements' 335-step schedules plus one combined decode+encode codec
 /// program batch.
 ///
 /// The wire format is compact (`RSML` magic): statements, the serialized
-/// ladder STARK, its claimed LogUp sum, and the nested decode/encode batch
-/// archives. The schedules themselves are never serialized — the verifier
-/// rebuilds them deterministically.
+/// ladder STARK, its claimed LogUp sum, and the nested codec batch archive.
+/// The schedules themselves are never serialized — the verifier rebuilds them
+/// deterministically.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArchivedRistrettoScalarMulLadderBatchProof {
     /// Public statements in row order.
@@ -1613,14 +1633,12 @@ pub struct ArchivedRistrettoScalarMulLadderBatchProof {
     pub stark_proof_bytes: Vec<u8>,
     /// Public claimed sum of the shared range LogUp (4 M31 coordinates).
     pub range_claimed_sum: [u32; 4],
-    /// One fixed-shape base-decode program per statement.
-    pub decodes: ArchivedRistrettoFpProgramBatchProof,
-    /// One fixed-shape accumulator-encode program per statement.
-    pub encodes: ArchivedRistrettoFpProgramBatchProof,
+    /// One fixed-shape combined decode+encode codec program per statement.
+    pub codecs: ArchivedRistrettoFpProgramBatchProof,
 }
 
 const LADDER_BATCH_ARCHIVE_MAGIC: [u8; 4] = *b"RSML";
-const LADDER_BATCH_ARCHIVE_VERSION: u8 = 1;
+const LADDER_BATCH_ARCHIVE_VERSION: u8 = 2;
 
 impl BorshSerialize for ArchivedRistrettoScalarMulLadderBatchProof {
     fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
@@ -1629,8 +1647,7 @@ impl BorshSerialize for ArchivedRistrettoScalarMulLadderBatchProof {
         self.statements.serialize(writer)?;
         self.stark_proof_bytes.serialize(writer)?;
         self.range_claimed_sum.serialize(writer)?;
-        self.decodes.serialize(writer)?;
-        self.encodes.serialize(writer)
+        self.codecs.serialize(writer)
     }
 }
 
@@ -1655,39 +1672,38 @@ impl BorshDeserialize for ArchivedRistrettoScalarMulLadderBatchProof {
             statements: Vec::<RistrettoScalarMulLadderStatement>::deserialize_reader(reader)?,
             stark_proof_bytes: Vec::<u8>::deserialize_reader(reader)?,
             range_claimed_sum: <[u32; 4]>::deserialize_reader(reader)?,
-            decodes: ArchivedRistrettoFpProgramBatchProof::deserialize_reader(reader)?,
-            encodes: ArchivedRistrettoFpProgramBatchProof::deserialize_reader(reader)?,
+            codecs: ArchivedRistrettoFpProgramBatchProof::deserialize_reader(reader)?,
         })
     }
 }
 
-/// Rebuild one statement's decode program, ladder schedule, and encode
-/// program deterministically from its public fields.
+/// Rebuild one statement's combined codec program and ladder schedule
+/// deterministically from its public fields.
 pub(crate) fn rebuild_statement(
     statement: &RistrettoScalarMulLadderStatement,
-) -> TexasAirResult<(RistrettoFpProgram, RistrettoFpProgram, Vec<LadderStep>)> {
+) -> TexasAirResult<(RistrettoFpProgram, Vec<LadderStep>)> {
     if statement.windows != windows(&statement.scalar) {
         return Err(TexasAirError::ConstraintUnsatisfied(
             "ladder statement windows do not decompose its scalar".into(),
         ));
     }
-    let (decode_program, coords) = build_ladder_decode_program(&statement.base)?;
+    let coords = decode_base_coords(&statement.base)?;
     let schedule = build_ladder_schedule(&statement.windows, &coords)?;
     let final_acc = schedule
         .last()
         .map(|step| step.output)
         .ok_or_else(|| TexasAirError::SpecViolation("ladder schedule is empty".into()))?;
-    let (encode_program, output) = build_ladder_encode_program(&final_acc)?;
+    let (codec_program, output) = build_ladder_codec_program(&statement.base, &final_acc)?;
     if statement.output != output {
         return Err(TexasAirError::ConstraintUnsatisfied(
             "ladder statement output is detached from its windows and base".into(),
         ));
     }
-    Ok((decode_program, encode_program, schedule))
+    Ok((codec_program, schedule))
 }
 
-/// Rebuild every statement (parallel) and validate the decode/encode batch
-/// detachment before any STARK verification.
+/// Rebuild every statement (parallel) and validate the codec batch detachment
+/// before any STARK verification.
 fn validate_batch_statement(
     archive: &ArchivedRistrettoScalarMulLadderBatchProof,
 ) -> TexasAirResult<Vec<Vec<LadderStep>>> {
@@ -1701,45 +1717,29 @@ fn validate_batch_statement(
         .par_iter()
         .map(rebuild_statement)
         .collect::<TexasAirResult<Vec<_>>>()?;
-    if archive.decodes.programs.len() != rebuilt.len()
-        || archive.encodes.programs.len() != rebuilt.len()
-    {
+    if archive.codecs.programs.len() != rebuilt.len() {
         return Err(TexasAirError::ConstraintUnsatisfied(
-            "decode/encode batch row counts are detached from the statements".into(),
+            "codec batch row counts are detached from the statements".into(),
         ));
     }
-    for ((_, (decode_program, encode_program, _)), archived_decode) in archive
+    for ((_, (codec_program, _)), archived_codec) in archive
         .statements
         .iter()
         .zip(rebuilt.iter())
-        .zip(archive.decodes.programs.iter())
+        .zip(archive.codecs.programs.iter())
     {
-        if archived_decode != decode_program {
+        if archived_codec != codec_program {
             return Err(TexasAirError::ConstraintUnsatisfied(
-                "decode batch row is detached from its base encoding".into(),
+                "codec batch row is detached from its base encoding and accumulator".into(),
             ));
         }
     }
-    for ((_, (_, encode_program, _)), archived_encode) in archive
-        .statements
-        .iter()
-        .zip(rebuilt.iter())
-        .zip(archive.encodes.programs.iter())
-    {
-        if archived_encode != encode_program {
-            return Err(TexasAirError::ConstraintUnsatisfied(
-                "encode batch row is detached from its accumulator".into(),
-            ));
-        }
-    }
-    Ok(rebuilt
-        .into_iter()
-        .map(|(_, _, schedule)| schedule)
-        .collect())
+    Ok(rebuilt.into_iter().map(|(_, schedule)| schedule).collect())
 }
 
 /// Prove multiple fixed-window scalar multiplications as one ladder batch
-/// STARK plus one decode and one encode program batch.
+/// STARK (two components: the general-addition segment and the narrower
+/// dedicated doubling segment) plus one combined codec program batch.
 ///
 /// Each input is `(scalar, windows, base)`; the caller owns the scalar-window
 /// decomposition proofs.
@@ -1754,13 +1754,13 @@ pub fn prove_ristretto_scalar_mul_ladder_batch(
     let built = inputs
         .into_par_iter()
         .map(|(scalar, windows, base)| {
-            let (decode_program, coords) = build_ladder_decode_program(&base)?;
+            let coords = decode_base_coords(&base)?;
             let schedule = build_ladder_schedule(&windows, &coords)?;
             let final_acc = schedule
                 .last()
                 .map(|step| step.output)
                 .ok_or_else(|| TexasAirError::SpecViolation("ladder schedule is empty".into()))?;
-            let (encode_program, output) = build_ladder_encode_program(&final_acc)?;
+            let (codec_program, output) = build_ladder_codec_program(&base, &final_acc)?;
             Ok((
                 RistrettoScalarMulLadderStatement {
                     scalar,
@@ -1768,19 +1768,16 @@ pub fn prove_ristretto_scalar_mul_ladder_batch(
                     base,
                     output,
                 },
-                decode_program,
-                encode_program,
+                codec_program,
                 schedule,
             ))
         })
         .collect::<TexasAirResult<Vec<_>>>()?;
     let statements: Vec<RistrettoScalarMulLadderStatement> =
         built.iter().map(|entry| entry.0.clone()).collect();
-    let decode_programs: Vec<RistrettoFpProgram> =
+    let codec_programs: Vec<RistrettoFpProgram> =
         built.iter().map(|entry| entry.1.clone()).collect();
-    let encode_programs: Vec<RistrettoFpProgram> =
-        built.iter().map(|entry| entry.2.clone()).collect();
-    let schedules: Vec<Vec<LadderStep>> = built.into_iter().map(|entry| entry.3).collect();
+    let schedules: Vec<Vec<LadderStep>> = built.into_iter().map(|entry| entry.2).collect();
 
     let log_size = ladder_log_size(schedules.len())?;
     let trace = trace_columns_batch(&schedules)?;
@@ -1838,14 +1835,12 @@ pub fn prove_ristretto_scalar_mul_ladder_batch(
         .serialize(&proof)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
 
-    let decodes = prove_ristretto_fp_program_batch_owned(decode_programs)?;
-    let encodes = prove_ristretto_fp_program_batch_owned(encode_programs)?;
+    let codecs = prove_ristretto_fp_program_batch_owned(codec_programs)?;
     let archive = ArchivedRistrettoScalarMulLadderBatchProof {
         statements,
         stark_proof_bytes,
         range_claimed_sum: range_sum.to_m31_array().map(|limb| limb.0),
-        decodes,
-        encodes,
+        codecs,
     };
     if crate::ristretto_fp_program_air::ristretto_self_verify_enabled() {
         verify_ristretto_scalar_mul_ladder_batch(&archive)?;
@@ -1854,7 +1849,7 @@ pub fn prove_ristretto_scalar_mul_ladder_batch(
 }
 
 /// Verify the statements, the rebuilt schedules' scope commitments, the
-/// ladder STARK, and the decode/encode program batch STARKs.
+/// two-component ladder STARK, and the combined codec program batch STARK.
 pub fn verify_ristretto_scalar_mul_ladder_batch(
     archive: &ArchivedRistrettoScalarMulLadderBatchProof,
 ) -> TexasAirResult<()> {
@@ -1928,8 +1923,7 @@ pub fn verify_ristretto_scalar_mul_ladder_batch(
     stwo::core::verifier::verify(&[&component], &mut channel, &mut scheme, proof)
         .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))?;
 
-    verify_ristretto_fp_program_batch(&archive.decodes)?;
-    verify_ristretto_fp_program_batch(&archive.encodes)?;
+    verify_ristretto_fp_program_batch(&archive.codecs)?;
     Ok(())
 }
 
@@ -2108,17 +2102,17 @@ mod tests {
     fn ladder_schedule_matches_native_curve_multiplication() {
         let scalar = scalar_bytes(0x0123_4567_89ab_cdef);
         let windows = windows(&scalar);
-        let (decode_program, coords) =
-            build_ladder_decode_program(&basepoint()).expect("decode program");
-        // The decode program's first value is the public encoding and the
+        let coords = decode_base_coords(&basepoint()).expect("decode");
+        // The codec program's first value is the public encoding and the
         // projective decode fixes Z = 1.
-        assert_eq!(decode_program.values[0], basepoint());
         assert_eq!(coords[2], ONE_BYTES);
 
         let schedule = build_ladder_schedule(&windows, &coords).expect("schedule");
         assert_eq!(schedule.len(), STEP_COUNT);
         let final_acc = schedule.last().expect("nonempty").output;
-        let (_, output) = build_ladder_encode_program(&final_acc).expect("encode program");
+        let (codec_program, output) =
+            build_ladder_codec_program(&basepoint(), &final_acc).expect("codec program");
+        assert_eq!(codec_program.values[0], basepoint());
         assert_eq!(
             output.as_slice(),
             native_multiple(&scalar, &basepoint()).as_slice(),
@@ -2126,14 +2120,12 @@ mod tests {
         );
 
         // Identity base: every step adds the identity; output is the identity.
-        let (identity_decode, identity_coords) =
-            build_ladder_decode_program(&identity()).expect("identity decode");
-        assert_eq!(identity_decode.values.len(), decode_program.values.len());
+        let identity_coords = decode_base_coords(&identity()).expect("identity decode");
         let identity_schedule =
             build_ladder_schedule(&windows, &identity_coords).expect("identity schedule");
         let identity_final = identity_schedule.last().expect("nonempty").output;
         let (_, identity_output) =
-            build_ladder_encode_program(&identity_final).expect("identity encode");
+            build_ladder_codec_program(&identity(), &identity_final).expect("identity codec");
         assert_eq!(identity_output.as_slice(), identity().as_slice());
     }
 
