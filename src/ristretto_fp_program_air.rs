@@ -5096,6 +5096,26 @@ impl FpProgramSegment {
         })
     }
 
+    /// Verifier-side build: scope columns plus the trace shape only (⑥b).
+    pub(crate) fn build_shape_only(
+        programs: &[RistrettoFpProgram],
+        scope_prefix: &str,
+    ) -> TexasAirResult<Self> {
+        let log_size = batch_log_size(programs.len())?;
+        let (program_width, _, _) = trace_layout(&programs[0])?;
+        let scope = scope_columns_batch(programs)?;
+        let width = program_width + range_table_column_count(log_size);
+        Ok(Self {
+            log_size,
+            scope_prefix: scope_prefix.to_string(),
+            scope,
+            trace: MethodTrace::from_columns(log_size, (0..width).map(|_| Vec::new()).collect()),
+            interaction: Vec::new(),
+            claimed_sum: SecureField::from(0u32),
+            relations: None,
+        })
+    }
+
     /// Draw this segment's LogUp relations from the channel (after the
     /// original-tree commit) and build the paired interaction columns.
     pub(crate) fn interact(

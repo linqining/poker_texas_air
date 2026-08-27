@@ -1999,6 +1999,26 @@ impl LadderSegment {
         })
     }
 
+    /// Verifier-side build: materializes only the scope columns (the shared
+    /// preprocessed tree) and the trace shape; the witness-heavy trace is
+    /// never generated on the verification path (⑥b).
+    pub(crate) fn build_shape_only(schedules: &[Vec<LadderStep>]) -> TexasAirResult<Self> {
+        let log_size = ladder_log_size(schedules.len())?;
+        let scope = scope_columns_batch(schedules)?;
+        let width = PROGRAM_WIDTH + range_table_column_count(log_size);
+        Ok(Self {
+            log_size,
+            scope,
+            trace: crate::trace_gen::MethodTrace::from_columns(
+                log_size,
+                (0..width).map(|_| Vec::new()).collect(),
+            ),
+            interaction: Vec::new(),
+            claimed_sum: SecureField::from(0u32),
+            relations: None,
+        })
+    }
+
     /// Draw this segment's LogUp relations from the channel (after the
     /// original-tree commit) and build the paired interaction columns.
     pub(crate) fn interact(&mut self, channel: &mut stwo::core::channel::Poseidon252Channel) {

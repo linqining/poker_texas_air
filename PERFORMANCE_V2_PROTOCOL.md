@@ -211,11 +211,29 @@ verify 24.9s / 42.7MB**（会话间波动大：历史 271.9s/35.3s 与本次同�
   + segments.build（6.4s，验证端在物化完整见证 trace，可改 shape-only）
   + stwo verify（1.4–4.8s，随字节线性）**。
 
+**哈希通道实验（✅ 2026-08-27 实测，代码已还原）**——prove 的 ~75%（~148s）
+是 Merkle 承诺，其哈希器是 Starknet Poseidon252（`starknet-crypto` 标量实现，
+252-bit 素域、非 M31 原生）。微基准（`merkle_hasher_microbench` ignored 测试）：
+叶块（16 M31 值）Poseidon252 **5,359 ns** vs Blake2s **103 ns**、节点哈希
+**4,290 ns** vs **83 ns**（**52×**）。临时把 4 个文件的通道类型替换为 stwo
+自带的 `Blake2sMerkleChannel` 后 deck-52 全矩阵实测：**prove 197.5→28.5s
+（6.9×）、verify 24.9→5.77s（4.3×）、证明字节 42.74→42.52MB（-0.5%）**，
+全部验证通过；树承诺 ~158s→~5s，verify 的 scope 重承诺 12.9s→0.23s（换哈希
+后"刚性"消失）。新瓶颈变为 prove.stwo 组合求值 14.9s、segments.build 4.4s。
+**Blake3 不适用**：stwo 2.3 的 lifted（异构列）通道只有 Poseidon252/Blake2s
+两种实现；64 字节块粒度下 Blake3≈Blake2s（各一次压缩函数），Blake3 的大输入/
+内置多线程优势在这个叶子形状用不上，自实现 lifted 通道收益≈0。**切换条件**：
+若 Path A 证明最终在 Starknet/Cairo 链上验证，Poseidon252 是 Cairo 原生哈希，
+应保留；若链上/递归目标非 Starknet（或将来自研 M31 verifier AIR 反正要换 M31
+原生 hash），切 Blake2s 是当前性价比最高的单一改动——与 ⑩ 同级收益、工作量
+低一个量级（~70 处类型引用替换，全部路径已实测）。
+
 | 优化点 | 做法 | 预估收益（修正后） | 复杂度 |
 | --- | --- | --- | --- |
+| ⓪ Blake2s Merkle 通道 | 通道类型替换（4 文件 ~70 处），实验已完成并还原 | **prove -6.9× / verify -4.3× / 字节 ~0**；切换条件见上（链上验证目标） | 低 |
 | ⑨ 测量归因 | ✅ **已完成**（2026-08-27，见上）：相位计时进 `prove_admission_inner`/`verify_admission_inner`（`admission.*` 记录），stwo tracing 走 `TEXAS_STWO_TRACING` | 成本模型修正为"时间∝单元数、字节∝列数"；①②⑥收益全部重估 | — |
 | ⑩ Pippenger 桶化 MSM AIR | 430 条独立梯子（144K 行，log 18）改为 ~7 组 52-way MSM 桶化（c=4–6 ≈ 30–35K 行，log 16）：Merkle/扩展 ~148→~37s、Composition ~19→~6s | **prove ~197→~65–80s（唯一的大时间杠杆）**；verify 的 scope 重承诺同步 ÷4 | 高 |
-| ⑩b 梯子 pinned 肢列消除 | 624 个 pinned 肢 trace 列与 312 个打包 scope 列重复——约束改读打包 scope（度 1 线性解包，pinned 肢不进 LogUp），删除 trace 侧肢列 | -624 个 log-18 列 ≈ **prove -24s**（每列 ~38ms）；不受③类"列计费"约束 | 中 |
+| ⑩b 梯子 pinned 肢列消除 | ❌ **撤回（2026-08-27 设计复审）**：原始方案（约束读打包 scope、删 624 个 trace 肢列）不可实现——2×11-bit 肢从 22-bit 打包列解出不是域线性运算，肢必须以独立列存在；唯一可行变体（肢改为非打包 scope 预处理列、同时删打包列）净负：prove 净 -312 个 log-18 列（~-12s）但 **verify 的 scope 树重承诺 +312 列（~+12.5s）**——验证端只重承诺 scope 树，trace 列迁入 scope 的每一列都永久加重链上验证负担（Starknet 目标下尤其如此），严格得不偿失 | 撤回 | — |
 | ① 专用 recurrence AIR | 梯子式固定布局 ~550 列/步（现 87.8K 列），全值公开可推导 → 零 canonicity、scope 钉死 | **时间 ~0**（修正：原估 -45% 基于伪影）；**字节 -13.3MB、verify -~1.5s** | 中 |
 | ② 专用 BG 调度 AIR | 幂表/累乘拆固定行（~600 列，现 117.6K 列，最大字节单项），与①可统一为一个 BG 标量 AIR | **字节 -17.9MB**、verify -~2s | 中 |
 | ②b 累加段专用行 AIR | 422 条压缩点加法现为 Fp 程序批（42.6K 列 ≈ 6.5MB）——梯子式共享行布局（每行一次 Edwards 加法 ~2.4K 列共享） | 字节 -~6MB | 中 |
@@ -223,13 +241,16 @@ verify 24.9s / 42.7MB**（会话间波动大：历史 271.9s/35.3s 与本次同�
 | ⑤ codec 段合并 | ✅ 已完成（2026-08，`build_ladder_codec_program`）：decode+encode 合一，梯子批 N=52 prove 18.3→16.0s / 证明 6.24→5.60MB；剩余方向见⑧ | 已兑现 | — |
 | ⑧ codec 段瘦身 | 430 个 decode+encode 程序批 26.9K 列：重复基点 decode 去重 + 固定布局专用行 | 字节 -~3–4MB | 低-中 |
 | ⑦ 见证生成定宽算术 | build+interact 共 ~10s 的 BigUint 商/乘换 4×u64 定点 | prove -5~8s | 低 |
-| ⑥b 验证端 shape-only 段构建 | `AdmissionSegments::build` 在 verify 侧只需尺寸/ID，却物化了完整见证 trace | **verify -6.4s**（24.9→~18s） | 低 |
+| ⑥b 验证端 shape-only 段构建 | ✅ **已落地并实测**（2026-08-27）：`AdmissionSegments::build_shape_only`——三个段（梯子/标量/Fp）各增 shape-only 构造器，verify 只物化 scope 树与 trace 形状（空列），witness 重型 trace 不再生成。实测 deck-52：**verify 的 segments.build 6,365→442 ms（-93%）**，verify 全程 24.9→15.2s（其中 -5.9s 为 ⑥b 确定性贡献，其余为会话波动——本会话各 Merkle 相位较上轮 uniformly 快 ~26%，归因比值不变） | **verify -5.9s（相位级确定）** | 低 |
 | ⑥ 双手合批 | 修正：时间上**近零收益**（梯子行数翻倍→Merkle 严格线性，+1 层 FRI ≈ +3%）；字节上宽段列数恒定、梯子查询微增，**每手字节约减半** | 字节 -~50%/手（摊销）；时间 ~0 | 低 |
 | ③ 梯子倍乘特化 | ❌ 维持关闭（2026-08 实测否决，见历史表） | — | 不可行 |
 
-叠加预估（修正后）：**⑩+⑩b+⑦ → prove ~40–55s**（Merkle ~37s 主导）；
-**①+②+②b+⑧ → 字节 42.7→~5–8MB**；**⑥b+①② → verify 24.9→~13s**（剩余
-12.9s 为梯子 scope 重承诺刚性，除非 scope 设计改为摘要绑定）。进 10s 量级需
+叠加预估（2026-08-27 决策后主线：**通道保持 Poseidon252**，Starknet 对齐；
+⓪ Blake2s 已实测 shelved——prove -6.9×/verify -4.3×，未来按需替换）：
+**⑥b（✅ 已落地，见下）→ verify ~-6s**；**+⑦（build/interact 定宽算术
+-5~8s）→ prove ~190s / verify ~13s**；**+⑩ Pippenger（行数 ÷4：Merkle
+~148→~37s、组合 ~19→~5s）→ prove ~45–60s**；字节正交：**①+②+②b+⑧ →
+42.7→~5–8MB**（列数计费，不受通道影响）。进 10s 以下或单证明上链仍需
 proof-verifies-proof 递归（超出 stwo 2.3）或专用后端（GPU-FRI），属下一架构
 阶段。**不建议动**：肢宽（11→12 位仅 ~10% 且 carry 表翻倍）、FRI 安全参数
 （协议决策）、carry 表拆分与 LOG_SIZE（历史红线）。
@@ -276,4 +297,37 @@ proof-verifies-proof 递归（超出 stwo 2.3）或专用后端（GPU-FRI），�
    recursion crate），当前骨架是递归的"折叠"半边（多组件单 FRI +
    摘要绑定），非 proof-verifies-proof；真正的电路内验证需升级
    stwo 或自研 verifier AIR。
+7. **Flock 消除路线（通道哈希 ≠ 语句哈希）**：换 STARK 通道
+   （⓪ Blake2s，已实测 prove -6.9×）只便宜外层工件自身的承诺，不
+   影响 Flock——Flock 的开销来自"在电路里证明位运算哈希"这一事实，
+   Blake2s 与 BLAKE3 同为 ARX（且每块 10 轮 vs 7 轮，更贵），换它
+   只是换一个待证明的位哈希。仓库已有直接证据：hash 层曾走
+   "Blake2b + M31 lookup 栈"（现 ZR3N 绑定 STARK ~5.7MB/7s），后迁
+   BLAKE3+Flock——位哈希进 M31 是实测淘汰过的方向。真正消除 Flock
+   需把 transcript/状态哈希换成 **M31 原生 SNARK 友好哈希**
+   （Poseidon2/Monolith over M31）：链语句成为 admission STARK 的
+   又一个 M31 段（同骨架/同树/同一次 FRI），递归工件自包含、部署
+   路径 37 个 Flock 归档（~10MB/手、每语句 ~136KB Ligerito 固定
+   成本）并为单 M31 批或服务端原生复核；代价是协议层变更
+   （poker_protocol transcript、`texas_poker_move` 参考实现、已部署
+   客户端兼容），π 不入 AIR 的否决不受影响（那是 BG 置换的 HVZK
+   约束，与 transcript 哈希无关）。**M31 原生哈希不做 limb 模拟**——
+   limb/carry/LogUp 只属于被迫非原生的 252-bit Ristretto 域；stwo 官方
+   Poseidon2-M31 参考电路（`examples/poseidon`）参数：t=16 状态、8 全轮
+   + 14 部分轮、S-box x^5（3 次原生乘；x³/x^7 在 M31 上不是置换——
+   3²·7 | 2^31−2）、线性层纯加法+公开常数（度 1），每置换 158 列 × 1 行
+   （8 置换 SIMD 打包/行），零 range-check。电路内成本：一条 ~50 置换
+   的 transcript 链 ≈ 8K cells ≈ 1/100 条梯子（梯子 335 行 × 2,398 列），
+   每手 37 链 ≈ 0.1% 梯子段当量——免费级；CPU 侧 ~0.2–3µs/置换（SIMD
+   批处理），相对 sigma 证明的 ms 级不可见。Monolith 的 x³（2 乘）在
+   M31 上不可用（非置换），其加法型 MDS 优势 Poseidon2-M31 已具备，
+   效率同级——跟随 stwo 参考电路即可（注意其轮常数为占位 TODO，正式
+   参数需按论文程序生成）。
+8. **段原型（parked）**：`ristretto_poseidon2_air` 已实现 Circle STARK 参数
+   的 Poseidon2-M31 段（t=16、8+14 轮、x^5 拆三步度 2 约束、442 列/置换、
+   LogUp 链式配平、接入 admission STARK 可选段），但 prove 报
+   "Constraints not satisfied"（单链单置换即复现）——疑 16 元 relation 的
+   交互层度数与协议 FRI 配置（blowup 1）不合，stwo 参考示例跑在自带的
+   LOG_EXPAND=2 + 系数存储配置下。测试已 #[ignore] parking；段形状/性能
+   结论（~0.1% 梯子当量）不受影响，Flock 消除决策不阻塞于此。
 

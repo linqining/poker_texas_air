@@ -144,6 +144,9 @@ pub mod ristretto_msm_air;
 pub mod ristretto_player_proofs_air;
 /// Composed host-zero Ristretto255 point-decode proofs.
 pub mod ristretto_point_decode_air;
+/// Poseidon2 over M31: transcript-chain segment for the unified admission
+/// STARK (Path A Flock-elimination prototype).
+pub mod ristretto_poseidon2_air;
 /// Composed host-zero Ristretto255 point-encode proofs.
 pub mod ristretto_point_encode_air;
 /// Folded Ristretto group-addition binding for reconstruction accumulators.

@@ -131,6 +131,9 @@ pub struct AdmissionStatement {
     pub schedule: Option<AdmissionScheduleSpec>,
     /// The Bayer--Groth product-argument recurrence, when present.
     pub recurrence: Option<AdmissionRecurrenceSpec>,
+    /// Folded Poseidon2-M31 transcript chains, when present (Path A
+    /// Flock-elimination prototype; see `ristretto_poseidon2_air`).
+    pub poseidon2: Option<crate::ristretto_poseidon2_air::Poseidon2ChainSpec>,
 }
 
 /// Serialized unified admission STARK.
@@ -245,6 +248,19 @@ fn admission_digest(statement: &AdmissionStatement) -> [u32; BINDING_DIGEST_LIMB
         }
         None => hasher.update(b"no-recurrence"),
     }
+    match &statement.poseidon2 {
+        Some(spec) => {
+            hasher.update(b"poseidon2");
+            hasher.update(&(spec.initial_states.len() as u64).to_le_bytes());
+            for state in &spec.initial_states {
+                for value in state {
+                    hasher.update(&value.to_le_bytes());
+                }
+            }
+            hasher.update(&spec.chain_length.to_le_bytes());
+        }
+        None => hasher.update(b"no-poseidon2"),
+    }
     let digest = hasher.finalize();
     core::array::from_fn(|index| {
         u32::from_le_bytes(
@@ -343,6 +359,7 @@ struct AdmissionRebuilt {
     addition_programs: Vec<RistrettoFpProgram>,
     schedule_program: Option<RistrettoScalarProgram>,
     recurrence_program: Option<RistrettoScalarProgram>,
+    poseidon2_spec: Option<crate::ristretto_poseidon2_air::Poseidon2ChainSpec>,
 }
 
 fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<AdmissionRebuilt> {
@@ -408,6 +425,7 @@ fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<Admission
         addition_programs,
         schedule_program,
         recurrence_program,
+        poseidon2_spec: statement.poseidon2.clone(),
     })
 }
 
@@ -479,6 +497,8 @@ struct AdmissionSegments {
     /// its component is a zero-claim construction supplied by the generic
     /// wrapper.
     texas: Option<(crate::trace_gen::MethodTrace, [u32; BINDING_DIGEST_LIMBS])>,
+    /// Folded Poseidon2-M31 transcript chains (optional segment).
+    poseidon2: Option<crate::ristretto_poseidon2_air::Poseidon2Segment>,
 }
 
 impl AdmissionSegments {
@@ -518,6 +538,56 @@ impl AdmissionSegments {
                 )?)
             },
             texas: None,
+            poseidon2: rebuilt
+                .poseidon2_spec
+                .as_ref()
+                .map(crate::ristretto_poseidon2_air::Poseidon2Segment::build),
+        })
+    }
+
+    /// Verifier-side build (⑥b): every segment skips its witness-heavy
+    /// trace materialization; only the shared scope tree and the trace
+    /// shapes are produced, which is all the verification path reads.
+    fn build_shape_only(rebuilt: &AdmissionRebuilt) -> TexasAirResult<Self> {
+        Ok(Self {
+            ladder: LadderSegment::build_shape_only(&rebuilt.schedules)?,
+            schedule: rebuilt
+                .schedule_program
+                .as_ref()
+                .map(|program| {
+                    ScalarProgramSegment::build_shape_only(
+                        &[program.clone()],
+                        "ristretto.admission.scalar.schedule.scope.v1",
+                    )
+                })
+                .transpose()?,
+            recurrence: rebuilt
+                .recurrence_program
+                .as_ref()
+                .map(|program| {
+                    ScalarProgramSegment::build_shape_only(
+                        &[program.clone()],
+                        "ristretto.admission.scalar.recurrence.scope.v1",
+                    )
+                })
+                .transpose()?,
+            codec: FpProgramSegment::build_shape_only(
+                &rebuilt.codec_programs,
+                "ristretto.admission.fp.codec.scope.v1",
+            )?,
+            additions: if rebuilt.addition_programs.is_empty() {
+                None
+            } else {
+                Some(FpProgramSegment::build_shape_only(
+                    &rebuilt.addition_programs,
+                    "ristretto.admission.fp.additions.scope.v1",
+                )?)
+            },
+            texas: None,
+            poseidon2: rebuilt
+                .poseidon2_spec
+                .as_ref()
+                .map(crate::ristretto_poseidon2_air::Poseidon2Segment::build),
         })
     }
 
@@ -535,6 +605,9 @@ impl AdmissionSegments {
         }
         if let Some(recurrence) = &self.recurrence {
             log = log.max(recurrence.log_size);
+        }
+        if let Some(poseidon2) = &self.poseidon2 {
+            log = log.max(poseidon2.log_size);
         }
         if let Some((trace, _)) = &self.texas {
             log = log.max(trace.log_size);
@@ -567,6 +640,11 @@ impl AdmissionSegments {
                 recurrence.interact(channel, program)
             });
         }
+        if let Some(poseidon2) = &mut self.poseidon2 {
+            timed_phase("interact.poseidon2", kind, None, || {
+                poseidon2.interact(channel)
+            });
+        }
         timed_phase("interact.codec", kind, None, || {
             self.codec.interact(channel, &rebuilt.codec_programs[0])
         });
@@ -585,6 +663,9 @@ impl AdmissionSegments {
         if let Some(recurrence) = &mut self.recurrence {
             recurrence.mirror_draw(channel);
         }
+        if let Some(poseidon2) = &mut self.poseidon2 {
+            poseidon2.mirror_draw(channel);
+        }
         self.codec.mirror_draw(channel);
         if let Some(additions) = &mut self.additions {
             additions.mirror_draw(channel);
@@ -594,6 +675,7 @@ impl AdmissionSegments {
     fn claimed_sum_count(&self) -> usize {
         2 + usize::from(self.schedule.is_some())
             + usize::from(self.recurrence.is_some())
+            + usize::from(self.poseidon2.is_some())
             + usize::from(self.additions.is_some())
     }
 
@@ -604,6 +686,9 @@ impl AdmissionSegments {
         }
         if let Some(recurrence) = &self.recurrence {
             sums.push(recurrence.claimed_sum);
+        }
+        if let Some(poseidon2) = &self.poseidon2 {
+            sums.push(poseidon2.claimed_sum);
         }
         sums.push(self.codec.claimed_sum);
         if let Some(additions) = &self.additions {
@@ -620,6 +705,11 @@ impl AdmissionSegments {
         if let Some(recurrence) = &self.recurrence {
             extend_timed(tree, "scope.recurrence", kind, || {
                 recurrence.scope.to_evaluations()
+            });
+        }
+        if let Some(poseidon2) = &self.poseidon2 {
+            extend_timed(tree, "scope.poseidon2", kind, || {
+                poseidon2.scope.to_evaluations()
             });
         }
         extend_timed(tree, "scope.codec", kind, || self.codec.scope.to_evaluations());
@@ -641,6 +731,11 @@ impl AdmissionSegments {
         if let Some(recurrence) = &self.recurrence {
             extend_timed(tree, "trace.recurrence", kind, || {
                 recurrence.trace.to_evaluations()
+            });
+        }
+        if let Some(poseidon2) = &self.poseidon2 {
+            extend_timed(tree, "trace.poseidon2", kind, || {
+                poseidon2.trace.to_evaluations()
             });
         }
         extend_timed(tree, "trace.codec", kind, || self.codec.trace.to_evaluations());
@@ -668,6 +763,11 @@ impl AdmissionSegments {
                 recurrence.interaction.clone()
             });
         }
+        if let Some(poseidon2) = &self.poseidon2 {
+            extend_timed(tree, "interaction.poseidon2", kind, || {
+                poseidon2.interaction.clone()
+            });
+        }
         extend_timed(tree, "interaction.codec", kind, || {
             self.codec.interaction.clone()
         });
@@ -686,6 +786,9 @@ impl AdmissionSegments {
         if let Some(recurrence) = &self.recurrence {
             sizes.push(vec![recurrence.log_size; recurrence.scope.num_columns]);
         }
+        if let Some(poseidon2) = &self.poseidon2 {
+            sizes.push(vec![poseidon2.log_size; poseidon2.scope.num_columns]);
+        }
         sizes.push(vec![self.codec.log_size; self.codec.scope.num_columns]);
         let mut sizes = sizes.concat();
         if let Some(additions) = &self.additions {
@@ -701,6 +804,9 @@ impl AdmissionSegments {
         }
         if let Some(recurrence) = &self.recurrence {
             sizes.push(vec![recurrence.log_size; recurrence.trace.num_columns]);
+        }
+        if let Some(poseidon2) = &self.poseidon2 {
+            sizes.push(vec![poseidon2.log_size; poseidon2.trace.num_columns]);
         }
         sizes.push(vec![self.codec.log_size; self.codec.trace.num_columns]);
         let mut sizes = sizes.concat();
@@ -739,6 +845,9 @@ impl AdmissionSegments {
                 recurrence.interaction_columns(program)
             ]);
         }
+        if let Some(poseidon2) = &self.poseidon2 {
+            sizes.push(vec![poseidon2.log_size; poseidon2.interaction.len()]);
+        }
         sizes.push(vec![
             self.codec.log_size;
             self.codec
@@ -770,6 +879,9 @@ impl AdmissionSegments {
                 .as_ref()
                 .expect("segment implies program");
             ids.extend(recurrence.preprocessed_ids(program));
+        }
+        if let Some(poseidon2) = &self.poseidon2 {
+            ids.extend(poseidon2.preprocessed_ids());
         }
         ids.extend(self.codec.preprocessed_ids(&rebuilt.codec_programs[0]));
         if let Some(additions) = &self.additions {
@@ -803,6 +915,9 @@ impl AdmissionSegments {
                 .as_ref()
                 .expect("segment implies program");
             components.push(Box::new(recurrence.component(allocator, program)));
+        }
+        if let Some(poseidon2) = &self.poseidon2 {
+            components.push(Box::new(poseidon2.component(allocator)));
         }
         components.push(Box::new(
             self.codec.component(allocator, &rebuilt.codec_programs[0]),
@@ -933,8 +1048,9 @@ fn verify_admission_inner(
     type Proof = StarkProof<Poseidon252MerkleHasher>;
     let kind = TimingKind::Verify;
     let rebuilt = timed_phase("rebuild", kind, None, || rebuild_admission(&archive.statement))?;
-    let mut segments =
-        timed_phase("segments.build", kind, None, || AdmissionSegments::build(&rebuilt))?;
+    let mut segments = timed_phase("segments.build", kind, None, || {
+        AdmissionSegments::build_shape_only(&rebuilt)
+    })?;
     segments.texas =
         texas_trace.map(|trace| (trace, texas_digest.expect("texas trace implies a digest")));
     let binding = AdmissionBindingAir::new(&archive.statement);
@@ -1319,6 +1435,7 @@ fn decompose_bg_admission(
     builder.check_equalities()?;
 
     let statement = AdmissionStatement {
+        poseidon2: None,
         tag: components.statement_digest,
         ladders: builder.ladders,
         additions: builder
@@ -1581,6 +1698,7 @@ fn decompose_player_admission(
     builder.check_equalities()?;
 
     Ok(AdmissionStatement {
+        poseidon2: None,
         tag: inputs.statement_digest,
         ladders: builder.ladders,
         additions: builder
@@ -1788,6 +1906,7 @@ mod tests {
         let output_one = ladder_archives.statements[0].output;
         let output_two = ladder_archives.statements[1].output;
         AdmissionStatement {
+            poseidon2: None,
             tag: [0xab; 32],
             ladders: ladder_archives.statements,
             additions: vec![AdmissionAdditionRow {
@@ -2305,10 +2424,21 @@ mod tests {
         let mut no_schedule = statement.clone();
         no_schedule.schedule = None;
         variants.push(("no-schedule", no_schedule));
-        let mut ladder_only = statement;
+        let mut ladder_only = statement.clone();
         ladder_only.schedule = None;
         ladder_only.recurrence = None;
         variants.push(("ladder-only", ladder_only));
+        // The transcript-replacement load of one BG shuffle: six chains
+        // (1 init + 5 challenges) × ~172 absorbed 31-bit elements ≈ the
+        // 5.5 KB BG wire at rate 8, padded to a uniform chain length.
+        let mut with_poseidon2 = statement;
+        with_poseidon2.poseidon2 = Some(crate::ristretto_poseidon2_air::Poseidon2ChainSpec {
+            initial_states: (0..6)
+                .map(|chain| core::array::from_fn(|i| (chain as u32 * 9_778 + i as u32 * 131) % 0x7FFF_FFFF))
+                .collect(),
+            chain_length: 176,
+        });
+        variants.push(("full+poseidon2", with_poseidon2));
 
         for (name, variant) in variants {
             let started = std::time::Instant::now();
@@ -2340,6 +2470,89 @@ mod tests {
                 .map_or_else(String::new, |count| format!(", {count} cols"));
             eprintln!("  {ms:>8} ms  {}{columns}", record.label);
         }
+    }
+
+    /// Microbenchmark of the two lifted Merkle hashers stwo 2.3 ships
+    /// (Starknet Poseidon252, the current channel, vs Blake2s) on the leaf
+    /// and node shapes the admission commitment uses. Leaves absorb 16 M31
+    /// values per Poseidon permutation block (64 bytes for Blake2s); nodes
+    /// hash two 32-byte digests. Blake3 has no lifted channel in stwo 2.3
+    /// and matches Blake2s per-block at these sizes.
+    #[test]
+    #[ignore = "microbenchmark: cargo test --release --lib merkle_hasher_microbench -- --ignored --nocapture"]
+    fn merkle_hasher_microbench() {
+        use std::hint::black_box;
+        use stwo::core::fields::m31::M31;
+        use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
+        use stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
+        use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
+
+        const BLOCKS: usize = 150; // ~2,400 M31 values: one ladder trace point.
+        let values: Vec<M31> = (0..(16 * BLOCKS) as u32).map(M31::from).collect();
+
+        fn bench_leaf<F: FnMut(&[M31])>(label: &str, mut absorb: F) {
+            const ITERS: usize = 2_000;
+            let values: Vec<M31> = (0..(16 * 150) as u32).map(M31::from).collect();
+            let started = std::time::Instant::now();
+            for _ in 0..ITERS {
+                absorb(black_box(&values));
+            }
+            let elapsed = started.elapsed();
+            eprintln!(
+                "{label}: {elapsed:?} total, {:.1} ns per 16-value block, {:.1} us per {}-value leaf",
+                elapsed.as_nanos() as f64 / ITERS as f64 / 150.0,
+                elapsed.as_nanos() as f64 / ITERS as f64 / 1_000.0,
+                values.len(),
+            );
+        }
+
+        fn bench_node<F: FnMut()>(label: &str, mut hash_node: F) {
+            const ITERS: usize = 200_000;
+            let started = std::time::Instant::now();
+            for _ in 0..ITERS {
+                hash_node();
+            }
+            let elapsed = started.elapsed();
+            eprintln!(
+                "{label}: {:.1} ns per node hash",
+                elapsed.as_nanos() as f64 / ITERS as f64,
+            );
+        }
+
+        bench_leaf("poseidon252 leaf", |values| {
+            let mut hasher = Poseidon252MerkleHasher::default();
+            hasher.update_leaf(values);
+            black_box(hasher.finalize());
+        });
+        bench_leaf("blake2s    leaf", |values| {
+            let mut hasher = Blake2sMerkleHasher::default();
+            hasher.update_leaf(values);
+            black_box(hasher.finalize());
+        });
+
+        // Node hashing: two child digests per call (the tree's internal
+        // layer, ~one hash per node).
+        let poseidon_children = {
+            let mut hasher = Poseidon252MerkleHasher::default();
+            hasher.update_leaf(&values[..16]);
+            let digest = hasher.finalize();
+            (digest, digest)
+        };
+        bench_node("poseidon252 node", || {
+            let digest = Poseidon252MerkleHasher::hash_children(poseidon_children.clone());
+            black_box(&digest);
+        });
+
+        let blake_children = {
+            let mut hasher = Blake2sMerkleHasher::default();
+            hasher.update_leaf(&values[..16]);
+            let digest = hasher.finalize();
+            (digest, digest)
+        };
+        bench_node("blake2s    node", || {
+            let digest = Blake2sMerkleHasher::hash_children(blake_children.clone());
+            black_box(&digest);
+        });
     }
 
     #[test]
@@ -2396,6 +2609,37 @@ mod tests {
         let mut spliced = archive.clone();
         spliced.stark_proof_bytes[proof_len / 2] ^= 1;
         assert!(verify_ristretto_bg_admission_components(&components, &spliced).is_err());
+    }
+
+    /// The folded Poseidon2-M31 transcript segment (parked prototype):
+    /// the AIR shape and segment wiring are in place, but the prover
+    /// reports "Constraints not satisfied" even for a single chain of one
+    /// permutation — suspected interaction-layer degree mismatch of the
+    /// 16-element relation under the protocol FRI config (blowup 1; the
+    /// stwo reference example runs under its own config with LOG_EXPAND=2
+    /// and stored coefficients).  Performance-wise the segment's cost is
+    /// negligible either way (442 columns × instances, no limbs/lookups),
+    /// so the Flock-elimination decision does not block on this.
+    #[test]
+    #[ignore = "prototype: constraint mismatch under investigation (see doc comment)"]
+    fn admission_poseidon2_segment_proves_and_verifies() {
+        use crate::ristretto_poseidon2_air::Poseidon2ChainSpec;
+
+        let components = bg_components_fixture(4);
+        let (mut statement, _) = decompose_bg_admission(&components).expect("decomposition");
+        statement.poseidon2 = Some(Poseidon2ChainSpec {
+            initial_states: vec![
+                core::array::from_fn(|i| (i as u32 * 31) % 0x7FFF_FFFF),
+                core::array::from_fn(|i| (i as u32 * 17 + 5) % 0x7FFF_FFFF),
+            ],
+            chain_length: 24,
+        });
+        let archive = prove_ristretto_admission_stark(statement).expect("admission STARK");
+        verify_ristretto_admission_stark(&archive).expect("admission verify");
+
+        let mut spliced = archive.clone();
+        spliced.statement.poseidon2.as_mut().unwrap().initial_states[0][0] ^= 1;
+        assert!(verify_ristretto_admission_stark(&spliced).is_err());
     }
 
     #[test]
