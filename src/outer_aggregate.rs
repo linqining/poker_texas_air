@@ -15,7 +15,7 @@ use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use rayon::prelude::*;
 
-use crate::dual_proof::{
+use crate::method_precompile_dual::{
     DualProofBundle, MAX_CRYPTO_REQUEST_BYTES, MAX_STARK_PROOF_BYTES, prove_dual_proof_verified,
     verify_dual_proof,
 };
@@ -352,8 +352,8 @@ struct ProvenDualProofResult {
     binding: PrecompileCallBinding,
 }
 
-impl From<crate::dual_proof::ProvenDualProof> for ProvenDualProofResult {
-    fn from(value: crate::dual_proof::ProvenDualProof) -> Self {
+impl From<crate::method_precompile_dual::ProvenDualProof> for ProvenDualProofResult {
+    fn from(value: crate::method_precompile_dual::ProvenDualProof) -> Self {
         Self {
             bundle: value.bundle,
             receipt: value.receipt,
@@ -429,7 +429,7 @@ fn verify_children(
     // Each child is an independent dual proof with its own bincode-decoded
     // Stwo proof and borsh-decoded flock binding; the chain assembly below
     // remains serial because receipts are order-sensitive.
-    let verified: Vec<TexasAirResult<crate::dual_proof::VerifiedDualProof>> = tasks
+    let verified: Vec<TexasAirResult<crate::method_precompile_dual::VerifiedDualProof>> = tasks
         .par_iter()
         .zip(children.par_iter())
         .map(|(task, child)| verify_dual_proof(task, child))

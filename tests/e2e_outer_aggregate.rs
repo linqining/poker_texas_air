@@ -9,7 +9,7 @@ use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCi
 use poker_protocol::crypto::types::ECPoint;
 use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
-use poker_texas_air::dual_proof::{DualProofBundle, prove_dual_proof};
+use poker_texas_air::method_precompile_dual::{DualProofBundle, prove_dual_proof};
 use poker_texas_air::outer_aggregate::{
     OUTER_AGGREGATE_VERSION, OuterAggregateBundle, aggregate_dual_proofs, prove_outer_aggregate,
     verify_outer_aggregate,

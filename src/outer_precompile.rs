@@ -34,7 +34,7 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, TraceLocationAllocator,
 };
 
-use crate::dual_proof::MAX_STARK_PROOF_BYTES;
+use crate::method_precompile_dual::MAX_STARK_PROOF_BYTES;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::outer_aggregate::{
     MAX_OUTER_AGGREGATE_BYTES, MAX_OUTER_CHILDREN, MIN_OUTER_CHILDREN, OuterAggregateBundle,

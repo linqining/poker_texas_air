@@ -1,7 +1,22 @@
 # 双证明结算架构重构方案（poker_protocol direct-sigma + 牌局过程 STARK）
 
-状态：设计稿 v2.6（2026-08-28，含实施记录）。本文档取代 admission-AIR（Path A
+状态：设计稿 v2.7（2026-08-29，含实施记录）。本文档取代 admission-AIR（Path A
 递归信封）作为「链上可验证结算」的目标架构。
+
+v2.7 变更（Path A 递归工件退役执行）：按「direct-sigma 已全面替代」的决策，
+**admission STARK 族整体移除**（非 archive，git 历史保留）：admission 主模块、
+reconstruction 全族（V2 摊牌重建——其义务被统一 Σ 的 reveal 关系 + 合约公开
+点算术/卡点比对分解吸收）、curve25519 域算术 AIR 族（fp_*/scalar_*/point_*/
+msm/edwards）、aggregator PoC（descriptor-only，生产本就 fail-closed）、
+ristretto_perf bin、相关 bench（slot-or-deep-batch / ristretto-timing）与
+e2e 测试。共 39 文件 −31,331 行。`dual_proof.rs` 更名
+`method_precompile_dual.rs`（消除与新双证明的撞名）。**保留** `outer_aggregate`
+（G 层 MVP 的 O(N) host 验证聚合，settlement calldata 构造器，非递归压缩）与
+`ristretto_shuffle_air`（V2 wire 类型内联自包含）。Rust 侧 release 回归
+364/364 绿；Cairo 22/22 绿。编译时间：lib check 5.7s → 4.4s（−23%）；
+运行时性能**零变化**（移除的全部是非生产路径代码）——九人桌 v3-dual
+276.5ms prove / 28.0ms host verify 实测不变。"一手一证"的递归聚合
+（跨证明折叠）确认为 M3 D 路线（gnark wrapper）的事，当前架构不做。
 
 v2.6 变更（BG shuffle 链上验证落地）：**kind=2 (`PROOF_KIND_SHUFFLE_BG`) 从
 fail-closed 变为直验**。`verify_bg_shuffle` 把 poker-protocol-bg 的

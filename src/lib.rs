@@ -42,7 +42,7 @@ pub mod trace_gen;
 
 // ===== 公共基础设施 =====
 pub mod deck_commitment;
-pub mod dual_proof;
+pub mod method_precompile_dual;
 pub mod error;
 pub mod hand_binding;
 pub mod merkle_tree;

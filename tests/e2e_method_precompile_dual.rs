@@ -25,7 +25,7 @@ use poker_protocol::zk_shuffle::reveal_token_proof::{REVEAL_TOKEN_PROOF_LABEL, R
 use poker_protocol::zk_shuffle::transcript_ext::{
     CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
 };
-use poker_texas_air::dual_proof::{
+use poker_texas_air::method_precompile_dual::{
     DUAL_PROOF_MAGIC, DUAL_PROOF_VERSION, DualProofBundle, dual_proof_from_archived,
     prove_dual_proof, verify_dual_proof,
 };
