@@ -40,13 +40,25 @@ pub enum CurveId {
     /// deliberately has a distinct 32-byte point encoding and must never be
     /// decoded as a legacy BLS request.
     Ristretto255 = 3,
+    /// BN254 G1 (direct-sigma settlement route, DUAL_PROOF_PROTOCOL.md §3.1).
+    ///
+    /// Cofactor-1 curve: 32-byte compressed encodings, big-endian scalars,
+    /// FiatShamirSha3 transcript. Never decodable as a legacy BLS request.
+    Bn254G1 = 4,
+    /// secp256k1 (direct-sigma settlement route, v2.2 production curve).
+    ///
+    /// Starknet-native EC_OP builtin support: 33-byte SEC1 compressed
+    /// encodings, 32-byte big-endian scalars, FiatShamirSha3 transcript.
+    /// Never decodable as a legacy BLS request.
+    Secp256k1 = 5,
 }
 
 impl CurveId {
     pub fn point_size(self) -> usize {
         match self {
             Self::Bls12381G1 | Self::Bls12377G1 => 48,
-            Self::Ristretto255 => 32,
+            Self::Ristretto255 | Self::Bn254G1 => 32,
+            Self::Secp256k1 => 33,
         }
     }
 }
@@ -59,6 +71,8 @@ impl TryFrom<u8> for CurveId {
             1 => Ok(Self::Bls12381G1),
             2 => Ok(Self::Bls12377G1),
             3 => Ok(Self::Ristretto255),
+            4 => Ok(Self::Bn254G1),
+            5 => Ok(Self::Secp256k1),
             _ => Err(AbiError::UnsupportedCurve(value)),
         }
     }
@@ -75,6 +89,10 @@ pub enum TranscriptId {
     FlockBlake3 = 4,
     /// Poseidon2-M31 native transcript (Flock-free deployment route).
     Poseidon2M31 = 5,
+    /// Keccak-256 transcript (v2.3 secp256k1 direct-sigma route): the
+    /// compression function maps to Starknet's native keccak builtin, making
+    /// on-chain Fiat–Shamir replay near-free.
+    Keccak256 = 7,
 }
 
 impl TryFrom<u8> for TranscriptId {
@@ -87,6 +105,7 @@ impl TryFrom<u8> for TranscriptId {
             3 => Ok(Self::Poseidon252),
             4 => Ok(Self::FlockBlake3),
             5 => Ok(Self::Poseidon2M31),
+            7 => Ok(Self::Keccak256),
             _ => Err(AbiError::UnsupportedTranscript(value)),
         }
     }
@@ -264,6 +283,16 @@ impl ShuffleVerifyRequest {
                 CurveId::Ristretto255,
                 ShuffleProofSystem::RistrettoAirV2,
                 TranscriptId::FlockBlake3 | TranscriptId::Poseidon2M31,
+            ) => {}
+            (
+                CurveId::Bn254G1,
+                ShuffleProofSystem::BayerGrothV2,
+                TranscriptId::FiatShamirSha3,
+            ) => {}
+            (
+                CurveId::Secp256k1,
+                ShuffleProofSystem::BayerGrothV2,
+                TranscriptId::FiatShamirSha3 | TranscriptId::Keccak256,
             ) => {}
             (CurveId::Ristretto255, _, _) => {
                 return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8))
@@ -969,7 +998,61 @@ mod tests {
     fn shuffle_roundtrip_is_canonical() {
         let request = shuffle_request();
         let encoded = request.encode().unwrap();
-        assert_eq!(ShuffleVerifyRequest::decode(&encoded).unwrap(), request);
+        assert_eq!(ShuffleVerifyRequest::decode(&encoded), Ok(request));
+    }
+
+    #[test]
+    fn bn254_sigma_combo_is_accepted_and_others_fail_closed() {
+        // The only admitted BN254 combination (DUAL_PROOF_PROTOCOL.md §3.1):
+        // (Bn254G1, BayerGrothV2, FiatShamirSha3), 32-byte encodings.
+        let request = ShuffleVerifyRequest {
+            curve: CurveId::Bn254G1,
+            proof_system: ShuffleProofSystem::BayerGrothV2,
+            transcript: TranscriptId::FiatShamirSha3,
+            context: b"bn254_sigma_shuffle_v3".to_vec(),
+            call_context: b"table=1/hand=2/call=3/player=4".to_vec(),
+            public_key: vec![7u8; 32],
+            input: vec![ristretto_ciphertext(1), ristretto_ciphertext(2)],
+            output: vec![ristretto_ciphertext(3), ristretto_ciphertext(4)],
+            proof: vec![9u8; 256],
+        };
+        assert_eq!(CurveId::Bn254G1.point_size(), 32);
+        assert_eq!(CurveId::try_from(4), Ok(CurveId::Bn254G1));
+        request.validate().expect("BN254 sigma combo is valid");
+        let encoded = request.encode().expect("BN254 request encodes");
+        assert_eq!(ShuffleVerifyRequest::decode(&encoded), Ok(request.clone()));
+
+        // Fail-closed: BN254 with the Ristretto-only transcript is rejected.
+        let bad_transcript = ShuffleVerifyRequest {
+            transcript: TranscriptId::Merlin,
+            ..request.clone()
+        };
+        assert_eq!(
+            bad_transcript.validate(),
+            Err(AbiError::UnsupportedTranscript(
+                TranscriptId::Merlin as u8
+            ))
+        );
+
+        // Fail-closed: BN254 with the Ristretto-only proof system is rejected
+        // (falls through to the transcript-arm classifier, still an error).
+        let bad_system = ShuffleVerifyRequest {
+            proof_system: ShuffleProofSystem::RistrettoAirV2,
+            ..request.clone()
+        };
+        assert_eq!(
+            bad_system.validate(),
+            Err(AbiError::UnsupportedTranscript(
+                TranscriptId::FiatShamirSha3 as u8
+            ))
+        );
+
+        // Fail-closed: wrong point width for BN254.
+        let bad_points = ShuffleVerifyRequest {
+            public_key: vec![7u8; 48],
+            ..request
+        };
+        assert_eq!(bad_points.validate(), Err(AbiError::InvalidPointSize));
     }
 
     #[test]

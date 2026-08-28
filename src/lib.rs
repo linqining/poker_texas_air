@@ -44,6 +44,7 @@ pub mod trace_gen;
 pub mod deck_commitment;
 pub mod dual_proof;
 pub mod error;
+pub mod hand_binding;
 pub mod merkle_tree;
 pub mod method_kind;
 pub mod outer_aggregate;

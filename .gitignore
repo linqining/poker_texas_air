@@ -8,3 +8,5 @@ coverage.lcov
 .zcode/
 .vscode/
 target-bench/
+/poker_contracts/target/*
+/poker_contracts/.snfoundry_cache/*

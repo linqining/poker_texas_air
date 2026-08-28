@@ -290,6 +290,44 @@ log-18 列主导），⑩ Pippenger 落地后预计 ~50–60s/洗牌（~450–54
   乘法核均试过）。已回退 crates.io 2.3。x86-64 AVX-512 机器上该分支
   仍值得启用。
 
+### 4.1.0 洗牌移出电路后的玩家-only 工件基准（✅ 2026-08-28 实测）
+
+部署路径切 Poseidon2 + host 验证洗牌（§4.0）后，一手一证工件只剩玩家义务。
+新增基准 `hand_admission_player_only_benchmark`（ignored，跑法
+`TEXAS_PROVE_TIMING=1 cargo test -p poker_texas_air --release --lib
+hand_admission_player_only_benchmark -- --ignored --nocapture`）：九个
+Poseidon2 ownership + 完整 reveal 阶段（8 玩家 × 4 街批量 token，88 方程）+
+一个 deck-52 fold DLEQ + 42 条 transcript 链折入 Poseidon2 段。
+
+**基线（2026-08-28，300 梯子 / 150 additions）**：prove **79.4s** / verify
+**9.9s** / 证明 **12.5MB**。相位归因：trace 树 34.7s + interaction 树 19.6s
++ scope 树 5.1s（**Merkle 合计 75%**）、prove.stwo 13.0s、segments.build
+2.8s、serialize 1.8s、interact 1.4s。
+
+本轮落地的三项：
+
+1. **玩家-only 工件解锁**：`decompose_hand_admission` 原先硬性拒绝零洗牌
+   （"carries no shuffle obligations"）——已放宽为"至少一项义务"，host 验证
+   洗牌后的结算工件可证。
+2. **批量 reveal 折入 admission（✅）**：`PlayerRevealBatchPoseidon2Entry` +
+   `reveal_batches` 分解（1 key + N 卡方程/批）。同负载下梯子 460（单卡编码
+   2N/卡）→ **300**；证明字节同步下降（codec 列减少）。**注意行数取整到
+   2 的幂**：460 与 300 梯子同落 log-17（131K 行），prove 时间不变、只有字节
+   收益；跨到 log-16（65.5K 行）需 **≤195 梯子**——单靠方程打包已不够，
+   只有 ⑩+ 桶化 MSM（300 方程 ≈ 600 点 → c=6 时 ~28K 行 ≈ log-15）能跨
+   台阶，届时 prove 预计 ~20s。修掉了 `combine_poseidon2_players` 丢
+   `reveal_batches` 的健全性缺口（原生门仍 fail-closed，但 STARK 未覆盖
+   reveal 方程）。
+3. **⑦ 见证定宽算术（✅）**：`ristretto_scalar_mul_air` 的 BigUint 商/比较
+   换 4×u64 定宽（利用 p = 2^255−19 的倒数结构估商 + ±1 精确校正，256 组
+   随机对照 BigUint 全对）。segments.build ~1.9→~1.0s；本工件收益 ~1s
+   （⑦ 的收益随洗牌段消失同步缩水——build/interact 只剩 ~4s）。
+
+**修正后的优化排序（玩家-only 工件）**：⑩+ 跨方程桶化 MSM 是唯一大时间
+杠杆（75% Merkle ∝ 行数，跨 log-16 需 ≤195 梯子、跨 log-15 需 ~桶化）；
+④ 混合加法（列减）次之（~2400 log-17 列是 Merkle 主体）；⑦ 已兑现；①②
+②b⑧ 在此工件只剩字节收益（宽标量段不存在）。
+
 ### 4.1 后续工作（增量优化 + 递归路线图）
 
 **递归工件（admission STARK）成本归因（✅ 2026-08-27 实测修正）**——非生产关键路径

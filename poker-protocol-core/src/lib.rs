@@ -15,7 +15,8 @@ mod borsh_impl;
 
 pub use backend::{
     ec_encrypt_batch_generic, Bls12381Curve, Bls12381ElGamalCiphertext, BlsCompressedPoint,
-    CompressedPoint, RistrettoCurve, RistrettoElGamalCiphertext,
+    Bn254Curve, Bn254ElGamalCiphertext, BnCompressedPoint, CompressedPoint, RistrettoCurve,
+    RistrettoElGamalCiphertext, Secp256k1Curve, Secp256k1ElGamalCiphertext, SecpCompressedPoint,
 };
 pub use curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
 pub use error::VerificationError;

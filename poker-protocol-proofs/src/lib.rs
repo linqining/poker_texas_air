@@ -23,6 +23,7 @@ pub mod remask_proof;
 pub mod reveal_token_proof;
 pub mod shuffle_proof;
 pub mod transcript_ext;
+pub mod unified_sigma;
 pub mod versioned;
 
 #[cfg(feature = "borsh")]

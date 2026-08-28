@@ -146,3 +146,54 @@ impl CryptoTranscript for FiatShamirTranscript {
         Challenge { scalar }
     }
 }
+
+
+/// Keccak-256 Fiat–Shamir transcript (v2.3 secp256k1 direct-sigma route).
+///
+/// Identical state machine to [`FiatShamirTranscript`] —
+/// `state = Keccak256(state || u32le(len) || label || u32le(len) || msg)`,
+/// challenge = hash_to_scalar(state) — with the compression function swapped
+/// to legacy Keccak-256 (0x01 padding) so the on-chain Cairo verifier replays
+/// it with Starknet's native keccak builtin at near-zero cost.
+#[derive(Debug)]
+pub struct KeccakTranscript {
+    state: Vec<u8>,
+}
+
+impl CryptoTranscript for KeccakTranscript {
+    fn new(protocol_name: &[u8]) -> Self {
+        let state = sha3::Keccak256::digest(protocol_name).to_vec();
+        KeccakTranscript { state }
+    }
+
+    fn append_message(&mut self, label: &[u8], message: &[u8]) {
+        let mut data = self.state.clone();
+        data.extend_from_slice(&(label.len() as u32).to_le_bytes());
+        data.extend_from_slice(label);
+        data.extend_from_slice(&(message.len() as u32).to_le_bytes());
+        data.extend_from_slice(message);
+        self.state = sha3::Keccak256::digest(&data).to_vec();
+    }
+
+    fn challenge_bytes(&mut self, label: &[u8], dest: &mut [u8]) {
+        self.append_message(label, b"challenge");
+        let hash = sha3::Keccak256::digest(&self.state);
+        let copy_len = dest.len().min(hash.len());
+        dest[..copy_len].copy_from_slice(&hash[..copy_len]);
+    }
+
+    fn append_point<C: Curve>(&mut self, label: &[u8], point: &C::Point) {
+        let point_bytes = point.compress();
+        self.append_message(label, point_bytes.as_ref());
+    }
+
+    fn append_scalar<C: Curve>(&mut self, label: &[u8], scalar: &C::Scalar) {
+        self.append_message(label, &scalar.as_bytes());
+    }
+
+    fn challenge<C: Curve>(&mut self, label: &[u8]) -> Challenge<C> {
+        self.append_message(label, b"challenge");
+        let scalar = C::hash_to_scalar(&self.state);
+        Challenge { scalar }
+    }
+}

@@ -29,7 +29,6 @@
 
 use bincode::Options;
 use borsh::{BorshDeserialize, BorshSerialize};
-use num_bigint::BigUint;
 use num_integer::Integer;
 use rayon::prelude::*;
 use stwo::core::channel::Channel;
@@ -308,30 +307,148 @@ const P_BASE_LIMBS: [u16; LIMB_COUNT] = base_limbs(&P_BYTES);
 /// `2d mod p` as twenty-four 11-bit limbs (hardcoded multiplication operand).
 const TWO_D_LIMBS: [u16; LIMB_COUNT] = base_limbs(&EDWARDS_TWO_D_BYTES);
 
-static MODULUS: std::sync::OnceLock<BigUint> = std::sync::OnceLock::new();
+/// Fixed-width 256-bit value (little-endian u64 limbs): the allocation-free
+/// replacement for the BigUint witness arithmetic (roadmap ⑦).
+type U256 = [u64; 4];
+/// The field modulus `p = 2^255 − 19` as u64 limbs.
+const P_U256: U256 = [0xffff_ffff_ffff_ffed, 0xffff_ffff_ffff_ffff, 0xffff_ffff_ffff_ffff, 0x7fff_ffff_ffff_ffff];
 
-fn modulus() -> &'static BigUint {
-    MODULUS.get_or_init(|| BigUint::from_bytes_le(&P_BYTES))
+fn u256(value: &[u8; LIMBS]) -> U256 {
+    let mut out = [0u64; 4];
+    for (index, limb) in out.iter_mut().enumerate() {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&value[8 * index..8 * index + 8]);
+        *limb = u64::from_le_bytes(bytes);
+    }
+    out
 }
 
-fn big_uint(value: &[u8; LIMBS]) -> BigUint {
-    BigUint::from_bytes_le(value)
-}
-
-fn limbs_bytes(value: &BigUint) -> [u8; LIMBS] {
+fn u256_bytes(value: &U256) -> [u8; LIMBS] {
     let mut out = [0u8; LIMBS];
-    let bytes = value.to_bytes_le();
-    let length = bytes.len().min(LIMBS);
-    out[..length].copy_from_slice(&bytes[..length]);
+    for (index, limb) in value.iter().enumerate() {
+        out[8 * index..8 * index + 8].copy_from_slice(&limb.to_le_bytes());
+    }
+    out
+}
+
+fn u256_cmp(a: &U256, b: &U256) -> std::cmp::Ordering {
+    for index in (0..4).rev() {
+        match a[index].cmp(&b[index]) {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// `a + b` with the carry out (no reduction; inputs are canonical).
+fn u256_add(a: &U256, b: &U256) -> (U256, u64) {
+    let mut out = [0u64; 4];
+    let mut carry = 0u128;
+    for index in 0..4 {
+        let sum = u128::from(a[index]) + u128::from(b[index]) + carry;
+        out[index] = sum as u64;
+        carry = sum >> 64;
+    }
+    (out, carry as u64)
+}
+
+/// Full 256×256 → 512-bit product.
+fn u256_mul_wide(a: &U256, b: &U256) -> [u64; 8] {
+    let mut out = [0u64; 8];
+    for (left_index, left) in a.iter().enumerate() {
+        let mut carry = 0u128;
+        for (right_index, right) in b.iter().enumerate() {
+            let sum = u128::from(*left) * u128::from(*right)
+                + u128::from(out[left_index + right_index])
+                + carry;
+            out[left_index + right_index] = sum as u64;
+            carry = sum >> 64;
+        }
+        out[left_index + 4] = out[left_index + 4].wrapping_add(carry as u64);
+    }
+    out
+}
+
+fn wide_cmp(a: &[u64; 8], b: &[u64; 8]) -> std::cmp::Ordering {
+    for index in (0..8).rev() {
+        match a[index].cmp(&b[index]) {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+fn wide_sub(a: &[u64; 8], b: &[u64; 8]) -> ([u64; 8], bool) {
+    let mut out = [0u64; 8];
+    let mut borrow = 0i128;
+    for index in 0..8 {
+        let difference = i128::from(a[index]) - i128::from(b[index]) - borrow;
+        if difference < 0 {
+            out[index] = (difference + (1i128 << 64)) as u64;
+            borrow = 1;
+        } else {
+            out[index] = difference as u64;
+            borrow = 0;
+        }
+    }
+    (out, borrow != 0)
+}
+
+fn p_wide() -> [u64; 8] {
+    let mut out = [0u64; 8];
+    out[..4].copy_from_slice(&P_U256);
     out
 }
 
 /// `⌊a·b / p⌋` as canonical bytes: the committed quotient of one
-/// multiplication row.
+/// multiplication row.  Uses the structure of `p = 2^255 − 19` — the
+/// reciprocal is `2^-255·(1 + 19/2^255 + …)` so the quotient is
+/// `(x >> 255) + (19·(x >> 255) >> 255)` with at most a couple of ±1
+/// corrections — instead of a heap-allocated BigUint division.
 fn quotient_bytes(a: &[u8; LIMBS], b: &[u8; LIMBS]) -> [u8; LIMBS] {
-    let product = big_uint(a) * big_uint(b);
-    let (quotient, _remainder) = product.div_rem(modulus());
-    limbs_bytes(&quotient)
+    let product = u256_mul_wide(&u256(a), &u256(b));
+    // h = x >> 255 (a < p, b < p ⇒ h < 2^255, fits U256).
+    let h = [
+        (product[3] >> 63) | (product[4] << 1),
+        (product[4] >> 63) | (product[5] << 1),
+        (product[5] >> 63) | (product[6] << 1),
+        (product[6] >> 63) | (product[7] << 1),
+    ];
+    // correction = (19·h) >> 255 (fits a handful of bits).
+    let mut scaled = [0u64; 5];
+    let mut carry = 0u128;
+    for index in 0..4 {
+        let term = u128::from(h[index]) * 19 + carry;
+        scaled[index] = term as u64;
+        carry = term >> 64;
+    }
+    scaled[4] = carry as u64;
+    let correction = (scaled[3] >> 63) | (scaled[4] << 1);
+    let (mut quotient, _overflow) = u256_add(&h, &[correction, 0, 0, 0]);
+    let _ = _overflow;
+    // Exact correction against p·q ≤ x < p·(q+1); the estimate is off by
+    // at most a couple of units.
+    let modulus_wide = p_wide();
+    let mut candidate = u256_mul_wide(&quotient, &P_U256);
+    while wide_cmp(&candidate, &product) == std::cmp::Ordering::Greater {
+        quotient[0] = quotient[0].wrapping_sub(1);
+        let (reduced, borrow) = wide_sub(&candidate, &modulus_wide);
+        debug_assert!(!borrow, "quotient estimate over-decrements");
+        candidate = reduced;
+    }
+    loop {
+        let mut next = quotient;
+        next[0] = next[0].wrapping_add(1);
+        let candidate_next = u256_mul_wide(&next, &P_U256);
+        if wide_cmp(&candidate_next, &product) == std::cmp::Ordering::Greater {
+            break;
+        }
+        quotient = next;
+        candidate = candidate_next;
+    }
+    u256_bytes(&quotient)
 }
 
 fn options() -> impl Options {
@@ -618,13 +735,18 @@ fn chain_witness(
     b_limbs: &[u16; LIMB_COUNT],
     out_limbs: &[u16; LIMB_COUNT],
     subtract: bool,
-    a_int: &BigUint,
-    b_int: &BigUint,
+    a_int: &U256,
+    b_int: &U256,
 ) -> TexasAirResult<ChainWitness> {
     let (k_negative, k_magnitude) = if subtract {
-        (a_int < b_int, a_int < b_int)
+        let below = u256_cmp(a_int, b_int) == std::cmp::Ordering::Less;
+        (below, below)
     } else {
-        (false, a_int + b_int >= *modulus())
+        let (sum, carry) = u256_add(a_int, b_int);
+        (
+            false,
+            carry != 0 || u256_cmp(&sum, &P_U256) != std::cmp::Ordering::Less,
+        )
     };
     let mut carry_in: i64 = 0;
     let mut carries = [SignedBit {
@@ -676,9 +798,10 @@ fn chain_witness(
 fn double_chain_witness(
     z_limbs: &[u16; LIMB_COUNT],
     d2_limbs: &[u16; LIMB_COUNT],
-    z_int: &BigUint,
+    z_int: &U256,
 ) -> TexasAirResult<DoubleChainWitness> {
-    let k = (z_int + z_int) >= *modulus();
+    let (doubled, carry) = u256_add(z_int, z_int);
+    let k = carry != 0 || u256_cmp(&doubled, &P_U256) != std::cmp::Ordering::Less;
     let mut carry_in: i64 = 0;
     let mut carries = [SignedBit {
         negative: false,
@@ -754,7 +877,7 @@ fn mul_witness(
 fn step_witness(step: &LadderStep) -> TexasAirResult<StepWitness> {
     let value_limbs: Vec<[u16; LIMB_COUNT]> =
         step.pinned.iter().map(|value| to_limbs(value)).collect();
-    let value_ints: Vec<BigUint> = step.pinned.iter().map(|value| big_uint(value)).collect();
+    let value_ints: Vec<U256> = step.pinned.iter().map(|value| u256(value)).collect();
 
     let quotients = [
         quotient_bytes(
@@ -2084,6 +2207,53 @@ impl LadderSegment {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn quotient_bytes_matches_biguint_reference() {
+        use num_bigint::BigUint;
+        let mut rng = test_rng();
+        let modulus = BigUint::from_bytes_le(&P_BYTES);
+        for _ in 0..256 {
+            let a = random_field_bytes(&mut rng);
+            let b = random_field_bytes(&mut rng);
+            let expected = {
+                let product = BigUint::from_bytes_le(&a) * BigUint::from_bytes_le(&b);
+                let (quotient, _remainder) = product.div_rem(&modulus);
+                let mut out = [0u8; LIMBS];
+                let bytes = quotient.to_bytes_le();
+                out[..bytes.len().min(LIMBS)].copy_from_slice(&bytes[..bytes.len().min(LIMBS)]);
+                out
+            };
+            assert_eq!(quotient_bytes(&a, &b), expected);
+        }
+    }
+
+    fn test_rng() -> rand::rngs::StdRng {
+        use rand::SeedableRng;
+        rand::rngs::StdRng::seed_from_u64(0x7F1D)
+    }
+
+    fn random_field_bytes(rng: &mut rand::rngs::StdRng) -> [u8; LIMBS] {
+        use rand::RngCore;
+        loop {
+            let mut bytes = [0u8; LIMBS];
+            rng.fill_bytes(&mut bytes);
+            let magnitude = BigUintShim::below_modulus(&bytes);
+            if magnitude {
+                return bytes;
+            }
+        }
+    }
+
+    /// Strict little-endian comparison against the group order shape:
+    /// reject values ≥ p so the reference quotient fits LIMBS bytes.
+    struct BigUintShim;
+    impl BigUintShim {
+        fn below_modulus(bytes: &[u8; LIMBS]) -> bool {
+            let value = num_bigint::BigUint::from_bytes_le(bytes);
+            value < num_bigint::BigUint::from_bytes_le(&P_BYTES)
+        }
+    }
     use super::*;
 
     fn basepoint() -> [u8; LIMBS] {

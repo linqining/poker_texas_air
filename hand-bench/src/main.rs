@@ -332,6 +332,10 @@ fn main() {
         full_hand_v2_nine();
         return;
     }
+    if std::env::args().any(|arg| arg == "full-hand-v3-dual") {
+        full_hand_v3_dual();
+        return;
+    }
     if std::env::args().any(|arg| arg == "full-hand-v2") {
         full_hand_v2();
         return;
@@ -974,6 +978,382 @@ fn full_hand_v2_nine() {
     println!(
         "\nTOTAL nine-player hand: wall {hand_wall:?} | client native prove {client_prove:?} | server AIR verify {server_verify:?} | client proof bytes {total_bytes} ({:.1} MiB)",
         total_bytes as f64 / (1024.0 * 1024.0)
+    );
+}
+
+/// Nine-player complete hand on the secp256k1 direct-sigma settlement route
+/// (DUAL_PROOF_PROTOCOL.md v2.2): the same mental-poker flow as
+/// `full_hand_v2_nine` but every P proof is the curve-generic sigma suite
+/// instantiated on secp256k1 with the FiatShamirSha3 transcript — the exact
+/// proof batch a `PokerDualSettlement.verify_and_settle` call will carry
+/// on-chain. Terminates by computing the unified `hand_binding`, the
+/// settlement digest, and the Phase-1 G attestation that registers the
+/// host-verified STARK commitments.
+fn full_hand_v3_dual() {
+    use poker_protocol::secp256k1_sigma::{SECP256K1_TEXAS_DECK_SIZE, canonical_deck};
+    use poker_protocol_core::{
+        Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric, Secp256k1Curve,
+    };
+    use poker_protocol_proofs::bayer_groth::BayerGrothShuffleProof;
+    use poker_protocol_proofs::dleq_proof::{DLEqProof, LeaveKind};
+    use poker_protocol_proofs::pk_ownership::PKOwnershipProof;
+    use poker_protocol_proofs::reveal_token_proof::RevealTokenProof;
+    use poker_protocol_proofs::transcript_ext::KeccakTranscript;
+    use poker_protocol_proofs::CryptoTranscript;
+    use rand::SeedableRng;
+    use rayon::prelude::*;
+    use starknet_crypto::FieldElement;
+    use std::collections::HashMap;
+
+    type Point = <Secp256k1Curve as Curve>::Point;
+    type Scalar = <Secp256k1Curve as Curve>::Scalar;
+    type Ct = ElGamalCiphertextGeneric<Secp256k1Curve>;
+
+    const PLAYERS: usize = 9;
+    const FOLD_SEAT: usize = 1;
+    let active: Vec<usize> = (0..PLAYERS).filter(|&seat| seat != FOLD_SEAT).collect();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0xB254_0001);
+
+    let transcript = |label: &'static str| KeccakTranscript::new(label.as_bytes());
+    let point_bytes = |point: &Point| {
+        let mut out = [0u8; 33];
+        out.copy_from_slice(point.compress().as_ref());
+        out
+    };
+    // 33-byte SEC1 point → (17-byte, 16-byte) felt pair (both < 2^136,
+    // Cairo-replicable).
+    let point_felts = |bytes: &[u8; 33]| {
+        let mut hi = [0u8; 17];
+        let mut lo = [0u8; 16];
+        hi.copy_from_slice(&bytes[..17]);
+        lo.copy_from_slice(&bytes[17..]);
+        [
+            FieldElement::from_byte_slice_be(&hi).expect("17 bytes are canonical"),
+            FieldElement::from_byte_slice_be(&lo).expect("16 bytes are canonical"),
+        ]
+    };
+    let deck_commitment = |deck: &[Ct]| {
+        let felts: Vec<FieldElement> = deck
+            .iter()
+            .flat_map(|ct| {
+                let c1 = point_bytes(&ct.c1);
+                let c2 = point_bytes(&ct.c2);
+                point_felts(&c1).into_iter().chain(point_felts(&c2))
+            })
+            .collect();
+        starknet_crypto::poseidon_hash_many(&felts)
+    };
+    // 20-byte seat address → felt (settlement_hash.cairo convention).
+    let seat_address = |seat: usize| {
+        let mut addr = [0u8; 20];
+        addr[16..].copy_from_slice(&(0xD1CEu32 + seat as u32).to_be_bytes());
+        FieldElement::from_byte_slice_be(&addr).expect("20 bytes are canonical")
+    };
+
+    let mut client_prove = std::time::Duration::ZERO;
+    let mut host_verify = std::time::Duration::ZERO;
+    let mut total_bytes = 0usize;
+    let hand_started = Instant::now();
+
+    // ---- Phase 1: nine ownership proofs (client) / native verifies --------
+    let started = Instant::now();
+    let mut secret_keys = Vec::with_capacity(PLAYERS);
+    let mut public_keys = Vec::with_capacity(PLAYERS);
+    let mut ownership = Vec::with_capacity(PLAYERS);
+    for seat in 0..PLAYERS {
+        let sk = Scalar::random(&mut rng);
+        let pk = Secp256k1Curve::base_g() * &sk;
+        let context = format!("table9-hand1-seat{seat}");
+        let proof = PKOwnershipProof::<Secp256k1Curve>::prove(&sk, &pk, &mut rng);
+        ownership.push((seat, context, proof));
+        secret_keys.push(sk);
+        public_keys.push(pk);
+    }
+    let phase_prove = started.elapsed();
+    let started = Instant::now();
+    for (seat, context, proof) in &ownership {
+        assert!(proof.verify(&public_keys[*seat]), "ownership verify seat {seat}");
+        total_bytes += point_bytes(&proof.commitment).len() + proof.response.as_bytes().len();
+    }
+    let phase_verify = started.elapsed();
+    client_prove += phase_prove;
+    host_verify += phase_verify;
+    println!(
+        "[1] ownership x{PLAYERS}: client prove {phase_prove:?}, host verify {phase_verify:?}"
+    );
+
+    // ---- Phase 2: canonical deck + nine sequential proven BG shuffles -----
+    let aggregate: Point = public_keys.iter().copied().sum();
+    let deck_points = canonical_deck();
+    assert_eq!(deck_points.len(), SECP256K1_TEXAS_DECK_SIZE);
+    let mut deck: Vec<Ct> = deck_points
+        .iter()
+        .map(|card| {
+            let r = Scalar::random(&mut rng);
+            Ct::encrypt(card, &aggregate, &r)
+        })
+        .collect();
+
+    let mut deck_commit_chain = vec![deck_commitment(&deck)];
+    let started = Instant::now();
+    let mut shuffle_proofs = Vec::with_capacity(PLAYERS);
+    for seat in 0..PLAYERS {
+        let mut permutation: Vec<usize> = (0..52).collect();
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ (seat as u64 + 0xB2);
+        for index in (1..permutation.len()).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            permutation.swap(index, (seed % (index as u64 + 1)) as usize);
+        }
+        let rerandomizers: Vec<Scalar> = (0..52).map(|_| Scalar::random(&mut rng)).collect();
+        let output: Vec<Ct> = permutation
+            .iter()
+            .zip(&rerandomizers)
+            .map(|(&source, r)| deck[source].re_encrypt(&aggregate, r))
+            .collect();
+
+        let mut prove_transcript = transcript("bn254_bg_shuffle_v3");
+        let proof = BayerGrothShuffleProof::<Secp256k1Curve>::prove(
+            &deck,
+            &output,
+            &permutation,
+            &rerandomizers,
+            &aggregate,
+            &mut rng,
+            &mut prove_transcript,
+        )
+        .expect("shuffle proves");
+        shuffle_proofs.push((deck.clone(), output.clone(), proof));
+        deck = output;
+        deck_commit_chain.push(deck_commitment(&deck));
+    }
+    let phase_prove = started.elapsed();
+    let started = Instant::now();
+    let admissions: Vec<Result<(), String>> = shuffle_proofs
+        .par_iter()
+        .map(|(input, output, proof)| {
+            let mut verify_transcript = transcript("bn254_bg_shuffle_v3");
+            proof
+                .verify(input, output, &aggregate, &mut verify_transcript)
+                .map_err(|error| format!("{error}"))
+        })
+        .collect();
+    for admission in &admissions {
+        admission.clone().expect("shuffle admission");
+    }
+    for (input, output, _proof) in &shuffle_proofs {
+        total_bytes += input.len() * 64 + output.len() * 64;
+    }
+    let phase_verify = started.elapsed();
+    client_prove += phase_prove;
+    host_verify += phase_verify;
+    println!(
+        "[2] shuffles x{PLAYERS}: client prove {phase_prove:?} ({:.0?}/shuffle), host verify {phase_verify:?} (parallel)",
+        phase_prove / PLAYERS as u32,
+    );
+
+    // ---- Phase 3: deal 18 hole cards + 5 board cards (index slices) -------
+    // Slices are index ranges into the deck; the ciphertext contents are read
+    // after the fold player's key layer is stripped (Phase 4), matching the
+    // protocol ordering where fold_with_proof removes that layer from every
+    // outstanding ciphertext.
+    let mut cursor = 0usize;
+    let mut hole_ranges: HashMap<usize, usize> = HashMap::new();
+    for &seat in &active {
+        hole_ranges.insert(seat, cursor);
+        cursor += 2;
+    }
+    cursor += 1; // burn
+    let board_range = cursor;
+    cursor += 5;
+    let showdown_range = cursor;
+
+    // ---- Phase 4: fold with a 52-card batch leave DLEQ ---------------------
+    let strip_fold_layer = |ct: &Ct| Ct {
+        c1: ct.c1,
+        c2: ct.c2 - ct.c1 * &secret_keys[FOLD_SEAT],
+    };
+    let started = Instant::now();
+    let folded_deck: Vec<Ct> = deck.iter().map(&strip_fold_layer).collect();
+    let mut fold_prove_transcript = transcript("bn254_fold_leave_v3");
+    let fold_proof = DLEqProof::<Secp256k1Curve, LeaveKind>::prove(
+        &deck,
+        &folded_deck,
+        &secret_keys[FOLD_SEAT],
+        &public_keys[FOLD_SEAT],
+        &mut fold_prove_transcript,
+    );
+    let fold_prove_elapsed = started.elapsed();
+    let started = Instant::now();
+    let mut fold_verify_transcript = transcript("bn254_fold_leave_v3");
+    assert!(
+        fold_proof.verify(
+            &deck,
+            &folded_deck,
+            &public_keys[FOLD_SEAT],
+            &mut fold_verify_transcript
+        ),
+        "fold leave DLEQ verifies"
+    );
+    let fold_verify_elapsed = started.elapsed();
+    total_bytes += folded_deck.len() * 32;
+    client_prove += fold_prove_elapsed;
+    host_verify += fold_verify_elapsed;
+    println!(
+        "[4] fold_with_proof (52-card leave DLEQ): client prove {fold_prove_elapsed:?}, host verify {fold_verify_elapsed:?}"
+    );
+
+    // Deck available to remaining players has the fold player's layer removed.
+    deck = folded_deck;
+
+    // ---- Phase 5: street reveals (tokens + proofs, batched) ----------------
+    let revealed: Vec<(usize, Ct)> = active
+        .iter()
+        .flat_map(|&seat| {
+            let start = hole_ranges[&seat];
+            let cards: Vec<Ct> = deck[start..start + 2]
+                .to_vec()
+                .into_iter()
+                .chain(deck[board_range..board_range + 5].to_vec())
+                .collect();
+            cards.into_iter().map(move |ct| (seat, ct))
+        })
+        .collect();
+    let started = Instant::now();
+    let mut reveal_proofs = Vec::with_capacity(revealed.len());
+    for (seat, ct) in &revealed {
+        let token = ct.gen_reveal_token(&secret_keys[*seat]);
+        let mut prove_transcript = transcript("bn254_reveal_token_v3");
+        let proof = RevealTokenProof::<Secp256k1Curve>::prove(
+            &secret_keys[*seat],
+            &public_keys[*seat],
+            ct,
+            &token,
+            &mut rng,
+            &mut prove_transcript,
+        );
+        reveal_proofs.push((*seat, ct.clone(), token, proof));
+    }
+    let phase_prove = started.elapsed();
+    let started = Instant::now();
+    let reveal_admissions: Vec<Result<(), String>> = reveal_proofs
+        .par_iter()
+        .map(|(seat, ct, token, proof)| {
+            let mut verify_transcript = transcript("bn254_reveal_token_v3");
+            proof
+                .verify(ct, token, &public_keys[*seat], &mut verify_transcript)
+                .map_err(|error| format!("{error:?}"))
+        })
+        .collect();
+    for admission in &reveal_admissions {
+        admission.clone().expect("reveal admission");
+    }
+    total_bytes += reveal_proofs.len() * 96;
+    let phase_verify = started.elapsed();
+    client_prove += phase_prove;
+    host_verify += phase_verify;
+    println!(
+        "[5] reveal tokens x{}: client prove {phase_prove:?}, host verify {phase_verify:?} (parallel)",
+        reveal_proofs.len()
+    );
+
+    // ---- Phase 6: showdown decrypt + settlement plan ------------------------
+    let started = Instant::now();
+    let mut decrypted = Vec::with_capacity(reveal_proofs.len());
+    for (seat, ct, token, _proof) in &reveal_proofs {
+        // Decryption: subtract every active player's token — the revealer's
+        // own token is carried by the proof, the rest are derived from sk.
+        let mut plaintext = ct.c2 - token;
+        for &other in &active {
+            if other == *seat {
+                continue;
+            }
+            plaintext = plaintext - ct.c1 * &secret_keys[other];
+        }
+        decrypted.push((*seat, plaintext));
+    }
+    for (_seat, point) in &decrypted {
+        assert!(
+            deck_points.iter().any(|card| card == point),
+            "decrypted plaintext must be a canonical card"
+        );
+    }
+    assert!(
+        decrypted.len() >= showdown_range,
+        "showdown must decrypt at least the dealt cards"
+    );
+
+    // Zero-sum settlement plan: seat 0 wins the pot, everyone else posted 50.
+    let pot = 50u64 * active.len() as u64;
+    let mut deltas: Vec<i128> = vec![0; PLAYERS];
+    deltas[0] = pot as i128;
+    for &seat in &active {
+        if seat != 0 {
+            deltas[seat] -= 50;
+        }
+    }
+    let settlement_digest = {
+        let mut fields = vec![FieldElement::from(1u64)]; // hand_id
+        for (seat, delta) in deltas.iter().enumerate() {
+            fields.push(seat_address(seat));
+            if *delta >= 0 {
+                fields.push(FieldElement::from(1u64));
+            } else {
+                fields.push(FieldElement::from(0u64));
+            }
+            fields.push(FieldElement::from(delta.unsigned_abs() as u64));
+        }
+        starknet_crypto::poseidon_hash_many(&fields)
+    };
+    let decrypt_elapsed = started.elapsed();
+    println!(
+        "[6] decrypt + settlement plan ({} cards, pot {pot}, settlement digest computed): {decrypt_elapsed:?} native",
+        decrypted.len()
+    );
+
+    // ---- Phase 7: unified hand_binding + Phase-1 G attestation -------------
+    let started = Instant::now();
+    let binding = poker_texas_air::hand_binding::compute_hand_binding(
+        &poker_texas_air::hand_binding::HandBindingInput {
+            table_id: 9,
+            hand_id: 1,
+            players: (0..PLAYERS).map(seat_address).collect(),
+            deck_commitments: deck_commit_chain,
+            reveal_commitment: starknet_crypto::poseidon_hash_many(
+                &reveal_proofs
+                    .iter()
+                    .flat_map(|(_seat, ct, token, _proof)| {
+                        let t = point_bytes(token);
+                        point_felts(&t).to_vec()
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            state_root_pre: FieldElement::from(0xDEAD_u64),
+            state_root_post: FieldElement::from(0xC0DE_u64),
+            settlement_digest,
+        },
+    )
+    .expect("hand binding");
+    // Phase 1 G attestation: the digest the operator registers on-chain while
+    // the canonical STARK (G) itself stays host-verified (default bench mode
+    // measures that STARK's prove/verify).
+    let g_attestation = starknet_crypto::poseidon_hash_many(&[
+        binding,
+        settlement_digest,
+        FieldElement::from(0xDEAD_u64),
+        FieldElement::from(0xC0DE_u64),
+    ]);
+    let binding_elapsed = started.elapsed();
+
+    let hand_wall = hand_started.elapsed();
+    println!(
+        "[7] hand_binding + G attestation: {binding_elapsed:?} native (binding 0x{:x}, attestation 0x{:x})",
+        binding, g_attestation
+    );
+    println!(
+        "\nTOTAL v3-dual nine-player hand: wall {hand_wall:?} | client native prove {client_prove:?} | host native verify {host_verify:?} | on-chain P calldata ≈ {total_bytes} bytes ({:.1} KiB)",
+        total_bytes as f64 / 1024.0
     );
 }
 

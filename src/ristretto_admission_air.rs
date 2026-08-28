@@ -1685,6 +1685,19 @@ pub struct PlayerRevealTokenPoseidon2Entry<'a> {
     pub wire: &'a crate::ristretto_player_proofs_air::RistrettoRevealTokenWire,
 }
 
+/// One batched reveal-token family (a player's whole street submission,
+/// one response over every revealed card) derived from the Poseidon2-M31
+/// transcript.  Folding the batch instead of per-card singles halves the
+/// ladder load of the reveal phase (1 key + N card equations vs 2N).
+#[derive(Debug, Clone, Copy)]
+pub struct PlayerRevealBatchPoseidon2Entry<'a> {
+    pub pk: &'a BgPoint,
+    pub cards: &'a [BgCiphertext],
+    pub tokens: &'a [BgPoint],
+    pub context: &'a [u8],
+    pub wire: &'a crate::ristretto_player_proofs_air::RistrettoRevealTokensBatchWire,
+}
+
 /// One batched deck-DLEQ family (52 cards) derived from the Poseidon2-M31
 /// transcript.
 #[derive(Debug, Clone, Copy)]
@@ -1705,6 +1718,10 @@ pub struct PlayerDeckDleqPoseidon2Entry<'a> {
 pub struct PlayerPoseidon2Inputs<'a> {
     pub pk_ownership: Vec<PlayerPkOwnershipPoseidon2Entry<'a>>,
     pub reveal_tokens: Vec<PlayerRevealTokenPoseidon2Entry<'a>>,
+    /// Batched reveal-token submissions (deployment shape: one proof per
+    /// player per street); folds as one key equation plus one equation per
+    /// card.
+    pub reveal_batches: Vec<PlayerRevealBatchPoseidon2Entry<'a>>,
     pub deck_dleqs: Vec<PlayerDeckDleqPoseidon2Entry<'a>>,
 }
 
@@ -1748,6 +1765,7 @@ fn decompose_player_poseidon2_into(
 ) -> TexasAirResult<()> {
     use crate::ristretto_player_proofs_air::{
         derive_pk_ownership_challenge_poseidon2, derive_reveal_token_challenge_poseidon2,
+        derive_reveal_tokens_batched_challenge_poseidon2,
     };
     let g = base_point_value();
     for entry in &inputs.pk_ownership {
@@ -1781,6 +1799,38 @@ fn decompose_player_poseidon2_into(
         let token_scaled = builder.mul(&challenge, entry.reveal_token);
         let rhs = builder.add(&token_scaled, &bg_encode_point(&t2))?;
         builder.eq(lhs, rhs);
+    }
+    for entry in &inputs.reveal_batches {
+        if entry.cards.len() != entry.tokens.len()
+            || entry.wire.commitment_t2.len() != entry.cards.len()
+        {
+            return Err(TexasAirError::SpecViolation(
+                "batched reveal statement shapes disagree".into(),
+            ));
+        }
+        let (challenge, spec) = derive_reveal_tokens_batched_challenge_poseidon2(
+            entry.pk,
+            entry.cards,
+            entry.tokens,
+            entry.context,
+            entry.wire,
+        );
+        chain_specs.push(spec);
+        let response = checked_scalar(&entry.wire.response, "batched reveal response")?;
+        let t1 = bg_decode_point(&entry.wire.commitment_t1)?;
+        // Key equation: G·response == t1 + pk·challenge.
+        let lhs = builder.mul(&response, &g);
+        let pk_scaled = builder.mul(&challenge, entry.pk);
+        let rhs = builder.add(&pk_scaled, &bg_encode_point(&t1))?;
+        builder.eq(lhs, rhs);
+        // Per-card equations: card.c1·response == T2_i + token_i·challenge.
+        for (index, (card, token)) in entry.cards.iter().zip(entry.tokens).enumerate() {
+            let commitment = bg_decode_point(&entry.wire.commitment_t2[index])?;
+            let lhs = builder.mul(&response, &card.c1);
+            let token_scaled = builder.mul(&challenge, token);
+            let rhs = builder.add(&token_scaled, &bg_encode_point(&commitment))?;
+            builder.eq(lhs, rhs);
+        }
     }
     for entry in &inputs.deck_dleqs {
         let (challenge, spec) = crate::ristretto_player_proofs_air::derive_deck_dleq_challenge_poseidon2(
@@ -1820,9 +1870,21 @@ fn decompose_player_poseidon2_into(
 pub fn decompose_hand_admission(
     components: &HandAdmissionComponents<'_>,
 ) -> TexasAirResult<AdmissionStatement> {
-    if components.shuffles.is_empty() {
+    let carries_player_obligations = !components.players.is_empty()
+        || components
+            .poseidon2_players
+            .iter()
+            .any(|player| {
+                !player.pk_ownership.is_empty()
+                    || !player.reveal_tokens.is_empty()
+                    || !player.reveal_batches.is_empty()
+                    || !player.deck_dleqs.is_empty()
+            });
+    // Host-verified shuffles (deployment path, §4.0) leave a player-only
+    // artifact; the hand must still carry at least one obligation.
+    if components.shuffles.is_empty() && !carries_player_obligations {
         return Err(TexasAirError::ConstraintUnsatisfied(
-            "hand admission carries no shuffle obligations".into(),
+            "hand admission carries no shuffle or player obligations".into(),
         ));
     }
     let mut ladders = Vec::new();
@@ -1883,6 +1945,7 @@ fn combine_poseidon2_players<'a>(
     for player in players {
         combined.pk_ownership.extend(player.pk_ownership.iter().copied());
         combined.reveal_tokens.extend(player.reveal_tokens.iter().copied());
+        combined.reveal_batches.extend(player.reveal_batches.iter().copied());
         combined.deck_dleqs.extend(player.deck_dleqs.iter().copied());
     }
     combined
@@ -2149,6 +2212,7 @@ fn decompose_player_admission(
 fn verify_player_poseidon2_native(inputs: &PlayerPoseidon2Inputs<'_>) -> TexasAirResult<()> {
     use crate::ristretto_player_proofs_air::{
         verify_pk_ownership_poseidon2, verify_reveal_token_poseidon2,
+        verify_reveal_tokens_batched_poseidon2,
     };
     for entry in &inputs.pk_ownership {
         verify_pk_ownership_poseidon2(entry.pk, entry.context, entry.wire)?;
@@ -2158,6 +2222,15 @@ fn verify_player_poseidon2_native(inputs: &PlayerPoseidon2Inputs<'_>) -> TexasAi
             entry.pk,
             entry.ciphertext,
             entry.reveal_token,
+            entry.context,
+            entry.wire,
+        )?;
+    }
+    for entry in &inputs.reveal_batches {
+        verify_reveal_tokens_batched_poseidon2(
+            entry.pk,
+            entry.cards,
+            entry.tokens,
             entry.context,
             entry.wire,
         )?;
@@ -3464,6 +3537,7 @@ mod tests {
                 context: b"hand-1-reveal",
                 wire: reveal_wire,
             }],
+            reveal_batches: Vec::new(),
             deck_dleqs: Vec::new(),
         }
     }
@@ -3656,6 +3730,7 @@ mod tests {
             poseidon2_players: vec![PlayerPoseidon2Inputs {
                 pk_ownership: Vec::new(),
                 reveal_tokens: Vec::new(),
+                reveal_batches: Vec::new(),
                 deck_dleqs: vec![PlayerDeckDleqPoseidon2Entry {
                     direction:
                         crate::ristretto_player_proofs_air::RistrettoDeckDleqDirection::Remask,
@@ -3690,6 +3765,302 @@ mod tests {
         wrong.poseidon2_players[0].deck_dleqs[0].direction =
             crate::ristretto_player_proofs_air::RistrettoDeckDleqDirection::Leave;
         assert!(verify_hand_admission_components(&wrong, &archive).is_err());
+    }
+
+    fn clone_reveal_batch_wire(
+        wire: &crate::ristretto_player_proofs_air::RistrettoRevealTokensBatchWire,
+    ) -> crate::ristretto_player_proofs_air::RistrettoRevealTokensBatchWire {
+        crate::ristretto_player_proofs_air::RistrettoRevealTokensBatchWire {
+            commitment_t1: wire.commitment_t1,
+            commitment_t2: wire.commitment_t2.clone(),
+            response: wire.response,
+        }
+    }
+
+    /// Batched reveal folding: one street batch becomes one key equation
+    /// plus one equation per card, the transcript chain merges into the
+    /// hand's Poseidon2 batch, and tampered submissions fail.
+    #[test]
+    fn reveal_batches_fold_and_reject_tampering() {
+        use crate::ristretto_player_proofs_air::prove_reveal_tokens_batched_poseidon2;
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+
+        let mut rng = StdRng::seed_from_u64(0x9E9B_0007);
+        let sk = BgScalar::random(&mut rng);
+        let pk = RistrettoCurve::base_g() * sk;
+        let cards = (0..3)
+            .map(|index| {
+                let card = RistrettoCurve::hash_to_curve(
+                    format!("batch-fold/card/{index}").as_bytes(),
+                );
+                let randomness = BgScalar::random(&mut rng);
+                BgCiphertext::encrypt(&card, &pk, &randomness)
+            })
+            .collect::<Vec<_>>();
+        let tokens = cards.iter().map(|ct| ct.c1 * sk).collect::<Vec<_>>();
+        let (wire, chain) = prove_reveal_tokens_batched_poseidon2(
+            &sk,
+            &pk,
+            &cards,
+            &tokens,
+            b"batch-fold-street",
+            &mut rng,
+        )
+        .expect("batched reveal");
+        let cards = Box::leak(Box::new(cards));
+        let tokens = Box::leak(Box::new(tokens));
+        let pk = Box::leak(Box::new(pk));
+        let wire = Box::leak(Box::new(wire));
+
+        let hand_root =
+            crate::ristretto_poseidon2_transcript::poseidon2_root(&chain.digests());
+        let components = HandAdmissionComponents {
+            shuffles: Vec::new(),
+            shuffle_chains: Vec::new(),
+            players: Vec::new(),
+            poseidon2_players: vec![PlayerPoseidon2Inputs {
+                pk_ownership: Vec::new(),
+                reveal_tokens: Vec::new(),
+                reveal_batches: vec![PlayerRevealBatchPoseidon2Entry {
+                    pk,
+                    cards,
+                    tokens,
+                    context: b"batch-fold-street",
+                    wire,
+                }],
+                deck_dleqs: Vec::new(),
+            }],
+            hand_root,
+            poseidon2: None,
+        };
+        let statement = decompose_hand_admission(&components).expect("decomposition");
+        // 1 key + 3 card equations = 8 scalar multiplications; the
+        // single-card encoding would cost 12.
+        assert_eq!(statement.ladders.len(), 8);
+        let archive = prove_hand_admission_components(&components).expect("hand STARK");
+        verify_hand_admission_components(&components, &archive).expect("hand verify");
+
+        // Tampered response scalar breaks the folded equation natively.
+        let mut tampered = clone_reveal_batch_wire(wire);
+        tampered.response[20] ^= 1;
+        let mut wrong = HandAdmissionComponents {
+            shuffles: Vec::new(),
+            shuffle_chains: Vec::new(),
+            players: Vec::new(),
+            poseidon2_players: vec![PlayerPoseidon2Inputs {
+                pk_ownership: Vec::new(),
+                reveal_tokens: Vec::new(),
+                reveal_batches: vec![PlayerRevealBatchPoseidon2Entry {
+                    pk,
+                    cards,
+                    tokens,
+                    context: b"batch-fold-street",
+                    wire: &tampered,
+                }],
+                deck_dleqs: Vec::new(),
+            }],
+            hand_root,
+            poseidon2: None,
+        };
+        assert!(verify_hand_admission_components(&wrong, &archive).is_err());
+
+        // Spliced transcript words detach the digest-bound chain schedule.
+        let mut spliced = archive.clone();
+        spliced.statement.poseidon2.as_mut().unwrap().absorbed_words[3][1] ^= 1;
+        assert!(verify_hand_admission_components(&wrong, &spliced).is_err());
+    }
+
+    /// Post-shuffle-removal hand benchmark: the settlement artifact when the
+    /// nine shuffles ride the host-verified deployment path (§4.0), so the
+    /// AIR covers only the remaining obligations — nine Poseidon2 key
+    /// ownerships, the full reveal phase in deployment shape (eight players
+    /// × four streets of batched reveal tokens, 88 equations instead of the
+    /// single-card encoding's 336), and one deck-52 fold DLEQ — plus the
+    /// hand's folded transcript chains.  Run with `TEXAS_PROVE_TIMING=1`
+    /// for phase attribution.
+    #[test]
+    #[ignore = "hand benchmark: minutes"]
+    fn hand_admission_player_only_benchmark() {
+        use crate::ristretto_player_proofs_air::{
+            prove_deck_dleq_poseidon2, prove_pk_ownership_poseidon2,
+            prove_reveal_tokens_batched_poseidon2,
+        };
+        use crate::ristretto_poseidon2_transcript::poseidon2_root;
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+
+        let mut rng = StdRng::seed_from_u64(0x9E9A_0001);
+        let g = RistrettoCurve::base_g();
+        let mut chains = Vec::new();
+
+        // Nine ownerships.
+        let mut ownerships = Vec::new();
+        for seat in 0..9u64 {
+            let sk = BgScalar::random(&mut rng);
+            let pk = g * sk;
+            let context: &'static [u8] = Box::leak(
+                format!("table9-hand1-seat{seat}").into_bytes().into_boxed_slice(),
+            );
+            let (wire, chain) =
+                prove_pk_ownership_poseidon2(&sk, &pk, context, &mut rng).expect("ownership");
+            ownerships.push((pk, context, wire));
+            chains.push(chain);
+        }
+
+        // Full reveal phase in deployment shape: eight players, four
+        // streets, one BATCHED proof per player per street (preflop holes
+        // 2, flop 3, turn 1, river 1).  Folding the batches replaces the
+        // single-card encoding's 336 ladders with 88.
+        let streets: [(&str, usize); 4] =
+            [("preflop-holes", 2), ("flop", 3), ("turn", 1), ("river", 1)];
+        let mut reveal_batches = Vec::new();
+        for seat in 0..8u64 {
+            let sk = BgScalar::random(&mut rng);
+            let pk = g * sk;
+            for (street_index, (street, count)) in streets.iter().enumerate() {
+                let cards = (0..*count)
+                    .map(|card| {
+                        let point = RistrettoCurve::hash_to_curve(
+                            format!("bench/reveal/{street}/{card}").as_bytes(),
+                        );
+                        let randomness = BgScalar::random(&mut rng);
+                        BgCiphertext::encrypt(&point, &pk, &randomness)
+                    })
+                    .collect::<Vec<_>>();
+                let tokens = cards.iter().map(|ct| ct.c1 * sk).collect::<Vec<_>>();
+                let context: &'static [u8] = Box::leak(
+                    format!("table9-hand1-{street}-seat{seat}")
+                        .into_bytes()
+                        .into_boxed_slice(),
+                );
+                let (wire, chain) = prove_reveal_tokens_batched_poseidon2(
+                    &sk,
+                    &pk,
+                    &cards,
+                    &tokens,
+                    context,
+                    &mut rng,
+                )
+                .expect("batched reveal");
+                let cards = Box::leak(Box::new(cards));
+                let tokens = Box::leak(Box::new(tokens));
+                let pk_ref = Box::leak(Box::new(pk));
+                reveal_batches.push((
+                    seat,
+                    street_index,
+                    pk_ref,
+                    cards,
+                    tokens,
+                    context,
+                    Box::leak(Box::new(wire)),
+                ));
+                chains.push(chain);
+            }
+        }
+
+        // One deck-52 fold (remask-direction DLEQ, same shape as the e2e test).
+        let sk = BgScalar::random(&mut rng);
+        let pk = g * sk;
+        let input = (0..52)
+            .map(|index| {
+                let card = RistrettoCurve::hash_to_curve(
+                    format!("player-only-bench/card/{index}").as_bytes(),
+                );
+                let randomness = BgScalar::random(&mut rng);
+                BgCiphertext::encrypt(&card, &pk, &randomness)
+            })
+            .collect::<Vec<_>>();
+        let output = input
+            .iter()
+            .map(|ct| BgCiphertext {
+                c1: ct.c1,
+                c2: ct.c2 + ct.c1 * sk,
+            })
+            .collect::<Vec<_>>();
+        let (dleq_wire, dleq_chain) = prove_deck_dleq_poseidon2(
+            crate::ristretto_player_proofs_air::RistrettoDeckDleqDirection::Remask,
+            &input,
+            &output,
+            &sk,
+            &pk,
+            b"player-only-bench-fold",
+            &mut rng,
+        )
+        .expect("fold DLEQ");
+        let input = Box::leak(Box::new(input));
+        let output = Box::leak(Box::new(output));
+        let pk = Box::leak(Box::new(pk));
+        let dleq_wire = Box::leak(Box::new(dleq_wire));
+        chains.push(dleq_chain);
+
+        let hand_root = poseidon2_root(
+            &merge_poseidon2_chain_specs(&chains)
+                .expect("chains")
+                .digests(),
+        );
+        let components = HandAdmissionComponents {
+            shuffles: Vec::new(),
+            shuffle_chains: Vec::new(),
+            players: Vec::new(),
+            poseidon2_players: vec![PlayerPoseidon2Inputs {
+                pk_ownership: ownerships
+                    .into_iter()
+                    .map(|(pk, context, wire)| PlayerPkOwnershipPoseidon2Entry {
+                        pk: Box::leak(Box::new(pk)),
+                        context,
+                        wire: Box::leak(Box::new(wire)),
+                    })
+                    .collect(),
+                reveal_tokens: Vec::new(),
+                reveal_batches: reveal_batches
+                    .into_iter()
+                    .map(|(_seat, _street, pk, cards, tokens, context, wire)| {
+                        PlayerRevealBatchPoseidon2Entry {
+                            pk,
+                            cards,
+                            tokens,
+                            context,
+                            wire,
+                        }
+                    })
+                    .collect(),
+                deck_dleqs: vec![PlayerDeckDleqPoseidon2Entry {
+                    direction:
+                        crate::ristretto_player_proofs_air::RistrettoDeckDleqDirection::Remask,
+                    input,
+                    output,
+                    pk,
+                    context: b"player-only-bench-fold",
+                    wire: dleq_wire,
+                }],
+            }],
+            hand_root,
+            poseidon2: None,
+        };
+        let statement = decompose_hand_admission(&components).expect("decomposition");
+        eprintln!(
+            "player-only hand decomposition: {} ladders, {} additions, chains {}",
+            statement.ladders.len(),
+            statement.additions.len(),
+            statement.poseidon2.as_ref().map_or(0, |spec| spec
+                .initial_states
+                .len()),
+        );
+        let started = std::time::Instant::now();
+        let archive = prove_hand_admission_components(&components).expect("hand STARK");
+        let prove_elapsed = started.elapsed();
+        let prove_records = crate::prove_timing::take_drain();
+        let started = std::time::Instant::now();
+        verify_hand_admission_components(&components, &archive).expect("hand verify");
+        let verify_elapsed = started.elapsed();
+        let verify_records = crate::prove_timing::take_drain();
+        eprintln!(
+            "player-only hand (9 pk + 32 batched reveals + 1 fold): prove {prove_elapsed:?}, verify {verify_elapsed:?}, proof {} bytes",
+            archive.stark_proof_bytes.len(),
+        );
+        print_phase_records("prove", &prove_records);
+        print_phase_records("verify", &verify_records);
     }
 
     /// Whole-hand deck-52 batch benchmark: nine shuffle admissions folded

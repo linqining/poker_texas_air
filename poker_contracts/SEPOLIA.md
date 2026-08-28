@@ -15,6 +15,16 @@ Rust `OuterAggregateBundle` before calling `register_aggregate`.
 - `PokerSettlement`: authorized-prover registration of aggregate digests,
   monotonic hand ranges, Poseidon settlement commitments, zero-sum checks, and
   replay-protected vault deltas.
+- `PokerDualSettlement` (dual-proof route, DUAL_PROOF_PROTOCOL.md v2.3):
+  verifies the **secp256k1 sigma ownership proofs on-chain** through the
+  Starknet EC_OP builtin (`dual/secp256k1_verifier.cairo`; the challenge
+  `keccak256(G‖pk‖R) mod n` is derived inside the contract, never submitted),
+  binds both proof tracks through the Poseidon `hand_binding`, and settles
+  through the same vault. The G-STARK stays host-verified in this phase; its
+  commitments are registered via `register_hand`. `scarb test`/`snforge test`
+  cross-validate the on-chain verifier against Rust (`k256`) vectors —
+  honest/forge/wrong-key/off-curve all covered. Requires `snforge_std`
+  (compatible Foundry release) for the Cairo test runner.
 
 ## Build
 

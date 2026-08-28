@@ -152,7 +152,9 @@ impl ShuffleVerifier for NativeBls12381ShuffleVerifier {
             ),
             // Poseidon252 is reserved for the Ristretto AIR verifier. The
             // native BLS backend must fail closed rather than reinterpret it.
-            TranscriptId::Poseidon252 => Err(NativePrecompileError::UnsupportedProofSystem),
+            TranscriptId::Poseidon252 | TranscriptId::Keccak256 => {
+                Err(NativePrecompileError::UnsupportedProofSystem)
+            }
             TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::Poseidon2M31 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
@@ -203,7 +205,9 @@ impl ReconstructionVerifier for NativeBls12381ReconstructionVerifier {
                 &user_public_key,
                 &mut FiatShamirTranscript::new(&request.context),
             ),
-            TranscriptId::Poseidon252 => Err(NativePrecompileError::UnsupportedProofSystem),
+            TranscriptId::Poseidon252 | TranscriptId::Keccak256 => {
+                Err(NativePrecompileError::UnsupportedProofSystem)
+            }
             TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::Poseidon2M31 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
@@ -257,7 +261,9 @@ impl ReconstructionV3Verifier for NativeBls12381ReconstructionV3Verifier {
                 &statement,
                 &mut FiatShamirTranscript::new(&request.context),
             ),
-            TranscriptId::Poseidon252 => Err(NativePrecompileError::UnsupportedProofSystem),
+            TranscriptId::Poseidon252 | TranscriptId::Keccak256 => {
+                Err(NativePrecompileError::UnsupportedProofSystem)
+            }
             TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::Poseidon2M31 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
@@ -368,14 +374,18 @@ fn decode_point(encoded: &[u8]) -> Result<<Bls12381Curve as Curve>::Point, Nativ
 mod tests {
     use super::*;
     use crate::crypto::curve::CurveScalar;
+    use crate::precompile_abi::RISTRETTO_AIR_DECK_SIZE;
     use rand_core::OsRng;
 
     #[test]
     fn native_bls_verifier_rejects_reserved_ristretto_air_route() {
+        // 52 cards: the request must clear ABI validation (deck-size check)
+        // so the verifier's own curve rejection is what fires.
         let ciphertext = |byte| EncodedCiphertext {
             c1: vec![byte; 32],
             c2: vec![byte.wrapping_add(1); 32],
         };
+        let n_cards = RISTRETTO_AIR_DECK_SIZE;
         let request = ShuffleVerifyRequest {
             curve: CurveId::Ristretto255,
             proof_system: ShuffleProofSystem::RistrettoAirV1,
@@ -383,8 +393,8 @@ mod tests {
             context: b"ristretto-air-v1".to_vec(),
             call_context: b"table=1/hand=1/call=1/epoch=2".to_vec(),
             public_key: vec![7; 32],
-            input: vec![ciphertext(1), ciphertext(2)],
-            output: vec![ciphertext(3), ciphertext(4)],
+            input: (0..n_cards).map(|i| ciphertext(i as u8)).collect(),
+            output: (0..n_cards).map(|i| ciphertext(i as u8 + 80)).collect(),
             proof: vec![9; 32],
         };
 

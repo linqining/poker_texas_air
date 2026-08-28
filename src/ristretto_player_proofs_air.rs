@@ -1946,3 +1946,28 @@ pub fn verify_fold_with_proof_v2_poseidon2(
     )
     .map(|_| ())
 }
+
+/// Derive the batched reveal-token challenge from the Poseidon2-M31
+/// transcript (the admission decomposition's replay of
+/// [`prove_reveal_tokens_batched_poseidon2`]).
+#[must_use]
+pub fn derive_reveal_tokens_batched_challenge_poseidon2(
+    pk: &RistrettoPoint,
+    cards: &[RistrettoCiphertext],
+    tokens: &[RistrettoPoint],
+    context: &[u8],
+    wire: &RistrettoRevealTokensBatchWire,
+) -> (RistrettoScalar, Poseidon2ChainSpec) {
+    let mut transcript = Poseidon2M31Transcript::new(REVEAL_TOKEN_PROTOCOL);
+    absorb_reveal_batch_statement_poseidon2(
+        &mut transcript,
+        context,
+        pk,
+        cards,
+        tokens,
+        &wire.commitment_t1,
+        &wire.commitment_t2,
+    );
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    (challenge, transcript.into_chain_spec())
+}
