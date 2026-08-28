@@ -14,5 +14,7 @@ sierra-release = true
 
 [lib]
 sierra-release = true
-# 主合约目标：产出 poker_contracts_PokerToken 等外部 artifact 供 sncast declare
+# 主合约目标：产出 sierra+casm artifact 供 Rust 部署工具使用
 [[target.starknet-contract]]
+sierra = true
+casm = true
