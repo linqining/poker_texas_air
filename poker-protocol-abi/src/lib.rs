@@ -73,6 +73,8 @@ pub enum TranscriptId {
     Poseidon252 = 3,
     /// Flock BLAKE3 transcript used by the trustless Ristretto AIR v2 route.
     FlockBlake3 = 4,
+    /// Poseidon2-M31 native transcript (Flock-free deployment route).
+    Poseidon2M31 = 5,
 }
 
 impl TryFrom<u8> for TranscriptId {
@@ -84,6 +86,7 @@ impl TryFrom<u8> for TranscriptId {
             2 => Ok(Self::FiatShamirSha3),
             3 => Ok(Self::Poseidon252),
             4 => Ok(Self::FlockBlake3),
+            5 => Ok(Self::Poseidon2M31),
             _ => Err(AbiError::UnsupportedTranscript(value)),
         }
     }
@@ -260,7 +263,7 @@ impl ShuffleVerifyRequest {
             (
                 CurveId::Ristretto255,
                 ShuffleProofSystem::RistrettoAirV2,
-                TranscriptId::FlockBlake3,
+                TranscriptId::FlockBlake3 | TranscriptId::Poseidon2M31,
             ) => {}
             (CurveId::Ristretto255, _, _) => {
                 return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8))

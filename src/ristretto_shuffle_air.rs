@@ -47,14 +47,18 @@ use poker_protocol_core::{
 
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::hash_prover::{ArchivedHashProof, Blake2bStatement, HashProofProvider};
+use crate::ristretto_poseidon2_air::Poseidon2ChainSpec;
+use crate::ristretto_poseidon2_transcript::Poseidon2M31Transcript;
 use crate::ristretto_reconstruction_proof_wire::{
     RistrettoBayerGrothShuffleProofWire, RistrettoCiphertextProofWire,
 };
 
 /// Magic prefix of the serialized V2 shuffle proof envelope.
 pub const RISTRETTO_SHUFFLE_V2_PROOF_MAGIC: [u8; 4] = *b"ZRS2";
-/// Version of the V2 shuffle proof envelope.
-pub const RISTRETTO_SHUFFLE_V2_PROOF_VERSION: u8 = 1;
+/// Version of the V2 shuffle proof envelope.  Version 2 introduced the
+/// versioned transcript sidecar ([`RistrettoShuffleV2TranscriptProof`]);
+/// version 1 envelopes are rejected fail-closed at the wire layer.
+pub const RISTRETTO_SHUFFLE_V2_PROOF_VERSION: u8 = 2;
 /// Transcript domain for the V2 shuffle Fiat--Shamir schedule.
 pub const RISTRETTO_SHUFFLE_V2_TRANSCRIPT_DOMAIN: &[u8] =
     b"zchain.texas.ristretto-air-v2.shuffle-transcript.v1";
@@ -420,10 +424,29 @@ impl RistrettoBayerGrothShuffleProofWire {
     }
 }
 
+/// Versioned transcript sidecar of the V2 shuffle envelope.
+///
+/// The Flock variant is the trustless route: a Flock STARK over the
+/// transcript's BLAKE3 chain statements.  The Poseidon2 variant is the
+/// deployment route: the M31-native chain schedule travels as a
+/// [`Poseidon2ChainSpec`] and the verifier replays it natively — no Flock
+/// archive, no session Flock setup.  Unknown variants fail closed at the
+/// borsh decode layer.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum RistrettoShuffleV2TranscriptProof {
+    /// Flock STARK over the Flock-BLAKE3 chain statements.
+    Flock(ArchivedHashProof),
+    /// Poseidon2-M31 chain schedule; the verifier replays the same
+    /// deterministic absorb-and-permute steps and compares terminal states.
+    Poseidon2 {
+        chain_spec: Poseidon2ChainSpec,
+    },
+}
+
 /// Complete, self-describing RistrettoAirV2 shuffle proof package.
 ///
 /// The envelope binds the Bayer--Groth wire, the derived challenge schedule,
-/// and the Flock transcript statements to the shuffle statement digest, so no
+/// and the transcript sidecar to the shuffle statement digest, so no
 /// component can be spliced between statements or proofs.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ArchivedRistrettoShuffleV2Proof {
@@ -434,14 +457,13 @@ pub struct ArchivedRistrettoShuffleV2Proof {
     pub transcript_domain_digest: [u8; 32],
     pub shuffle: RistrettoBayerGrothShuffleProofWire,
     pub challenges: Vec<RistrettoShuffleV2ChallengeWire>,
-    /// Flock STARK over the transcript's chain statements.
-    pub flock: ArchivedHashProof,
+    /// Versioned transcript sidecar (Flock STARK or Poseidon2 chain spec).
+    pub transcript: RistrettoShuffleV2TranscriptProof,
     pub component_digest: [u8; 32],
 }
 
 impl ArchivedRistrettoShuffleV2Proof {
     fn component_digest(&self) -> TexasAirResult<[u8; 32]> {
-        let statements = self.flock.statements();
         let mut preimage = Vec::new();
         preimage.extend_from_slice(COMPONENT_DOMAIN);
         preimage.extend_from_slice(&self.statement_digest);
@@ -450,15 +472,26 @@ impl ArchivedRistrettoShuffleV2Proof {
             .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
         borsh::to_writer(&mut preimage, &self.challenges)
             .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
-        for statement in &statements {
-            preimage.extend_from_slice(&(statement.message.len() as u32).to_le_bytes());
-            preimage.extend_from_slice(&statement.message);
-            preimage.extend_from_slice(&statement.digest);
+        match &self.transcript {
+            RistrettoShuffleV2TranscriptProof::Flock(flock) => {
+                preimage.push(0);
+                for statement in flock.statements() {
+                    preimage.extend_from_slice(&(statement.message.len() as u32).to_le_bytes());
+                    preimage.extend_from_slice(&statement.message);
+                    preimage.extend_from_slice(&statement.digest);
+                }
+            }
+            RistrettoShuffleV2TranscriptProof::Poseidon2 { chain_spec } => {
+                preimage.push(1);
+                borsh::to_writer(&mut preimage, chain_spec).map_err(|error| {
+                    TexasAirError::SerializationError(error.to_string())
+                })?;
+            }
         }
         Ok(chain_digest(&preimage))
     }
 
-    /// Assemble the envelope from a proven shuffle and its transcript.
+    /// Assemble the envelope from a proven shuffle and its Flock transcript.
     pub fn from_parts(
         statement_digest: [u8; 32],
         shuffle: RistrettoBayerGrothShuffleProofWire,
@@ -471,14 +504,54 @@ impl ArchivedRistrettoShuffleV2Proof {
             transcript_domain_digest: chain_digest(RISTRETTO_SHUFFLE_V2_TRANSCRIPT_DOMAIN),
             shuffle,
             challenges: transcript.challenges().to_vec(),
-            flock,
+            transcript: RistrettoShuffleV2TranscriptProof::Flock(flock),
             component_digest: [0; 32],
         };
-        if envelope.flock.statements() != transcript.statements() {
-            return Err(TexasAirError::ConstraintUnsatisfied(
-                "Flock proof does not cover the exact shuffle transcript statements".into(),
+        if let RistrettoShuffleV2TranscriptProof::Flock(flock) = &envelope.transcript {
+            if flock.statements() != transcript.statements() {
+                return Err(TexasAirError::ConstraintUnsatisfied(
+                    "Flock proof does not cover the exact shuffle transcript statements".into(),
+                ));
+            }
+        }
+        envelope.component_digest = envelope.component_digest()?;
+        Ok(envelope)
+    }
+
+    /// Assemble the envelope from a Poseidon2-path proven shuffle: the
+    /// recorded challenge schedule and chain spec come directly from the
+    /// prover's transcript run, so both stay bound to the statement digest.
+    pub fn from_parts_poseidon2(
+        statement_digest: [u8; 32],
+        shuffle: RistrettoBayerGrothShuffleProofWire,
+        transcript: &Poseidon2M31Transcript,
+    ) -> TexasAirResult<Self> {
+        let images = transcript.challenge_images();
+        let retries = transcript.challenge_retries();
+        if images.len() != retries.len() {
+            return Err(TexasAirError::SpecViolation(
+                "Poseidon2 transcript challenge schedule is inconsistent".into(),
             ));
         }
+        let challenges = images
+            .iter()
+            .zip(retries)
+            .map(|(image, retry)| RistrettoShuffleV2ChallengeWire {
+                image: *image,
+                retry_count: *retry,
+            })
+            .collect::<Vec<_>>();
+        let mut envelope = Self {
+            version: RISTRETTO_SHUFFLE_V2_PROOF_VERSION,
+            statement_digest,
+            transcript_domain_digest: chain_digest(RISTRETTO_SHUFFLE_V2_TRANSCRIPT_DOMAIN),
+            shuffle,
+            challenges,
+            transcript: RistrettoShuffleV2TranscriptProof::Poseidon2 {
+                chain_spec: transcript.chain_spec(),
+            },
+            component_digest: [0; 32],
+        };
         envelope.component_digest = envelope.component_digest()?;
         Ok(envelope)
     }
@@ -537,6 +610,13 @@ impl ArchivedRistrettoShuffleV2Proof {
                 ));
             }
         }
+        if let RistrettoShuffleV2TranscriptProof::Poseidon2 { chain_spec } = &self.transcript {
+            chain_spec.validate().map_err(|error| {
+                TexasAirError::SpecViolation(format!(
+                    "Ristretto shuffle V2 Poseidon2 chain spec is malformed: {error}"
+                ))
+            })?;
+        }
         if self.component_digest != self.component_digest()? {
             return Err(TexasAirError::ConstraintUnsatisfied(
                 "Ristretto shuffle V2 component digest is detached".into(),
@@ -549,10 +629,26 @@ impl ArchivedRistrettoShuffleV2Proof {
     pub fn validate_against_request(&self, request: &ShuffleVerifyRequest) -> TexasAirResult<()> {
         if request.curve != CurveId::Ristretto255
             || request.proof_system != ShuffleProofSystem::RistrettoAirV2
-            || request.transcript != TranscriptId::FlockBlake3
         {
             return Err(TexasAirError::SpecViolation(
                 "Ristretto shuffle V2 proof is bound to the fixed V2 discriminators".into(),
+            ));
+        }
+        let routes_match = match (request.transcript, &self.transcript) {
+            (
+                TranscriptId::FlockBlake3,
+                RistrettoShuffleV2TranscriptProof::Flock(_),
+            ) => true,
+            (
+                TranscriptId::Poseidon2M31,
+                RistrettoShuffleV2TranscriptProof::Poseidon2 { .. },
+            ) => true,
+            _ => false,
+        };
+        if !routes_match {
+            return Err(TexasAirError::SpecViolation(
+                "Ristretto shuffle V2 transcript sidecar does not match the request transcript discriminator"
+                    .into(),
             ));
         }
         if self.statement_digest != shuffle_v2_statement_digest(request)? {
@@ -606,8 +702,7 @@ pub fn prove_ristretto_air_v2_shuffle(
         return Err(TexasAirError::SpecViolation(
             "Ristretto shuffle V2 proving requires the fixed V2 discriminators".into(),
         ));
-    }
-    let (input, output, public_key) = request_points(request)?;
+    }    let (input, output, public_key) = request_points(request)?;
     let statement_digest = shuffle_v2_statement_digest(request)?;
     let mut transcript = FlockShuffleTranscript::new(
         poker_protocol::ristretto_air::RISTRETTO_AIR_V2_SHUFFLE_CONTEXT,
@@ -637,6 +732,55 @@ pub fn prove_ristretto_air_v2_shuffle(
     )
 }
 
+/// Prove the complete V2 shuffle under the Poseidon2-M31 transcript.
+///
+/// Deployment-route twin of [`prove_ristretto_air_v2_shuffle`]: the
+/// Fiat--Shamir schedule is driven by the M31-native sponge and the envelope
+/// carries the foldable [`Poseidon2ChainSpec`] instead of a Flock archive, so
+/// the wire shrinks from megabytes to kilobytes and the verifier needs no
+/// Flock setup.  The request must carry the `Poseidon2M31` discriminator.
+pub fn prove_ristretto_air_v2_shuffle_poseidon2(
+    request: &ShuffleVerifyRequest,
+    permutation: &[usize],
+    rerandomizers: &[RistrettoScalar],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<ArchivedRistrettoShuffleV2Proof> {
+    request.validate().map_err(|error| {
+        TexasAirError::SpecViolation(format!("invalid shuffle request: {error}"))
+    })?;
+    if request.curve != CurveId::Ristretto255
+        || request.proof_system != ShuffleProofSystem::RistrettoAirV2
+        || request.transcript != TranscriptId::Poseidon2M31
+    {
+        return Err(TexasAirError::SpecViolation(
+            "Ristretto shuffle V2 Poseidon2 proving requires the Poseidon2M31 discriminator"
+                .into(),
+        ));
+    }
+    let (input, output, public_key) = request_points(request)?;
+    let statement_digest = shuffle_v2_statement_digest(request)?;
+    let mut transcript = Poseidon2M31Transcript::new(
+        poker_protocol::ristretto_air::RISTRETTO_AIR_V2_SHUFFLE_CONTEXT,
+    );
+    let proof = BayerGrothShuffleProof::<RistrettoCurve>::prove(
+        &input,
+        &output,
+        permutation,
+        rerandomizers,
+        &public_key,
+        rng,
+        &mut transcript,
+    )
+    .map_err(|error| {
+        TexasAirError::ConstraintUnsatisfied(format!("Bayer-Groth shuffle proving failed: {error}"))
+    })?;
+    ArchivedRistrettoShuffleV2Proof::from_parts_poseidon2(
+        statement_digest,
+        RistrettoBayerGrothShuffleProofWire::from_proof(&proof),
+        &transcript,
+    )
+}
+
 fn map_verification_error(error: VerificationError) -> TexasAirError {
     TexasAirError::ConstraintUnsatisfied(format!(
         "Bayer-Groth shuffle verification failed: {error:?}"
@@ -663,8 +807,9 @@ pub fn run_bayer_groth_verify(
 ///
 /// This checks, in order: the request discriminators and canonical encoding,
 /// the envelope's statement/component bindings, the native Bayer--Groth
-/// public-equation argument under the Flock transcript, the recomputed
-/// challenge schedule, and the Flock STARK over the transcript chains.
+/// public-equation argument under the request's transcript route (Flock or
+/// Poseidon2), the recomputed challenge schedule, and the route's transcript
+/// proof (Flock STARK verification or Poseidon2 chain replay).
 pub fn verify_ristretto_air_v2_shuffle_submission(
     request_bytes: &[u8],
 ) -> TexasAirResult<ArchivedRistrettoShuffleV2Proof> {
@@ -676,24 +821,58 @@ pub fn verify_ristretto_air_v2_shuffle_submission(
     envelope.validate_against_request(&request)?;
     let proof = envelope.shuffle.to_proof()?;
     let (input, output, public_key) = request_points(&request)?;
-    let mut transcript = FlockShuffleTranscript::new(
-        poker_protocol::ristretto_air::RISTRETTO_AIR_V2_SHUFFLE_CONTEXT,
-    );
-    proof
-        .verify(&input, &output, &public_key, &mut transcript)
-        .map_err(map_verification_error)?;
-    if transcript.challenges() != envelope.challenges.as_slice() {
-        return Err(TexasAirError::ConstraintUnsatisfied(
-            "Ristretto shuffle V2 challenge schedule is detached from the transcript".into(),
-        ));
+    match &envelope.transcript {
+        RistrettoShuffleV2TranscriptProof::Flock(flock) => {
+            let mut transcript = FlockShuffleTranscript::new(
+                poker_protocol::ristretto_air::RISTRETTO_AIR_V2_SHUFFLE_CONTEXT,
+            );
+            proof
+                .verify(&input, &output, &public_key, &mut transcript)
+                .map_err(map_verification_error)?;
+            if transcript.challenges() != envelope.challenges.as_slice() {
+                return Err(TexasAirError::ConstraintUnsatisfied(
+                    "Ristretto shuffle V2 challenge schedule is detached from the transcript"
+                        .into(),
+                ));
+            }
+            crate::blake3_flock::FlockProvider
+                .verify_statements(flock, transcript.statements())
+                .map_err(|error| {
+                    TexasAirError::ConstraintUnsatisfied(format!(
+                        "Flock transcript verification failed: {error}"
+                    ))
+                })?;
+        }
+        RistrettoShuffleV2TranscriptProof::Poseidon2 { chain_spec } => {
+            let mut transcript = Poseidon2M31Transcript::new(
+                poker_protocol::ristretto_air::RISTRETTO_AIR_V2_SHUFFLE_CONTEXT,
+            );
+            proof
+                .verify(&input, &output, &public_key, &mut transcript)
+                .map_err(map_verification_error)?;
+            let replayed = transcript
+                .challenge_images()
+                .iter()
+                .zip(transcript.challenge_retries())
+                .map(|(image, retry)| RistrettoShuffleV2ChallengeWire {
+                    image: *image,
+                    retry_count: *retry,
+                })
+                .collect::<Vec<_>>();
+            if replayed != envelope.challenges {
+                return Err(TexasAirError::ConstraintUnsatisfied(
+                    "Ristretto shuffle V2 challenge schedule is detached from the transcript"
+                        .into(),
+                ));
+            }
+            if transcript.chain_spec() != *chain_spec {
+                return Err(TexasAirError::ConstraintUnsatisfied(
+                    "Ristretto shuffle V2 Poseidon2 chain schedule is detached from the transcript"
+                        .into(),
+                ));
+            }
+        }
     }
-    crate::blake3_flock::FlockProvider
-        .verify_statements(&envelope.flock, transcript.statements())
-        .map_err(|error| {
-            TexasAirError::ConstraintUnsatisfied(format!(
-                "Flock transcript verification failed: {error}"
-            ))
-        })?;
     Ok(envelope)
 }
 
@@ -876,6 +1055,20 @@ mod tests {
         request.encode().expect("canonical request bytes")
     }
 
+    fn proved_request_poseidon2() -> Vec<u8> {
+        let (submission, permutation, rerandomizers, _public_key) = deck_submission();
+        let mut rng = test_rng();
+        let mut request = submission
+            .to_verify_request_v2(vec![7; 32])
+            .expect("V2 request");
+        request.transcript = TranscriptId::Poseidon2M31;
+        let envelope =
+            prove_ristretto_air_v2_shuffle_poseidon2(&request, &permutation, &rerandomizers, &mut rng)
+                .expect("V2 Poseidon2 shuffle proof");
+        request.proof = envelope.encode_wire().expect("envelope wire");
+        request.encode().expect("canonical request bytes")
+    }
+
     #[test]
     fn transcript_is_deterministic_and_statement_bound() {
         let (submission, permutation, rerandomizers, _public_key) = deck_submission();
@@ -919,8 +1112,16 @@ mod tests {
         let envelope =
             ArchivedRistrettoShuffleV2Proof::decode_wire(&request.proof).expect("envelope");
         let shuffle_wire = borsh::to_vec(&envelope.shuffle).expect("shuffle wire");
-        let flock_wire = borsh::to_vec(&envelope.flock).expect("flock wire");
-        let statement_count = envelope.flock.statements().len();
+        let flock_wire = match &envelope.transcript {
+            RistrettoShuffleV2TranscriptProof::Flock(flock) => {
+                let count = flock.statements().len();
+                (
+                    borsh::to_vec(flock).expect("flock wire").len(),
+                    count,
+                )
+            }
+            _ => panic!("flock proved request must carry the Flock sidecar"),
+        };
         let started = std::time::Instant::now();
         admit_ristretto_air_v2_shuffle_submission(&request_bytes)
             .expect("complete V2 shuffle submission admits");
@@ -930,9 +1131,91 @@ mod tests {
             started.elapsed(),
             request_bytes.len(),
             shuffle_wire.len(),
-            flock_wire.len(),
-            statement_count,
+            flock_wire.0,
+            flock_wire.1,
         );
+    }
+
+    #[test]
+    fn proves_and_verifies_a_poseidon2_v2_shuffle() {
+        let started = std::time::Instant::now();
+        let request_bytes = proved_request_poseidon2();
+        let prove_elapsed = started.elapsed();
+        let request = ShuffleVerifyRequest::decode(&request_bytes).expect("decode");
+        let envelope =
+            ArchivedRistrettoShuffleV2Proof::decode_wire(&request.proof).expect("envelope");
+        assert!(matches!(
+            envelope.transcript,
+            RistrettoShuffleV2TranscriptProof::Poseidon2 { .. }
+        ));
+        let started = std::time::Instant::now();
+        admit_ristretto_air_v2_shuffle_submission(&request_bytes)
+            .expect("Poseidon2 V2 shuffle submission admits");
+        eprintln!(
+            "ristretto-air v2 shuffle (poseidon2): prove {:?}, verify+admit {:?}, request wire {} bytes",
+            prove_elapsed,
+            started.elapsed(),
+            request_bytes.len(),
+        );
+    }
+
+    #[test]
+    fn poseidon2_route_rejects_tampered_and_mismatched_routes() {
+        let request_bytes = proved_request_poseidon2();
+        admit_ristretto_air_v2_shuffle_submission(&request_bytes)
+            .expect("baseline Poseidon2 submission admits");
+
+        // Route splice: submit the Poseidon2 envelope under the Flock
+        // discriminator.  The statement digest and the sidecar check both
+        // detach.
+        let request = ShuffleVerifyRequest::decode(&request_bytes).expect("decode");
+        let mut flock_route = request.clone();
+        flock_route.transcript = TranscriptId::FlockBlake3;
+        assert!(
+            admit_ristretto_air_v2_shuffle_submission(&flock_route.encode().expect("encode"))
+                .is_err()
+        );
+
+        // Chain-schedule splice inside the envelope.
+        let mut envelope =
+            ArchivedRistrettoShuffleV2Proof::decode_wire(&request.proof).expect("envelope");
+        if let RistrettoShuffleV2TranscriptProof::Poseidon2 { chain_spec } =
+            &mut envelope.transcript
+        {
+            if let Some(word) = chain_spec.absorbed_words.first_mut() {
+                word[0] = word[0].wrapping_add(1);
+            } else {
+                panic!("poseidon2 chain spec carries at least one step");
+            }
+        }
+        envelope.component_digest = envelope.component_digest().expect("digest");
+        let mut tampered = request.clone();
+        tampered.proof = envelope.encode_wire().expect("wire");
+        assert!(
+            admit_ristretto_air_v2_shuffle_submission(&tampered.encode().expect("encode")).is_err()
+        );
+
+        // Challenge-schedule splice reaches the replay comparison.
+        let mut envelope =
+            ArchivedRistrettoShuffleV2Proof::decode_wire(&request.proof).expect("envelope");
+        envelope.challenges[2].image[0] ^= 1;
+        envelope.component_digest = envelope.component_digest().expect("digest");
+        let mut tampered = request.clone();
+        tampered.proof = envelope.encode_wire().expect("wire");
+        let error = admit_ristretto_air_v2_shuffle_submission(&tampered.encode().expect("encode"))
+            .expect_err("spliced challenge schedule must fail");
+        assert!(error.to_string().contains("challenge schedule"));
+
+        // Bayer-Groth response splice reaches the argument layer.
+        let mut envelope =
+            ArchivedRistrettoShuffleV2Proof::decode_wire(&request.proof).expect("envelope");
+        envelope.shuffle.a_response[3][20] ^= 1;
+        envelope.component_digest = envelope.component_digest().expect("digest");
+        let mut tampered = request.clone();
+        tampered.proof = envelope.encode_wire().expect("wire");
+        let error = admit_ristretto_air_v2_shuffle_submission(&tampered.encode().expect("encode"))
+            .expect_err("tampered response must fail");
+        assert!(error.to_string().contains("Bayer-Groth"));
     }
 
     #[test]

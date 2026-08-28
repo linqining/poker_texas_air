@@ -154,6 +154,7 @@ impl ShuffleVerifier for NativeBls12381ShuffleVerifier {
             // native BLS backend must fail closed rather than reinterpret it.
             TranscriptId::Poseidon252 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
+            TranscriptId::Poseidon2M31 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
     }
 }
@@ -204,6 +205,7 @@ impl ReconstructionVerifier for NativeBls12381ReconstructionVerifier {
             ),
             TranscriptId::Poseidon252 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
+            TranscriptId::Poseidon2M31 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
     }
 }
@@ -257,6 +259,7 @@ impl ReconstructionV3Verifier for NativeBls12381ReconstructionV3Verifier {
             ),
             TranscriptId::Poseidon252 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
+            TranscriptId::Poseidon2M31 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
     }
 }

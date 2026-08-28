@@ -103,6 +103,8 @@ pub struct Poseidon2M31Transcript {
     /// Accepted challenge images, in derivation order (the wire record a
     /// verifier replays against).
     challenge_images: Vec<[u8; 32]>,
+    /// Rejection-sampling retries consumed per accepted challenge image.
+    challenge_retries: Vec<u32>,
     /// Number of challenges derived so far (challenge ordinal).
     challenges: usize,
 }
@@ -117,6 +119,7 @@ impl Poseidon2M31Transcript {
             pending: Vec::new(),
             words: Vec::new(),
             challenge_images: Vec::new(),
+            challenge_retries: Vec::new(),
             challenges: 0,
         }
     }
@@ -124,6 +127,11 @@ impl Poseidon2M31Transcript {
     /// The accepted challenge images, in derivation order.
     pub fn challenge_images(&self) -> &[[u8; 32]] {
         &self.challenge_images
+    }
+
+    /// Rejection-sampling retries consumed per accepted challenge image.
+    pub fn challenge_retries(&self) -> &[u32] {
+        &self.challenge_retries
     }
 
     /// The transcript's current state limbs (for digesting callers).
@@ -194,6 +202,7 @@ impl Poseidon2M31Transcript {
             if image != [0u8; 32] && scalar_magnitude_ok(&image) {
                 self.challenges += 1;
                 self.challenge_images.push(image);
+                self.challenge_retries.push(retry);
                 return image;
             }
             retry = retry

@@ -668,13 +668,14 @@ fn full_hand_v2_nine() {
     use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar, RistrettoCurve};
     use poker_protocol::ristretto_air::{RistrettoAirCiphertext, RistrettoShuffleSubmission};
     use poker_texas_air::ristretto_player_proofs_air::{
-        RistrettoCiphertext, prove_fold_with_proof_v2, prove_pk_ownership,
-        prove_reveal_tokens_batched, verify_fold_with_proof_v2, verify_pk_ownership,
-        verify_reveal_tokens_batched,
+        RistrettoCiphertext, prove_fold_with_proof_v2_poseidon2, prove_pk_ownership_poseidon2,
+        prove_reveal_tokens_batched_poseidon2, verify_fold_with_proof_v2_poseidon2,
+        verify_pk_ownership_poseidon2, verify_reveal_tokens_batched_poseidon2,
     };
     use poker_texas_air::ristretto_shuffle_air::{
-        admit_ristretto_air_v2_shuffle_submission, prove_ristretto_air_v2_shuffle,
+        admit_ristretto_air_v2_shuffle_submission, prove_ristretto_air_v2_shuffle_poseidon2,
     };
+    use poker_protocol::precompile_abi::TranscriptId;
     use rand::SeedableRng;
     use rayon::prelude::*;
 
@@ -706,7 +707,8 @@ fn full_hand_v2_nine() {
         let pk = RistrettoCurve::base_g() * sk;
         let context = format!("table9-hand1-seat{seat}");
         let (wire, proof) =
-            prove_pk_ownership(&sk, &pk, context.as_bytes(), &mut rng).expect("ownership proof");
+            prove_pk_ownership_poseidon2(&sk, &pk, context.as_bytes(), &mut rng)
+                .expect("ownership proof");
         ownership.push((seat, context, wire, proof));
         secret_keys.push(sk);
         public_keys.push(pk);
@@ -714,7 +716,7 @@ fn full_hand_v2_nine() {
     let phase_prove = started.elapsed();
     let started = Instant::now();
     for (seat, context, wire, proof) in &ownership {
-        verify_pk_ownership(&public_keys[*seat], context.as_bytes(), wire, proof)
+        verify_pk_ownership_poseidon2(&public_keys[*seat], context.as_bytes(), wire)
             .expect("ownership verify");
         total_bytes += borsh_ser(wire).len() + borsh_ser(proof).len();
     }
@@ -722,11 +724,8 @@ fn full_hand_v2_nine() {
     client_prove += phase_prove;
     server_verify += phase_verify;
     println!(
-        "[1] ownership x{PLAYERS}: client prove {phase_prove:?} (cold flock), server verify {phase_verify:?}"
+        "[1] ownership x{PLAYERS}: client prove {phase_prove:?}, server verify {phase_verify:?}"
     );
-    let started = Instant::now();
-    poker_texas_air::blake3_flock::preheat_flock_setup().expect("flock preheat");
-    println!("    flock preheat (server warm-up): {:?}", started.elapsed());
 
     // ---- Phase 2: canonical deck + nine sequential BG shuffles -----------
     let aggregate: Point = public_keys.iter().copied().sum();
@@ -783,8 +782,9 @@ fn full_hand_v2_nine() {
         let mut request = submission
             .to_verify_request_v2(format!("table9-hand1-shuffle{seat}").into_bytes())
             .expect("V2 shuffle request");
+        request.transcript = TranscriptId::Poseidon2M31;
         let envelope =
-            prove_ristretto_air_v2_shuffle(&request, &permutation, &rerandomizers, &mut rng)
+            prove_ristretto_air_v2_shuffle_poseidon2(&request, &permutation, &rerandomizers, &mut rng)
                 .expect("V2 shuffle proof");
         request.proof = envelope.encode_wire().expect("envelope wire");
         let request_bytes = request.encode().expect("canonical request");
@@ -793,8 +793,17 @@ fn full_hand_v2_nine() {
     }
     let phase_prove = started.elapsed();
     let started = Instant::now();
+    let admissions: Vec<_> = shuffle_archives
+        .par_iter()
+        .map(|request_bytes| {
+            admit_ristretto_air_v2_shuffle_submission(request_bytes)
+                .map_err(|error| format!("{error}"))
+        })
+        .collect();
+    for admission in &admissions {
+        admission.clone().expect("shuffle admission");
+    }
     for request_bytes in &shuffle_archives {
-        admit_ristretto_air_v2_shuffle_submission(request_bytes).expect("shuffle admission");
         total_bytes += request_bytes.len();
     }
     let phase_verify = started.elapsed();
@@ -823,7 +832,7 @@ fn full_hand_v2_nine() {
 
     // ---- Phase 4: preflop betting; seat {FOLD_SEAT} folds with proof ------
     let started = Instant::now();
-    let (folded_universe, fold_archive) = prove_fold_with_proof_v2(
+    let (folded_universe, fold_archive) = prove_fold_with_proof_v2_poseidon2(
         &secret_keys[FOLD_SEAT],
         &public_keys[FOLD_SEAT],
         &aggregate,
@@ -834,7 +843,7 @@ fn full_hand_v2_nine() {
     .expect("fold_with_proof proof");
     let phase_prove = started.elapsed();
     let started = Instant::now();
-    verify_fold_with_proof_v2(
+    verify_fold_with_proof_v2_poseidon2(
         &public_keys[FOLD_SEAT],
         &aggregate,
         &deck,
@@ -874,7 +883,7 @@ fn full_hand_v2_nine() {
                 .map(|card| card.c1 * secret_keys[seat])
                 .collect();
             let context = format!("table9-hand1-{street_name}-seat{seat}");
-            let (wire, proof) = prove_reveal_tokens_batched(
+            let (wire, proof) = prove_reveal_tokens_batched_poseidon2(
                 &secret_keys[seat],
                 &public_keys[seat],
                 street_cards,
@@ -890,13 +899,12 @@ fn full_hand_v2_nine() {
         let results: Vec<_> = batches
             .par_iter()
             .map(|(seat, context, wire, proof, tokens)| {
-                verify_reveal_tokens_batched(
+                verify_reveal_tokens_batched_poseidon2(
                     &public_keys[*seat],
                     street_cards,
                     tokens,
                     context.as_bytes(),
                     wire,
-                    proof,
                 )
                 .map_err(|error| format!("seat {seat}: {error}"))
             })

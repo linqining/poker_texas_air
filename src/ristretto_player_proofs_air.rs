@@ -1157,6 +1157,53 @@ pub fn verify_reveal_token_poseidon2(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn poseidon2_batched_reveal_and_fold_roundtrip() {
+        let mut rng = test_rng();
+        let (sk, pk) = keypair(&mut rng);
+        let cards = sample_deck(&pk, &mut rng);
+        let tokens: Vec<RistrettoPoint> = cards.iter().map(|ct| ct.c1 * sk).collect();
+
+        let (wire, spec) =
+            prove_reveal_tokens_batched_poseidon2(&sk, &pk, &cards, &tokens, b"showdown", &mut rng)
+                .expect("poseidon2 batched reveal proof");
+        spec.validate().expect("spec shape");
+        let replayed = verify_reveal_tokens_batched_poseidon2(&pk, &cards, &tokens, b"showdown", &wire)
+            .expect("poseidon2 batched reveal verify");
+        assert_eq!(spec, replayed);
+        // Wrong context and tampered response both fail.
+        assert!(
+            verify_reveal_tokens_batched_poseidon2(&pk, &cards, &tokens, b"other", &wire).is_err()
+        );
+        let mut tampered = wire;
+        tampered.response[20] ^= 1;
+        assert!(
+            verify_reveal_tokens_batched_poseidon2(&pk, &cards, &tokens, b"showdown", &tampered)
+                .is_err()
+        );
+
+        // Fold twin: prove a leave over the same deck and verify.
+        let (mask_sk, mask_pk) = keypair(&mut rng);
+        let (folded, archive) = prove_fold_with_proof_v2_poseidon2(
+            &mask_sk,
+            &mask_pk,
+            &pk,
+            &cards,
+            [0xAB; 32],
+            &mut rng,
+        )
+        .expect("poseidon2 fold proof");
+        archive.chain_spec.validate().expect("fold spec shape");
+        verify_fold_with_proof_v2_poseidon2(&mask_pk, &pk, &cards, &folded, &archive)
+            .expect("poseidon2 fold verify");
+        // Spliced output deck must fail.
+        let mut swapped = folded.clone();
+        swapped[0].c2 = folded[1].c2;
+        assert!(
+            verify_fold_with_proof_v2_poseidon2(&mask_pk, &pk, &cards, &swapped, &archive).is_err()
+        );
+    }
     use super::*;
 
     #[test]
@@ -1651,4 +1698,251 @@ pub fn verify_reveal_tokens_batched(
         }
     }
     Ok(())
+}
+
+// ============================================================================
+// Batched reveal tokens, Poseidon2-M31 route (Flock-free deployment path)
+// ============================================================================
+
+fn absorb_reveal_batch_statement_poseidon2(
+    transcript: &mut Poseidon2M31Transcript,
+    context: &[u8],
+    pk: &RistrettoPoint,
+    cards: &[RistrettoCiphertext],
+    tokens: &[RistrettoPoint],
+    commitment_t1: &[u8; 32],
+    commitment_t2: &[[u8; 32]],
+) {
+    transcript.append_message(b"context", context);
+    transcript.append_message(b"pk", &point_bytes(pk));
+    for ciphertext in cards {
+        transcript.append_message(b"c1", &point_bytes(&ciphertext.c1));
+        transcript.append_message(b"c2", &point_bytes(&ciphertext.c2));
+    }
+    for token in tokens {
+        transcript.append_message(b"reveal_token", &point_bytes(token));
+    }
+    transcript.append_message(b"t1", commitment_t1);
+    for commitment in commitment_t2 {
+        transcript.append_message(b"t2", commitment);
+    }
+}
+
+/// Prove one batched reveal-token DLEQ under the Poseidon2-M31 transcript
+/// (deployment-route twin of [`prove_reveal_tokens_batched`]; the returned
+/// chain spec folds into the unified admission STARK's Poseidon2 segment
+/// instead of carrying a Flock archive).
+pub fn prove_reveal_tokens_batched_poseidon2(
+    sk: &RistrettoScalar,
+    pk: &RistrettoPoint,
+    cards: &[RistrettoCiphertext],
+    tokens: &[RistrettoPoint],
+    context: &[u8],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(RistrettoRevealTokensBatchWire, Poseidon2ChainSpec)> {
+    if cards.is_empty() || cards.len() != tokens.len() {
+        return Err(TexasAirError::SpecViolation(
+            "batched reveal tokens require matching non-empty card/token lists".into(),
+        ));
+    }
+    if *sk == RistrettoScalar::zero() || pk.is_identity() || RistrettoCurve::base_g() * *sk != *pk {
+        return Err(TexasAirError::SpecViolation(
+            "batched reveal-token witness does not match the public key".into(),
+        ));
+    }
+    for (card, token) in cards.iter().zip(tokens) {
+        if !card.is_valid() || token.is_identity() || *token != card.c1 * *sk {
+            return Err(TexasAirError::SpecViolation(
+                "batched reveal-token witness does not match a statement entry".into(),
+            ));
+        }
+    }
+    let (nonce, t1) = loop {
+        let nonce = RistrettoScalar::random(rng);
+        if nonce == RistrettoScalar::zero() {
+            continue;
+        }
+        let t1 = RistrettoCurve::base_g() * nonce;
+        if !t1.is_identity() {
+            break (nonce, t1);
+        }
+    };
+    let mut commitment_t2 = Vec::with_capacity(cards.len());
+    let mut degenerate = false;
+    for card in cards {
+        let point = card.c1 * nonce;
+        degenerate |= point.is_identity();
+        commitment_t2.push(point_bytes(&point));
+    }
+    if degenerate {
+        return Err(TexasAirError::SpecViolation(
+            "batched reveal-token commitment degenerated to the identity; reseed".into(),
+        ));
+    }
+    let mut transcript = Poseidon2M31Transcript::new(REVEAL_TOKEN_PROTOCOL);
+    absorb_reveal_batch_statement_poseidon2(
+        &mut transcript,
+        context,
+        pk,
+        cards,
+        tokens,
+        &point_bytes(&t1),
+        &commitment_t2,
+    );
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    let response = nonce + challenge * *sk;
+    let wire = RistrettoRevealTokensBatchWire {
+        commitment_t1: point_bytes(&t1),
+        commitment_t2,
+        response: scalar_bytes(&response),
+    };
+    Ok((wire, transcript.into_chain_spec()))
+}
+
+/// Verify one Poseidon2-path batched reveal-token proof natively; returns
+/// the replayed chain statement for folding.
+pub fn verify_reveal_tokens_batched_poseidon2(
+    pk: &RistrettoPoint,
+    cards: &[RistrettoCiphertext],
+    tokens: &[RistrettoPoint],
+    context: &[u8],
+    wire: &RistrettoRevealTokensBatchWire,
+) -> TexasAirResult<Poseidon2ChainSpec> {
+    if cards.is_empty() || cards.len() != tokens.len() || wire.commitment_t2.len() != cards.len() {
+        return Err(TexasAirError::SpecViolation(
+            "batched reveal-token statement shapes disagree".into(),
+        ));
+    }
+    if pk.is_identity() {
+        return Err(TexasAirError::SpecViolation(
+            "batched reveal-token public key is the identity".into(),
+        ));
+    }
+    for (card, token) in cards.iter().zip(tokens) {
+        if !card.is_valid() || token.is_identity() {
+            return Err(TexasAirError::SpecViolation(
+                "batched reveal-token statement contains identity points".into(),
+            ));
+        }
+    }
+    let t1 = decode_point(&wire.commitment_t1, "batched reveal-token commitment")?;
+    let response = decode_scalar(&wire.response, "batched reveal-token response")?;
+    if t1.is_identity() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "batched reveal-token commitment is the identity".into(),
+        ));
+    }
+    let mut commitments = Vec::with_capacity(cards.len());
+    for bytes in &wire.commitment_t2 {
+        let point = decode_point(bytes, "batched reveal-token per-card commitment")?;
+        if point.is_identity() {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "batched reveal-token per-card commitment is the identity".into(),
+            ));
+        }
+        commitments.push(point);
+    }
+    let mut transcript = Poseidon2M31Transcript::new(REVEAL_TOKEN_PROTOCOL);
+    absorb_reveal_batch_statement_poseidon2(
+        &mut transcript,
+        context,
+        pk,
+        cards,
+        tokens,
+        &wire.commitment_t1,
+        &wire.commitment_t2,
+    );
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    if RistrettoCurve::base_g() * response != t1 + *pk * challenge {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "batched reveal-token key equation is not satisfied".into(),
+        ));
+    }
+    for ((card, token), commitment) in cards.iter().zip(tokens).zip(&commitments) {
+        if card.c1 * response != *commitment + *token * challenge {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "batched reveal-token per-card equation is not satisfied".into(),
+            ));
+        }
+    }
+    Ok(transcript.into_chain_spec())
+}
+
+// ============================================================================
+// fold_with_proof V2, Poseidon2-M31 route (Flock-free deployment path)
+// ============================================================================
+
+/// Poseidon2-route twin of [`ArchivedRistrettoFoldWithProofV2`]: the deck
+/// DLEQ wire plus the foldable transcript chain spec, no Flock archive.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedRistrettoFoldWithProofV2Poseidon2 {
+    /// Leave-direction DLEQ wire over the deck transition.
+    pub deck: RistrettoDeckDleqWire,
+    /// Poseidon2-M31 transcript chain schedule.
+    pub chain_spec: Poseidon2ChainSpec,
+    /// New aggregate public key (`old_aggregate − player_pk`).
+    pub new_aggregate_pk: [u8; 32],
+    /// Digest binding the caller's canonical transition context.
+    pub context_digest: [u8; 32],
+}
+
+/// Prove the complete `fold_with_proof` crypto relation under the
+/// Poseidon2-M31 transcript.
+pub fn prove_fold_with_proof_v2_poseidon2(
+    player_sk: &RistrettoScalar,
+    player_pk: &RistrettoPoint,
+    aggregate_pk: &RistrettoPoint,
+    input_deck: &[RistrettoCiphertext],
+    context_digest: [u8; 32],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(Vec<RistrettoCiphertext>, ArchivedRistrettoFoldWithProofV2Poseidon2)> {
+    let output_deck = fold_deck_transition(input_deck, player_sk)?;
+    let new_aggregate = *aggregate_pk - *player_pk;
+    let mut context = context_digest.to_vec();
+    context.extend_from_slice(&point_bytes(&new_aggregate));
+    let (deck, chain_spec) = prove_deck_dleq_poseidon2(
+        RistrettoDeckDleqDirection::Leave,
+        input_deck,
+        &output_deck,
+        player_sk,
+        player_pk,
+        &context,
+        rng,
+    )?;
+    Ok((
+        output_deck,
+        ArchivedRistrettoFoldWithProofV2Poseidon2 {
+            deck,
+            chain_spec,
+            new_aggregate_pk: point_bytes(&new_aggregate),
+            context_digest,
+        },
+    ))
+}
+
+/// Verify the Poseidon2-route `fold_with_proof` relation natively.
+pub fn verify_fold_with_proof_v2_poseidon2(
+    player_pk: &RistrettoPoint,
+    aggregate_pk: &RistrettoPoint,
+    input_deck: &[RistrettoCiphertext],
+    output_deck: &[RistrettoCiphertext],
+    archive: &ArchivedRistrettoFoldWithProofV2Poseidon2,
+) -> TexasAirResult<()> {
+    let new_aggregate = decode_point(&archive.new_aggregate_pk, "fold new aggregate key")?;
+    if new_aggregate != *aggregate_pk - *player_pk {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "fold aggregate-key update is detached from the player key".into(),
+        ));
+    }
+    let mut context = archive.context_digest.to_vec();
+    context.extend_from_slice(&archive.new_aggregate_pk);
+    verify_deck_dleq_poseidon2(
+        RistrettoDeckDleqDirection::Leave,
+        input_deck,
+        output_deck,
+        player_pk,
+        &context,
+        &archive.deck,
+    )
+    .map(|_| ())
 }

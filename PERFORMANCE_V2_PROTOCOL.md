@@ -235,9 +235,14 @@ log-18 列主导），⑩ Pippenger 落地后预计 ~50–60s/洗牌（~450–54
   `merge_poseidon2_chain_specs` 按最长链零词填充合批，`poseidon2_root` 从
   链 digest 派生 M31 原生 hand root。**玩家证明的 Poseidon2 路径已闭环**
   （`prove/verify_pk_ownership_poseidon2`、`prove/verify_reveal_token_
-  poseidon2`）：挑战真实由 M31 sponge 派生，方程以 `PlayerPoseidon2Inputs`
-  折进整手工件、其 transcript 链合入同一 Poseidon2 批——整手测试即此
-  闭环，无任何 Flock 工件。Flock 消除（路线图 7）在此路径成立。
+  poseidon2`、`prove/verify_deck_dleq_poseidon2`）与**洗牌准入**
+  （`prove_bg_admission_poseidon2`：BG 证明对 Poseidon2 transcript 生成，
+  验证重放的链规格随整手工件折叠——只含公开数据，无 π，HVZK 保持）：
+  挑战真实由 M31 sponge 派生，全部方程与链以 `HandAdmissionComponents
+  { shuffles + shuffle_chains, poseidon2_players }` 折进整手工件。
+  `hand_admission_poseidon2_end_to_end`（91s）验证全 Poseidon2 手：
+  3 洗牌 + 52 卡 fold + 玩家，单一 STARK，零 Flock 工件——Flock 消除
+  （路线图 7）在 admission 路径全部闭环。
 - **一手一证 API（✅）**：`HandAdmissionComponents { shuffles, players,
   poseidon2_players, hand_root, poseidon2 }` → `decompose/prove/
   verify_hand_admission_components`。9 份洗牌的梯子/累加/调度/recurrence + 玩家 ownership/
@@ -249,9 +254,13 @@ log-18 列主导），⑩ Pippenger 落地后预计 ~50–60s/洗牌（~450–54
 - **多成分 Texas 折叠（✅）**：`prove/verify_ristretto_admission_stark_
   with_texas_batch`——多个方法 AIR 成分（`Vec<TexasMethodIngredient>`）
   折进同一份 admission STARK，成分顺序进 FS 绑定；换序/缺成分/篡改期望行
-  全部拒绝（测试覆盖）。全方法接线剩余：CanonicalAir（29 种转移、带
-  range LogUp）尚不满足 TexasAir 的零交互层槽位——需给 Texas 折叠槽加
-  交互树管道后接入。
+  全部拒绝（测试覆盖）。全方法接线剩余：CanonicalAir（29 种转移）接入
+  需同时扩展 Texas 折叠槽的两套管道——(a) tree-0：CanonicalAir 读自身的
+  `get_preprocessed_column` 作用域列（当前 Texas 槽无 scope 通道，需按
+  fold 命名空间把 canonical scope 列提交进共享树 0）；(b) tree-2：其
+  `CanonicalRange8` LogUp 携带非零 claimed_sum，验证端需原生重算交互列
+  与求和（对齐 poseidon2 段的 full-build 模式）；外加 CanonicalAir 公开化
+  + TexasAir 实现（statement/trace_num_columns）。属多日级重构，未动。
 - **测试**：`hand_admission_proves_and_verifies`（3 洗牌 + Poseidon2 路径
   玩家证明——挑战来自被折叠的链，41s，四类篡改拒绝）、
   `poseidon2_player_proofs_prove_verify_and_reject`、
@@ -268,6 +277,18 @@ log-18 列主导），⑩ Pippenger 落地后预计 ~50–60s/洗牌（~450–54
   log-21，36GB 机器需 swap（重跑可能 OOM），基准支持
   `TEXAS_HAND_SHUFFLES=k` 变体。后续优化排序不变：⑩ Pippenger（时间）
   → ①+②+②b+⑧（字节），都在合批后的单工件上直接生效。
+
+  **stwo Poseidon252 SIMD 实验（❌ 2026-08-28 否决，NEON 上不实际）**：
+  曾把四个 stwo 依赖切到 `linqining/stwo` 的 `feat/posiden-simd` 分支
+  （构建通过、admission 套件 10/10 过），但该分支的 SIMD 门控是
+  `cfg!(all(target_arch = "x86_64", target_feature = "avx512f"))`，本机
+  Apple Silicon 走标量回退（且回退路径多做列转换，实测单线程更慢）；
+  批量内核在 NEON 上 ~6.9µs/哈希 vs 标量 4.4–6.9µs、节点层比 rayon+
+  标量基线慢 20–30%——结构性原因：NEON 无 64×64→128 widening 乘法，
+  8×8 肢 schoolbook 乘法数为标量 mul+umulh 的 2 倍，且 Starknet
+  Poseidon 的无乘法 MDS 在 SIMD 下要付进位链（CIOS/SOS/分半 SOS 三种
+  乘法核均试过）。已回退 crates.io 2.3。x86-64 AVX-512 机器上该分支
+  仍值得启用。
 
 ### 4.1 后续工作（增量优化 + 递归路线图）
 

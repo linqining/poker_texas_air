@@ -1883,6 +1883,7 @@ fn combine_poseidon2_players<'a>(
     for player in players {
         combined.pk_ownership.extend(player.pk_ownership.iter().copied());
         combined.reveal_tokens.extend(player.reveal_tokens.iter().copied());
+        combined.deck_dleqs.extend(player.deck_dleqs.iter().copied());
     }
     combined
 }
