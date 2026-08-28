@@ -3550,6 +3550,147 @@ mod tests {
         assert!(verify_hand_admission_components(&components, &spliced).is_err());
     }
 
+    /// Fully-Poseidon2 hand: the SHUFFLES themselves are proven under the
+    /// M31 transcript (`prove_bg_admission_poseidon2`), a 52-card deck
+    /// DLEQ rides the same path, and the player equations come from the
+    /// Poseidon2 fixture — every folded chain is a real protocol
+    /// transcript, zero Flock artifacts anywhere.
+    #[test]
+    fn hand_admission_poseidon2_end_to_end() {
+        use crate::ristretto_poseidon2_transcript::poseidon2_root;
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+
+        // Three deck-4 shuffles proven over the Poseidon2 transcript.
+        let mut shuffle_chains = Vec::new();
+        let mut shuffles = Vec::new();
+        for shuffle in 0..3u64 {
+            let mut rng = StdRng::seed_from_u64(0x90C1_0000 + shuffle);
+            let g = RistrettoCurve::base_g();
+            let secret = BgScalar::random(&mut rng);
+            let public_key = g * secret;
+            let input = (0..4)
+                .map(|_| {
+                    let rerandomizer = BgScalar::random(&mut rng);
+                    BgCiphertext {
+                        c1: g * rerandomizer,
+                        c2: public_key * rerandomizer,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut permutation = vec![0usize, 1, 2, 3];
+            use rand::seq::SliceRandom;
+            permutation.shuffle(&mut rng);
+            let rerandomizers = (0..4)
+                .map(|_| BgScalar::random(&mut rng))
+                .collect::<Vec<_>>();
+            let output = permutation
+                .iter()
+                .zip(&rerandomizers)
+                .map(|(&source, rerandomizer)| {
+                    input[source].re_encrypt(&public_key, rerandomizer)
+                })
+                .collect::<Vec<_>>();
+            let (components, chain) = prove_bg_admission_poseidon2(
+                &input,
+                &output,
+                &permutation,
+                &rerandomizers,
+                &public_key,
+                [0x5b + shuffle as u8; 32],
+                &mut rng,
+            )
+            .expect("poseidon2 BG admission");
+            shuffles.push(components);
+            shuffle_chains.push(chain);
+        }
+
+        // A fold (deck DLEQ, 52 cards) on the same Poseidon2 path.
+        let mut rng = StdRng::seed_from_u64(0xF01D_00BB);
+        let sk = BgScalar::random(&mut rng);
+        let pk = base_point_value() * sk;
+        let dleq_input = (0..52)
+            .map(|index| {
+                let card = RistrettoCurve::hash_to_curve(
+                    format!("poseidon2-e2e/card/{index}").as_bytes(),
+                );
+                let randomness = BgScalar::random(&mut rng);
+                BgCiphertext::encrypt(&card, &pk, &randomness)
+            })
+            .collect::<Vec<_>>();
+        let dleq_output = dleq_input
+            .iter()
+            .map(|ct| BgCiphertext {
+                c1: ct.c1,
+                c2: ct.c2 + ct.c1 * sk,
+            })
+            .collect::<Vec<_>>();
+        let (dleq_wire, dleq_chain) = crate::ristretto_player_proofs_air::prove_deck_dleq_poseidon2(
+            crate::ristretto_player_proofs_air::RistrettoDeckDleqDirection::Remask,
+            &dleq_input,
+            &dleq_output,
+            &sk,
+            &pk,
+            b"poseidon2-e2e-fold",
+            &mut rng,
+        )
+        .expect("poseidon2 deck DLEQ");
+        let dleq_input = Box::leak(Box::new(dleq_input));
+        let dleq_output = Box::leak(Box::new(dleq_output));
+        let dleq_pk = Box::leak(Box::new(pk));
+        let dleq_wire = Box::leak(Box::new(dleq_wire));
+
+        let mut all_chains = shuffle_chains.clone();
+        all_chains.push(dleq_chain);
+        let hand_root = poseidon2_root(
+            &merge_poseidon2_chain_specs(&all_chains)
+                .expect("chains")
+                .digests(),
+        );
+
+        let components = HandAdmissionComponents {
+            shuffles,
+            shuffle_chains,
+            players: Vec::new(),
+            poseidon2_players: vec![PlayerPoseidon2Inputs {
+                pk_ownership: Vec::new(),
+                reveal_tokens: Vec::new(),
+                deck_dleqs: vec![PlayerDeckDleqPoseidon2Entry {
+                    direction:
+                        crate::ristretto_player_proofs_air::RistrettoDeckDleqDirection::Remask,
+                    input: dleq_input,
+                    output: dleq_output,
+                    pk: dleq_pk,
+                    context: b"poseidon2-e2e-fold",
+                    wire: dleq_wire,
+                }],
+            }],
+            hand_root,
+            poseidon2: None,
+        };
+        let statement = decompose_hand_admission(&components).expect("decomposition");
+        // Three schedules, three recurrences, the fold's 53 extra
+        // equations, and every action's chain in one batch.
+        assert_eq!(statement.schedules.len(), 3);
+        assert_eq!(statement.recurrences.len(), 3);
+        let chains = statement.poseidon2.as_ref().expect("folded chains");
+        assert_eq!(chains.initial_states.len(), 4); // 3 shuffles + 1 fold
+
+        let archive = prove_hand_admission_components(&components).expect("hand STARK");
+        verify_hand_admission_components(&components, &archive).expect("hand verify");
+
+        // Tampering the folded transcript words detaches the digest.
+        let mut spliced = archive.clone();
+        spliced.statement.poseidon2.as_mut().unwrap().absorbed_words[5][0] ^= 1;
+        assert!(verify_hand_admission_components(&components, &spliced).is_err());
+
+        // A wrong fold direction derives different challenges.
+        let mut wrong = components;
+        wrong.poseidon2_players[0].deck_dleqs[0].direction =
+            crate::ristretto_player_proofs_air::RistrettoDeckDleqDirection::Leave;
+        assert!(verify_hand_admission_components(&wrong, &archive).is_err());
+    }
+
     /// Whole-hand deck-52 batch benchmark: nine shuffle admissions folded
     /// into ONE STARK (the "一手一证" settlement artifact), with the
     /// hand's transcript chains (6 × 176 steps per shuffle) folded into

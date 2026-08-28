@@ -50,10 +50,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tracing = "0.1"
 rayon = "1"
 proptest = "1"
-stwo = { git = "https://github.com/linqining/stwo", branch = "feat/posiden-simd", features = ["parallel", "prover"] }
-stwo-air-utils = { git = "https://github.com/linqining/stwo", branch = "feat/posiden-simd" }
-stwo-air-utils-derive = { git = "https://github.com/linqining/stwo", branch = "feat/posiden-simd" }
-stwo-constraint-framework = { git = "https://github.com/linqining/stwo", branch = "feat/posiden-simd", features = ["prover"] }
+stwo = { version = "2.3", features = ["parallel", "prover"] }
+stwo-air-utils = "2.3"
+stwo-air-utils-derive = "2.3"
+stwo-constraint-framework = { version = "2.3", features = ["prover"] }
 starknet-ff = { version = "0.3", features = ["serde"] }
 starknet-crypto = { version = "0.6", default-features = false, features = ["alloc"] }
 bincode = "1"

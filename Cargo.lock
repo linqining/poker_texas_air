@@ -2117,7 +2117,8 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "stwo"
 version = "2.3.0"
-source = "git+https://github.com/linqining/stwo?branch=feat%2Fposiden-simd#84dfa955fb700791079977728cce41967913ae1b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86f36868631bb04ea97ad0f42daef676f87496edba200c80b24f8b6731352c3c"
 dependencies = [
  "blake2",
  "blake3",
@@ -2135,7 +2136,6 @@ dependencies = [
  "rayon",
  "serde",
  "starknet-crypto",
- "starknet-crypto-codegen",
  "starknet-ff",
  "stwo-std-shims",
  "thiserror 2.0.20",
@@ -2146,7 +2146,8 @@ dependencies = [
 [[package]]
 name = "stwo-air-utils"
 version = "2.3.0"
-source = "git+https://github.com/linqining/stwo?branch=feat%2Fposiden-simd#84dfa955fb700791079977728cce41967913ae1b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77f60480c80a27ec979022a679e50f09b22ac892298eac039e5dfb0031107413"
 dependencies = [
  "bytemuck",
  "itertools 0.12.1",
@@ -2158,7 +2159,8 @@ dependencies = [
 [[package]]
 name = "stwo-air-utils-derive"
 version = "2.3.0"
-source = "git+https://github.com/linqining/stwo?branch=feat%2Fposiden-simd#84dfa955fb700791079977728cce41967913ae1b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70cadfd1768f7a1f34ed48a9e57c9f083938c5359f3465732f296cea8ed14aad"
 dependencies = [
  "itertools 0.13.0",
  "proc-macro2",
@@ -2169,7 +2171,8 @@ dependencies = [
 [[package]]
 name = "stwo-constraint-framework"
 version = "2.3.0"
-source = "git+https://github.com/linqining/stwo?branch=feat%2Fposiden-simd#84dfa955fb700791079977728cce41967913ae1b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f42067540d13760ad11b949d0a28a3faf02d17087eff15bc95ef573e6e95f5b"
 dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.12.1",
