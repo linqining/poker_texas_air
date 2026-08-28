@@ -1509,6 +1509,7 @@ dependencies = [
  "borsh",
  "curve25519-dalek",
  "group",
+ "halo2curves",
  "lazy_static",
  "merlin",
  "poker-protocol-bg",

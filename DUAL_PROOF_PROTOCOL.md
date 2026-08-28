@@ -1,7 +1,18 @@
 # 双证明结算架构重构方案（poker_protocol direct-sigma + 牌局过程 STARK）
 
-状态：设计稿 v2.7（2026-08-29，含实施记录）。本文档取代 admission-AIR（Path A
+状态：设计稿 v2.8（2026-08-29，含实施记录）。本文档取代 admission-AIR（Path A
 递归信封）作为「链上可验证结算」的目标架构。
+
+v2.8 变更（重构成果总结 + DAPV 方向）：**Path A admission STARK 全族移除后，
+系统证明复杂度大幅简化**。前架构的 admission STARK 需要 log-16~21 的 FRI 域
+（124–188 梯子 × 335 行 ≈ 41.5–63K 行，prove 38.4s，Merkle 承诺占 78%）；
+移除后 **P 层不再有任何 STARK**（direct-sigma 链上直验或毫秒级 native prove），
+**G 层保持 log-8**（canonical tagged batch 域下限 256 行，批内行数 1..=256
+不影响证明成本；九人桌一手 = 2 个 log-8 批并行 prove 651ms）。正在研究的
+**DAPV（Direct-Sigma Aggregate Pairing Verification）**将 P 层进一步聚合为
+**一次配对**：ρ = H(hand-agg ‖ hand_binding)，L = Σ ρⁱ·Lᵢ（N ≈ 200–600 条
+残差方程 MSM），接受 ⟺ e(L, H₂) = 1——终态为**一手牌提交一个配对 + 一个
+STARK**。
 
 v2.7 变更（Path A 递归工件退役执行）：按「direct-sigma 已全面替代」的决策，
 **admission STARK 族整体移除**（非 archive，git 历史保留）：admission 主模块、
@@ -149,6 +160,37 @@ STARK，每条曲线运算要展开成几千条 M31 约束，成本随牌数×�
 
 SNARK 的唯一结构性优势是后续可聚合压缩；在每手链上验证费用成为实际瓶颈之前，
 它不值得电路栈 + 仪式 + 秒级客户端证明的代价。v2 把它放在 §11 升级路径。
+
+## 0.5 重构成果总结（v2.2–v2.8）
+
+| 指标 | 前架构（admission STARK） | 现架构（direct-sigma + G STARK） |
+| --- | --- | --- |
+| P 层证明形态 | 一个 admission STARK（Ristretto 曲线算术进 M31） | 每玩家一个统一 Σ（native prove 毫秒级，链上 EC_OP 直验） |
+| P 层 FRI logsize | **log-16 ~ log-21**（124–188 梯子 × 335 行，41.5–63K 行） | **无 STARK**（链上群方程直验，或 DAPV 单配对） |
+| P 层 prove 时间 | 38.4s（Merkle 承诺 30s = 78%） | **228ms**（九人桌全手 native） |
+| G 层 FRI logsize | log-8 × 2 批（不变） | **log-8 × 2 批**（不变；域下限 256 行） |
+| G 层 prove 时间 | ~0.6s/批 | **651ms**（2 批并行） |
+| 链上验证 | 无（仅 digest 注册） | P 全 kind 直验（22/22 snforge 绿） |
+| 代码量 | +31,331 行 admission 族 | **−31,331 行**（v2.7 移除，git 历史保留） |
+| 编译时间 | 5.7s（lib check） | **4.4s**（−23%） |
+
+**主要性能提升来源**（按贡献排序）：
+1. **消除结构性成本**——"非原生曲线算术进 M31 STARK"是 admission 路线的
+   根本瓶颈（每条 255-bit 曲线运算展开为 ~335 行 M31 约束，随牌数×玩家数
+   线性爆炸）；direct-sigma 在 EC_OP 内建上直接执行群方程，该成本归零。
+2. **P 层去 STARK 化**——sigma 协议本质是"证明廉价、验证廉价"的构造，
+   链上直验消除了 FRI/Merkle 承诺/quotient 插值的全部开销。
+3. **统一 Σ 合并**——一玩家一证明（共享 witness 的 AND 组合），证明数
+   35→9，挑战/响应共享，calldata 缩小 ~3×。
+4. **G 层不变**——canonical tagged batch 本来就在 log-8 域下限运行，
+   与 admission 移除无关。
+
+**DAPV 方向**（正在研究，另一会话）：将全部 P 层残差方程（ownership +
+reveal + fold + BG shuffle ≈ 200–600 条仿射线性残差）经 Schwartz–Zippel
+折叠为单个群元素 L = Σ ρⁱ·Lᵢ（一次 MSM），链上验证归约为**唯一一次配对**
+e(L, H₂) = 1（H₂ ∈ G₂ 固定常数）。曲线需迁回 BN254（余因子 1，Starknet
+有纯 Cairo 配对实现）。可靠性损失 ≤ (N−1)/r ≈ 2⁻²⁴⁶（Schwartz–Zippel）。
+终态：**一手牌 = 一个配对（P 聚合） + 一个 STARK（G）**，两笔上链调用。
 
 ## 1. 目标架构总览
 
