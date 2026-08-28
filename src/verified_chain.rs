@@ -320,7 +320,6 @@ pub(crate) fn issue_tagged_batch_receipt(
 /// Descriptor-only summaries are intentionally not accepted by this API:
 ///
 /// ```compile_fail
-/// use poker_texas_air::aggregator_air::ChildDescriptor;
 /// use poker_texas_air::verified_chain::VerifiedChain;
 ///
 /// let descriptor: ChildDescriptor = todo!();

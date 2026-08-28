@@ -4,7 +4,6 @@
 //!
 //! - [`verify_create_table`] — 验证 `create_table` 方法的 L1 proof
 //! - [`verify_method`] — 泛型 verify，支持任意 method AIR（阶段 2-4）
-//! - [`verify_aggregator`] — 验证 Aggregator proof
 
 use stwo::core::channel::Poseidon252Channel;
 use stwo::core::pcs::CommitmentSchemeVerifier;
@@ -259,14 +258,3 @@ where
     verify_method_inner(proof, expected_air, &expected_public_inputs, false)
 }
 
-/// 验证 Aggregator proof。
-///
-/// 委托给 [`crate::aggregator_verifier::verify_aggregator`]。
-///
-/// # Errors
-///
-/// - `TexasAirError::ConstraintUnsatisfied` — AIR 约束不满足
-/// - `TexasAirError::StwoProverError` — Stwo verifier 内部错误
-pub fn verify_aggregator(proof: crate::aggregator_prover::AggregatorProof) -> TexasAirResult<()> {
-    crate::aggregator_verifier::verify_aggregator(proof)
-}

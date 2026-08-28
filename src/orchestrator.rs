@@ -132,19 +132,6 @@ pub struct ArchivedProvenTask {
 }
 
 impl ProvenTask {
-    /// 转为实验性 descriptor-only Aggregator 的子节点描述符。
-    ///
-    /// 返回值不能证明任何子 proof 已被验证，生产 Aggregator 入口会
-    /// fail closed。
-    #[must_use]
-    pub fn to_child_descriptor(&self) -> crate::aggregator_air::ChildDescriptor {
-        crate::aggregator_air::ChildDescriptor {
-            pre_state_root: state_root_to_m31_limbs(self.pre_state_root),
-            post_state_root: state_root_to_m31_limbs(self.post_state_root),
-            call_seq: self.call_seq,
-            method_kind: self.method_kind,
-        }
-    }
 }
 
 /// Orchestrator：消费证明任务，生成并自验 proof。

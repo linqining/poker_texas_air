@@ -49,9 +49,71 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::hash_prover::{ArchivedHashProof, Blake2bStatement, HashProofProvider};
 use crate::ristretto_poseidon2_air::Poseidon2ChainSpec;
 use crate::ristretto_poseidon2_transcript::Poseidon2M31Transcript;
-use crate::ristretto_reconstruction_proof_wire::{
-    RistrettoBayerGrothShuffleProofWire, RistrettoCiphertextProofWire,
-};
+/// Fixed 52-card deck size for the V2 Ristretto wire (was
+/// `CANONICAL_RECONSTRUCTION_CARDS` in the retired reconstruction module).
+pub const RISTRETTO_V2_DECK_CARDS: usize = 52;
+
+/// Compressed ElGamal ciphertext on the V2 wire.
+#[derive(Debug, Clone, PartialEq, Eq, BorshDeserialize, BorshSerialize)]
+pub struct RistrettoCiphertextProofWire {
+    pub c1: [u8; 32],
+    pub c2: [u8; 32],
+}
+
+impl Default for RistrettoCiphertextProofWire {
+    fn default() -> Self {
+        Self { c1: [0; 32], c2: [0; 32] }
+    }
+}
+
+/// Fixed 52-card Bayer--Groth V2 public wire, represented with Ristretto
+/// compressed points/scalars rather than legacy BLS serialisation.
+#[derive(Debug, Clone, PartialEq, Eq, BorshDeserialize, BorshSerialize)]
+pub struct RistrettoBayerGrothShuffleProofWire {
+    pub c_permutation: [u8; 32],
+    pub c_permuted_powers: [u8; 32],
+    pub c_alpha: [u8; 32],
+    pub c_beta: [u8; 32],
+    pub ciphertext_0: RistrettoCiphertextProofWire,
+    pub ciphertext_1: RistrettoCiphertextProofWire,
+    pub alpha_response: [[u8; 32]; RISTRETTO_V2_DECK_CARDS],
+    pub commitment_response: [u8; 32],
+    pub beta: [u8; 32],
+    pub beta_blinding_response: [u8; 32],
+    pub rerandomization_response: [u8; 32],
+    pub c_d: [u8; 32],
+    pub c_delta: [u8; 32],
+    pub c_capital_delta: [u8; 32],
+    pub a_response: [[u8; 32]; RISTRETTO_V2_DECK_CARDS],
+    pub b_response: [[u8; 32]; RISTRETTO_V2_DECK_CARDS],
+    pub r_response: [u8; 32],
+    pub s_response: [u8; 32],
+}
+
+impl Default for RistrettoBayerGrothShuffleProofWire {
+    fn default() -> Self {
+        Self {
+            c_permutation: [0; 32],
+            c_permuted_powers: [0; 32],
+            c_alpha: [0; 32],
+            c_beta: [0; 32],
+            ciphertext_0: RistrettoCiphertextProofWire::default(),
+            ciphertext_1: RistrettoCiphertextProofWire::default(),
+            alpha_response: [[0; 32]; RISTRETTO_V2_DECK_CARDS],
+            commitment_response: [0; 32],
+            beta: [0; 32],
+            beta_blinding_response: [0; 32],
+            rerandomization_response: [0; 32],
+            c_d: [0; 32],
+            c_delta: [0; 32],
+            c_capital_delta: [0; 32],
+            a_response: [[0; 32]; RISTRETTO_V2_DECK_CARDS],
+            b_response: [[0; 32]; RISTRETTO_V2_DECK_CARDS],
+            r_response: [0; 32],
+            s_response: [0; 32],
+        }
+    }
+}
 
 /// Magic prefix of the serialized V2 shuffle proof envelope.
 pub const RISTRETTO_SHUFFLE_V2_PROOF_MAGIC: [u8; 4] = *b"ZRS2";
@@ -813,10 +875,7 @@ pub fn run_bayer_groth_verify(
 pub fn verify_ristretto_air_v2_shuffle_submission(
     request_bytes: &[u8],
 ) -> TexasAirResult<ArchivedRistrettoShuffleV2Proof> {
-    let request =
-        crate::ristretto_reconstruction_composition::decode_ristretto_air_v2_shuffle_request(
-            request_bytes,
-        )?;
+    let request = decode_v2_shuffle_request(request_bytes)?;
     let envelope = ArchivedRistrettoShuffleV2Proof::decode_wire(&request.proof)?;
     envelope.validate_against_request(&request)?;
     let proof = envelope.shuffle.to_proof()?;
@@ -940,10 +999,7 @@ pub struct RistrettoAirV2ShuffleInCircuitComponents {
 pub fn ristretto_air_v2_shuffle_in_circuit_components(
     request_bytes: &[u8],
 ) -> TexasAirResult<RistrettoAirV2ShuffleInCircuitComponents> {
-    let request =
-        crate::ristretto_reconstruction_composition::decode_ristretto_air_v2_shuffle_request(
-            request_bytes,
-        )?;
+    let request = decode_v2_shuffle_request(request_bytes)?;
     let envelope = ArchivedRistrettoShuffleV2Proof::decode_wire(&request.proof)?;
     envelope.validate_against_request(&request)?;
     let proof = envelope.shuffle.to_proof()?;
@@ -1318,4 +1374,36 @@ mod tests {
                 .contains("detached from the request statement")
         );
     }
+}
+
+/// Canonical-decode a V2 shuffle request (moved from the retired
+/// reconstruction composition module).
+fn decode_v2_shuffle_request(
+    request_bytes: &[u8],
+) -> TexasAirResult<poker_protocol::precompile_abi::ShuffleVerifyRequest> {
+    use poker_protocol::precompile_abi::{ShuffleProofSystem, ShuffleVerifyRequest};
+    let request = ShuffleVerifyRequest::decode(request_bytes).map_err(|error| {
+        TexasAirError::SerializationError(format!(
+            "Ristretto AIR V2 shuffle request decode failed: {error}"
+        ))
+    })?;
+    if request.proof_system != ShuffleProofSystem::RistrettoAirV2
+        || request.context.as_slice()
+            != poker_protocol::ristretto_air::RISTRETTO_AIR_V2_SHUFFLE_CONTEXT
+    {
+        return Err(TexasAirError::SpecViolation(
+            "Ristretto AIR V2 shuffle endpoint received a non-V2 request".into(),
+        ));
+    }
+    let canonical = request.encode().map_err(|error| {
+        TexasAirError::SerializationError(format!(
+            "Ristretto AIR V2 shuffle request encoding failed: {error}"
+        ))
+    })?;
+    if canonical != request_bytes {
+        return Err(TexasAirError::SerializationError(
+            "Ristretto AIR V2 shuffle request is not canonically encoded".into(),
+        ));
+    }
+    Ok(request)
 }

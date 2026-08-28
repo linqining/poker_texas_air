@@ -308,16 +308,3 @@ pub(crate) fn prepare_public_inputs_for_trace(
     Ok(public_inputs)
 }
 
-/// 请求聚合多个 proof descriptor；当前默认拒绝。
-///
-/// 委托给 [`crate::aggregator_prover::prove_aggregator`]。当前 descriptor-only
-/// Aggregator 不验证子 proof，因此该调用 fail closed。
-///
-/// # Errors
-///
-/// - `TexasAirError::UntrustedAggregationDisabled` — 可信递归 verifier 尚未接入
-pub fn aggregate_proofs(
-    children: Vec<crate::aggregator_air::ChildDescriptor>,
-) -> TexasAirResult<crate::aggregator_prover::AggregatorProof> {
-    crate::aggregator_prover::prove_aggregator(children)
-}
