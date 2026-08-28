@@ -12,7 +12,7 @@
 ///   also gated in this deployment for simplicity).
 use openzeppelin::access::ownable::OwnableComponent;
 use openzeppelin::security::pausable::PausableComponent;
-use openzeppelin::token::erc20::interface::{IERC20CamelDispatcher, IERC20CamelDispatcherTrait};
+use openzeppelin::token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTrait};
 use starknet::ContractAddress;
 use starknet::storage::{
     Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
@@ -48,7 +48,7 @@ pub trait IPokerVault<TContractState> {
 pub mod PokerVault {
     use openzeppelin::access::ownable::OwnableComponent;
     use openzeppelin::security::pausable::PausableComponent;
-    use openzeppelin::token::erc20::interface::{IERC20CamelDispatcher, IERC20CamelDispatcherTrait};
+    use openzeppelin::token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTrait};
     use starknet::ContractAddress;
     use starknet::storage::{
         Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
@@ -147,9 +147,9 @@ pub mod PokerVault {
 
             // Pull STRK20 from the caller into this contract. Requires the
             // caller to have approved this vault for `amount`.
-            let dispatcher = IERC20CamelDispatcher { contract_address: token };
+            let dispatcher = IERC20Dispatcher { contract_address: token };
             let ok = dispatcher
-                .transferFrom(caller, starknet::get_contract_address(), amount);
+                .transfer_from(caller, starknet::get_contract_address(), amount);
             assert!(ok, "Token transfer failed");
 
             let current = self.chip_balances.read(caller);
@@ -170,7 +170,7 @@ pub mod PokerVault {
             self.total_chips.write(self.total_chips.read() - amount);
 
             let token = self.token_address.read();
-            let dispatcher = IERC20CamelDispatcher { contract_address: token };
+            let dispatcher = IERC20Dispatcher { contract_address: token };
             let ok = dispatcher.transfer(caller, amount);
             assert!(ok, "Token transfer failed");
 

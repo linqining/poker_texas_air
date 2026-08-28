@@ -126,11 +126,13 @@ pub struct AdmissionStatement {
     pub ladders: Vec<RistrettoScalarMulLadderStatement>,
     /// Compressed-point accumulation rows (may be empty).
     pub additions: Vec<AdmissionAdditionRow>,
-    /// The Bayer--Groth scalar schedule of this admission, when present
-    /// (player-proof admissions carry none).
-    pub schedule: Option<AdmissionScheduleSpec>,
-    /// The Bayer--Groth product-argument recurrence, when present.
-    pub recurrence: Option<AdmissionRecurrenceSpec>,
+    /// The Bayer--Groth scalar schedules of this admission (player-proof
+    /// admissions carry none; a whole-hand admission carries one per
+    /// folded shuffle, batched by deck shape at segment build).
+    pub schedules: Vec<AdmissionScheduleSpec>,
+    /// The Bayer--Groth product-argument recurrences (one per folded
+    /// shuffle).
+    pub recurrences: Vec<AdmissionRecurrenceSpec>,
     /// Folded Poseidon2-M31 transcript chains, when present (Path A
     /// Flock-elimination prototype; see `ristretto_poseidon2_air`).
     pub poseidon2: Option<crate::ristretto_poseidon2_air::Poseidon2ChainSpec>,
@@ -150,7 +152,7 @@ pub struct ArchivedRistrettoAdmissionProof {
 }
 
 const ADMISSION_ARCHIVE_MAGIC: [u8; 4] = *b"RSAD";
-const ADMISSION_ARCHIVE_VERSION: u8 = 4;
+const ADMISSION_ARCHIVE_VERSION: u8 = 5;
 
 impl BorshSerialize for ArchivedRistrettoAdmissionProof {
     fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
@@ -224,29 +226,25 @@ fn admission_digest(statement: &AdmissionStatement) -> [u32; BINDING_DIGEST_LIMB
         hasher.update(&addition.right);
         hasher.update(&addition.output);
     }
-    match &statement.schedule {
-        Some(schedule) => {
-            hasher.update(b"schedule");
-            hasher.update(&schedule.powers_challenge);
-            hasher.update(&schedule.product_y);
-            hasher.update(&schedule.product_z);
-            hasher.update(&schedule.product_challenge);
-            hasher.update(&(schedule.deck_size as u64).to_le_bytes());
-        }
-        None => hasher.update(b"no-schedule"),
+    hasher.update(&(statement.schedules.len() as u64).to_le_bytes());
+    for schedule in &statement.schedules {
+        hasher.update(b"schedule");
+        hasher.update(&schedule.powers_challenge);
+        hasher.update(&schedule.product_y);
+        hasher.update(&schedule.product_z);
+        hasher.update(&schedule.product_challenge);
+        hasher.update(&(schedule.deck_size as u64).to_le_bytes());
     }
-    match &statement.recurrence {
-        Some(recurrence) => {
-            hasher.update(b"recurrence");
-            hasher.update(&recurrence.product_challenge);
-            for value in &recurrence.b_response {
-                hasher.update(value);
-            }
-            for value in &recurrence.a_response {
-                hasher.update(value);
-            }
+    hasher.update(&(statement.recurrences.len() as u64).to_le_bytes());
+    for recurrence in &statement.recurrences {
+        hasher.update(b"recurrence");
+        hasher.update(&recurrence.product_challenge);
+        for value in &recurrence.b_response {
+            hasher.update(value);
         }
-        None => hasher.update(b"no-recurrence"),
+        for value in &recurrence.a_response {
+            hasher.update(value);
+        }
     }
     match &statement.poseidon2 {
         Some(spec) => {
@@ -258,6 +256,12 @@ fn admission_digest(statement: &AdmissionStatement) -> [u32; BINDING_DIGEST_LIMB
                 }
             }
             hasher.update(&spec.chain_length.to_le_bytes());
+            hasher.update(&(spec.absorbed_words.len() as u64).to_le_bytes());
+            for words in &spec.absorbed_words {
+                for word in words {
+                    hasher.update(&word.to_le_bytes());
+                }
+            }
         }
         None => hasher.update(b"no-poseidon2"),
     }
@@ -281,7 +285,7 @@ struct AdmissionBindingAir {
     tag: [u32; BINDING_TAG_LIMBS],
     ladder_count: u32,
     addition_count: u32,
-    deck_size: u32,
+    schedule_count: u32,
 }
 
 impl AdmissionBindingAir {
@@ -294,10 +298,7 @@ impl AdmissionBindingAir {
                 .expect("tag splits into eight u32 limbs"),
             ladder_count: statement.ladders.len() as u32,
             addition_count: statement.additions.len() as u32,
-            deck_size: statement
-                .schedule
-                .as_ref()
-                .map_or(0, |schedule| schedule.deck_size as u32),
+            schedule_count: statement.schedules.len() as u32,
         }
     }
 
@@ -311,7 +312,7 @@ impl AdmissionBindingAir {
         }
         row.push(M31::from(self.ladder_count));
         row.push(M31::from(self.addition_count));
-        row.push(M31::from(self.deck_size));
+        row.push(M31::from(self.schedule_count));
         row.push(M31::from(u32::from(ADMISSION_ARCHIVE_VERSION)));
         let rows = 1usize << self.log_size;
         crate::trace_gen::MethodTrace::from_columns(
@@ -339,7 +340,7 @@ impl FrameworkEval for AdmissionBindingAir {
             .chain([
                 self.ladder_count,
                 self.addition_count,
-                self.deck_size,
+                self.schedule_count,
                 u32::from(ADMISSION_ARCHIVE_VERSION),
             ]);
         for expected in constants {
@@ -357,8 +358,12 @@ struct AdmissionRebuilt {
     schedules: Vec<Vec<crate::ristretto_scalar_mul_air::LadderStep>>,
     codec_programs: Vec<RistrettoFpProgram>,
     addition_programs: Vec<RistrettoFpProgram>,
-    schedule_program: Option<RistrettoScalarProgram>,
-    recurrence_program: Option<RistrettoScalarProgram>,
+    /// Same-shape schedule programs, one group per distinct deck shape
+    /// (each group batches into ONE scalar segment).
+    schedule_programs: Vec<Vec<RistrettoScalarProgram>>,
+    /// Same-shape recurrence programs, one group per distinct response
+    /// length.
+    recurrence_programs: Vec<Vec<RistrettoScalarProgram>>,
     poseidon2_spec: Option<crate::ristretto_poseidon2_air::Poseidon2ChainSpec>,
 }
 
@@ -395,9 +400,9 @@ fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<Admission
             Ok(program)
         })
         .collect::<TexasAirResult<Vec<_>>>()?;
-    let schedule_program = statement
-        .schedule
-        .as_ref()
+    let schedule_programs = statement
+        .schedules
+        .par_iter()
         .map(|schedule| {
             build_bayer_groth_scalar_schedule(
                 &schedule.powers_challenge,
@@ -407,10 +412,23 @@ fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<Admission
                 schedule.deck_size,
             )
         })
-        .transpose()?;
-    let recurrence_program = statement
-        .recurrence
-        .as_ref()
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    // Batch same-shape schedules into one segment per deck shape
+    // (deterministic ascending group order).
+    let mut schedule_groups: Vec<(usize, Vec<RistrettoScalarProgram>)> = Vec::new();
+    for (spec, program) in statement.schedules.iter().zip(schedule_programs) {
+        match schedule_groups.iter_mut().find(|(deck, _)| *deck == spec.deck_size) {
+            Some((_, group)) => group.push(program),
+            None => schedule_groups.push((spec.deck_size, vec![program])),
+        }
+    }
+    schedule_groups.sort_by_key(|(deck, _)| *deck);
+    let schedule_programs: Vec<Vec<RistrettoScalarProgram>> =
+        schedule_groups.into_iter().map(|(_, group)| group).collect();
+
+    let recurrence_programs = statement
+        .recurrences
+        .par_iter()
         .map(|recurrence| {
             crate::ristretto_scalar_program_air::build_bayer_groth_recurrence_program(
                 &recurrence.product_challenge,
@@ -418,13 +436,29 @@ fn rebuild_admission(statement: &AdmissionStatement) -> TexasAirResult<Admission
                 &recurrence.a_response,
             )
         })
-        .transpose()?;
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    let mut recurrence_groups: Vec<(usize, Vec<RistrettoScalarProgram>)> = Vec::new();
+    for (spec, program) in statement
+        .recurrences
+        .iter()
+        .zip(recurrence_programs)
+    {
+        let length = spec.b_response.len();
+        match recurrence_groups.iter_mut().find(|(len, _)| *len == length) {
+            Some((_, group)) => group.push(program),
+            None => recurrence_groups.push((length, vec![program])),
+        }
+    }
+    recurrence_groups.sort_by_key(|(length, _)| *length);
+    let recurrence_programs: Vec<Vec<RistrettoScalarProgram>> =
+        recurrence_groups.into_iter().map(|(_, group)| group).collect();
+
     Ok(AdmissionRebuilt {
         schedules,
         codec_programs,
         addition_programs,
-        schedule_program,
-        recurrence_program,
+        schedule_programs,
+        recurrence_programs,
         poseidon2_spec: statement.poseidon2.clone(),
     })
 }
@@ -488,15 +522,19 @@ fn extend_timed(
 /// deterministically (currently only the additions segment can be empty).
 struct AdmissionSegments {
     ladder: LadderSegment,
-    schedule: Option<ScalarProgramSegment>,
-    recurrence: Option<ScalarProgramSegment>,
+    /// One scalar segment per schedule shape group (same-shape programs
+    /// share a single FRI-sized batch).
+    schedule: Vec<ScalarProgramSegment>,
+    /// One scalar segment per recurrence shape group.
+    recurrence: Vec<ScalarProgramSegment>,
     codec: FpProgramSegment,
     additions: Option<FpProgramSegment>,
-    /// Optional Texas method-AIR trace (Layer-1 fold): trace columns only —
-    /// a method AIR carries no preprocessed columns and no LogUp layer, so
-    /// its component is a zero-claim construction supplied by the generic
-    /// wrapper.
-    texas: Option<(crate::trace_gen::MethodTrace, [u32; BINDING_DIGEST_LIMBS])>,
+    /// Texas method-AIR folds (Layer-1): trace columns only — a method AIR
+    /// carries no preprocessed columns and no LogUp layer, so each fold's
+    /// component is a zero-claim construction supplied by its factory.
+    /// Multiple method AIRs (lifecycle/hand/betting/settlement) share the
+    /// single admission STARK.
+    texas: Vec<(crate::trace_gen::MethodTrace, [u32; BINDING_DIGEST_LIMBS])>,
     /// Folded Poseidon2-M31 transcript chains (optional segment).
     poseidon2: Option<crate::ristretto_poseidon2_air::Poseidon2Segment>,
 }
@@ -506,25 +544,27 @@ impl AdmissionSegments {
         Ok(Self {
             ladder: LadderSegment::build(&rebuilt.schedules)?,
             schedule: rebuilt
-                .schedule_program
-                .as_ref()
-                .map(|program| {
+                .schedule_programs
+                .iter()
+                .enumerate()
+                .map(|(group, programs)| {
                     ScalarProgramSegment::build(
-                        &[program.clone()],
-                        "ristretto.admission.scalar.schedule.scope.v1",
+                        programs,
+                        &format!("ristretto.admission.scalar.schedule.{group}.scope.v1"),
                     )
                 })
-                .transpose()?,
+                .collect::<TexasAirResult<Vec<_>>>()?,
             recurrence: rebuilt
-                .recurrence_program
-                .as_ref()
-                .map(|program| {
+                .recurrence_programs
+                .iter()
+                .enumerate()
+                .map(|(group, programs)| {
                     ScalarProgramSegment::build(
-                        &[program.clone()],
-                        "ristretto.admission.scalar.recurrence.scope.v1",
+                        programs,
+                        &format!("ristretto.admission.scalar.recurrence.{group}.scope.v1"),
                     )
                 })
-                .transpose()?,
+                .collect::<TexasAirResult<Vec<_>>>()?,
             codec: FpProgramSegment::build(
                 &rebuilt.codec_programs,
                 "ristretto.admission.fp.codec.scope.v1",
@@ -537,7 +577,7 @@ impl AdmissionSegments {
                     "ristretto.admission.fp.additions.scope.v1",
                 )?)
             },
-            texas: None,
+            texas: Vec::new(),
             poseidon2: rebuilt
                 .poseidon2_spec
                 .as_ref()
@@ -552,25 +592,27 @@ impl AdmissionSegments {
         Ok(Self {
             ladder: LadderSegment::build_shape_only(&rebuilt.schedules)?,
             schedule: rebuilt
-                .schedule_program
-                .as_ref()
-                .map(|program| {
+                .schedule_programs
+                .iter()
+                .enumerate()
+                .map(|(group, programs)| {
                     ScalarProgramSegment::build_shape_only(
-                        &[program.clone()],
-                        "ristretto.admission.scalar.schedule.scope.v1",
+                        programs,
+                        &format!("ristretto.admission.scalar.schedule.{group}.scope.v1"),
                     )
                 })
-                .transpose()?,
+                .collect::<TexasAirResult<Vec<_>>>()?,
             recurrence: rebuilt
-                .recurrence_program
-                .as_ref()
-                .map(|program| {
+                .recurrence_programs
+                .iter()
+                .enumerate()
+                .map(|(group, programs)| {
                     ScalarProgramSegment::build_shape_only(
-                        &[program.clone()],
-                        "ristretto.admission.scalar.recurrence.scope.v1",
+                        programs,
+                        &format!("ristretto.admission.scalar.recurrence.{group}.scope.v1"),
                     )
                 })
-                .transpose()?,
+                .collect::<TexasAirResult<Vec<_>>>()?,
             codec: FpProgramSegment::build_shape_only(
                 &rebuilt.codec_programs,
                 "ristretto.admission.fp.codec.scope.v1",
@@ -583,7 +625,7 @@ impl AdmissionSegments {
                     "ristretto.admission.fp.additions.scope.v1",
                 )?)
             },
-            texas: None,
+            texas: Vec::new(),
             poseidon2: rebuilt
                 .poseidon2_spec
                 .as_ref()
@@ -600,16 +642,16 @@ impl AdmissionSegments {
         if let Some(additions) = &self.additions {
             log = log.max(additions.log_size);
         }
-        if let Some(schedule) = &self.schedule {
+        for schedule in &self.schedule {
             log = log.max(schedule.log_size);
         }
-        if let Some(recurrence) = &self.recurrence {
+        for recurrence in &self.recurrence {
             log = log.max(recurrence.log_size);
         }
         if let Some(poseidon2) = &self.poseidon2 {
             log = log.max(poseidon2.log_size);
         }
-        if let Some((trace, _)) = &self.texas {
+        for (trace, _) in &self.texas {
             log = log.max(trace.log_size);
         }
         log
@@ -622,20 +664,14 @@ impl AdmissionSegments {
     ) {
         let kind = TimingKind::Prove;
         timed_phase("interact.ladder", kind, None, || self.ladder.interact(channel));
-        if let Some(schedule) = &mut self.schedule {
-            let program = rebuilt
-                .schedule_program
-                .as_ref()
-                .expect("segment implies program");
+        for (group, schedule) in self.schedule.iter_mut().enumerate() {
+            let program = &rebuilt.schedule_programs[group][0];
             timed_phase("interact.schedule", kind, None, || {
                 schedule.interact(channel, program)
             });
         }
-        if let Some(recurrence) = &mut self.recurrence {
-            let program = rebuilt
-                .recurrence_program
-                .as_ref()
-                .expect("segment implies program");
+        for (group, recurrence) in self.recurrence.iter_mut().enumerate() {
+            let program = &rebuilt.recurrence_programs[group][0];
             timed_phase("interact.recurrence", kind, None, || {
                 recurrence.interact(channel, program)
             });
@@ -657,10 +693,10 @@ impl AdmissionSegments {
 
     fn mirror_draw(&mut self, channel: &mut stwo::core::channel::Poseidon252Channel) {
         self.ladder.mirror_draw(channel);
-        if let Some(schedule) = &mut self.schedule {
+        for schedule in &mut self.schedule {
             schedule.mirror_draw(channel);
         }
-        if let Some(recurrence) = &mut self.recurrence {
+        for recurrence in &mut self.recurrence {
             recurrence.mirror_draw(channel);
         }
         if let Some(poseidon2) = &mut self.poseidon2 {
@@ -672,19 +708,50 @@ impl AdmissionSegments {
         }
     }
 
+    /// Restore each segment's LogUp claimed sum from the archive, in the
+    /// fixed order of [`Self::claimed_sums`].  The shape-only verifier build
+    /// leaves every sum at zero (no interaction columns are materialized),
+    /// but the OODS constraint evaluation reads the sum through the
+    /// components' cumsum shift, so a segment whose LogUp does not telescope
+    /// to zero — the Poseidon2 chain segment's `Σ (1/d_init − 1/d_digest)`
+    /// never does — must see its real prover-side sum.
+    fn restore_claimed_sums(&mut self, sums: &[SecureField]) {
+        let mut slot = 0;
+        self.ladder.claimed_sum = sums[slot];
+        slot += 1;
+        for schedule in &mut self.schedule {
+            schedule.claimed_sum = sums[slot];
+            slot += 1;
+        }
+        for recurrence in &mut self.recurrence {
+            recurrence.claimed_sum = sums[slot];
+            slot += 1;
+        }
+        if let Some(poseidon2) = &mut self.poseidon2 {
+            poseidon2.claimed_sum = sums[slot];
+            slot += 1;
+        }
+        self.codec.claimed_sum = sums[slot];
+        slot += 1;
+        if let Some(additions) = &mut self.additions {
+            additions.claimed_sum = sums[slot];
+        }
+        debug_assert_eq!(slot, sums.len() - usize::from(self.additions.is_some()));
+    }
+
     fn claimed_sum_count(&self) -> usize {
-        2 + usize::from(self.schedule.is_some())
-            + usize::from(self.recurrence.is_some())
+        2 + self.schedule.len()
+            + self.recurrence.len()
             + usize::from(self.poseidon2.is_some())
             + usize::from(self.additions.is_some())
     }
 
     fn claimed_sums(&self) -> Vec<SecureField> {
         let mut sums = vec![self.ladder.claimed_sum];
-        if let Some(schedule) = &self.schedule {
+        for schedule in &self.schedule {
             sums.push(schedule.claimed_sum);
         }
-        if let Some(recurrence) = &self.recurrence {
+        for recurrence in &self.recurrence {
             sums.push(recurrence.claimed_sum);
         }
         if let Some(poseidon2) = &self.poseidon2 {
@@ -699,10 +766,10 @@ impl AdmissionSegments {
 
     fn commit_scope(&self, tree: &mut AdmissionTreeBuilder<'_, '_>, kind: TimingKind) {
         extend_timed(tree, "scope.ladder", kind, || self.ladder.scope.to_evaluations());
-        if let Some(schedule) = &self.schedule {
+        for schedule in &self.schedule {
             extend_timed(tree, "scope.schedule", kind, || schedule.scope.to_evaluations());
         }
-        if let Some(recurrence) = &self.recurrence {
+        for recurrence in &self.recurrence {
             extend_timed(tree, "scope.recurrence", kind, || {
                 recurrence.scope.to_evaluations()
             });
@@ -725,10 +792,10 @@ impl AdmissionSegments {
         kind: TimingKind,
     ) {
         extend_timed(tree, "trace.ladder", kind, || self.ladder.trace.to_evaluations());
-        if let Some(schedule) = &self.schedule {
+        for schedule in &self.schedule {
             extend_timed(tree, "trace.schedule", kind, || schedule.trace.to_evaluations());
         }
-        if let Some(recurrence) = &self.recurrence {
+        for recurrence in &self.recurrence {
             extend_timed(tree, "trace.recurrence", kind, || {
                 recurrence.trace.to_evaluations()
             });
@@ -742,7 +809,7 @@ impl AdmissionSegments {
         if let Some(additions) = &self.additions {
             extend_timed(tree, "trace.additions", kind, || additions.trace.to_evaluations());
         }
-        if let Some((trace, _)) = &self.texas {
+        for (trace, _) in &self.texas {
             extend_timed(tree, "trace.texas", kind, || trace.to_evaluations());
         }
         extend_timed(tree, "trace.binding", kind, || binding_trace.to_evaluations());
@@ -753,12 +820,12 @@ impl AdmissionSegments {
         extend_timed(tree, "interaction.ladder", kind, || {
             self.ladder.interaction.clone()
         });
-        if let Some(schedule) = &self.schedule {
+        for schedule in &self.schedule {
             extend_timed(tree, "interaction.schedule", kind, || {
                 schedule.interaction.clone()
             });
         }
-        if let Some(recurrence) = &self.recurrence {
+        for recurrence in &self.recurrence {
             extend_timed(tree, "interaction.recurrence", kind, || {
                 recurrence.interaction.clone()
             });
@@ -780,10 +847,10 @@ impl AdmissionSegments {
 
     fn scope_sizes(&self) -> Vec<u32> {
         let mut sizes = vec![vec![self.ladder.log_size; self.ladder.scope.num_columns]];
-        if let Some(schedule) = &self.schedule {
+        for schedule in &self.schedule {
             sizes.push(vec![schedule.log_size; schedule.scope.num_columns]);
         }
-        if let Some(recurrence) = &self.recurrence {
+        for recurrence in &self.recurrence {
             sizes.push(vec![recurrence.log_size; recurrence.scope.num_columns]);
         }
         if let Some(poseidon2) = &self.poseidon2 {
@@ -799,10 +866,10 @@ impl AdmissionSegments {
 
     fn trace_sizes(&self) -> Vec<u32> {
         let mut sizes = vec![vec![self.ladder.log_size; self.ladder.trace.num_columns]];
-        if let Some(schedule) = &self.schedule {
+        for schedule in &self.schedule {
             sizes.push(vec![schedule.log_size; schedule.trace.num_columns]);
         }
-        if let Some(recurrence) = &self.recurrence {
+        for recurrence in &self.recurrence {
             sizes.push(vec![recurrence.log_size; recurrence.trace.num_columns]);
         }
         if let Some(poseidon2) = &self.poseidon2 {
@@ -813,7 +880,7 @@ impl AdmissionSegments {
         if let Some(additions) = &self.additions {
             sizes.extend(vec![additions.log_size; additions.trace.num_columns]);
         }
-        if let Some((trace, _)) = &self.texas {
+        for (trace, _) in &self.texas {
             sizes.extend(vec![trace.log_size; trace.num_columns]);
         }
         sizes.extend(vec![BINDING_LOG_SIZE; BINDING_COLUMNS]);
@@ -825,28 +892,22 @@ impl AdmissionSegments {
             self.ladder.log_size;
             self.ladder.interaction_columns()
         ]];
-        if let Some(schedule) = &self.schedule {
-            let program = rebuilt
-                .schedule_program
-                .as_ref()
-                .expect("segment implies program");
+        for (group, schedule) in self.schedule.iter().enumerate() {
+            let program = &rebuilt.schedule_programs[group][0];
             sizes.push(vec![
                 schedule.log_size;
                 schedule.interaction_columns(program)
             ]);
         }
-        if let Some(recurrence) = &self.recurrence {
-            let program = rebuilt
-                .recurrence_program
-                .as_ref()
-                .expect("segment implies program");
+        for (group, recurrence) in self.recurrence.iter().enumerate() {
+            let program = &rebuilt.recurrence_programs[group][0];
             sizes.push(vec![
                 recurrence.log_size;
                 recurrence.interaction_columns(program)
             ]);
         }
         if let Some(poseidon2) = &self.poseidon2 {
-            sizes.push(vec![poseidon2.log_size; poseidon2.interaction.len()]);
+            sizes.push(vec![poseidon2.log_size; poseidon2.interaction_columns()]);
         }
         sizes.push(vec![
             self.codec.log_size;
@@ -866,18 +927,12 @@ impl AdmissionSegments {
 
     fn preprocessed_ids(&self, rebuilt: &AdmissionRebuilt) -> Vec<PreProcessedColumnId> {
         let mut ids = self.ladder.preprocessed_ids();
-        if let Some(schedule) = &self.schedule {
-            let program = rebuilt
-                .schedule_program
-                .as_ref()
-                .expect("segment implies program");
+        for (group, schedule) in self.schedule.iter().enumerate() {
+            let program = &rebuilt.schedule_programs[group][0];
             ids.extend(schedule.preprocessed_ids(program));
         }
-        if let Some(recurrence) = &self.recurrence {
-            let program = rebuilt
-                .recurrence_program
-                .as_ref()
-                .expect("segment implies program");
+        for (group, recurrence) in self.recurrence.iter().enumerate() {
+            let program = &rebuilt.recurrence_programs[group][0];
             ids.extend(recurrence.preprocessed_ids(program));
         }
         if let Some(poseidon2) = &self.poseidon2 {
@@ -896,24 +951,22 @@ impl AdmissionSegments {
         allocator: &mut TraceLocationAllocator,
         rebuilt: &AdmissionRebuilt,
         binding: AdmissionBindingAir,
-        texas_component: Option<
-            &dyn Fn(&mut TraceLocationAllocator) -> Box<dyn ComponentProver<SimdBackend>>,
+        texas_components: &mut dyn Iterator<
+            Item = &(
+                dyn Fn(&mut TraceLocationAllocator) -> Box<dyn ComponentProver<SimdBackend>>
+                    + Send
+                    + Sync
+            ),
         >,
     ) -> Vec<Box<dyn ComponentProver<SimdBackend>>> {
         let mut components: Vec<Box<dyn ComponentProver<SimdBackend>>> =
             vec![Box::new(self.ladder.component(allocator))];
-        if let Some(schedule) = &self.schedule {
-            let program = rebuilt
-                .schedule_program
-                .as_ref()
-                .expect("segment implies program");
+        for (group, schedule) in self.schedule.iter().enumerate() {
+            let program = &rebuilt.schedule_programs[group][0];
             components.push(Box::new(schedule.component(allocator, program)));
         }
-        if let Some(recurrence) = &self.recurrence {
-            let program = rebuilt
-                .recurrence_program
-                .as_ref()
-                .expect("segment implies program");
+        for (group, recurrence) in self.recurrence.iter().enumerate() {
+            let program = &rebuilt.recurrence_programs[group][0];
             components.push(Box::new(recurrence.component(allocator, program)));
         }
         if let Some(poseidon2) = &self.poseidon2 {
@@ -927,11 +980,8 @@ impl AdmissionSegments {
                 additions.component(allocator, &rebuilt.addition_programs[0]),
             ));
         }
-        if self.texas.is_some() {
-            components.push(texas_component
-                .expect("texas trace implies a component factory")(
-                allocator
-            ));
+        for factory in texas_components {
+            components.push(factory(allocator));
         }
         components.push(Box::new(FrameworkComponent::new(
             allocator,
@@ -947,24 +997,42 @@ impl AdmissionSegments {
 pub fn prove_ristretto_admission_stark(
     statement: AdmissionStatement,
 ) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
-    prove_admission_inner(statement, None, None, None)
+    prove_admission_inner(statement, &[])
 }
 
-type TexasFactory<'a> =
-    &'a (dyn Fn(&mut TraceLocationAllocator) -> Box<dyn ComponentProver<SimdBackend>>);
+/// One Layer-1 method fold bound to its component factory: the trace
+/// enters shared tree 1, the ingredient digest binds the statement through
+/// the channel, and the factory builds the zero-claim `BoundAir` component
+/// against the shared allocator.
+pub struct TexasFold {
+    pub trace: crate::trace_gen::MethodTrace,
+    pub digest: [u32; BINDING_DIGEST_LIMBS],
+    pub factory: Box<
+        dyn Fn(&mut TraceLocationAllocator) -> Box<dyn ComponentProver<SimdBackend>>
+            + Send
+            + Sync,
+    >,
+}
+
+/// Fiat--Shamir binding of the method folds: domain tag, fold count, then
+/// every ingredient digest in order (mirrored by the verifier).
+fn mix_texas_domain(channel: &mut stwo::core::channel::Poseidon252Channel, texas: &[TexasFold]) {
+    channel.mix_u64(0x7a63_6861_7465_7861);
+    channel.mix_u64(texas.len() as u64);
+    for fold in texas {
+        channel.mix_u32s(&fold.digest);
+    }
+}
 
 fn prove_admission_inner(
     statement: AdmissionStatement,
-    texas_trace: Option<crate::trace_gen::MethodTrace>,
-    texas_digest: Option<[u32; BINDING_DIGEST_LIMBS]>,
-    texas_factory: Option<TexasFactory<'_>>,
+    texas: &[TexasFold],
 ) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
     let kind = TimingKind::Prove;
     let rebuilt = timed_phase("rebuild", kind, None, || rebuild_admission(&statement))?;
     let mut segments =
         timed_phase("segments.build", kind, None, || AdmissionSegments::build(&rebuilt))?;
-    segments.texas =
-        texas_trace.map(|trace| (trace, texas_digest.expect("texas trace implies a digest")));
+    segments.texas = texas.iter().map(|fold| (fold.trace.clone(), fold.digest)).collect();
     let binding = AdmissionBindingAir::new(&statement);
     let binding_trace = timed_phase("binding.trace", kind, None, || binding.trace_columns());
 
@@ -975,10 +1043,7 @@ fn prove_admission_inner(
     let mut channel = stwo::core::channel::Poseidon252Channel::default();
     channel.mix_u64(0x7a63_6861_646d_6973);
     channel.mix_u32s(&admission_digest(&statement));
-    if let Some(digest) = texas_digest {
-        channel.mix_u64(0x7a63_6861_7465_7861);
-        channel.mix_u32s(&digest);
-    }
+    mix_texas_domain(&mut channel, texas);
     let mut scheme =
         CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::with_memory_pool(
             config,
@@ -1008,7 +1073,14 @@ fn prove_admission_inner(
 
     let ids = segments.preprocessed_ids(&rebuilt);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let components = segments.components(&mut allocator, &rebuilt, binding, texas_factory);
+    let factories: Vec<
+        &(
+            dyn Fn(&mut TraceLocationAllocator) -> Box<dyn ComponentProver<SimdBackend>>
+                + Send
+                + Sync
+        ),
+    > = texas.iter().map(|fold| &*fold.factory).collect();
+    let components = segments.components(&mut allocator, &rebuilt, binding, &mut factories.into_iter());
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
         components.iter().map(|component| &**component).collect();
     let proof = timed_phase("prove.stwo", kind, None, || {
@@ -1036,14 +1108,12 @@ fn prove_admission_inner(
 pub fn verify_ristretto_admission_stark(
     archive: &ArchivedRistrettoAdmissionProof,
 ) -> TexasAirResult<()> {
-    verify_admission_inner(archive, None, None, None)
+    verify_admission_inner(archive, &[])
 }
 
 fn verify_admission_inner(
     archive: &ArchivedRistrettoAdmissionProof,
-    texas_trace: Option<crate::trace_gen::MethodTrace>,
-    texas_digest: Option<[u32; BINDING_DIGEST_LIMBS]>,
-    texas_factory: Option<TexasFactory<'_>>,
+    texas: &[TexasFold],
 ) -> TexasAirResult<()> {
     type Proof = StarkProof<Poseidon252MerkleHasher>;
     let kind = TimingKind::Verify;
@@ -1051,8 +1121,7 @@ fn verify_admission_inner(
     let mut segments = timed_phase("segments.build", kind, None, || {
         AdmissionSegments::build_shape_only(&rebuilt)
     })?;
-    segments.texas =
-        texas_trace.map(|trace| (trace, texas_digest.expect("texas trace implies a digest")));
+    segments.texas = texas.iter().map(|fold| (fold.trace.clone(), fold.digest)).collect();
     let binding = AdmissionBindingAir::new(&archive.statement);
     let proof: Proof = timed_phase("deserialize", kind, None, || {
         options().deserialize(&archive.stark_proof_bytes)
@@ -1084,10 +1153,7 @@ fn verify_admission_inner(
     let mut channel = stwo::core::channel::Poseidon252Channel::default();
     channel.mix_u64(0x7a63_6861_646d_6973);
     channel.mix_u32s(&admission_digest(&archive.statement));
-    if let Some(digest) = texas_digest {
-        channel.mix_u64(0x7a63_6861_7465_7861);
-        channel.mix_u32s(&digest);
-    }
+    mix_texas_domain(&mut channel, texas);
     let mut scheme =
         stwo::core::pcs::CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
     scheme.commit(proof.commitments[0], &segments.scope_sizes(), &mut channel);
@@ -1108,6 +1174,7 @@ fn verify_admission_inner(
             }))
         })
         .collect();
+    segments.restore_claimed_sums(&sums);
     channel.mix_felts(&sums);
     scheme.commit(
         proof.commitments[2],
@@ -1117,7 +1184,14 @@ fn verify_admission_inner(
 
     let ids = segments.preprocessed_ids(&rebuilt);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let components = segments.components(&mut allocator, &rebuilt, binding, texas_factory);
+    let factories: Vec<
+        &(
+            dyn Fn(&mut TraceLocationAllocator) -> Box<dyn ComponentProver<SimdBackend>>
+                + Send
+                + Sync
+        ),
+    > = texas.iter().map(|fold| &*fold.factory).collect();
+    let components = segments.components(&mut allocator, &rebuilt, binding, &mut factories.into_iter());
     let component_refs: Vec<&dyn stwo::core::air::Component> = components
         .iter()
         .map(|component| component.as_ref() as &dyn stwo::core::air::Component)
@@ -1447,18 +1521,18 @@ fn decompose_bg_admission(
                 output,
             })
             .collect(),
-        schedule: Some(AdmissionScheduleSpec {
+        schedules: vec![AdmissionScheduleSpec {
             powers_challenge: bg_scalar_bytes(&powers_challenge),
             product_y: bg_scalar_bytes(&product_y),
             product_z: bg_scalar_bytes(&product_z),
             product_challenge: bg_scalar_bytes(&product_challenge),
             deck_size: n,
-        }),
-        recurrence: Some(AdmissionRecurrenceSpec {
+        }],
+        recurrences: vec![AdmissionRecurrenceSpec {
             product_challenge: bg_scalar_bytes(&product_challenge),
             b_response: product.b_response.iter().map(bg_scalar_bytes).collect(),
             a_response: product.a_response.iter().map(bg_scalar_bytes).collect(),
-        }),
+        }],
     };
     Ok((statement, builder.equalities))
 }
@@ -1486,6 +1560,360 @@ pub fn verify_ristretto_bg_admission_components(
     if archive.statement != statement {
         return Err(TexasAirError::ConstraintUnsatisfied(
             "BG admission statement is detached from its component set".into(),
+        ));
+    }
+    verify_ristretto_admission_stark(archive)
+}
+
+/// Prove one Bayer--Groth shuffle under the Poseidon2-M31 transcript and
+/// return its admission components together with the replayed transcript
+/// chain (public data only — the challenge schedule, no witness, no
+/// permutation hint, HVZK preserved).  This is the Flock-free shuffle
+/// path for whole-hand admissions.
+pub fn prove_bg_admission_poseidon2(
+    input: &[BgCiphertext],
+    output: &[BgCiphertext],
+    permutation: &[usize],
+    rerandomizers: &[BgScalar],
+    public_key: &BgPoint,
+    statement_digest: [u8; 32],
+    rng: &mut (impl rand_core::CryptoRng + rand_core::RngCore),
+) -> TexasAirResult<(BgAdmissionComponents, crate::ristretto_poseidon2_air::Poseidon2ChainSpec)>
+{
+    use crate::ristretto_poseidon2_transcript::Poseidon2M31Transcript;
+    let context = poker_protocol::ristretto_air::RISTRETTO_AIR_V2_SHUFFLE_CONTEXT;
+    let mut prove_transcript = Poseidon2M31Transcript::new(context);
+    let proof = BayerGrothShuffleProof::<RistrettoCurve>::prove(
+        input,
+        output,
+        permutation,
+        rerandomizers,
+        public_key,
+        rng,
+        &mut prove_transcript,
+    )
+    .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))?;
+    let mut replay = Poseidon2M31Transcript::new(context);
+    proof
+        .verify(input, output, public_key, &mut replay)
+        .map_err(|error| TexasAirError::ConstraintUnsatisfied(error.to_string()))?;
+    let images = replay.challenge_images();
+    if images.len() != 5 {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "BG verify replay must derive exactly five challenges".into(),
+        ));
+    }
+    let challenges = images
+        .iter()
+        .map(|image| {
+            <BgScalar as CurveScalar>::from_canonical_bytes(image).ok_or_else(|| {
+                TexasAirError::ConstraintUnsatisfied(
+                    "BG challenge image is not a canonical scalar".into(),
+                )
+            })
+        })
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    Ok((
+        BgAdmissionComponents {
+            statement_digest,
+            input: input.to_vec(),
+            output: output.to_vec(),
+            public_key: *public_key,
+            proof,
+            challenges,
+        },
+        replay.into_chain_spec(),
+    ))
+}
+
+/// Merge per-action Poseidon2 chain statements into one uniform-length
+/// batch: shorter chains are padded with all-zero word steps.  The
+/// padding is deterministic and unambiguous (every absorbed word is
+/// public), and the padded chains keep their honest prefix semantics —
+/// challenges were derived from intermediate states the batch still pins.
+pub fn merge_poseidon2_chain_specs(
+    specs: &[crate::ristretto_poseidon2_air::Poseidon2ChainSpec],
+) -> Option<crate::ristretto_poseidon2_air::Poseidon2ChainSpec> {
+    use crate::ristretto_poseidon2_air::{N_RATE_LANES, Poseidon2ChainSpec};
+    let specs: Vec<_> = specs
+        .iter()
+        .filter(|spec| !spec.initial_states.is_empty())
+        .collect();
+    if specs.is_empty() {
+        return None;
+    }
+    let chain_length = specs.iter().map(|spec| spec.chain_length).max().unwrap();
+    let mut initial_states = Vec::new();
+    let mut absorbed_words = Vec::new();
+    for spec in &specs {
+        for chain in 0..spec.initial_states.len() {
+            initial_states.push(spec.initial_states[chain]);
+            for step in 0..chain_length as usize {
+                let index = chain * spec.chain_length as usize + step;
+                absorbed_words.push(if step < spec.chain_length as usize {
+                    spec.absorbed_words[index]
+                } else {
+                    [0u32; N_RATE_LANES]
+                });
+            }
+        }
+    }
+    Some(Poseidon2ChainSpec {
+        initial_states,
+        absorbed_words,
+        chain_length,
+    })
+}
+
+/// One key-ownership equation whose challenge is derived from the
+/// Poseidon2-M31 transcript (the Flock-free admission path).
+#[derive(Debug, Clone, Copy)]
+pub struct PlayerPkOwnershipPoseidon2Entry<'a> {
+    pub pk: &'a BgPoint,
+    pub context: &'a [u8],
+    pub wire: &'a crate::ristretto_player_proofs_air::RistrettoPkOwnershipWire,
+}
+
+/// One reveal-token equation pair derived from the Poseidon2-M31
+/// transcript.
+#[derive(Debug, Clone, Copy)]
+pub struct PlayerRevealTokenPoseidon2Entry<'a> {
+    pub pk: &'a BgPoint,
+    pub ciphertext: &'a BgCiphertext,
+    pub reveal_token: &'a BgPoint,
+    pub context: &'a [u8],
+    pub wire: &'a crate::ristretto_player_proofs_air::RistrettoRevealTokenWire,
+}
+
+/// One batched deck-DLEQ family (52 cards) derived from the Poseidon2-M31
+/// transcript.
+#[derive(Debug, Clone, Copy)]
+pub struct PlayerDeckDleqPoseidon2Entry<'a> {
+    pub direction: crate::ristretto_player_proofs_air::RistrettoDeckDleqDirection,
+    pub input: &'a [BgCiphertext],
+    pub output: &'a [BgCiphertext],
+    pub pk: &'a BgPoint,
+    pub context: &'a [u8],
+    pub wire: &'a crate::ristretto_player_proofs_air::RistrettoDeckDleqWire,
+}
+
+/// Player obligations on the Poseidon2-M31 transcript path: every
+/// challenge comes from the M31 sponge, every transcript run is a chain
+/// statement folded into the hand's Poseidon2 batch, and there is no
+/// Flock sidecar at all.
+#[derive(Debug, Clone, Default)]
+pub struct PlayerPoseidon2Inputs<'a> {
+    pub pk_ownership: Vec<PlayerPkOwnershipPoseidon2Entry<'a>>,
+    pub reveal_tokens: Vec<PlayerRevealTokenPoseidon2Entry<'a>>,
+    pub deck_dleqs: Vec<PlayerDeckDleqPoseidon2Entry<'a>>,
+}
+
+/// One whole hand's admission obligations, settled by a single STARK: all
+/// shuffle equations, all player equations, the hand-transcript root, and
+/// the hand's folded Poseidon2 chains.  This is the "one proof per hand"
+/// artifact — every obligation that the deployment path checks natively
+/// (BG verification, player proofs) folds into one multi-component prove
+/// call with one FRI over the shared trees.
+pub struct HandAdmissionComponents<'a> {
+    /// The hand's shuffle admissions (typically nine deck-52 sets).
+    pub shuffles: Vec<BgAdmissionComponents>,
+    /// The shuffles' Poseidon2 replay chains, when they were proven under
+    /// the M31 transcript (see [`prove_bg_admission_poseidon2`]); one per
+    /// shuffle, merged into the hand's Poseidon2 batch.  Empty when the
+    /// shuffles ride the Flock deployment path.
+    pub shuffle_chains:
+        Vec<crate::ristretto_poseidon2_air::Poseidon2ChainSpec>,
+    /// Player obligations folded into the same proof (ownership, reveal
+    /// tokens, deck DLEQs); may be empty when the artifact covers only
+    /// the shuffles.
+    pub players: Vec<PlayerAdmissionInputs<'a>>,
+    /// Player obligations on the Poseidon2-M31 transcript path: their
+    /// equations fold the same way, and their transcript chains merge
+    /// into the hand's Poseidon2 batch (no Flock artifacts).
+    pub poseidon2_players: Vec<PlayerPoseidon2Inputs<'a>>,
+    /// The hand-transcript root (a Poseidon2 digest over the per-action
+    /// chains); becomes the admission tag.
+    pub hand_root: [u8; 32],
+    /// The hand's transcript chains as one uniform Poseidon2 batch
+    /// (see [`merge_poseidon2_chain_specs`]).
+    pub poseidon2: Option<crate::ristretto_poseidon2_air::Poseidon2ChainSpec>,
+}
+
+/// Fold the Poseidon2-path player equations into the builder, collecting
+/// every replayed transcript chain.
+fn decompose_player_poseidon2_into(
+    inputs: &PlayerPoseidon2Inputs<'_>,
+    builder: &mut PointEquationBuilder,
+    chain_specs: &mut Vec<crate::ristretto_poseidon2_air::Poseidon2ChainSpec>,
+) -> TexasAirResult<()> {
+    use crate::ristretto_player_proofs_air::{
+        derive_pk_ownership_challenge_poseidon2, derive_reveal_token_challenge_poseidon2,
+    };
+    let g = base_point_value();
+    for entry in &inputs.pk_ownership {
+        let (challenge, spec) =
+            derive_pk_ownership_challenge_poseidon2(entry.pk, entry.context, entry.wire);
+        chain_specs.push(spec);
+        let response = checked_scalar(&entry.wire.response, "pk-ownership response")?;
+        let commitment = bg_decode_point(&entry.wire.commitment)?;
+        let lhs = builder.mul(&response, &g);
+        let pk_scaled = builder.mul(&challenge, entry.pk);
+        let rhs = builder.add(&pk_scaled, &bg_encode_point(&commitment))?;
+        builder.eq(lhs, rhs);
+    }
+    for entry in &inputs.reveal_tokens {
+        let (challenge, spec) = derive_reveal_token_challenge_poseidon2(
+            entry.pk,
+            entry.ciphertext,
+            entry.reveal_token,
+            entry.context,
+            entry.wire,
+        );
+        chain_specs.push(spec);
+        let response = checked_scalar(&entry.wire.response, "reveal-token response")?;
+        let t1 = bg_decode_point(&entry.wire.commitment_t1)?;
+        let t2 = bg_decode_point(&entry.wire.commitment_t2)?;
+        let lhs = builder.mul(&response, &g);
+        let pk_scaled = builder.mul(&challenge, entry.pk);
+        let rhs = builder.add(&pk_scaled, &bg_encode_point(&t1))?;
+        builder.eq(lhs, rhs);
+        let lhs = builder.mul(&response, &entry.ciphertext.c1);
+        let token_scaled = builder.mul(&challenge, entry.reveal_token);
+        let rhs = builder.add(&token_scaled, &bg_encode_point(&t2))?;
+        builder.eq(lhs, rhs);
+    }
+    for entry in &inputs.deck_dleqs {
+        let (challenge, spec) = crate::ristretto_player_proofs_air::derive_deck_dleq_challenge_poseidon2(
+            entry.direction,
+            entry.input,
+            entry.output,
+            entry.pk,
+            entry.context,
+            entry.wire,
+        )?;
+        chain_specs.push(spec);
+        let response = checked_scalar(&entry.wire.response, "deck DLEQ response")?;
+        let commitment_pk = bg_decode_point(&entry.wire.commitment_pk)?;
+        let lhs = builder.mul(&response, &g);
+        let pk_scaled = builder.mul(&challenge, entry.pk);
+        let rhs = builder.add(&pk_scaled, &bg_encode_point(&commitment_pk))?;
+        builder.eq(lhs, rhs);
+        for index in 0..entry.input.len() {
+            let d2 = entry
+                .direction
+                .compute_d2(&entry.input[index].c2, &entry.output[index].c2);
+            let commitment = bg_decode_point(&entry.wire.per_card_commitments[index])?;
+            let lhs = builder.mul(&response, &entry.input[index].c1);
+            let d2_scaled = builder.mul(&challenge, &d2);
+            let rhs = builder.add(&d2_scaled, &bg_encode_point(&commitment))?;
+            builder.eq(lhs, rhs);
+        }
+    }
+    Ok(())
+}
+
+/// Decompose a whole hand into one admission statement: every shuffle's
+/// ladders/additions/schedules/recurrences and every player's point
+/// equations merge into the shared statement under the hand root.  The
+/// Poseidon2-path players' transcript chains merge with the caller's
+/// shuffle-side chains into one uniform batch.
+pub fn decompose_hand_admission(
+    components: &HandAdmissionComponents<'_>,
+) -> TexasAirResult<AdmissionStatement> {
+    if components.shuffles.is_empty() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "hand admission carries no shuffle obligations".into(),
+        ));
+    }
+    let mut ladders = Vec::new();
+    let mut additions = Vec::new();
+    let mut schedules = Vec::new();
+    let mut recurrences = Vec::new();
+    for shuffle in &components.shuffles {
+        let (statement, _) = decompose_bg_admission(shuffle)?;
+        ladders.extend(statement.ladders);
+        additions.extend(statement.additions);
+        schedules.extend(statement.schedules);
+        recurrences.extend(statement.recurrences);
+    }
+    for player in &components.players {
+        let statement = decompose_player_admission(player)?;
+        ladders.extend(statement.ladders);
+        additions.extend(statement.additions);
+    }
+    let mut chain_specs = Vec::new();
+    if let Some(spec) = &components.poseidon2 {
+        chain_specs.push(spec.clone());
+    }
+    chain_specs.extend(components.shuffle_chains.iter().cloned());
+    if !components.poseidon2_players.is_empty() {
+        let mut builder = PointEquationBuilder::default();
+        decompose_player_poseidon2_into(
+            &combine_poseidon2_players(&components.poseidon2_players),
+            &mut builder,
+            &mut chain_specs,
+        )?;
+        builder.check_equalities()?;
+        ladders.extend(builder.ladders);
+        additions.extend(builder.additions.into_iter().map(|(left, right, output)| {
+            AdmissionAdditionRow {
+                left,
+                right,
+                output,
+            }
+        }));
+    }
+    let poseidon2 = merge_poseidon2_chain_specs(&chain_specs);
+    Ok(AdmissionStatement {
+        tag: components.hand_root,
+        ladders,
+        additions,
+        schedules,
+        recurrences,
+        poseidon2,
+    })
+}
+
+/// Flatten per-player Poseidon2 inputs into one set (equation order is
+/// players in order, ownership before reveal tokens).
+fn combine_poseidon2_players<'a>(
+    players: &[PlayerPoseidon2Inputs<'a>],
+) -> PlayerPoseidon2Inputs<'a> {
+    let mut combined = PlayerPoseidon2Inputs::default();
+    for player in players {
+        combined.pk_ownership.extend(player.pk_ownership.iter().copied());
+        combined.reveal_tokens.extend(player.reveal_tokens.iter().copied());
+    }
+    combined
+}
+
+/// Prove the whole hand's admission obligations in ONE STARK.
+pub fn prove_hand_admission_components(
+    components: &HandAdmissionComponents<'_>,
+) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
+    let statement = decompose_hand_admission(components)?;
+    prove_ristretto_admission_stark(statement)
+}
+
+/// Verify the whole-hand admission STARK, fail-closed: every player proof
+/// is natively verified, the archived statement must be exactly the
+/// derived merge (each shuffle's decomposition re-runs the canonical
+/// challenge replay and all equation checks natively), and the single
+/// STARK verifies.
+pub fn verify_hand_admission_components(
+    components: &HandAdmissionComponents<'_>,
+    archive: &ArchivedRistrettoAdmissionProof,
+) -> TexasAirResult<()> {
+    for player in &components.players {
+        verify_player_inputs_native(player)?;
+    }
+    for player in &components.poseidon2_players {
+        verify_player_poseidon2_native(player)?;
+    }
+    let statement = decompose_hand_admission(components)?;
+    if archive.statement != statement {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "hand admission statement is detached from its component set".into(),
         ));
     }
     verify_ristretto_admission_stark(archive)
@@ -1710,9 +2138,40 @@ fn decompose_player_admission(
                 output,
             })
             .collect(),
-        schedule: None,
-        recurrence: None,
+        schedules: Vec::new(),
+        recurrences: Vec::new(),
     })
+}
+
+/// Run every Poseidon2-path player verification natively (the fail-closed
+/// gate; each replays the M31 transcript and checks the sigma equation).
+fn verify_player_poseidon2_native(inputs: &PlayerPoseidon2Inputs<'_>) -> TexasAirResult<()> {
+    use crate::ristretto_player_proofs_air::{
+        verify_pk_ownership_poseidon2, verify_reveal_token_poseidon2,
+    };
+    for entry in &inputs.pk_ownership {
+        verify_pk_ownership_poseidon2(entry.pk, entry.context, entry.wire)?;
+    }
+    for entry in &inputs.reveal_tokens {
+        verify_reveal_token_poseidon2(
+            entry.pk,
+            entry.ciphertext,
+            entry.reveal_token,
+            entry.context,
+            entry.wire,
+        )?;
+    }
+    for entry in &inputs.deck_dleqs {
+        crate::ristretto_player_proofs_air::verify_deck_dleq_poseidon2(
+            entry.direction,
+            entry.input,
+            entry.output,
+            entry.pk,
+            entry.context,
+            entry.wire,
+        )?;
+    }
+    Ok(())
 }
 
 /// Run every native player-proof verification (the fail-closed gate; each
@@ -1814,48 +2273,83 @@ fn texas_ingredient_digest<A: crate::airs::TexasAir>(
 
 /// Prove one unified admission STARK that additionally folds a Texas method
 /// AIR (Layer-1 component) alongside the crypto segments.
-pub fn prove_ristretto_admission_stark_with_texas<A: crate::airs::TexasAir + 'static>(
+pub fn prove_ristretto_admission_stark_with_texas<A: crate::airs::TexasAir + Send + 'static>(
     statement: AdmissionStatement,
     texas: TexasMethodIngredient<A>,
 ) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
-    let TexasMethodIngredient {
-        trace,
-        air,
-        expected_trace_row,
-    } = texas;
-    let digest = texas_ingredient_digest(trace.log_size, &air, &expected_trace_row);
-    let factory =
-        |allocator: &mut TraceLocationAllocator| -> Box<dyn ComponentProver<SimdBackend>> {
-            Box::new(FrameworkComponent::new(
-                allocator,
-                crate::airs::bound::BoundAir::new(air.clone(), expected_trace_row.clone()),
-                SecureField::from(0u32),
-            ))
-        };
-    prove_admission_inner(statement, Some(trace), Some(digest), Some(&factory))
+    prove_ristretto_admission_stark_with_texas_batch(statement, vec![texas])
+}
+
+/// Prove one unified admission STARK folding SEVERAL same-type method AIRs
+/// (the multi-ingredient Layer-1 batch: lifecycle/hand/betting rows in one
+/// proof).  Ingredient order is part of the Fiat--Shamir binding.
+pub fn prove_ristretto_admission_stark_with_texas_batch<A: crate::airs::TexasAir + Send + 'static>(
+    statement: AdmissionStatement,
+    ingredients: Vec<TexasMethodIngredient<A>>,
+) -> TexasAirResult<ArchivedRistrettoAdmissionProof> {
+    let folds: Vec<TexasFold> = ingredients
+        .iter()
+        .map(|ingredient| {
+            let air = ingredient.air.clone();
+            let expected_trace_row = ingredient.expected_trace_row.clone();
+            TexasFold {
+                digest: texas_ingredient_digest(
+                    ingredient.trace.log_size,
+                    &ingredient.air,
+                    &ingredient.expected_trace_row,
+                ),
+                factory: Box::new(move |allocator: &mut TraceLocationAllocator| {
+                    Box::new(FrameworkComponent::new(
+                        allocator,
+                        crate::airs::bound::BoundAir::new(air.clone(), expected_trace_row.clone()),
+                        SecureField::from(0u32),
+                    )) as Box<dyn ComponentProver<SimdBackend>>
+                }),
+                trace: ingredient.trace.clone(),
+            }
+        })
+        .collect();
+    prove_admission_inner(statement, &folds)
 }
 
 /// Verify one unified admission STARK that additionally folds a Texas
 /// method AIR; the ingredient set must be the caller's rebuilt one.
-pub fn verify_ristretto_admission_stark_with_texas<A: crate::airs::TexasAir + 'static>(
+pub fn verify_ristretto_admission_stark_with_texas<A: crate::airs::TexasAir + Send + 'static>(
     archive: &ArchivedRistrettoAdmissionProof,
     texas: TexasMethodIngredient<A>,
 ) -> TexasAirResult<()> {
-    let TexasMethodIngredient {
-        trace,
-        air,
-        expected_trace_row,
-    } = texas;
-    let digest = texas_ingredient_digest(trace.log_size, &air, &expected_trace_row);
-    let factory =
-        |allocator: &mut TraceLocationAllocator| -> Box<dyn ComponentProver<SimdBackend>> {
-            Box::new(FrameworkComponent::new(
-                allocator,
-                crate::airs::bound::BoundAir::new(air.clone(), expected_trace_row.clone()),
-                SecureField::from(0u32),
-            ))
-        };
-    verify_admission_inner(archive, Some(trace), Some(digest), Some(&factory))
+    verify_ristretto_admission_stark_with_texas_batch(archive, vec![texas])
+}
+
+/// Verify a multi-ingredient Texas fold (same rebuilt ingredient set, same
+/// order as the prove call).
+pub fn verify_ristretto_admission_stark_with_texas_batch<A: crate::airs::TexasAir + Send + 'static>(
+    archive: &ArchivedRistrettoAdmissionProof,
+    ingredients: Vec<TexasMethodIngredient<A>>,
+) -> TexasAirResult<()> {
+    let folds: Vec<TexasFold> = ingredients
+        .iter()
+        .map(|ingredient| {
+            let air = ingredient.air.clone();
+            let expected_trace_row = ingredient.expected_trace_row.clone();
+            TexasFold {
+                digest: texas_ingredient_digest(
+                    ingredient.trace.log_size,
+                    &ingredient.air,
+                    &ingredient.expected_trace_row,
+                ),
+                factory: Box::new(move |allocator: &mut TraceLocationAllocator| {
+                    Box::new(FrameworkComponent::new(
+                        allocator,
+                        crate::airs::bound::BoundAir::new(air.clone(), expected_trace_row.clone()),
+                        SecureField::from(0u32),
+                    )) as Box<dyn ComponentProver<SimdBackend>>
+                }),
+                trace: ingredient.trace.clone(),
+            }
+        })
+        .collect();
+    verify_admission_inner(archive, &folds)
 }
 
 #[cfg(test)]
@@ -1914,21 +2408,25 @@ mod tests {
                 right: output_two,
                 output: curve_add(&output_one, &output_two),
             }],
-            schedule: Some(AdmissionScheduleSpec {
+            schedules: vec![AdmissionScheduleSpec {
                 powers_challenge: scalar_bytes(7),
                 product_y: scalar_bytes(9),
                 product_z: scalar_bytes(11),
                 product_challenge: scalar_bytes(13),
                 deck_size: 12,
-            }),
-            recurrence: None,
+            }],
+            recurrences: Vec::new(),
         }
     }
 
     fn bg_components_fixture(deck: usize) -> BgAdmissionComponents {
+        bg_components_fixture_seeded(deck, 0x5A1E)
+    }
+
+    fn bg_components_fixture_seeded(deck: usize, seed: u64) -> BgAdmissionComponents {
         use rand::SeedableRng;
         use rand::rngs::StdRng;
-        let mut rng = StdRng::seed_from_u64(0x5A1E);
+        let mut rng = StdRng::seed_from_u64(seed);
         let g = RistrettoCurve::base_g();
         let secret = BgScalar::random(&mut rng);
         let public_key = g * secret;
@@ -2089,6 +2587,12 @@ mod tests {
 
     fn texas_create_table_ingredient()
     -> TexasMethodIngredient<crate::airs::lifecycle::create_table::CreateTableAir> {
+        texas_create_table_ingredient_seeded(0)
+    }
+
+    fn texas_create_table_ingredient_seeded(
+        variant: u8,
+    ) -> TexasMethodIngredient<crate::airs::lifecycle::create_table::CreateTableAir> {
         use poker_l1::object_model::ObjectID;
         use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
         let mut pre_table = TexasPokerTable::new(
@@ -2102,17 +2606,17 @@ mod tests {
         pre_table.call_seq = 0;
         let mut post_table = TexasPokerTable::new(
             ObjectID::new([0xAA; 20], 42),
-            "test_table".to_string(),
-            [0xCC; 20],
+            format!("test_table_{variant}"),
+            [0xCC + variant; 20],
             6,
-            10,
+            10 + variant as u64,
             20,
         );
         post_table.call_seq = 1;
         let input = crate::airs::lifecycle::create_table::CreateTableInput {
-            name: "test_table".to_string(),
+            name: format!("test_table_{variant}"),
             max_players: 6,
-            small_blind: 10,
+            small_blind: 10 + variant as u64,
             big_blind: 20,
         };
         let trace = crate::trace_gen::create_table_trace::gen_create_table_trace(
@@ -2213,6 +2717,91 @@ mod tests {
             verify_ristretto_admission_stark_with_texas(&spliced, texas_create_table_ingredient())
                 .is_err()
         );
+    }
+
+    /// Multi-ingredient Layer-1 fold: SEVERAL method AIRs (two distinct
+    /// CreateTable transitions) share one admission STARK with the crypto
+    /// equations — the "dual-proof 全方法接线" building block.  Order is
+    /// part of the Fiat--Shamir binding.
+    #[test]
+    fn texas_layer1_multi_fold_proves_and_verifies() {
+        let owned = player_roundtrip_fixture(false);
+        let inputs = PlayerAdmissionInputs {
+            statement_digest: [0x79; 32],
+            pk_ownership: owned
+                .pk_ownership
+                .iter()
+                .map(|(pk, wire, proof)| PlayerPkOwnershipEntry {
+                    pk,
+                    context: b"table7-hand3",
+                    wire,
+                    proof,
+                })
+                .collect(),
+            reveal_tokens: owned
+                .reveal_tokens
+                .iter()
+                .map(
+                    |(pk, ciphertext, reveal_token, wire, proof)| PlayerRevealTokenEntry {
+                        pk,
+                        ciphertext,
+                        reveal_token,
+                        context: b"table7-hand3",
+                        wire,
+                        proof,
+                    },
+                )
+                .collect(),
+            deck_dleqs: Vec::new(),
+        };
+        let statement = decompose_player_admission(&inputs).expect("decomposition");
+        let ingredients = vec![
+            texas_create_table_ingredient_seeded(0),
+            texas_create_table_ingredient_seeded(1),
+            texas_create_table_ingredient_seeded(2),
+        ];
+        let archive = prove_ristretto_admission_stark_with_texas_batch(
+            statement.clone(),
+            ingredients,
+        )
+        .expect("multi-fold STARK");
+        verify_ristretto_admission_stark_with_texas_batch(
+            &archive,
+            vec![
+                texas_create_table_ingredient_seeded(0),
+                texas_create_table_ingredient_seeded(1),
+                texas_create_table_ingredient_seeded(2),
+            ],
+        )
+        .expect("multi-fold verify");
+
+        // Wrong ingredient count detaches.
+        assert!(verify_ristretto_admission_stark_with_texas_batch(
+            &archive,
+            vec![texas_create_table_ingredient_seeded(0)],
+        )
+        .is_err());
+
+        // Swapped order changes the Fiat--Shamir binding.
+        let swapped = vec![
+            texas_create_table_ingredient_seeded(1),
+            texas_create_table_ingredient_seeded(0),
+            texas_create_table_ingredient_seeded(2),
+        ];
+        assert!(verify_ristretto_admission_stark_with_texas_batch(&archive, swapped).is_err());
+
+        // A tampered expected row still rejects.
+        let mut wrong = texas_create_table_ingredient_seeded(0);
+        wrong.expected_trace_row[0] = wrong.expected_trace_row[0] + M31::from(1u32);
+        assert!(verify_ristretto_admission_stark_with_texas_batch(
+            &archive,
+            vec![
+                wrong,
+                texas_create_table_ingredient_seeded(1),
+                texas_create_table_ingredient_seeded(2),
+            ],
+        )
+        .is_err());
     }
 
     #[test]
@@ -2419,14 +3008,14 @@ mod tests {
 
         let mut variants: Vec<(&str, AdmissionStatement)> = vec![("full", statement.clone())];
         let mut no_recurrence = statement.clone();
-        no_recurrence.recurrence = None;
+        no_recurrence.recurrences.clear();
         variants.push(("no-recurrence", no_recurrence));
         let mut no_schedule = statement.clone();
-        no_schedule.schedule = None;
+        no_schedule.schedules.clear();
         variants.push(("no-schedule", no_schedule));
         let mut ladder_only = statement.clone();
-        ladder_only.schedule = None;
-        ladder_only.recurrence = None;
+        ladder_only.schedules.clear();
+        ladder_only.recurrences.clear();
         variants.push(("ladder-only", ladder_only));
         // The transcript-replacement load of one BG shuffle: six chains
         // (1 init + 5 challenges) × ~172 absorbed 31-bit elements ≈ the
@@ -2435,6 +3024,9 @@ mod tests {
         with_poseidon2.poseidon2 = Some(crate::ristretto_poseidon2_air::Poseidon2ChainSpec {
             initial_states: (0..6)
                 .map(|chain| core::array::from_fn(|i| (chain as u32 * 9_778 + i as u32 * 131) % 0x7FFF_FFFF))
+                .collect(),
+            absorbed_words: (0..6 * 176)
+                .map(|step| core::array::from_fn(|lane| (step as u32 * 17 + lane as u32 * 5) % 0x7FFF_FFFF))
                 .collect(),
             chain_length: 176,
         });
@@ -2470,6 +3062,175 @@ mod tests {
                 .map_or_else(String::new, |count| format!(", {count} cols"));
             eprintln!("  {ms:>8} ms  {}{columns}", record.label);
         }
+    }
+
+    /// Full-hand Path A benchmark with the correct client/server split:
+    /// ALL player proofs (ownership, reveal tokens, deck DLEQ) and the
+    /// Bayer--Groth shuffle arguments are CLIENT-side native proofs — never
+    /// circuit-proven.  The server's recursion artifact covers only the
+    /// shuffle-admission obligations: one BG admission STARK per shuffle
+    /// (deck 52), the folding target of Path A.  Transcript chains
+    /// (BLAKE3/Flock) remain separate artifacts, unfolded.
+    #[test]
+    #[ignore = "full-hand recursion benchmark: ~22 minutes of shuffle admissions"]
+    fn full_hand_recursion_benchmark() {
+        use crate::ristretto_player_proofs_air::{
+            prove_deck_dleq, prove_pk_ownership, prove_reveal_token, RistrettoDeckDleqDirection,
+            verify_deck_dleq, verify_pk_ownership, verify_reveal_token,
+        };
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+
+        let mut client_prove = std::time::Duration::ZERO;
+        let mut server_native_verify = std::time::Duration::ZERO;
+
+        // ---- Client phase (native, no circuits): nine ownership, nine
+        // shuffles (native BG, inside the fixture), one fold DLEQ, and a
+        // representative reveal batch scaled to the street pattern. ----
+        let mut ownership_artifacts = Vec::new();
+        for seat in 0..9u64 {
+            let mut rng = StdRng::seed_from_u64(0xC0DE_0000 + seat);
+            let started = std::time::Instant::now();
+            let sk = BgScalar::random(&mut rng);
+            let pk = base_point_value() * sk;
+            let context: &'static [u8] =
+                Box::leak(format!("recursion-hand1-seat{seat}").into_boxed_str()).as_bytes();
+            let (wire, proof) =
+                prove_pk_ownership(&sk, &pk, context, &mut rng).expect("ownership proof");
+            client_prove += started.elapsed();
+            let started = std::time::Instant::now();
+            verify_pk_ownership(&pk, context, &wire, &proof).expect("ownership verify");
+            server_native_verify += started.elapsed();
+            ownership_artifacts.push((pk, context, wire, proof));
+        }
+        eprintln!("[client native] ownership x9: included in client total below");
+
+        {
+            // One fold deck-DLEQ (52 cards) + one 3-token reveal batch,
+            // both native; the reveal batch scales to 32 street batches.
+            let mut rng = StdRng::seed_from_u64(0xF01D_0001);
+            let sk = BgScalar::random(&mut rng);
+            let pk = base_point_value() * sk;
+            let input = (0..52)
+                .map(|index| {
+                    let card =
+                        RistrettoCurve::hash_to_curve(format!("recursion/card/{index}").as_bytes());
+                    let randomness = BgScalar::random(&mut rng);
+                    BgCiphertext::encrypt(&card, &pk, &randomness)
+                })
+                .collect::<Vec<_>>();
+            let output = input
+                .iter()
+                .map(|ct| BgCiphertext {
+                    c1: ct.c1,
+                    c2: ct.c2 + ct.c1 * sk,
+                })
+                .collect::<Vec<_>>();
+            let started = std::time::Instant::now();
+            let (wire, proof) = prove_deck_dleq(
+                RistrettoDeckDleqDirection::Remask,
+                &input,
+                &output,
+                &sk,
+                &pk,
+                b"recursion-hand1-fold",
+                &mut rng,
+            )
+            .expect("deck DLEQ proof");
+            let reveal_start = std::time::Instant::now();
+            let mut reveal_prove = std::time::Duration::ZERO;
+            let mut reveal_verify = std::time::Duration::ZERO;
+            for batch in 0..32u64 {
+                let mut rng = StdRng::seed_from_u64(0xEA1A_0004 + batch);
+                let sk = BgScalar::random(&mut rng);
+                let pk = base_point_value() * sk;
+                for index in 0..3u64 {
+                    let card = RistrettoCurve::hash_to_curve(
+                        format!("recursion/reveal/{batch}/{index}").as_bytes(),
+                    );
+                    let randomness = BgScalar::random(&mut rng);
+                    let ciphertext = BgCiphertext::encrypt(&card, &pk, &randomness);
+                    let reveal_token = ciphertext.c1 * sk;
+                    let started = std::time::Instant::now();
+                    let (wire, proof) = prove_reveal_token(
+                        &sk,
+                        &pk,
+                        &ciphertext,
+                        &reveal_token,
+                        b"recursion-hand1-reveal",
+                        &mut rng,
+                    )
+                    .expect("reveal proof");
+                    reveal_prove += started.elapsed();
+                    let started = std::time::Instant::now();
+                    verify_reveal_token(
+                        &pk,
+                        &ciphertext,
+                        &reveal_token,
+                        b"recursion-hand1-reveal",
+                        &wire,
+                        &proof,
+                    )
+                    .expect("reveal verify");
+                    reveal_verify += started.elapsed();
+                }
+            }
+            let fold_prove = reveal_start.elapsed() - reveal_prove;
+            client_prove += fold_prove + reveal_prove;
+            let started = std::time::Instant::now();
+            verify_deck_dleq(
+                RistrettoDeckDleqDirection::Remask,
+                &input,
+                &output,
+                &pk,
+                b"recursion-hand1-fold",
+                &wire,
+                &proof,
+            )
+            .expect("deck DLEQ verify");
+            server_native_verify += reveal_verify + started.elapsed();
+        }
+        eprintln!(
+            "[client native] fold x1 + reveal x32x3: included in client total below"
+        );
+        eprintln!(
+            "client native prove total (ownership+shuffle+fold+reveal): {client_prove:?}; server native verify (player proofs): {server_native_verify:?}"
+        );
+
+        // ---- Server recursion artifacts: the ONLY circuit proving. Nine
+        // deck-52 BG shuffle admissions, one admission STARK per shuffle.
+        // (The fixture's native BG prove/verify above plays the client;
+        // only the admission STARK below is server-side.) -----------------
+        let mut recursion_prove = std::time::Duration::ZERO;
+        let mut recursion_verify = std::time::Duration::ZERO;
+        let mut recursion_bytes = 0usize;
+        for shuffle in 0..9u64 {
+            // The fixture runs the client's native BG prove and the
+            // extractor's native verify replay — time it as client work.
+            let started = std::time::Instant::now();
+            let components = bg_components_fixture_seeded(52, 0x5A1E + shuffle);
+            client_prove += started.elapsed();
+            let started = std::time::Instant::now();
+            let archive = prove_ristretto_bg_admission_components(&components)
+                .expect("BG admission STARK");
+            let prove_elapsed = started.elapsed();
+            let started = std::time::Instant::now();
+            verify_ristretto_bg_admission_components(&components, &archive)
+                .expect("BG admission verify");
+            let verify_elapsed = started.elapsed();
+            let bytes = archive.stark_proof_bytes.len();
+            eprintln!(
+                "[shuffle{shuffle} admission] prove {prove_elapsed:>9.2?}, verify {verify_elapsed:>8.3?}, {:.2} MB",
+                bytes as f64 / 1e6
+            );
+            recursion_prove += prove_elapsed;
+            recursion_verify += verify_elapsed;
+            recursion_bytes += bytes;
+        }
+        eprintln!(
+            "=== full-hand recursion artifacts (9 shuffle admissions): prove {recursion_prove:?}, verify {recursion_verify:?}, {:.2} MB ===",
+            recursion_bytes as f64 / 1e6
+        );
     }
 
     /// Microbenchmark of the two lifted Merkle hashers stwo 2.3 ships
@@ -2565,7 +3326,8 @@ mod tests {
             statement.additions.len(),
             equalities.len()
         );
-        assert_eq!(statement.schedule.expect("bg schedule").deck_size, 4);
+        assert_eq!(statement.schedules[0].deck_size, 4);
+        assert_eq!(statement.schedules.len(), 1);
         let started = std::time::Instant::now();
         let archive =
             prove_ristretto_bg_admission_components(&components).expect("BG admission STARK");
@@ -2611,35 +3373,243 @@ mod tests {
         assert!(verify_ristretto_bg_admission_components(&components, &spliced).is_err());
     }
 
-    /// The folded Poseidon2-M31 transcript segment (parked prototype):
-    /// the AIR shape and segment wiring are in place, but the prover
-    /// reports "Constraints not satisfied" even for a single chain of one
-    /// permutation — suspected interaction-layer degree mismatch of the
-    /// 16-element relation under the protocol FRI config (blowup 1; the
-    /// stwo reference example runs under its own config with LOG_EXPAND=2
-    /// and stored coefficients).  Performance-wise the segment's cost is
-    /// negligible either way (442 columns × instances, no limbs/lookups),
-    /// so the Flock-elimination decision does not block on this.
+    /// The folded Poseidon2-M31 transcript segment proves and verifies
+    /// inside the unified admission STARK (fixed 2026-08-28).  Three
+    /// stacked defects had parked it: (1) the LogUp fraction generator
+    /// packed trace columns in natural row order, but
+    /// `LogupTraceGenerator` stores secure columns bit-reversed — the
+    /// fractions were permuted relative to the constraint evaluation;
+    /// (2) the verifier built its components with zero LogUp claimed
+    /// sums — harmless while every other segment telescopes to exactly
+    /// zero, but this segment's `Σ (1/d_init − 1/d_digest)` never does,
+    /// so the archive sums are now restored into the verifier-side
+    /// segments; (3) the verifier declared the tree-2 layout from the
+    /// (never materialized) interaction vector instead of the fixed
+    /// per-row entry count.
     #[test]
-    #[ignore = "prototype: constraint mismatch under investigation (see doc comment)"]
     fn admission_poseidon2_segment_proves_and_verifies() {
         use crate::ristretto_poseidon2_air::Poseidon2ChainSpec;
 
         let components = bg_components_fixture(4);
         let (mut statement, _) = decompose_bg_admission(&components).expect("decomposition");
+        let initial_states = vec![
+            core::array::from_fn(|i| (i as u32 * 31) % 0x7FFF_FFFF),
+            core::array::from_fn(|i| (i as u32 * 17 + 5) % 0x7FFF_FFFF),
+        ];
         statement.poseidon2 = Some(Poseidon2ChainSpec {
-            initial_states: vec![
-                core::array::from_fn(|i| (i as u32 * 31) % 0x7FFF_FFFF),
-                core::array::from_fn(|i| (i as u32 * 17 + 5) % 0x7FFF_FFFF),
-            ],
+            absorbed_words: (0..initial_states.len() * 24)
+                .map(|step| core::array::from_fn(|lane| (step as u32 * 8 + lane as u32 * 3) % 0x7FFF_FFFF))
+                .collect(),
+            initial_states,
             chain_length: 24,
         });
         let archive = prove_ristretto_admission_stark(statement).expect("admission STARK");
         verify_ristretto_admission_stark(&archive).expect("admission verify");
 
+        // A spliced initial state detaches the scope tree (the digest pins
+        // the spec).
         let mut spliced = archive.clone();
         spliced.statement.poseidon2.as_mut().unwrap().initial_states[0][0] ^= 1;
         assert!(verify_ristretto_admission_stark(&spliced).is_err());
+
+        // A spliced absorbed word detaches the digest-bound word schedule.
+        let mut spliced = archive.clone();
+        spliced.statement.poseidon2.as_mut().unwrap().absorbed_words[3][2] ^= 1;
+        assert!(verify_ristretto_admission_stark(&spliced).is_err());
+    }
+
+    /// A player's ownership + reveal proofs on the Poseidon2-M31 path,
+    /// leaked for the test's lifetime (the entries borrow the wires).
+    fn player_poseidon2_fixture() -> PlayerPoseidon2Inputs<'static> {
+        use crate::ristretto_player_proofs_air::{
+            prove_pk_ownership_poseidon2, prove_reveal_token_poseidon2,
+        };
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+        let mut rng = StdRng::seed_from_u64(0x51DE_00AA);
+        let sk = BgScalar::random(&mut rng);
+        let pk = base_point_value() * sk;
+        let (ownership_wire, _) =
+            prove_pk_ownership_poseidon2(&sk, &pk, b"hand-1-seat-0", &mut rng)
+                .expect("poseidon2 ownership proof");
+        let card = RistrettoCurve::hash_to_curve(b"poseidon2-hand/card/1");
+        let randomness = BgScalar::random(&mut rng);
+        let ciphertext = BgCiphertext::encrypt(&card, &pk, &randomness);
+        let reveal_token = ciphertext.c1 * sk;
+        let (reveal_wire, _) = prove_reveal_token_poseidon2(
+            &sk,
+            &pk,
+            &ciphertext,
+            &reveal_token,
+            b"hand-1-reveal",
+            &mut rng,
+        )
+        .expect("poseidon2 reveal proof");
+        let pk = Box::leak(Box::new(pk));
+        let ciphertext = Box::leak(Box::new(ciphertext));
+        let reveal_token = Box::leak(Box::new(reveal_token));
+        let ownership_wire = Box::leak(Box::new(ownership_wire));
+        let reveal_wire = Box::leak(Box::new(reveal_wire));
+        PlayerPoseidon2Inputs {
+            pk_ownership: vec![PlayerPkOwnershipPoseidon2Entry {
+                pk,
+                context: b"hand-1-seat-0",
+                wire: ownership_wire,
+            }],
+            reveal_tokens: vec![PlayerRevealTokenPoseidon2Entry {
+                pk,
+                ciphertext,
+                reveal_token,
+                context: b"hand-1-reveal",
+                wire: reveal_wire,
+            }],
+            deck_dleqs: Vec::new(),
+        }
+    }
+
+    /// Whole-hand admission ("一手一证"): three deck-4 shuffles plus a
+    /// player's ownership/reveal equations and REAL Poseidon2 transcript
+    /// chains fold into ONE STARK under a Poseidon2 hand root.
+    #[test]
+    fn hand_admission_proves_and_verifies() {
+        use crate::ristretto_poseidon2_transcript::{Poseidon2M31Transcript, poseidon2_root};
+        use poker_protocol_core::CryptoTranscript;
+
+        let shuffles: Vec<BgAdmissionComponents> = (0..3u64)
+            .map(|shuffle| bg_components_fixture_seeded(4, 0x5A1E + shuffle))
+            .collect();
+
+        // One real Poseidon2 transcript per folded action: absorb the
+        // action context and derive a challenge, exactly as the native
+        // protocol would.
+        let specs: Vec<_> = (0..4u64)
+            .map(|action| {
+                let mut transcript = Poseidon2M31Transcript::new(
+                    format!("recursion-hand1-action{action}").as_bytes(),
+                );
+                transcript.append_message(
+                    b"context",
+                    format!("hand-1-action-{action}").as_bytes(),
+                );
+                transcript.append_message(b"pk", &[(action + 1) as u8; 32]);
+                let _ = transcript.challenge::<RistrettoCurve>(b"challenge");
+                transcript.into_chain_spec()
+            })
+            .collect();
+        let poseidon2 = merge_poseidon2_chain_specs(&specs).expect("chains");
+        let hand_root = poseidon2_root(&poseidon2.digests());
+
+        // REAL Poseidon2 player proofs: the folded equations' challenges
+        // are derived from the very transcript chains folded into the
+        // statement below — the closed Flock-free loop.
+        let poseidon2_players = vec![player_poseidon2_fixture()];
+
+        let components = HandAdmissionComponents {
+            shuffles,
+            shuffle_chains: Vec::new(),
+            players: Vec::new(),
+            poseidon2_players,
+            hand_root,
+            poseidon2: Some(poseidon2),
+        };
+        // The merged statement carries every shuffle's schedule and the
+        // folded player equations.
+        let statement = decompose_hand_admission(&components).expect("hand decomposition");
+        assert_eq!(statement.schedules.len(), 3);
+        assert_eq!(statement.recurrences.len(), 3);
+        assert!(statement.ladders.len() > 3 * 40);
+
+        let archive = prove_hand_admission_components(&components).expect("hand STARK");
+        verify_hand_admission_components(&components, &archive).expect("hand verify");
+
+        // A spliced hand root detaches the statement.
+        let mut spliced = archive.clone();
+        spliced.statement.tag[7] ^= 1;
+        assert!(verify_hand_admission_components(&components, &spliced).is_err());
+
+        // Dropping a shuffle detaches the statement.
+        let fewer = HandAdmissionComponents {
+            shuffles: components.shuffles[..2].to_vec(),
+            shuffle_chains: components.shuffle_chains.clone(),
+            players: Vec::new(),
+            poseidon2_players: components.poseidon2_players.clone(),
+            hand_root: components.hand_root,
+            poseidon2: components.poseidon2.clone(),
+        };
+        assert!(verify_hand_admission_components(&fewer, &archive).is_err());
+
+        // A spliced transcript word detaches the digest-bound chain spec.
+        let mut spliced = archive.clone();
+        spliced.statement.poseidon2.as_mut().unwrap().absorbed_words[2][1] ^= 1;
+        assert!(verify_hand_admission_components(&components, &spliced).is_err());
+
+        // Spliced proof bytes fail the STARK.
+        let mut spliced = archive.clone();
+        let len = spliced.stark_proof_bytes.len();
+        spliced.stark_proof_bytes[len / 2] ^= 1;
+        assert!(verify_hand_admission_components(&components, &spliced).is_err());
+    }
+
+    /// Whole-hand deck-52 batch benchmark: nine shuffle admissions folded
+    /// into ONE STARK (the "一手一证" settlement artifact), with the
+    /// hand's transcript chains (6 × 176 steps per shuffle) folded into
+    /// the Poseidon2 segment.  Compare against §4.0.1's nine separate
+    /// artifacts (1,417.8s prove / 384.6 MB).  The shuffle count defaults
+    /// to nine; `TEXAS_HAND_SHUFFLES=k` runs a k-shuffle variant (a
+    /// nine-shuffle ladder segment is log-21 — expect a heavy memory
+    /// footprint and swap on 32 GB machines).
+    #[test]
+    #[ignore = "whole-hand batch benchmark: tens of minutes"]
+    fn hand_admission_deck52_batch_benchmark() {
+        use crate::ristretto_poseidon2_transcript::{Poseidon2M31Transcript, poseidon2_root};
+        use poker_protocol_core::CryptoTranscript;
+
+        let shuffle_count: u64 = std::env::var("TEXAS_HAND_SHUFFLES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(9);
+        let shuffles: Vec<BgAdmissionComponents> = (0..shuffle_count)
+            .map(|shuffle| bg_components_fixture_seeded(52, 0x5A1E + shuffle))
+            .collect();
+
+        // Realistic transcript load: six chains of 176 steps per shuffle
+        // (1 init + 5 challenge flushes × ~172 absorbed elements).
+        let specs: Vec<_> = (0..shuffle_count * 6)
+            .map(|action| {
+                let mut transcript = Poseidon2M31Transcript::new(
+                    format!("recursion-hand1-chain{action}").as_bytes(),
+                );
+                transcript.append_message(b"context", &[7u8; 96]);
+                for round in 0..5u64 {
+                    transcript.append_message(b"wire", &[(action + round) as u8; 1_100]);
+                    let _ = transcript.challenge::<RistrettoCurve>(b"challenge");
+                }
+                transcript.into_chain_spec()
+            })
+            .collect();
+        let poseidon2 = merge_poseidon2_chain_specs(&specs).expect("chains");
+        let hand_root = poseidon2_root(&poseidon2.digests());
+
+        let components = HandAdmissionComponents {
+            shuffles,
+            shuffle_chains: Vec::new(),
+            players: Vec::new(),
+            poseidon2_players: Vec::new(),
+            hand_root,
+            poseidon2: Some(poseidon2),
+        };
+        let started = std::time::Instant::now();
+        let archive = prove_hand_admission_components(&components).expect("hand STARK");
+        let prove_elapsed = started.elapsed();
+        let bytes = archive.stark_proof_bytes.len();
+        let started = std::time::Instant::now();
+        verify_hand_admission_components(&components, &archive).expect("hand verify");
+        let verify_elapsed = started.elapsed();
+        eprintln!(
+            "=== whole-hand admission ({shuffle_count} shuffles + {} chains, ONE STARK): prove {prove_elapsed:?}, verify {verify_elapsed:?}, {:.2} MB ===",
+            shuffle_count * 6,
+            bytes as f64 / 1e6
+        );
     }
 
     #[test]
@@ -2668,7 +3638,7 @@ mod tests {
         )
         .expect("separate ladder proof");
         let separate_schedule = prove_ristretto_scalar_program(&{
-            let spec = statement.schedule.as_ref().expect("bg schedule");
+            let spec = &statement.schedules[0];
             build_bayer_groth_scalar_schedule(
                 &spec.powers_challenge,
                 &spec.product_y,
@@ -2724,12 +3694,7 @@ mod tests {
 
         // A detached schedule challenge rebuilds a different program.
         let mut spliced = archive.clone();
-        spliced
-            .statement
-            .schedule
-            .as_mut()
-            .expect("bg schedule")
-            .product_y[0] ^= 1;
+        spliced.statement.schedules[0].product_y[0] ^= 1;
         assert!(verify_ristretto_admission_stark(&spliced).is_err());
 
         // A detached ladder output fails the native rebuild.

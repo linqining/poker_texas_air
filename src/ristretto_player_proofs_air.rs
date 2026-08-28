@@ -811,9 +811,405 @@ pub fn verify_fold_with_proof_v2(
     )
 }
 
+
+// ============================================================================
+// Poseidon2-M31 admission path (Flock-free)
+// ============================================================================
+
+use crate::ristretto_poseidon2_air::Poseidon2ChainSpec;
+use crate::ristretto_poseidon2_transcript::Poseidon2M31Transcript;
+
+fn absorb_deck_dleq_statement_poseidon2(
+    transcript: &mut Poseidon2M31Transcript,
+    context: &[u8],
+    pk: &RistrettoPoint,
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    commitments: &[[u8; 32]; RISTRETTO_PLAYER_PROOF_DECK_SIZE],
+    commitment_pk: &[u8; 32],
+) {
+    transcript.append_message(b"context", context);
+    transcript.append_message(b"pk", &point_bytes(pk));
+    for ciphertext in input {
+        transcript.append_message(b"in_c1", &point_bytes(&ciphertext.c1));
+        transcript.append_message(b"in_c2", &point_bytes(&ciphertext.c2));
+    }
+    for ciphertext in output {
+        transcript.append_message(b"out_c1", &point_bytes(&ciphertext.c1));
+        transcript.append_message(b"out_c2", &point_bytes(&ciphertext.c2));
+    }
+    for commitment in commitments {
+        transcript.append_message(b"a_i", commitment);
+    }
+    transcript.append_message(b"commitment_pk", commitment_pk);
+}
+
+/// Derive the deck-DLEQ challenge from the Poseidon2-M31 transcript.
+pub(crate) fn derive_deck_dleq_challenge_poseidon2(
+    direction: RistrettoDeckDleqDirection,
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    pk: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoDeckDleqWire,
+) -> TexasAirResult<(RistrettoScalar, Poseidon2ChainSpec)> {
+    if input.len() != RISTRETTO_PLAYER_PROOF_DECK_SIZE || output.len() != input.len() {
+        return Err(TexasAirError::SpecViolation(
+            "deck DLEQ requires the fixed 52-card deck".into(),
+        ));
+    }
+    let mut transcript = Poseidon2M31Transcript::new(direction.protocol());
+    absorb_deck_dleq_statement_poseidon2(
+        &mut transcript,
+        context,
+        pk,
+        input,
+        output,
+        &wire.per_card_commitments,
+        &wire.commitment_pk,
+    );
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    Ok((challenge, transcript.into_chain_spec()))
+}
+
+/// Prove one batched deck DLEQ under the Poseidon2-M31 transcript (the
+/// Flock-free admission path); the transcript run is the foldable chain.
+pub fn prove_deck_dleq_poseidon2(
+    direction: RistrettoDeckDleqDirection,
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    sk: &RistrettoScalar,
+    pk: &RistrettoPoint,
+    context: &[u8],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(RistrettoDeckDleqWire, Poseidon2ChainSpec)> {
+    if input.len() != RISTRETTO_PLAYER_PROOF_DECK_SIZE || output.len() != input.len() {
+        return Err(TexasAirError::SpecViolation(
+            "deck DLEQ requires the fixed 52-card deck".into(),
+        ));
+    }
+    if *sk == RistrettoScalar::zero() || pk.is_identity() || RistrettoCurve::base_g() * *sk != *pk {
+        return Err(TexasAirError::SpecViolation(
+            "deck DLEQ witness does not match the public key".into(),
+        ));
+    }
+    for index in 0..input.len() {
+        if !input[index].is_valid() || !output[index].is_valid() {
+            return Err(TexasAirError::SpecViolation(
+                "deck DLEQ ciphertext is invalid".into(),
+            ));
+        }
+        if input[index].c1 != output[index].c1 {
+            return Err(TexasAirError::SpecViolation(
+                "deck DLEQ requires c1 invariance".into(),
+            ));
+        }
+        let d2 = direction.compute_d2(&input[index].c2, &output[index].c2);
+        if d2.is_identity() || d2 != input[index].c1 * *sk {
+            return Err(TexasAirError::SpecViolation(
+                "deck DLEQ output deck does not match the witness key".into(),
+            ));
+        }
+    }
+    let mut nonce;
+    let mut commitments = [[0u8; 32]; RISTRETTO_PLAYER_PROOF_DECK_SIZE];
+    let mut commitment_pk;
+    loop {
+        nonce = RistrettoScalar::random(rng);
+        if nonce == RistrettoScalar::zero() {
+            continue;
+        }
+        commitment_pk = RistrettoCurve::base_g() * nonce;
+        let mut degenerate = commitment_pk.is_identity();
+        for (index, commitment) in commitments.iter_mut().enumerate() {
+            let point = input[index].c1 * nonce;
+            *commitment = point_bytes(&point);
+            degenerate |= point.is_identity();
+        }
+        if !degenerate {
+            break;
+        }
+    }
+    let mut transcript = Poseidon2M31Transcript::new(direction.protocol());
+    absorb_deck_dleq_statement_poseidon2(
+        &mut transcript,
+        context,
+        pk,
+        input,
+        output,
+        &commitments,
+        &point_bytes(&commitment_pk),
+    );
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    let response = nonce + challenge * *sk;
+    let wire = RistrettoDeckDleqWire {
+        per_card_commitments: commitments,
+        commitment_pk: point_bytes(&commitment_pk),
+        response: scalar_bytes(&response),
+    };
+    Ok((wire, transcript.into_chain_spec()))
+}
+
+/// Verify one Poseidon2-path deck DLEQ natively; returns the replayed
+/// chain statement for folding.
+pub fn verify_deck_dleq_poseidon2(
+    direction: RistrettoDeckDleqDirection,
+    input: &[RistrettoCiphertext],
+    output: &[RistrettoCiphertext],
+    pk: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoDeckDleqWire,
+) -> TexasAirResult<Poseidon2ChainSpec> {
+    let (challenge, spec) =
+        derive_deck_dleq_challenge_poseidon2(direction, input, output, pk, context, wire)?;
+    let response = decode_scalar(&wire.response, "deck DLEQ response")?;
+    let commitment_pk = decode_point(&wire.commitment_pk, "deck DLEQ key commitment")?;
+    if RistrettoCurve::base_g() * response != commitment_pk + *pk * challenge {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "deck DLEQ key equation is not satisfied".into(),
+        ));
+    }
+    for index in 0..input.len() {
+        let d2 = direction.compute_d2(&input[index].c2, &output[index].c2);
+        let commitment = decode_point(&wire.per_card_commitments[index], "card commitment")?;
+        if input[index].c1 * response != commitment + d2 * challenge {
+            return Err(TexasAirError::ConstraintUnsatisfied(
+                "deck DLEQ per-card equation is not satisfied".into(),
+            ));
+        }
+    }
+    Ok(spec)
+}
+
+/// Derive the pk-ownership challenge from the Poseidon2-M31 transcript
+/// (same absorb order as the Flock path); the whole run is the foldable
+/// chain statement.
+pub(crate) fn derive_pk_ownership_challenge_poseidon2(
+    pk: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoPkOwnershipWire,
+) -> (RistrettoScalar, Poseidon2ChainSpec) {
+    let mut transcript = Poseidon2M31Transcript::new(PK_OWNERSHIP_PROTOCOL);
+    transcript.append_message(b"context", context);
+    transcript.append_message(b"pk", &point_bytes(pk));
+    transcript.append_message(b"commitment", &wire.commitment);
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    (challenge, transcript.into_chain_spec())
+}
+
+/// Derive the reveal-token challenge from the Poseidon2-M31 transcript.
+pub(crate) fn derive_reveal_token_challenge_poseidon2(
+    pk: &RistrettoPoint,
+    ciphertext: &RistrettoCiphertext,
+    reveal_token: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoRevealTokenWire,
+) -> (RistrettoScalar, Poseidon2ChainSpec) {
+    let mut transcript = Poseidon2M31Transcript::new(REVEAL_TOKEN_PROTOCOL);
+    transcript.append_message(b"context", context);
+    transcript.append_message(b"pk", &point_bytes(pk));
+    transcript.append_message(b"c1", &point_bytes(&ciphertext.c1));
+    transcript.append_message(b"c2", &point_bytes(&ciphertext.c2));
+    transcript.append_message(b"reveal_token", &point_bytes(reveal_token));
+    transcript.append_message(b"t1", &wire.commitment_t1);
+    transcript.append_message(b"t2", &wire.commitment_t2);
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    (challenge, transcript.into_chain_spec())
+}
+
+/// Prove knowledge of `sk` with `pk = sk·G` under the Poseidon2-M31
+/// transcript: the Fiat--Shamir run is returned as a foldable chain
+/// statement instead of a Flock archive.
+pub fn prove_pk_ownership_poseidon2(
+    sk: &RistrettoScalar,
+    pk: &RistrettoPoint,
+    context: &[u8],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(RistrettoPkOwnershipWire, Poseidon2ChainSpec)> {
+    if *sk == RistrettoScalar::zero() || pk.is_identity() || RistrettoCurve::base_g() * *sk != *pk {
+        return Err(TexasAirError::SpecViolation(
+            "pk-ownership witness does not match the public key".into(),
+        ));
+    }
+    let mut transcript = Poseidon2M31Transcript::new(PK_OWNERSHIP_PROTOCOL);
+    transcript.append_message(b"context", context);
+    transcript.append_message(b"pk", &point_bytes(pk));
+    let (nonce, commitment) = loop {
+        let nonce = RistrettoScalar::random(rng);
+        if nonce == RistrettoScalar::zero() {
+            continue;
+        }
+        let commitment = RistrettoCurve::base_g() * nonce;
+        if !commitment.is_identity() {
+            break (nonce, commitment);
+        }
+    };
+    transcript.append_message(b"commitment", &point_bytes(&commitment));
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    let response = nonce + challenge * *sk;
+    let wire = RistrettoPkOwnershipWire {
+        commitment: point_bytes(&commitment),
+        response: scalar_bytes(&response),
+    };
+    Ok((wire, transcript.into_chain_spec()))
+}
+
+/// Verify one Poseidon2-path key-ownership proof natively; returns the
+/// replayed chain statement for folding.
+pub fn verify_pk_ownership_poseidon2(
+    pk: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoPkOwnershipWire,
+) -> TexasAirResult<Poseidon2ChainSpec> {
+    if pk.is_identity() {
+        return Err(TexasAirError::SpecViolation(
+            "pk-ownership public key is the identity".into(),
+        ));
+    }
+    let commitment = decode_point(&wire.commitment, "pk-ownership commitment")?;
+    let response = decode_scalar(&wire.response, "pk-ownership response")?;
+    if commitment.is_identity() {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "pk-ownership commitment is the identity".into(),
+        ));
+    }
+    let (challenge, spec) = derive_pk_ownership_challenge_poseidon2(pk, context, wire);
+    if RistrettoCurve::base_g() * response != commitment + *pk * challenge {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "pk-ownership equation is not satisfied".into(),
+        ));
+    }
+    Ok(spec)
+}
+
+/// Prove `token = sk·ct.c1` under the Poseidon2-M31 transcript.
+pub fn prove_reveal_token_poseidon2(
+    sk: &RistrettoScalar,
+    pk: &RistrettoPoint,
+    ciphertext: &RistrettoCiphertext,
+    reveal_token: &RistrettoPoint,
+    context: &[u8],
+    rng: &mut (impl CryptoRng + RngCore),
+) -> TexasAirResult<(RistrettoRevealTokenWire, Poseidon2ChainSpec)> {
+    if *sk == RistrettoScalar::zero()
+        || pk.is_identity()
+        || RistrettoCurve::base_g() * *sk != *pk
+        || !ciphertext.is_valid()
+        || reveal_token.is_identity()
+        || *reveal_token != ciphertext.c1 * *sk
+    {
+        return Err(TexasAirError::SpecViolation(
+            "reveal-token witness does not match the statement".into(),
+        ));
+    }
+    let mut transcript = Poseidon2M31Transcript::new(REVEAL_TOKEN_PROTOCOL);
+    transcript.append_message(b"context", context);
+    transcript.append_message(b"pk", &point_bytes(pk));
+    transcript.append_message(b"c1", &point_bytes(&ciphertext.c1));
+    transcript.append_message(b"c2", &point_bytes(&ciphertext.c2));
+    transcript.append_message(b"reveal_token", &point_bytes(reveal_token));
+    let (nonce, t1, t2) = loop {
+        let nonce = RistrettoScalar::random(rng);
+        if nonce == RistrettoScalar::zero() {
+            continue;
+        }
+        let t1 = RistrettoCurve::base_g() * nonce;
+        let t2 = ciphertext.c1 * nonce;
+        if !t1.is_identity() && !t2.is_identity() {
+            break (nonce, t1, t2);
+        }
+    };
+    transcript.append_message(b"t1", &point_bytes(&t1));
+    transcript.append_message(b"t2", &point_bytes(&t2));
+    let challenge = transcript.challenge::<RistrettoCurve>(b"challenge").scalar;
+    let response = nonce + challenge * *sk;
+    let wire = RistrettoRevealTokenWire {
+        commitment_t1: point_bytes(&t1),
+        commitment_t2: point_bytes(&t2),
+        response: scalar_bytes(&response),
+    };
+    Ok((wire, transcript.into_chain_spec()))
+}
+
+/// Verify one Poseidon2-path reveal-token proof natively; returns the
+/// replayed chain statement for folding.
+pub fn verify_reveal_token_poseidon2(
+    pk: &RistrettoPoint,
+    ciphertext: &RistrettoCiphertext,
+    reveal_token: &RistrettoPoint,
+    context: &[u8],
+    wire: &RistrettoRevealTokenWire,
+) -> TexasAirResult<Poseidon2ChainSpec> {
+    let (challenge, spec) =
+        derive_reveal_token_challenge_poseidon2(pk, ciphertext, reveal_token, context, wire);
+    let response = decode_scalar(&wire.response, "reveal-token response")?;
+    let t1 = decode_point(&wire.commitment_t1, "reveal-token t1")?;
+    let t2 = decode_point(&wire.commitment_t2, "reveal-token t2")?;
+    if RistrettoCurve::base_g() * response != t1 + *pk * challenge
+        || ciphertext.c1 * response != t2 + *reveal_token * challenge
+    {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "reveal-token equation is not satisfied".into(),
+        ));
+    }
+    Ok(spec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poseidon2_player_proofs_prove_verify_and_reject() {
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+        let mut rng = StdRng::seed_from_u64(0x51DE_0002);
+
+        let sk = RistrettoScalar::random(&mut rng);
+        let pk = RistrettoCurve::base_g() * sk;
+        let (wire, spec) =
+            prove_pk_ownership_poseidon2(&sk, &pk, b"hand-1-seat-0", &mut rng)
+                .expect("poseidon2 ownership proof");
+        spec.validate().expect("spec shape");
+        let replayed = verify_pk_ownership_poseidon2(&pk, b"hand-1-seat-0", &wire)
+            .expect("poseidon2 ownership verify");
+        assert_eq!(spec, replayed);
+        // Wrong context derives a different challenge.
+        assert!(verify_pk_ownership_poseidon2(&pk, b"other-context", &wire).is_err());
+        // Tampered response breaks the equation.
+        let mut tampered = wire;
+        tampered.response[3] ^= 1;
+        assert!(verify_pk_ownership_poseidon2(&pk, b"hand-1-seat-0", &tampered).is_err());
+
+        let card = RistrettoCurve::hash_to_curve(b"poseidon2/card/1");
+        let randomness = RistrettoScalar::random(&mut rng);
+        let ciphertext = RistrettoCiphertext::encrypt(&card, &pk, &randomness);
+        let reveal_token = ciphertext.c1 * sk;
+        let (wire, spec) = prove_reveal_token_poseidon2(
+            &sk,
+            &pk,
+            &ciphertext,
+            &reveal_token,
+            b"hand-1-reveal",
+            &mut rng,
+        )
+        .expect("poseidon2 reveal proof");
+        let replayed = verify_reveal_token_poseidon2(
+            &pk,
+            &ciphertext,
+            &reveal_token,
+            b"hand-1-reveal",
+            &wire,
+        )
+        .expect("poseidon2 reveal verify");
+        assert_eq!(spec, replayed);
+        let mut tampered = wire;
+        tampered.commitment_t1[5] ^= 1;
+        assert!(
+            verify_reveal_token_poseidon2(&pk, &ciphertext, &reveal_token, b"hand-1-reveal", &tampered)
+                .is_err()
+        );
+    }
 
     fn test_rng() -> rand::rngs::StdRng {
         use rand::SeedableRng;

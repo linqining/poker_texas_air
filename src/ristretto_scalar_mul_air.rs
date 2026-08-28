@@ -84,8 +84,10 @@ const STEP_COUNT: usize = TABLE_STEPS + HORNER_STEPS;
 /// and FRI soundness keeps its nominal query weight at 128 rows.
 const LOG_SIZE_FLOOR: u32 = 7;
 /// Guard on the batch size so step counts cannot overflow the padded domain
-/// or the u32 LogUp multiplicities.
-const MAX_STATEMENTS: usize = 512;
+/// or the u32 LogUp multiplicities.  A whole-hand admission batches nine
+/// deck-52 shuffles ≈ 3,870 ladder statements (≈ 1.3M steps, log 21) —
+/// still far below the multiplicity and domain bounds.
+const MAX_STATEMENTS: usize = 8192;
 
 // ---------------------------------------------------------------------------
 // Pinned row values (fixed order, shared by builder, witness, trace, and AIR).

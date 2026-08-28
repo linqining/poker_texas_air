@@ -184,6 +184,91 @@ AIR 验证器（verify_*/admit_*）：
 路径**；Path A 递归信封（271.9s@deck-52）是链上/递归工件成本，不在该
 关键路径上。
 
+### 4.0.1 整手牌递归基准（✅ 2026-08-28 实测，`full_hand_recursion_benchmark`）
+
+九人整手、正确的客户端/服务端分层：**全部玩家证明（ownership/reveal/deck-DLEQ）
+与洗牌论证都是客户端 native prove，不进电路**；服务端递归工件只折叠洗牌准入义务
+（9 个 deck-52 BG admission STARK，每个一份独立工件）。transcript 链
+（BLAKE3/Flock）仍是独立外挂工件，未折叠进递归 AIR（parking 原型见路线图 8）。
+
+| 层 | 实测 |
+| --- | --- |
+| 客户端 native prove（ownership×9 + 洗牌×9 + fold×1 + reveal 96 token） | **2.07s** |
+| 服务端玩家证明原生验证 | 557ms |
+| **服务端递归工件 prove（9 × BG admission STARK）** | **1,417.8s**（中位 ~142s/洗牌；单次 136.9–259.9s，会话波动） |
+| 递归工件 verify | 140.1s（~15.6s/个） |
+| **递归工件体积** | **384.6 MB（42.7MB × 9）** |
+
+解读：①每工件 ~42.7MB 中 ~12.5MB 是 FRI+表条纹地板（2 条梯子的最小语句实测
+同为此量级），9 份工件各自全额支付——**多洗牌合批进单份 admission STARK**
+（statement 已支持多梯子；schedule/recurrence 需 Vec 化）是把地板摊到每手的
+自然下一步（**✅ 已落地，见 §4.0.2**）；②prove 时间与 §4.1 归因一致（梯子
+log-18 列主导），⑩ Pippenger 落地后预计 ~50–60s/洗牌（~450–540s/手）；
+③体积出路仍是 ①+②+②b+⑧（每工件 42.7→~5–8MB）加合批；④部署路径服务端
+原生验证 447ms/手——递归工件的溢价（~3,200×）买到的是单工件链上可验证性，
+不是成本优势。
+
+### 4.0.2 一手一证（✅ 2026-08-28 实现，`prove/verify_hand_admission_components`）
+
+按上面的解读 ① 落地：**整手牌的结算义务折叠为一份 admission STARK**。
+
+- **⑥' Vec 化（✅）**：`AdmissionStatement.schedule/recurrence` 从 `Option`
+  改为 `Vec`（wire 版本 v4→v5）；rebuild 按 deck 形状分组，同形状的调度/
+  recurrence 程序批进**单个**标量段（9 份 deck-52 调度共享一个 FRI 段，列数
+  不变、行数只贡献 log 因子）；绑定行的 deck_size 列改为 schedule_count。
+  ladder 批上限 `MAX_STATEMENTS` 512→8192（整手 3,870 条梯子 ≈ log-21 行，
+  远离 u32/M31 多重度上界）。
+- **Poseidon2 段修复 + 健全化（✅）**：parked 原型（路线图 8）的三个叠加
+  缺陷——①LogUp 分数生成器按自然序打包而 `LogupTraceGenerator` 存位反序
+  （分数被置换→"Constraints not satisfied"）；②验证端组件不恢复 LogUp
+  claimed_sum（其它段恰好全零未暴露，本段 `Σ(1/d_init − 1/d_digest)` 非零
+  →DEEP-ALI 失败）；③验证端 tree-2 列数取未物化的 interaction 向量。修复
+  后补齐**消息吸收**（每步 8 个公开 rate 词进 scope 列，域加法度数 1）与
+  **边界绑定**（每链 `(−1, scope 初始)/(+1, scope digest)` 边界条目 +
+  one-hot 选择子，总分数和恒为 0，多重集论证钉死首尾态——与 ladder range
+  表同一模式）；padding 槽作为一条确定性 padding 链折入。`absorbed_words`
+  进 statement digest（fail-closed）。
+- **Poseidon2-M31 原生 transcript（✅）**：`ristretto_poseidon2_transcript`
+  实现第四个 `CryptoTranscript`——framed 吸收（3 字节/limb）+ absorb-and-
+  permute 步进 + 双置换 squeeze（496→256 位）拒绝采样。整个 transcript
+  运行即一份 `Poseidon2ChainSpec`（初始态 + 公开词表），
+  `merge_poseidon2_chain_specs` 按最长链零词填充合批，`poseidon2_root` 从
+  链 digest 派生 M31 原生 hand root。**玩家证明的 Poseidon2 路径已闭环**
+  （`prove/verify_pk_ownership_poseidon2`、`prove/verify_reveal_token_
+  poseidon2`）：挑战真实由 M31 sponge 派生，方程以 `PlayerPoseidon2Inputs`
+  折进整手工件、其 transcript 链合入同一 Poseidon2 批——整手测试即此
+  闭环，无任何 Flock 工件。Flock 消除（路线图 7）在此路径成立。
+- **一手一证 API（✅）**：`HandAdmissionComponents { shuffles, players,
+  poseidon2_players, hand_root, poseidon2 }` → `decompose/prove/
+  verify_hand_admission_components`。9 份洗牌的梯子/累加/调度/recurrence + 玩家 ownership/
+  reveal/DLEQ 点方程 + 手牌全部 transcript 链合并进**一次 prove() 调用**
+  （一棵 scope 树、一棵 trace 树、一棵交互树、单次 FRI）；tag = Poseidon2
+  hand root。验证端 fail-closed：每份洗牌原生重放（decompose 内含挑战重放
+  与全部等式检查）、每个玩家证明原生验证、statement 必须等于推导合并、
+  单次 STARK 验证。
+- **多成分 Texas 折叠（✅）**：`prove/verify_ristretto_admission_stark_
+  with_texas_batch`——多个方法 AIR 成分（`Vec<TexasMethodIngredient>`）
+  折进同一份 admission STARK，成分顺序进 FS 绑定；换序/缺成分/篡改期望行
+  全部拒绝（测试覆盖）。全方法接线剩余：CanonicalAir（29 种转移、带
+  range LogUp）尚不满足 TexasAir 的零交互层槽位——需给 Texas 折叠槽加
+  交互树管道后接入。
+- **测试**：`hand_admission_proves_and_verifies`（3 洗牌 + Poseidon2 路径
+  玩家证明——挑战来自被折叠的链，41s，四类篡改拒绝）、
+  `poseidon2_player_proofs_prove_verify_and_reject`、
+  `admission_poseidon2_segment_proves_
+  and_verifies`（去 ignore，含词表篡改拒绝）、`texas_layer1_multi_fold_
+  proves_and_verifies`（3 成分）。全库 507 测试回归通过。
+- **成本实测（✅ 2026-08-28，`hand_admission_deck52_batch_benchmark`）**：
+  3 洗牌 + 18 链单 STARK：**prove 274.3s / verify 22.2s / 43.14MB 单工件**
+  （对照 3 份分离工件 ~426s / 128MB：**prove -36%、体积 -66%**。prove 的
+  节约来自 padding 摊销——单洗牌梯子 144K→262K 行有 82% 填充开销，3 合批
+  432K→524K 仅 21%；体积节约来自 FRI/表条纹地板只付一次）。9 洗牌完整
+  运行验证通过（证明+验证 exit 0），按同模型外推 **~820s / ~60–70MB vs
+  1,417.8s / 384.6MB（prove -42%、体积 -82%）**；注意 9 洗牌梯子段为
+  log-21，36GB 机器需 swap（重跑可能 OOM），基准支持
+  `TEXAS_HAND_SHUFFLES=k` 变体。后续优化排序不变：⑩ Pippenger（时间）
+  → ①+②+②b+⑧（字节），都在合批后的单工件上直接生效。
+
 ### 4.1 后续工作（增量优化 + 递归路线图）
 
 **递归工件（admission STARK）成本归因（✅ 2026-08-27 实测修正）**——非生产关键路径
@@ -220,13 +305,22 @@ verify 24.9s / 42.7MB**（会话间波动大：历史 271.9s/35.3s 与本次同�
 （6.9×）、verify 24.9→5.77s（4.3×）、证明字节 42.74→42.52MB（-0.5%）**，
 全部验证通过；树承诺 ~158s→~5s，verify 的 scope 重承诺 12.9s→0.23s（换哈希
 后"刚性"消失）。新瓶颈变为 prove.stwo 组合求值 14.9s、segments.build 4.4s。
+**第三选项（SIMD 化 Poseidon252）**：52× 差距主要来自标量实现——stwo 的
+`simd/poseidon252.rs` 自带 `TODO: replace with SIMD implementation`，叶哈希
+（叶子间独立、可跨叶向量化）SIMD 化预计拿回 4–8× 且**保持 Cairo 对齐**，
+是"链上便宜 + CPU 快"的标准解法，也是业界无人做通道包装的原因。
 **Blake3 不适用**：stwo 2.3 的 lifted（异构列）通道只有 Poseidon252/Blake2s
 两种实现；64 字节块粒度下 Blake3≈Blake2s（各一次压缩函数），Blake3 的大输入/
 内置多线程优势在这个叶子形状用不上，自实现 lifted 通道收益≈0。**切换条件**：
 若 Path A 证明最终在 Starknet/Cairo 链上验证，Poseidon252 是 Cairo 原生哈希，
 应保留；若链上/递归目标非 Starknet（或将来自研 M31 verifier AIR 反正要换 M31
 原生 hash），切 Blake2s 是当前性价比最高的单一改动——与 ⑩ 同级收益、工作量
-低一个量级（~70 处类型引用替换，全部路径已实测）。
+低一个量级（admission 路径 ~70 处类型引用替换已实测；全栈 30+ 文件）。**注意
+通道选择与"递归 vs tagged commitment"无关**：tagged 主路径（`texas_tagged`/
+`texas_canonical_air`/aggregator/dual_proof）本身就是 Poseidon252 通道的 stwo
+证明，Flock 与部署路径服务端原生验证不使用它——真正的决策变量是"哪个 stwo
+证明需要在链上验证"：链上验 STARK → 保留 Poseidon252；链上只验 canonical
+承诺/哈希根 → 全栈换 Blake2s 收益照旧（所有 stwo prove ~6.9×）。
 
 | 优化点 | 做法 | 预估收益（修正后） | 复杂度 |
 | --- | --- | --- | --- |
@@ -288,23 +382,31 @@ proof-verifies-proof 递归（超出 stwo 2.3）或专用后端（GPU-FRI），�
    a[0]` 的 mod-l 推导并入 admission STARK 第二标量段（语句携带
    AdmissionRecurrenceSpec，wire v4；`d == 0` 与 `b[n-1]` 比较仍为对
    pinned 输出的原生检查）；
-5. ✅ **Texas Layer-1 折叠**（已完成，原型）：`prove/verify_
-   ristretto_admission_stark_with_texas` 把任一方法 AIR（BoundAir 包装，
-   trace 列进共享 tree 1、期望行摘要素入通道、零 claim 组件）折进
-   admission STARK——CreateTable 与 pk+reveal 点方程一份证明验证通过，
-   篡改期望行拒绝；dual-proof 全方法接线是后续项；
+5. ✅ **Texas Layer-1 折叠**（已完成，含多成分批）：`prove/verify_
+   ristretto_admission_stark_with_texas(_batch)` 把一个或多个方法 AIR
+   （BoundAir 包装，trace 列进共享 tree 1、期望行摘要素入通道、零 claim
+   组件）折进 admission STARK——CreateTable 与 pk+reveal 点方程一份证明
+   验证通过，篡改期望行拒绝；多成分批（2026-08-28）支持
+   `Vec<TexasMethodIngredient>`，成分顺序进 FS 绑定；CanonicalAir 全方法
+   接线还需给 Texas 槽加交互树管道（其 range LogUp 有非零 claim）；
 6. **边界**：电路内 FRI 验证超出 stwo 2.3 能力（无 verifier-air/
    recursion crate），当前骨架是递归的"折叠"半边（多组件单 FRI +
    摘要绑定），非 proof-verifies-proof；真正的电路内验证需升级
    stwo 或自研 verifier AIR。
-7. **Flock 消除路线（通道哈希 ≠ 语句哈希）**：换 STARK 通道
+7. **Flock 消除路线（✅ 2026-08-28 核心已落地）**：换 STARK 通道
    （⓪ Blake2s，已实测 prove -6.9×）只便宜外层工件自身的承诺，不
    影响 Flock——Flock 的开销来自"在电路里证明位运算哈希"这一事实，
    Blake2s 与 BLAKE3 同为 ARX（且每块 10 轮 vs 7 轮，更贵），换它
    只是换一个待证明的位哈希。仓库已有直接证据：hash 层曾走
    "Blake2b + M31 lookup 栈"（现 ZR3N 绑定 STARK ~5.7MB/7s），后迁
-   BLAKE3+Flock——位哈希进 M31 是实测淘汰过的方向。真正消除 Flock
-   需把 transcript/状态哈希换成 **M31 原生 SNARK 友好哈希**
+   BLAKE3+Flock——位哈希进 M31 是实测淘汰过的方向。**✅ 核心已落地
+   （2026-08-28，见 §4.0.2）**：`ristretto_poseidon2_transcript` 提供
+   M31 原生 Poseidon2 transcript（CryptoTranscript 第四实现），其链语句
+   作为 admission STARK 的又一个 M31 段（同骨架/同树/同一次 FRI）随
+   一手一证工件自包含；剩余迁移面：poker_protocol 各证明入口与
+   `texas_poker_move` 参考实现切到该 transcript（部署路径的 37 个 Flock
+   归档随之并为单 M31 批或服务端原生复核）。原方案（供参照）：需把
+   transcript/状态哈希换成 **M31 原生 SNARK 友好哈希**
    （Poseidon2/Monolith over M31）：链语句成为 admission STARK 的
    又一个 M31 段（同骨架/同树/同一次 FRI），递归工件自包含、部署
    路径 37 个 Flock 归档（~10MB/手、每语句 ~136KB Ligerito 固定
@@ -323,11 +425,11 @@ proof-verifies-proof 递归（超出 stwo 2.3）或专用后端（GPU-FRI），�
    M31 上不可用（非置换），其加法型 MDS 优势 Poseidon2-M31 已具备，
    效率同级——跟随 stwo 参考电路即可（注意其轮常数为占位 TODO，正式
    参数需按论文程序生成）。
-8. **段原型（parked）**：`ristretto_poseidon2_air` 已实现 Circle STARK 参数
-   的 Poseidon2-M31 段（t=16、8+14 轮、x^5 拆三步度 2 约束、442 列/置换、
-   LogUp 链式配平、接入 admission STARK 可选段），但 prove 报
-   "Constraints not satisfied"（单链单置换即复现）——疑 16 元 relation 的
-   交互层度数与协议 FRI 配置（blowup 1）不合，stwo 参考示例跑在自带的
-   LOG_EXPAND=2 + 系数存储配置下。测试已 #[ignore] parking；段形状/性能
-   结论（~0.1% 梯子当量）不受影响，Flock 消除决策不阻塞于此。
+8. ✅ **Poseidon2 段（已修复并健全化，2026-08-28）**：`ristretto_
+   poseidon2_air` 的 Circle STARK 参数 Poseidon2-M31 段（t=16、8+14 轮、
+   x^5 拆三步度 2 约束、442 列/置换）修复了三个叠加缺陷（分数位反序、
+   claimed_sum 不恢复、tree-2 列数声明）并补齐消息吸收与边界绑定（见
+   §4.0.2）——admission 内证明/验证/篡改拒绝全部通过，测试去 ignore。
+   原"16 元 relation 度数与 blowup 1 不合"的怀疑不成立：relation 的
+   combine 是仿射的（度数 1），配对约束三次，度数声明本就正确。
 
