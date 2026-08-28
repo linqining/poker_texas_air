@@ -13,8 +13,10 @@
 use core::starknet::secp256k1::Secp256k1Point;
 use core::starknet::secp256_trait::{Secp256PointTrait, Secp256Trait};
 use super::keccak::{challenge_mod_n, u256_to_be_bytes};
-use super::keccak_transcript::{point_compressed, scalar_be, transcript_append,
-    transcript_challenge, transcript_new};
+use super::keccak_transcript::{
+    point_compressed, scalar_be, transcript_append, transcript_challenge,
+    transcript_challenge_and_state, transcript_new,
+};
 
 
 /// secp256k1 base field prime p (for point negation: -y = p - y).
@@ -214,11 +216,11 @@ pub fn verify_p_proof(
         if n_declared != n {
             return false;
         }
-        let in_c1 = payload.slice(7_u32, 7_u32 + 2 * n);
-        let in_c2 = payload.slice(7_u32 + 2 * n, 7_u32 + 4 * n);
-        let out_c1 = payload.slice(7_u32 + 4 * n, 7_u32 + 6 * n);
-        let out_c2 = payload.slice(7_u32 + 6 * n, 7_u32 + 8 * n);
-        let a = payload.slice(7_u32 + 8 * n, len);
+        let in_c1 = payload.slice(7_u32, 2 * n);
+        let in_c2 = payload.slice(7_u32 + 2 * n, 2 * n);
+        let out_c1 = payload.slice(7_u32 + 4 * n, 2 * n);
+        let out_c2 = payload.slice(7_u32 + 6 * n, 2 * n);
+        let a = payload.slice(7_u32 + 8 * n, 2 * n);
         return verify_fold_leave(
             protocol_name, pk, commitment_pk, nonce, s, n,
             in_c1, in_c2, out_c1, out_c2, a,
@@ -237,16 +239,16 @@ pub fn verify_p_proof(
         let n_fold: u32 = n_fold_val.try_into().expect('n_fold fits u32');
         let n_reveal: u32 = n_reveal_val.try_into().expect('n_reveal fits u32');
         let n_rel = 1_u32 + n_fold + n_reveal;
-        let expected = 4_u32 + 4 * n_fold + 3 * n_reveal + 1 + 2 * n_rel;
+        let expected = 4_u32 + 8 * n_fold + 6 * n_reveal + 1 + 2 * n_rel;
         if len != expected {
             return false;
         }
-        let s_scalar = *payload.at(4_u32 + 4 * n_fold + 3 * n_reveal);
+        let s_scalar = *payload.at(4_u32 + 8 * n_fold + 6 * n_reveal);
         let pk = (*payload.at(0), *payload.at(1));
-        let fold = payload.slice(4_u32, 4_u32 + 4 * n_fold);
+        let fold = payload.slice(4_u32, 4_u32 + 8 * n_fold);
         let reveal = payload.slice(
-            4_u32 + 4 * n_fold,
-            4_u32 + 4 * n_fold + 3 * n_reveal,
+            4_u32 + 8 * n_fold,
+            4_u32 + 8 * n_fold + 6 * n_reveal,
         );
         let commitments = payload.slice(
             4_u32 + 4 * n_fold + 3 * n_reveal + 1,
@@ -256,7 +258,11 @@ pub fn verify_p_proof(
             protocol_name, pk, n_fold, n_reveal, fold, reveal, s_scalar, commitments,
         );
     }
-    // Shuffle (BG product argument) verifier: pending on-chain wiring.
+    if kind == PROOF_KIND_SHUFFLE_BG {
+        // See verify_bg_shuffle for the (31 + 13n) layout; the protocol
+        // name is the Keccak transcript domain.
+        return verify_bg_shuffle(protocol_name, payload);
+    }
     false
 }
 
@@ -330,7 +336,7 @@ pub fn verify_unified(
     state = transcript_append(state, l_n_fold, scalar_be(n_fold.into()).span());
     let mut i: u32 = 0;
     while i < n_fold {
-        let base = 4 * i;
+        let base = 8 * i;
         state = transcript_append(state, l_in_c1, point_compressed(*fold.at(base), *fold.at(base + 1)).span());
         state = transcript_append(state, l_in_c2, point_compressed(*fold.at(base + 2), *fold.at(base + 3)).span());
         state = transcript_append(state, l_out_c1, point_compressed(*fold.at(base + 4), *fold.at(base + 5)).span());
@@ -404,7 +410,7 @@ pub fn verify_unified(
     // Fold relations: (in_c1_i, in_c2_i - out_c2_i).
     i = 0;
     while i < n_fold {
-        let base = 4 * i;
+        let base = 8 * i;
         let c1_point = match ec_decode(*fold.at(base), *fold.at(base + 1)) {
             Option::Some(point) => point,
             Option::None => {
@@ -817,6 +823,769 @@ pub fn verify_fold_leave(
         }
         k += 1;
     }
+    true
+}
+
+
+// ============================================================
+// Bayer–Groth shuffle on-chain verification (kind = 2)
+// ============================================================
+
+use super::fr::{fr_add, fr_from_u64, fr_mul, fr_sub};
+
+/// `challenge_nonzero` from poker-protocol-bg: derive the challenge; on zero
+/// (probability ~2^-256) append the retry counter and re-derive. Returns
+/// (challenge, new transcript state).
+fn bg_challenge_nonzero(
+    state: u256, label: Span<u8>,
+) -> (u256, u256) {
+    let (mut current, mut state) = transcript_challenge_and_state(state, label);
+    let mut counter: u32 = 0;
+    while current == 0 {
+        let mut retry: Array<u8> = array![];
+        // u32 little-endian.
+        let value = counter;
+        retry.append((value & 0xFF).try_into().expect('le0'));
+        retry.append(((value / 256) & 0xFF).try_into().expect('le1'));
+        retry.append(((value / 65536) & 0xFF).try_into().expect('le2'));
+        retry.append(((value / 16777216) & 0xFF).try_into().expect('le3'));
+        state = transcript_append(
+            state,
+            array![
+                0x62, 0x67, 0x31, 0x32, 0x5f, 0x7a, 0x65, 0x72, 0x6f, 0x5f, 0x63, 0x68, 0x61,
+                0x6c, 0x6c, 0x65, 0x6e, 0x67, 0x65, 0x5f, 0x72, 0x65, 0x74, 0x72, 0x79
+            ].span(), // "bg12_zero_challenge_retry"
+            retry.span(),
+        );
+        let (retried, retry_state) = transcript_challenge_and_state(state, label);
+        current = retried;
+        state = retry_state;
+        counter += 1;
+    }
+    (current, state)
+}
+
+/// Append one ciphertext under `bg12_ciphertext_label`/`bg12_ciphertext_c1/c2`.
+fn bg_append_ciphertext(
+    mut state: u256, label_name: Span<u8>, c1: (u256, u256), c2: (u256, u256),
+) -> u256 {
+    let (c1_x, c1_y) = c1;
+    let (c2_x, c2_y) = c2;
+    let l_label = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x63, 0x69, 0x70, 0x68, 0x65, 0x72, 0x74, 0x65, 0x78,
+        0x74, 0x5f, 0x6c, 0x61, 0x62, 0x65, 0x6c
+    ].span(); // bg12_ciphertext_label
+    let l_c1 = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x63, 0x69, 0x70, 0x68, 0x65, 0x72, 0x74, 0x65, 0x78,
+        0x74, 0x5f, 0x63, 0x31
+    ].span();
+    let l_c2 = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x63, 0x69, 0x70, 0x68, 0x65, 0x72, 0x74, 0x65, 0x78,
+        0x74, 0x5f, 0x63, 0x32
+    ].span();
+    state = transcript_append(state, l_label, label_name);
+    state = transcript_append(state, l_c1, point_compressed(c1_x, c1_y).span());
+    state = transcript_append(state, l_c2, point_compressed(c2_x, c2_y).span());
+    state
+}
+
+/// Pedersen vector commitment Σ values[i]·G[i] + blinding·H over decoded
+/// points. Points arrive as a flat Span<u256> of coordinate pairs.
+fn bg_vector_commit(
+    values: Span<u256>, blinding: u256, gens: Span<u256>, h: (u256, u256),
+) -> Option<Secp256k1Point> {
+    let (h_x, h_y) = h;
+    // Accumulator starts as None (identity); zero-scalar terms are skipped,
+    // matching the Rust MSM semantics where h·0 contributes the identity.
+    let mut acc: Option<Secp256k1Point> = Option::None;
+    if blinding != 0 {
+        let h_point = match ec_decode(h_x, h_y) {
+            Option::Some(point) => point,
+            Option::None => {
+                return Option::None;
+            }
+        };
+        acc = ec_mul(h_point, blinding);
+        if acc.is_none() {
+            return Option::None;
+        }
+    }
+    let mut i: u32 = 0;
+    let n = values.len();
+    while i < n {
+        let scalar = *values.at(i);
+        if scalar == 0 {
+            i += 1;
+            continue;
+        }
+        let gen = match ec_decode(*gens.at(2 * i), *gens.at(2 * i + 1)) {
+            Option::Some(point) => point,
+            Option::None => {
+                return Option::None;
+            }
+        };
+        let term = match ec_mul(gen, scalar) {
+            Option::Some(point) => point,
+            Option::None => {
+                return Option::None;
+            }
+        };
+        acc = match acc {
+            Option::None => Option::Some(term),
+            Option::Some(prev) => ec_add(prev, term),
+        };
+        if acc.is_none() {
+            return Option::None;
+        }
+        i += 1;
+    }
+    acc
+}
+
+/// Ciphertext MSM: (Σ s_i·c1_i, Σ s_i·c2_i) over flat coordinate spans.
+fn bg_ciphertext_msm(
+    c1: Span<u256>, c2: Span<u256>, scalars: Span<u256>,
+) -> Option<(Secp256k1Point, Secp256k1Point)> {
+    let n = scalars.len();
+    let mut acc1: Option<Secp256k1Point> = Option::None;
+    let mut acc2: Option<Secp256k1Point> = Option::None;
+    let mut i: u32 = 0;
+    while i < n {
+        let scalar = *scalars.at(i);
+        if scalar != 0 {
+            let p1 = match ec_decode(*c1.at(2 * i), *c1.at(2 * i + 1)) {
+                Option::Some(point) => point,
+                Option::None => {
+                    return Option::None;
+                }
+            };
+            let t1 = match ec_mul(p1, scalar) {
+                Option::Some(point) => point,
+                Option::None => {
+                    return Option::None;
+                }
+            };
+            acc1 = match acc1 {
+                Option::None => Option::Some(t1),
+                Option::Some(prev) => ec_add(prev, t1),
+            };
+            let p2 = match ec_decode(*c2.at(2 * i), *c2.at(2 * i + 1)) {
+                Option::Some(point) => point,
+                Option::None => {
+                    return Option::None;
+                }
+            };
+            let t2 = match ec_mul(p2, scalar) {
+                Option::Some(point) => point,
+                Option::None => {
+                    return Option::None;
+                }
+            };
+            acc2 = match acc2 {
+                Option::None => Option::Some(t2),
+                Option::Some(prev) => ec_add(prev, t2),
+            };
+        }
+        i += 1;
+    }
+    match (acc1, acc2) {
+        (Option::Some(a), Option::Some(b)) => Option::Some((a, b)),
+        _ => Option::None,
+    }
+}
+
+/// Verify a Bayer–Groth shuffle proof (poker-protocol-bg `verify`, n ≥ 2).
+/// Layout (33 + 13n u256 values):
+/// [n 1][pk 2][in_c1 2n][in_c2 2n][out_c1 2n][out_c2 2n]
+/// [c_perm 2][c_perm_pow 2][c_alpha 2][c_beta 2][ct0 4][ct1 4]
+/// [alpha_resp n][commit_resp 1][beta 1][beta_blind 1][rerand 1]
+/// [c_d 2][c_delta 2][c_cap_delta 2][a_resp n][b_resp n][r_resp 1][s_resp 1]
+/// [h 2][gens 2n]
+pub fn verify_bg_shuffle(
+    protocol_name: Span<u8>, payload: Span<u256>,
+) -> bool {
+    let len = payload.len();
+    if len < 1_u32 {
+        return false;
+    }
+    let n_val = *payload.at(0);
+    let n: u32 = n_val.try_into().expect('n fits u32');
+    if n < 2_u32 {
+        return false;
+    }
+    if len != 33_u32 + 13 * n {
+        return false;
+    }
+    let mut cursor: u32 = 1;
+    let pk = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let in_c1 = payload.slice(cursor, 2 * n);
+    cursor += 2 * n;
+    let in_c2 = payload.slice(cursor, 2 * n);
+    cursor += 2 * n;
+    let out_c1 = payload.slice(cursor, 2 * n);
+    cursor += 2 * n;
+    let out_c2 = payload.slice(cursor, 2 * n);
+    cursor += 2 * n;
+    let c_perm = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let c_perm_pow = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let c_alpha = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let c_beta = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let ct0_c1 = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let ct0_c2 = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let ct1_c1 = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let ct1_c2 = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let alpha_resp = payload.slice(cursor, n);
+    cursor += n;
+    let commit_resp = *payload.at(cursor);
+    cursor += 1;
+    let beta = *payload.at(cursor);
+    cursor += 1;
+    let beta_blind = *payload.at(cursor);
+    cursor += 1;
+    let rerand = *payload.at(cursor);
+    cursor += 1;
+    let c_d = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let c_delta = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let c_cap_delta = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let a_resp = payload.slice(cursor, n);
+    cursor += n;
+    let b_resp = payload.slice(cursor, n);
+    cursor += n;
+    let r_resp = *payload.at(cursor);
+    cursor += 1;
+    let s_resp = *payload.at(cursor);
+    cursor += 1;
+    let h = (*payload.at(cursor), *payload.at(cursor + 1));
+    cursor += 2;
+    let gens = payload.slice(cursor, 2 * n);
+
+    // Destructure the tuple-shaped payload fields (Cairo tuples have no
+    // member access).
+    let (pk_x, pk_y) = pk;
+    let (c_perm_x, c_perm_y) = c_perm;
+    let (c_perm_pow_x, c_perm_pow_y) = c_perm_pow;
+    let (c_alpha_x, c_alpha_y) = c_alpha;
+    let (c_beta_x, c_beta_y) = c_beta;
+    let (ct0_c1_x, ct0_c1_y) = ct0_c1;
+    let (ct0_c2_x, ct0_c2_y) = ct0_c2;
+    let (ct1_c1_x, ct1_c1_y) = ct1_c1;
+    let (ct1_c2_x, ct1_c2_y) = ct1_c2;
+    let (c_d_x, c_d_y) = c_d;
+    let (c_delta_x, c_delta_y) = c_delta;
+    let (c_cap_delta_x, c_cap_delta_y) = c_cap_delta;
+    let (h_x, h_y) = h;
+
+    // ---- Transcript replay (append_statement + challenges). ----
+    let l_protocol = array![0x62, 0x67, 0x31, 0x32, 0x5f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x63, 0x6f, 0x6c].span(); // bg12_protocol
+    let protocol_id = array![
+        0x70, 0x6f, 0x6b, 0x65, 0x72, 0x2f, 0x62, 0x61, 0x79, 0x65, 0x72, 0x2d, 0x67, 0x72,
+        0x6f, 0x74, 0x68, 0x2d, 0x73, 0x68, 0x75, 0x66, 0x66, 0x6c, 0x65, 0x2f, 0x76, 0x32
+    ].span(); // poker/bayer-groth-shuffle/v2
+    let l_deck = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x64, 0x65, 0x63, 0x6b, 0x5f, 0x73, 0x69, 0x7a, 0x65
+    ].span(); // bg12_deck_size
+    let l_pk = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63, 0x5f, 0x6b, 0x65,
+        0x79
+    ].span();
+    let label_input = array![0x69, 0x6e, 0x70, 0x75, 0x74].span();
+    let label_output = array![0x6f, 0x75, 0x74, 0x70, 0x75, 0x74].span();
+    let l_c_perm = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x63, 0x5f, 0x70, 0x65, 0x72, 0x6d, 0x75, 0x74, 0x61,
+        0x74, 0x69, 0x6f, 0x6e
+    ].span();
+    let l_powers = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x70, 0x6f, 0x77, 0x65, 0x72, 0x73, 0x5f, 0x63, 0x68,
+        0x61, 0x6c, 0x6c, 0x65, 0x6e, 0x67, 0x65
+    ].span();
+    let l_perm_pow = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x63, 0x5f, 0x70, 0x65, 0x72, 0x6d, 0x75, 0x74, 0x65,
+        0x64, 0x5f, 0x70, 0x6f, 0x77, 0x65, 0x72, 0x73
+    ].span();
+    let l_prod_y = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x70, 0x72, 0x6f, 0x64, 0x75, 0x63, 0x74, 0x5f, 0x79
+    ].span();
+    let l_prod_z = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x70, 0x72, 0x6f, 0x64, 0x75, 0x63, 0x74, 0x5f, 0x7a
+    ].span();
+    let l_mexp_alpha = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x6d, 0x65, 0x78, 0x70, 0x5f, 0x63, 0x5f, 0x61, 0x6c,
+        0x70, 0x68, 0x61
+    ].span();
+    let l_mexp_beta = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x6d, 0x65, 0x78, 0x70, 0x5f, 0x63, 0x5f, 0x62, 0x65,
+        0x74, 0x61
+    ].span();
+    let label_mexp0 = array![0x6d, 0x65, 0x78, 0x70, 0x5f, 0x30].span();
+    let label_mexp1 = array![0x6d, 0x65, 0x78, 0x70, 0x5f, 0x31].span();
+    let l_mexp_c = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x6d, 0x65, 0x78, 0x70, 0x5f, 0x63, 0x68, 0x61, 0x6c,
+        0x6c, 0x65, 0x6e, 0x67, 0x65
+    ].span();
+    let l_c_d = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x70, 0x72, 0x6f, 0x64, 0x75, 0x63, 0x74, 0x5f, 0x63,
+        0x5f, 0x64
+    ].span();
+    let l_c_delta = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x70, 0x72, 0x6f, 0x64, 0x75, 0x63, 0x74, 0x5f, 0x63,
+        0x5f, 0x64, 0x65, 0x6c, 0x74, 0x61
+    ].span();
+    let l_c_cap_delta = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x70, 0x72, 0x6f, 0x64, 0x75, 0x63, 0x74, 0x5f, 0x63,
+        0x5f, 0x63, 0x61, 0x70, 0x69, 0x74, 0x61, 0x6c, 0x5f, 0x64, 0x65, 0x6c, 0x74, 0x61
+    ].span();
+    let l_prod_c = array![
+        0x62, 0x67, 0x31, 0x32, 0x5f, 0x70, 0x72, 0x6f, 0x64, 0x75, 0x63, 0x74, 0x5f, 0x63,
+        0x68, 0x61, 0x6c, 0x6c, 0x65, 0x6e, 0x67, 0x65
+    ].span();
+
+    let mut state = transcript_new(protocol_name);
+    state = transcript_append(state, l_protocol, protocol_id);
+    // deck size: u64 little-endian (8 bytes).
+    let mut deck: Array<u8> = array![];
+    let deck_value: u64 = n.into();
+    deck.append((deck_value & 0xFF).try_into().expect('d0'));
+    deck.append(((deck_value / 256) & 0xFF).try_into().expect('d1'));
+    deck.append(((deck_value / 65536) & 0xFF).try_into().expect('d2'));
+    deck.append(((deck_value / 16777216) & 0xFF).try_into().expect('d3'));
+    deck.append(0);
+    deck.append(0);
+    deck.append(0);
+    deck.append(0);
+    state = transcript_append(state, l_deck, deck.span());
+    state = transcript_append(state, l_pk, point_compressed(pk_x, pk_y).span());
+    let mut i: u32 = 0;
+    while i < n {
+        state = bg_append_ciphertext(
+            state,
+            label_input,
+            (*in_c1.at(2 * i), *in_c1.at(2 * i + 1)),
+            (*in_c2.at(2 * i), *in_c2.at(2 * i + 1)),
+        );
+        i += 1;
+    }
+    i = 0;
+    while i < n {
+        state = bg_append_ciphertext(
+            state,
+            label_output,
+            (*out_c1.at(2 * i), *out_c1.at(2 * i + 1)),
+            (*out_c2.at(2 * i), *out_c2.at(2 * i + 1)),
+        );
+        i += 1;
+    }
+    state = transcript_append(state, l_c_perm, point_compressed(c_perm_x, c_perm_y).span());
+    assert!(1 == 1, "t4 loops+cperm");
+    let (powers_challenge, state_value) = bg_challenge_nonzero(state, l_powers);
+    let mut state = state_value;
+    state = transcript_append(
+        state, l_perm_pow, point_compressed(c_perm_pow_x, c_perm_pow_y).span(),
+    );
+    let (product_y, state_y) = bg_challenge_nonzero(state, l_prod_y);
+    let mut state = state_y;
+    let (product_z, state_z) = bg_challenge_nonzero(state, l_prod_z);
+    let mut state = state_z;
+    state = transcript_append(state, l_mexp_alpha, point_compressed(c_alpha_x, c_alpha_y).span());
+    state = transcript_append(state, l_mexp_beta, point_compressed(c_beta_x, c_beta_y).span());
+    state = bg_append_ciphertext(state, label_mexp0, ct0_c1, ct0_c2);
+    state = bg_append_ciphertext(state, label_mexp1, ct1_c1, ct1_c2);
+    let (mexp_challenge, state_m) = bg_challenge_nonzero(state, l_mexp_c);
+    let mut state = state_m;
+    state = transcript_append(state, l_c_d, point_compressed(c_d_x, c_d_y).span());
+    state = transcript_append(state, l_c_delta, point_compressed(c_delta_x, c_delta_y).span());
+    state = transcript_append(
+        state, l_c_cap_delta, point_compressed(c_cap_delta_x, c_cap_delta_y).span(),
+    );
+    let (product_challenge, _state_p) = bg_challenge_nonzero(state, l_prod_c);
+
+    assert!(1 == 1, "stage: transcript ok");
+    // ---- Scalar precomputation. ----
+    // public_powers[i] = x^(i+1).
+    let mut powers: Array<u256> = array![];
+    let mut running = powers_challenge;
+    i = 0;
+    while i < n {
+        powers.append(running);
+        running = fr_mul(running, powers_challenge);
+        i += 1;
+    }
+    // c_a = c_perm·y + c_perm_pow (point equation, deferred scalar-free).
+    // expected_product = ∏_{i=1..n} (y·i + x^i − z).
+    let mut expected_product: u256 = 1;
+    i = 0;
+    while i < n {
+        let index = fr_from_u64((i + 1).into());
+        let term = fr_sub(fr_add(fr_mul(product_y, index), *powers.at(i)), product_z);
+        expected_product = fr_mul(expected_product, term);
+        i += 1;
+    }
+    // recurrence[i] = pc·b[i+1] − b[i]·a[i+1] for i < n−1.
+    let mut recurrence: Array<u256> = array![];
+    i = 0;
+    while i + 1 < n {
+        let left = fr_mul(product_challenge, *b_resp.at(i + 1));
+        let right = fr_mul(*b_resp.at(i), *a_resp.at(i + 1));
+        recurrence.append(fr_sub(left, right));
+        i += 1;
+    }
+
+    assert!(1 == 1, "stage: scalars ok");
+    // ---- Point equations. ----
+    let generator = match ec_decode(GENERATOR_X, GENERATOR_Y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let pk_point = match ec_decode(pk_x, pk_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let c_perm_point = match ec_decode(c_perm_x, c_perm_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let c_perm_pow_point = match ec_decode(c_perm_pow_x, c_perm_pow_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+
+    // E1: mexp.ciphertext_1 == msm(input, public_powers).
+    let (e1_msm_c1, e1_msm_c2) = match bg_ciphertext_msm(in_c1, in_c2, powers.span()) {
+        Option::Some(pair) => pair,
+        Option::None => {
+            return false;
+        }
+    };
+    let e1_c1 = match ec_decode(ct1_c1_x, ct1_c1_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    if !ec_equation_holds(e1_c1, e1_msm_c1) {
+        return false;
+    }
+    let e1_c2 = match ec_decode(ct1_c2_x, ct1_c2_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    if !ec_equation_holds(e1_c2, e1_msm_c2) {
+        return false;
+    }
+
+    assert!(1 == 1, "stage: E1 ok");
+    // E2: c_permuted_powers·e + c_alpha == vector_commit(alpha_response, commit_response).
+    let e2_lhs = match ec_mul(c_perm_pow_point, mexp_challenge) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let c_alpha_point = match ec_decode(c_alpha_x, c_alpha_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e2_lhs = match ec_add(e2_lhs, c_alpha_point) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e2_rhs = match bg_vector_commit(alpha_resp, commit_resp, gens, h) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    if !ec_equation_holds(e2_lhs, e2_rhs) {
+        return false;
+    }
+
+    // E3: c_beta == G·beta + H·beta_blinding (scalar_commit).
+    let c_beta_point = match ec_decode(c_beta_x, c_beta_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let h_point = match ec_decode(h_x, h_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e3_g = match ec_mul(generator, beta) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e3_h = match ec_mul(h_point, beta_blind) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e3 = match ec_add(e3_g, e3_h) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    if !ec_equation_holds(e3, c_beta_point) {
+        return false;
+    }
+
+    // E4: output_alpha = msm(output, alpha_response).
+    let (e4_out_c1, e4_out_c2) = match bg_ciphertext_msm(out_c1, out_c2, alpha_resp) {
+        Option::Some(pair) => pair,
+        Option::None => {
+            return false;
+        }
+    };
+
+    // E5: ct0 + ct1·e == (G·rerand + out_alpha.c1, G·beta + pk·rerand + out_alpha.c2).
+    let ct0_c1_point = match ec_decode(ct0_c1_x, ct0_c1_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let ct0_c2_point = match ec_decode(ct0_c2_x, ct0_c2_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let ct1_c1_point = match ec_decode(ct1_c1_x, ct1_c1_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let ct1_c2_point = match ec_decode(ct1_c2_x, ct1_c2_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e5_c1_lhs = match ec_add(
+        ct0_c1_point,
+        match ec_mul(ct1_c1_point, mexp_challenge) {
+            Option::Some(point) => point,
+            Option::None => {
+                return false;
+            }
+        },
+    ) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e5_c1_rhs = match ec_add(
+        match ec_mul(generator, rerand) {
+            Option::Some(point) => point,
+            Option::None => {
+                return false;
+            }
+        },
+        e4_out_c1,
+    ) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    if !ec_equation_holds(e5_c1_lhs, e5_c1_rhs) {
+        return false;
+    }
+    let e5_c2_lhs = match ec_add(
+        ct0_c2_point,
+        match ec_mul(ct1_c2_point, mexp_challenge) {
+            Option::Some(point) => point,
+            Option::None => {
+                return false;
+            }
+        },
+    ) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e5_c2_rhs = match ec_add(
+        match ec_add(
+            match ec_mul(generator, beta) {
+                Option::Some(point) => point,
+                Option::None => {
+                    return false;
+                }
+            },
+            match ec_mul(pk_point, rerand) {
+                Option::Some(point) => point,
+                Option::None => {
+                    return false;
+                }
+            },
+        ) {
+            Option::Some(point) => point,
+            Option::None => {
+                return false;
+            }
+        },
+        e4_out_c2,
+    ) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    if !ec_equation_holds(e5_c2_lhs, e5_c2_rhs) {
+        return false;
+    }
+
+    assert!(1 == 1, "stage: E5 ok");
+    // c_a = c_perm·y + c_perm_pow; c_minus_z = vector_commit([−z; n], 0).
+    let c_a = match ec_add(
+        match ec_mul(c_perm_point, product_y) {
+            Option::Some(point) => point,
+            Option::None => {
+                return false;
+            }
+        },
+        c_perm_pow_point,
+    ) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let neg_z = fr_sub(0, product_z);
+    let mut minus_z_vec: Array<u256> = array![];
+    i = 0;
+    while i < n {
+        minus_z_vec.append(neg_z);
+        i += 1;
+    }
+    let c_minus_z = match bg_vector_commit(minus_z_vec.span(), 0, gens, h) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+
+    // E6: c_d + (c_a + c_minus_z)·pc == vector_commit(a_response, r_response).
+    let c_d_point = match ec_decode(c_d_x, c_d_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e6_lhs = match ec_add(
+        c_d_point,
+        match ec_mul(
+            match ec_add(c_a, c_minus_z) {
+                Option::Some(point) => point,
+                Option::None => {
+                    return false;
+                }
+            },
+            product_challenge,
+        ) {
+            Option::Some(point) => point,
+            Option::None => {
+                return false;
+            }
+        },
+    ) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e6_rhs = match bg_vector_commit(a_resp, r_resp, gens, h) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    if !ec_equation_holds(e6_lhs, e6_rhs) {
+        return false;
+    }
+
+    assert!(1 == 1, "stage: E6 ok");
+    // E7: c_delta + c_capital_delta·pc == vector_commit(recurrence, s_response).
+    let c_delta_point = match ec_decode(c_delta_x, c_delta_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let c_cap_delta_point = match ec_decode(c_cap_delta_x, c_cap_delta_y) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e7_lhs = match ec_add(
+        c_delta_point,
+        match ec_mul(c_cap_delta_point, product_challenge) {
+            Option::Some(point) => point,
+            Option::None => {
+                return false;
+            }
+        },
+    ) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    let e7_rhs = match bg_vector_commit(recurrence.span(), s_resp, gens, h) {
+        Option::Some(point) => point,
+        Option::None => {
+            return false;
+        }
+    };
+    if !ec_equation_holds(e7_lhs, e7_rhs) {
+        return false;
+    }
+
+    // E8: b[0] == a[0].
+    if *b_resp.at(0) != *a_resp.at(0) {
+        return false;
+    }
+
+    // E10: b[n−1] == pc · expected_product.
+    let e10 = fr_mul(product_challenge, expected_product);
+    if *b_resp.at(n - 1) != e10 {
+        return false;
+    }
+
     true
 }
 
@@ -1294,8 +2063,166 @@ mod tests {
         );
     }
 
+    fn with_slot_bumped(source: @Array<u256>, index: u32) -> Array<u256> {{
+        let mut out: Array<u256> = array![];
+        let mut i: u32 = 0;
+        while i < source.len() {{
+            if i == index {{
+                out.append(*source.at(i) + 1);
+            }} else {{
+                out.append(*source.at(i));
+            }}
+            i += 1;
+        }}
+        out
+    }}
+
+    #[test]
+    fn bg_shuffle_rust_vector_verifies_and_tamper_rejected() {
+        // Generated by secp256k1_vectors::print_bg_shuffle_vector (n=4,
+        // Keccak transcript domain b"secp256k1_bg_shuffle_v3").
+        let protocol_name: Array<u8> = array![0x73, 0x65, 0x63, 0x70, 0x32, 0x35, 0x36, 0x6b, 0x31, 0x5f, 0x62, 0x67, 0x5f, 0x73, 0x68, 0x75, 0x66, 0x66, 0x6c, 0x65, 0x5f, 0x76, 0x33];
+        let payload: Array<u256> = array![
+            0x4,
+            0x425bc49b8a2b53baee141ece85730f1f621119d1cb0f254f8f7a092631363057,
+            0x05a3e9252a8401763a7b59f3e10c2152cf06f5a9f0a6b91c9d3b0d8ceb27ff27,
+            0xa2f8ca3b4e183225376845de298787924577f555e0f6ccdfc1259c8b01b1fcb3,
+            0x586cbe26e9767b7a788333a33dc738fee34cb9cdca99cd2b839837fa2d732311,
+            0x0b21a423d319cb1bfc1ee4d0b6df78fd1201c6e9345c65be36dabdfaf4138e82,
+            0x6ae07c44d10748b75e2ea7b7cb06c1ffdee536a320366d56adf8d6c31b505c57,
+            0x6718ce1f30d9c49dd742a5cd4054a2a0d8ba13f5466be9aa8131c34e0eaaad47,
+            0xc9a3b89fbb5ee69fa88b835f66342b675a25e5904a1e70cd211078d5b5da80ea,
+            0xc195f0abf453247921e47935437553fd5cb02c5ef0a6e18918de877b3db69fc4,
+            0x9bbb02f2f3ea9e781b30a3088b5b14a2c69fea2c3de6c01738ad6ed9ba43fa53,
+            0x8d7f5fdb4b3ba724b5a272915c92a507ea5adc1ae563fdbff863204bfda66eef,
+            0x89075cb221032328c9db6943b8a82691d5c0de706d6495afe07be63e19026015,
+            0x23b9880c3e654f9bdfe13a6813ab0350dfb015e23878a1faa5eb8b511585a773,
+            0x5f5a6b5b4eafac78a8bc553cb8475afba2ce7452adea60ad9466ba9dc902cbcb,
+            0xc0600b3ec6606e8396ae2790923c63f7d42105139aa0ef0f2068f1bada55631e,
+            0x5fbdca4495b6fc80c6d1ffefb31af4af479c63902172223b968608c86a9f6e77,
+            0x7e25ea8ac80ed5e443def8b5f9d3956875faf806d680e95d0bce56b80354bcc7,
+            0x2c4d9c1b5aa7956ebe69b1047caad053d3e5ef04b9288aae78522d9a92a8a291,
+            0x86dedfd1f082945d134aa2473124124aa13f2e9a09fe693b04f524b0f4fd7db7,
+            0xf1cdcf4914491fd34a511ae6eec29bf5d7a1b6d42663ee96a37aee530180e8cf,
+            0x93ba8bbbf86b68fa93d5602d42169dbb016ca87a564cb0ae59911ec0de705dbe,
+            0x92efc7044aaa79dde72dd7916b2fd9d4d9fa00ba3221996e3207cf71eaa9eee5,
+            0x585336e97fadce927d911c3c770adb8556a9b2503894fa0431e45cef2f93c2ba,
+            0xf7e12564a550ee0fcc5a6e27157040d6ceab57cbc990904ebe53ea8020ca1e21,
+            0x3f3550d146c4b44ac5c2118dcb8b948606bfd1d5cd0a95a2c4e3789ac209bb50,
+            0xf66d1bdcd61010c793e6df258fae97c249fa61ea72f1f404b512184dc66f04c1,
+            0xe206a5280d5ec7e8fc556ef58ed84d1936805f435ec96d90216301a7956efab0,
+            0xf3467d0e4c174920a1bbfb417c0a6af692e91110d6af2d9e4481d97e7b820d1a,
+            0x7d923166272df72ad6b91f13777ed3204c10676406584f686224686ae3a3e748,
+            0xae28aff7e293e1bd14dc0aa11e4854ac48d2e59891e9b9b1a8e763ac88d6a818,
+            0x3e2ed277186f02469e348e561f79ffa74b4a722ad09f0c9f57da3aabd695142c,
+            0x8765e23f15494ffa0fed29816d19a83d6aea264fa61e45c455a4c506a0ee5788,
+            0xbf58b4f301fbf0f4a876d286e0e585c87cad83f7f83a64c68d70fab26f22b8eb,
+            0x8f67e7f98772a84f5318d27277b6ed59667e7ec8f515b14cc3d5ccb424c862db,
+            0xe2d8e0265e8ca04f7220eedc77b1f14699abf938c89c13fc3c66a0a9c2ab24f9,
+            0x6751c56448faa91c5bdc5b4faae7284eebf9471956e642fc768a384f7d165bdc,
+            0x23b4dce72f23d0c253ac92023946c913419c1b0eab07f3b2aa90c0f7ebbe31c0,
+            0x24368cad687d66e75a24f2901d9ac60bdd283cc45670d836af903e90203f6720,
+            0xd4009c19c365d7b415cf83bdfd21b66fc15db5a1624e56b67c4ca92250db78ef,
+            0xf05cd60e4d1eabf9f2a76b8a58ef244924cbfc12a6dc31d1c98eae064a3207ba,
+            0xa7655292c044fcda536487c8395a593f153914e66d6a1e95f2a740d995d9ea54,
+            0x4f2dc9bb53f5e7121aa391b23ab726d0756d11766408606048c2f0ec57b0c3c9,
+            0xb0ccb7cfd275ef0664175f2df5a305b718fa68ccb064304858b51e31d644d00c,
+            0x9b0842e955e4c4e837d12286c27b34bce6cd87842b5b985ed0d8c246b0e2b8cc,
+            0x840c3397dd682a1ff19161efd50a46dfdc83668c80e200e96d300ee2efff7e7c,
+            0x24517d1aa3a8b845c24cae95544497a9f2c1bd3c48e6c23a1e7a5accde784914,
+            0x609ca58355be4670c9d2b223742b3992f418b182fdf37795e49a91fb0556cd6a,
+            0x13883f499eadc31a1ced9b2a173ad9d034e0daf3af5a9505cccf6f30eb77e3ac,
+            0xe18544222d279a24aa17db4b430dda9c94f37309ed20b038384dd69dd9b5e55b,
+            0x1e406720910fba81b73cc2b8a4bc7005470f24f0b4c605cc1ffa314121923fc1,
+            0x3c5c282207b6fd79aed3d5a2b16447d42a0b5fcc0fcb5b546b06dc76339cbdc2,
+            0xe37ebd64fee3d32bcd131eb0a27a565b1b0130cfe04d4173dd740ff0e5f173d4,
+            0x5374ff9a319dc035844849251ac967453cc5c81af9fda0d26c3f06ddb0e94247,
+            0x02b89331428b7645348177d99e69f99e5136a8790b32899d7048c46729932700,
+            0x44a6251500b8a0d40b1a6ad3f7dac04ba9158190dc9f73251fd194d163b3afb4,
+            0x2d01c461e1ace5baa39b2daf8bcd75baba90dd22ba0585956192ee3ac8dc65c2,
+            0x4036c0a53b60970675d2aa2dc82d59ff785ea69b65a8da25aea4f7816bcbe666,
+            0x6eb5bb0b7fec7649de4b1b19d25db05cff9a16005eb7c0784f321f8b3f8c6571,
+            0x2d142ad0e4b7b58e0e610a4ddce559f67b5d2461500d51a3cd05ebaa127c51a3,
+            0xe6fc20a1b2d265529049eea27ac2e4cd8a7fce0551b247f5f58337c31f2acee2,
+            0x3398e8dabb6d843f95a54cc170c17799c7870e75afad13d8e8e422ba24f214fe,
+            0xe3d17f317151c452143a09c7746a0521b62a836b6b962780dd63e845cf604e45,
+            0xa4715b4a9099ed61835b2350deac4d345cbe82650860e703f6ea46b8f3b6364d,
+            0x30ad8e93d46bc706559c566c8254b8c1514a707c5e10c3e9e444a3ee9d378ac0,
+            0xb27c997cc089d7f64ae7f7241e00fa6c989ad6be31938fd7b39407a859881f9f,
+            0xc965bcb401f94d8f90f60211cc453cc43a38c2a25b6e2cfceac74889ea35e31d,
+            0x454c975a9b705fc0062631533b0a70763b5a3ead33c21f57e7efceb3739dde0d,
+            0xcb562077b821572838a95bc570784ed48f442610b2068ee709c1683be941c582,
+            0xb27c997cc089d7f64ae7f7241e00fa6c989ad6be31938fd7b39407a859881f9f,
+            0x759119d9ff6ee11b1bedc3dfc3e4a0c33ea55b57c0ed0e70bf0bade132de85e1,
+            0x485aa9f68919c92bc720eec9b4831cbaa756f1932f8640eee41b58f29d0b664c,
+            0x83bb4a6d3d47d75b8b577189c0ce3d2ce4254b75c4edc075ac1fbb6c19ef3b4a,
+            0xf814b8ceeaba72511c015162cb3d7eabcc74180e21fc535654d3258b2f4a003b,
+            0xfe4319a2c0ff5c04a8307219ce3ce61b11dbc3ecab8d26d6be7c8453d50a14cd,
+            0x9bc5eec4543edc44632a14caa3332e41e2160e46a3662c9b9efffa7f8a51145f,
+            0xba3cc4505407df4a8e310b4ca15f8e278c8c9464d2f9c32a652a4f1611b3c8d7,
+            0x631e5f62e1f3f4a9b5463af35108f05876a973fb9ee228ebaee6f7566545c1dc,
+            0xad4a1c0e54d03205c4bb302695f55fe08bc0672910844b209a76b4e9c149f318,
+            0x82f324f71eac40448abe27bfb64f6337b31e87d300f217356d0c223f7639c041,
+            0x53b1a95c473f54af88583accd5bc9d9320ec3208ec68890153a74f96f9fcbbaf,
+            0xc8c132f4ce8f7ca0c8f6e7faebf4da05d163d28135e6a7e827807b2d29bdb0d1,
+            0x964bb5495b8c60a5038e1bb089d76f89cd3d0bc16487fa9b9d114fd966e378f5,
+            0xdfe91c8099871a3939588306078b6f251cd34e21e747b732bd509f9bf2e897a5,
+            0x99c860f777f1a68fcae0ebbe1808a8c48acf1ab95d85b2123101ad41dd6b4ff2
+        ];
+        assert!(payload.len() == 85, "payload length");
+        let direct = verify_bg_shuffle(protocol_name.span(), payload.span());
+        assert!(direct, "honest bg shuffle verifies");
+
+        // Forged rerandomization response must fail (rerand at index 58).
+        let forged = with_slot_bumped(@payload, 58);
+        assert!(
+            !verify_bg_shuffle(protocol_name.span(), forged.span()),
+            "forged rerand must not verify"
+        );
+
+        // Tampered output ciphertext must fail (out_c2 x of card 0 at 27).
+        let tampered = with_slot_bumped(@payload, 27);
+        assert!(
+            !verify_bg_shuffle(protocol_name.span(), tampered.span()),
+            "tampered output must not verify"
+        );
+
+        // Wrong transcript domain must fail.
+        let other: Array<u8> = array![0x6f, 0x74, 0x68, 0x65, 0x72];
+        assert!(
+            !verify_bg_shuffle(other.span(), payload.span()),
+            "wrong domain must not verify"
+        );
+    }
+
+    #[test]
+    fn bg_challenge_probe() {
+        // Replay the BG transcript chain on the deterministic vector and
+        // assert the first challenge equals the Rust ground truth.
+        let protocol_name: Array<u8> = array![
+            0x73, 0x65, 0x63, 0x70, 0x32, 0x35, 0x36, 0x6b, 0x31, 0x5f, 0x62, 0x67, 0x5f,
+            0x73, 0x68, 0x75, 0x66, 0x66, 0x6c, 0x65, 0x5f, 0x76, 0x33
+        ];
+        let pk = (0x425bc49b8a2b53baee141ece85730f1f621119d1cb0f254f8f7a092631363057, 0x05a3e9252a8401763a7b59f3e10c2152cf06f5a9f0a6b91c9d3b0d8ceb27ff27);
+        let (pk_x_probe, pk_y_probe) = pk;
+        let mut state = transcript_new(protocol_name.span());
+        assert!(
+            state
+                == 0xbf46572afbce91b5bcd2b2e9e83798bb8064f0d8db3224a93c165eb1091ea5cd_u256,
+            "S_INIT"
+        );
+        state = transcript_append(state, array![0x62,0x67,0x31,0x32,0x5f,0x70,0x72,0x6f,0x74,0x6f,0x63,0x6f,0x6c].span(), array![0x70,0x6f,0x6b,0x65,0x72,0x2f,0x62,0x61,0x79,0x65,0x72,0x2d,0x67,0x72,0x6f,0x74,0x68,0x2d,0x73,0x68,0x75,0x66,0x66,0x6c,0x65,0x2f,0x76,0x32].span());
+        assert!(state == 0x66340518ea0f1b2beeb82b21cf235e8a1fa8bfe501f91a94f72339cb7cf199db_u256, "S0");
+        let mut deck: Array<u8> = array![4, 0, 0, 0, 0, 0, 0, 0];
+        state = transcript_append(state, array![0x62,0x67,0x31,0x32,0x5f,0x64,0x65,0x63,0x6b,0x5f,0x73,0x69,0x7a,0x65].span(), deck.span());
+        assert!(state == 0x993c6368dffe9145960a990cb342954302d85a583b7acddece6154b332e915c6_u256, "S1");
+        state = transcript_append(state, array![0x62,0x67,0x31,0x32,0x5f,0x70,0x75,0x62,0x6c,0x69,0x63,0x5f,0x6b,0x65,0x79].span(), point_compressed(pk_x_probe, pk_y_probe).span());
+        assert!(state == 0xf6785b92edd3e326360f29fa6871bc42c2610b2e1d2656a5ce7881e987616eca_u256, "S2");
+    }
+
     #[test]
     fn unknown_proof_kind_fails_closed() {
+
 
         let payload = array![];
         let name: Array<u8> = array![

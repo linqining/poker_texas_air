@@ -283,6 +283,12 @@ impl<C: Curve> BayerGrothShuffleProof<C> {
         append_ciphertext::<C>(transcript, b"mexp_0", &ciphertext_0);
         append_ciphertext::<C>(transcript, b"mexp_1", &ciphertext_1);
         let mexp_challenge = challenge_nonzero::<C>(transcript, b"bg12_mexp_challenge");
+
+        #[cfg(feature = "debug-print-challenges")]
+        {
+            use k256::elliptic_curve::PrimeField as _;
+            let _ = &mexp_challenge;
+        }
         let alpha_response: Vec<C::Scalar> = (0..n)
             .map(|i| alpha[i] + mexp_challenge * permuted_powers[i])
             .collect();
@@ -378,6 +384,12 @@ impl<C: Curve> BayerGrothShuffleProof<C> {
         append_ciphertext::<C>(transcript, b"mexp_0", &mexp.ciphertext_0);
         append_ciphertext::<C>(transcript, b"mexp_1", &mexp.ciphertext_1);
         let mexp_challenge = challenge_nonzero::<C>(transcript, b"bg12_mexp_challenge");
+
+        #[cfg(feature = "debug-print-challenges")]
+        {
+            use k256::elliptic_curve::PrimeField as _;
+            let _ = &mexp_challenge;
+        }
 
         let public_powers: Vec<C::Scalar> =
             (1..=n).map(|i| scalar_pow(powers_challenge, i)).collect();

@@ -1,7 +1,35 @@
 # 双证明结算架构重构方案（poker_protocol direct-sigma + 牌局过程 STARK）
 
-状态：设计稿 v2.4（2026-08-28，含实施记录）。本文档取代 admission-AIR（Path A
+状态：设计稿 v2.6（2026-08-28，含实施记录）。本文档取代 admission-AIR（Path A
 递归信封）作为「链上可验证结算」的目标架构。
+
+v2.6 变更（BG shuffle 链上验证落地）：**kind=2 (`PROOF_KIND_SHUFFLE_BG`) 从
+fail-closed 变为直验**。`verify_bg_shuffle` 把 poker-protocol-bg 的
+`BayerGrothShuffleProof::verify` 全量方程翻译到 Cairo（EC_OP 内建承载全部群
+运算；标量域算术走新 `dual/fr.cairo`——`u256_mul_mod_n` + 比较守卫加法 + 
+`fr_sub`，全程 mod-n）；transcript 重放含 `bg12_*` 全标签（逐字节对齐
+poker-protocol-bg）、u64-LE deck size、`challenge_nonzero` 重试语义。
+Payload 布局 (33+13n)×u256：语句（pk、in/out 密文、承诺点）+ 证明向量 +
+**h 与 n 个生成器**（性能优先：生成器表随 calldata 传入而非链上 derive）。
+确定性 RNG 的 n=4 向量经 Cairo↔Rust↔Python 三方交叉验证（honest/伪造
+rerand/篡改密文/错域全拒绝）。调试中顺带修复了两处基础设施 bug：
+`Span::slice(start, length)` 长度语义误用为 end（影响 fold/unified 的
+dispatcher 切片）、`transcript_challenge` 不回传挑战后的链状态（BG 多挑战
+链因此断裂——新增 `transcript_challenge_and_state`）。snforge 22/22 绿。
+
+v2.5 变更（per-player 统一 Σ）：**PlayerHandSigma 落地两仓**。标准定义在
+`zgame/poker-protocol-proofs/src/unified_sigma.rs`（zgame 为标准协议仓库，
+同步引入 Secp256k1Curve/KeccakTranscript/ABI 枚举 Secp256k1=5、Keccak256=7，
+编号与本仓一致）；本仓镜像同文件。协议形态：一玩家一证明——语句 = ownership
+(G,pk) + fold leave (in_c1_i, d2_i) + reveal (c1_j, token_j) 的**同 witness
+关系集**；证明 = 逐关系承诺 A_k=w·X_k + 单响应 s=w+c·sk；验证 = ∀k:
+s·X_k == A_k + c·Y_k。**精确特判可靠性**（同 witness AND 组合，非计算性
+批量化）。Transcript：`b"poker_unified_sigma_v1"`，Keccak-256，标签
+unified_pk/n_fold/fold_*/n_reveal/reveal_*/commitment/challenge 逐字节两端
+对齐。Cairo `verify_unified`（kind=5）经完整向量交叉验证（含伪造/篡改/错域
+拒绝）；G 通道维持 Poseidon252MerkleChannel 不变（v2.5 决策）。注意：完整
+向量测试需 `snforge test --max-n-steps 1000000000`（runner 默认步数上限
+较低）。
 
 v2.4 变更（P 验证器补全）：**CP（reveal token）与批量 DLEQ（fold）链上验证器
 落地**——同一 EC_OP + Keccak transcript 载体，Rust↔Cairo 向量交叉验证
@@ -42,7 +70,8 @@ Montgomery CIOS 参考实现并经向量交叉验证，验证了可行性但代�
 | `hand_binding`（§6 统一绑定） | ✅ 4/4 绿 | `src/hand_binding.rs` |
 | bench `full-hand-v3-dual`（九人桌，Keccak transcript） | ✅ **整手 289.63ms**（client prove 237ms + host verify 29ms），calldata ≈65.9KiB | `hand-bench/src/main.rs` |
 | Cairo `keccak.cairo`（builtin 封装 + pad10*1 + LE mod-n 挑战） | ✅ 3/3 绿（NIST 空串/abc + mod-n） | `poker_contracts/src/dual/keccak.cairo` |
-| Cairo `secp256k1_verifier`（EC_OP builtin：ownership + **reveal CP + fold DLEQ**，挑战/tract 重放 + fail-closed 调度） | ✅ **8/11 绿**（ownership 向量 + 挑战 golden + CP 向量 + fold 向量 + 篡改拒绝全覆盖） | `poker_contracts/src/dual/secp256k1_verifier.cairo` |
+| Cairo `secp256k1_verifier`（EC_OP builtin：ownership + reveal CP + fold DLEQ + **BG shuffle**，挑战/transcript 重放 + 调度） | ✅ 全 kind 直验（22/22 snforge 绿，含 BG 向量交叉验证） | `poker_contracts/src/dual/secp256k1_verifier.cairo` |
+| Cairo `fr.cairo`（secp256k1 标量域 mod-n 算术：mul via `u256_mul_mod_n`、比较守卫 add/sub） | ✅ 5/5 绿 | `poker_contracts/src/dual/fr.cairo` |
 | Cairo `keccak_transcript`（FiatShamir 状态机重放：new/append/challenge + 点压缩） | ✅ 状态机确定性测试绿 | `poker_contracts/src/dual/keccak_transcript.cairo` |
 | Cairo `PokerDualSettlement`（u256 calldata，ownership 块 = 1 kind + 5×u256） | ✅ 编译绿 | `poker_contracts/src/poker_dual_settlement.cairo` |
 | 部署清单/文档 | ✅ `strk20.json`（dual proof_policy + abi_notes）、`SEPOLIA.md`、本文档 v2.3 | 仓库根 / `poker_contracts` |
@@ -296,7 +325,7 @@ OS 级 S-two 验证不开放给应用。因此：
 | 验证器 | 状态 | 内容 |
 | --- | --- | --- |
 | `verify_ownership` | ✅ 已实现 + 2/2 测试绿 | `s·G == R + c·pk`：EC_OP 标量乘/点加 + 坐标比对；on-curve 解码失败/恒等点拒绝 |
-| `verify_p_proof` 调度 | ✅ | ownership / reveal-token CP / fold DLEQ 直验（混合帧）；BG shuffle fail-closed（Fr modmul 待 mod builtin / SNARK 评估） |
+| `verify_p_proof` 调度 | ✅ | **全部 kind 直验**：ownership / reveal CP / fold DLEQ / unified Σ / BG shuffle |
 | 交叉验证 | ✅ | 向量由 `k256`（Rust）生成（`secp256k1_vectors.rs`），Cairo 侧 honest 验证 / 伪造 s 拒绝 / 错钥拒绝 / off-curve 拒绝 全绿 |
 
 验收纪律沿用：Rust↔Cairo 测试向量交叉验证（合法/非法/篡改各态），BG 挑战

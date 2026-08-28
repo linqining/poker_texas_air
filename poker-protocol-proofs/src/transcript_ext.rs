@@ -160,6 +160,13 @@ pub struct KeccakTranscript {
     state: Vec<u8>,
 }
 
+impl KeccakTranscript {
+    /// Debug accessor: the raw transcript state (vector-generator tooling).
+    pub fn state_bytes(&self) -> &[u8] {
+        &self.state
+    }
+}
+
 impl CryptoTranscript for KeccakTranscript {
     fn new(protocol_name: &[u8]) -> Self {
         let state = sha3::Keccak256::digest(protocol_name).to_vec();

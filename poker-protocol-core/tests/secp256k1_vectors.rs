@@ -427,3 +427,216 @@ fn print_unified_sigma_vector() {
         "vector must verify through the standard API"
     );
 }
+
+#[test]
+#[ignore]
+fn print_bg_shuffle_vector() {
+    use poker_protocol_proofs::bayer_groth::BayerGrothShuffleProof;
+    use poker_protocol_proofs::transcript_ext::KeccakTranscript;
+    use poker_protocol_core::CryptoTranscript;
+
+    let to_hex = |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+    let print_scalar = |name: &str, s: &Scalar| {
+        println!(
+            "        let {name} = 0x{};",
+            to_hex(<Scalar as PrimeField>::to_repr(s).as_ref())
+        );
+    };
+    let print_point = |name: &str, point: &k256::AffinePoint| {
+        let encoded = point.to_encoded_point(false);
+        let mut x = [0u8; 32];
+        x.copy_from_slice(encoded.x().expect("non-identity"));
+        let mut y = [0u8; 32];
+        y.copy_from_slice(encoded.y().expect("non-identity"));
+        println!("        let {name}_x = 0x{};", to_hex(&x));
+        println!("        let {name}_y = 0x{};", to_hex(&y));
+    };
+
+    const N: usize = 4; // debug-sized vector; production shape is 52.
+    let agg_sk = <Secp256k1Curve as Curve>::hash_to_scalar(b"cairo_bg_agg_sk");
+    let agg_pk: k256::AffinePoint = (Secp256k1Curve::base_g() * &agg_sk).into();
+    let agg_pk_proj: ProjectivePoint = agg_pk.into();
+
+    // Deterministic statement: cards 0..N under aggregate key; shuffle =
+    // rotate by 1; rerandomizers from domain-hashed scalars.
+    let input: Vec<ElGamalCiphertextGeneric<Secp256k1Curve>> = (0..N)
+        .map(|i| {
+            let card = Secp256k1Curve::hash_to_curve(
+                format!("texas_poker_secp256k1/card/{i}").as_bytes(),
+            );
+            let r = <Secp256k1Curve as Curve>::hash_to_scalar(format!("cairo_bg_r{i}").as_bytes());
+            ElGamalCiphertextGeneric::<Secp256k1Curve>::encrypt(&card, &agg_pk_proj, &r)
+        })
+        .collect();
+    let permutation: Vec<usize> = (1..=N).map(|i| i % N).collect();
+    let rerandomizers: Vec<Scalar> = (0..N)
+        .map(|i| <Secp256k1Curve as Curve>::hash_to_scalar(format!("cairo_bg_rr{i}").as_bytes()))
+        .collect();
+    let output: Vec<ElGamalCiphertextGeneric<Secp256k1Curve>> = permutation
+        .iter()
+        .zip(&rerandomizers)
+        .map(|(&source, r)| input[source].re_encrypt(&agg_pk_proj, r))
+        .collect();
+
+    // Deterministic proving randomness so the vector is stable across runs
+    // (the port-side tests embed the literal bytes).
+    let mut prove_rng = {
+        use rand::SeedableRng;
+        rand::rngs::StdRng::seed_from_u64(0xB654_0001)
+    };
+    let mut transcript = KeccakTranscript::new(b"secp256k1_bg_shuffle_v3");
+    let proof = BayerGrothShuffleProof::<Secp256k1Curve>::prove(
+        &input, &output, &permutation, &rerandomizers, &agg_pk_proj, &mut prove_rng,
+        &mut transcript,
+    )
+    .expect("bg prove");
+
+    // Self-check through the standard verifier (same transcript domain).
+    let mut verify_transcript = KeccakTranscript::new(b"secp256k1_bg_shuffle_v3");
+    proof
+        .verify(&input, &output, &agg_pk_proj, &mut verify_transcript)
+        .expect("bg verify");
+
+    // Challenge-chain ground truth: manual replay with the same public
+    // transcript API (must equal the prove-side derivation).
+    {
+        use poker_protocol_core::CryptoTranscript;
+        let mut t = KeccakTranscript::new(b"secp256k1_bg_shuffle_v3");
+        t.append_message(b"bg12_protocol", b"poker/bayer-groth-shuffle/v2");
+        println!("BG_S0 = {}", to_hex(t.state_bytes()));
+        t.append_message(b"bg12_deck_size", &(N as u64).to_le_bytes());
+        println!("BG_S1 = {}", to_hex(t.state_bytes()));
+        t.append_point::<Secp256k1Curve>(b"bg12_public_key", &agg_pk_proj);
+        println!("BG_S2 = {}", to_hex(t.state_bytes()));
+        for ct in &input {
+            t.append_message(b"bg12_ciphertext_label", b"input");
+            t.append_point::<Secp256k1Curve>(b"bg12_ciphertext_c1", &ct.c1);
+            t.append_point::<Secp256k1Curve>(b"bg12_ciphertext_c2", &ct.c2);
+        }
+        println!("BG_S3 = {}", to_hex(t.state_bytes()));
+        for ct in &output {
+            t.append_message(b"bg12_ciphertext_label", b"output");
+            t.append_point::<Secp256k1Curve>(b"bg12_ciphertext_c1", &ct.c1);
+            t.append_point::<Secp256k1Curve>(b"bg12_ciphertext_c2", &ct.c2);
+        }
+        println!("BG_S4 = {}", to_hex(t.state_bytes()));
+        t.append_point::<Secp256k1Curve>(b"bg12_c_permutation", &proof.c_permutation);
+        println!("BG_S5 = {}", to_hex(t.state_bytes()));
+        // Byte-level fingerprint of the last append (append_point path).
+        {
+            let comp = proof.c_permutation.compress();
+            println!("BG_CPERM_WIRE = {}", to_hex(comp.as_bytes()));
+        }
+        // Pre/post states around the challenge append (not challenge_nonzero).
+        println!("BG_S5B = {}", to_hex(t.state_bytes()));
+        t.append_message(b"bg12_powers_challenge", b"challenge");
+        println!("BG_S6 = {}", to_hex(t.state_bytes()));
+        let x_raw = <Secp256k1Curve as Curve>::hash_to_scalar(t.state_bytes());
+        print_scalar("BG_X_RAW", &x_raw);
+        let x = x_raw;
+        t.append_point::<Secp256k1Curve>(b"bg12_c_permuted_powers", &proof.c_permuted_powers);
+        let y = t.challenge::<Secp256k1Curve>(b"bg12_product_y").scalar;
+        let z = t.challenge::<Secp256k1Curve>(b"bg12_product_z").scalar;
+        t.append_point::<Secp256k1Curve>(b"bg12_mexp_c_alpha", &proof.multi_exponentiation.c_alpha);
+        t.append_point::<Secp256k1Curve>(b"bg12_mexp_c_beta", &proof.multi_exponentiation.c_beta);
+        let mexp_ct = [
+            (b"mexp_0", &proof.multi_exponentiation.ciphertext_0),
+            (b"mexp_1", &proof.multi_exponentiation.ciphertext_1),
+        ];
+        for (label, ct) in mexp_ct {
+            t.append_message(b"bg12_ciphertext_label", label);
+            t.append_point::<Secp256k1Curve>(b"bg12_ciphertext_c1", &ct.c1);
+            t.append_point::<Secp256k1Curve>(b"bg12_ciphertext_c2", &ct.c2);
+        }
+        let e = t.challenge::<Secp256k1Curve>(b"bg12_mexp_challenge").scalar;
+        t.append_point::<Secp256k1Curve>(b"bg12_product_c_d", &proof.product.c_d);
+        t.append_point::<Secp256k1Curve>(b"bg12_product_c_delta", &proof.product.c_delta);
+        t.append_point::<Secp256k1Curve>(
+            b"bg12_product_c_capital_delta",
+            &proof.product.c_capital_delta,
+        );
+        let pc = t.challenge::<Secp256k1Curve>(b"bg12_product_challenge").scalar;
+        println!("--- BG challenges ---");
+        print_scalar("BG_CH_X", &x);
+        print_scalar("BG_CH_Y", &y);
+        print_scalar("BG_CH_Z", &z);
+        print_scalar("BG_CH_E", &e);
+        print_scalar("BG_CH_PC", &pc);
+        // E10 ground truth.
+        let mut prod = Scalar::from(1u64);
+        let mut run = Scalar::from(1u64);
+        for i in 1..=N {
+            run = run * x;
+            let term = y * Scalar::from(i as u64) + run - z;
+            prod = prod * term;
+        }
+        let e10 = pc * prod;
+        print_scalar("BG_E10", &e10);
+        print_scalar("BG_B3", &proof.product.b_response[N - 1]);
+    }
+
+    // Commitment-key constant table (n = N).
+    println!("--- BG commitment key (n={N}) ---");
+    let h = Secp256k1Curve::hash_to_curve(b"poker/bg12/v2/H");
+    let h_a: k256::AffinePoint = h.into();
+    print_point("BG_H", &h_a);
+    for i in 0..N {
+        let g = Secp256k1Curve::hash_to_curve(format!("poker/bg12/v2/G/{N}/{i}").as_bytes());
+        let g_a: k256::AffinePoint = g.into();
+        print_point(&format!("BG_G{i}"), &g_a);
+    }
+
+    println!("--- BG statement (n={N}) ---");
+    print_point("BG_PK", &agg_pk);
+    for (i, ct) in input.iter().enumerate() {
+        let a: k256::AffinePoint = ct.c1.into();
+        let b: k256::AffinePoint = ct.c2.into();
+        print_point(&format!("BG_IN{i}_C1"), &a);
+        print_point(&format!("BG_IN{i}_C2"), &b);
+    }
+    for (i, ct) in output.iter().enumerate() {
+        let a: k256::AffinePoint = ct.c1.into();
+        let b: k256::AffinePoint = ct.c2.into();
+        print_point(&format!("BG_OUT{i}_C1"), &a);
+        print_point(&format!("BG_OUT{i}_C2"), &b);
+    }
+
+    println!("--- BG proof (n={N}) ---");
+    let cp: k256::AffinePoint = proof.c_permutation.into();
+    print_point("BG_C_PERM", &cp);
+    let cpp: k256::AffinePoint = proof.c_permuted_powers.into();
+    print_point("BG_C_PERM_POW", &cpp);
+    let ca: k256::AffinePoint = proof.multi_exponentiation.c_alpha.into();
+    print_point("BG_C_ALPHA", &ca);
+    let cb: k256::AffinePoint = proof.multi_exponentiation.c_beta.into();
+    print_point("BG_C_BETA", &cb);
+    let ct0a: k256::AffinePoint = proof.multi_exponentiation.ciphertext_0.c1.into();
+    let ct0b: k256::AffinePoint = proof.multi_exponentiation.ciphertext_0.c2.into();
+    print_point("BG_MEXP_CT0_C1", &ct0a);
+    print_point("BG_MEXP_CT0_C2", &ct0b);
+    let ct1a: k256::AffinePoint = proof.multi_exponentiation.ciphertext_1.c1.into();
+    let ct1b: k256::AffinePoint = proof.multi_exponentiation.ciphertext_1.c2.into();
+    print_point("BG_MEXP_CT1_C1", &ct1a);
+    print_point("BG_MEXP_CT1_C2", &ct1b);
+    for (i, s) in proof.multi_exponentiation.alpha_response.iter().enumerate() {
+        print_scalar(&format!("BG_AR{i}"), s);
+    }
+    print_scalar("BG_COMMIT_RESP", &proof.multi_exponentiation.commitment_response);
+    print_scalar("BG_BETA", &proof.multi_exponentiation.beta);
+    print_scalar("BG_BETA_BLIND", &proof.multi_exponentiation.beta_blinding_response);
+    print_scalar("BG_RERAND_RESP", &proof.multi_exponentiation.rerandomization_response);
+    let cd: k256::AffinePoint = proof.product.c_d.into();
+    print_point("BG_C_D", &cd);
+    let cdel: k256::AffinePoint = proof.product.c_delta.into();
+    print_point("BG_C_DELTA", &cdel);
+    let ccd: k256::AffinePoint = proof.product.c_capital_delta.into();
+    print_point("BG_C_CAP_DELTA", &ccd);
+    for (i, s) in proof.product.a_response.iter().enumerate() {
+        print_scalar(&format!("BG_ARESP{i}"), s);
+    }
+    for (i, s) in proof.product.b_response.iter().enumerate() {
+        print_scalar(&format!("BG_BRESP{i}"), s);
+    }
+    print_scalar("BG_R_RESP", &proof.product.r_response);
+    print_scalar("BG_S_RESP", &proof.product.s_response);
+}

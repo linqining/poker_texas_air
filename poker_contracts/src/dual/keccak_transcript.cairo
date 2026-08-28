@@ -36,6 +36,17 @@ pub fn transcript_append(mut state: u256, label: Span<u8>, message: Span<u8>) ->
 /// Derive the challenge scalar: append `(label, "challenge")`, then reduce
 /// the keccak digest (little-endian) modulo the secp256k1 group order.
 pub fn transcript_challenge(mut state: u256, label: Span<u8>) -> u256 {
+    let (challenge, _state) = transcript_challenge_and_state(state, label);
+    challenge
+}
+
+/// Challenge derivation that also returns the **post-append** transcript
+/// state, for chains that continue after a challenge (e.g. the BG shuffle's
+/// multi-challenge schedule). The bare [`transcript_challenge`] cannot
+/// return it, which silently truncated such chains.
+pub fn transcript_challenge_and_state(
+    mut state: u256, label: Span<u8>,
+) -> (u256, u256) {
     let mut challenge_marker: Array<u8> = array![];
     challenge_marker.append(0x63); // 'c'
     challenge_marker.append(0x68); // 'h'
@@ -47,7 +58,8 @@ pub fn transcript_challenge(mut state: u256, label: Span<u8>) -> u256 {
     challenge_marker.append(0x67); // 'g'
     challenge_marker.append(0x65); // 'e'
     state = transcript_append(state, label, challenge_marker.span());
-    challenge_mod_n(u256_to_le_bytes(state).span())
+    let challenge = challenge_mod_n(u256_to_le_bytes(state).span());
+    (challenge, state)
 }
 
 /// SEC1 compressed encoding of an (x, y) point: `0x02/0x03 ‖ x_be`, 33 bytes.
