@@ -135,9 +135,13 @@ fn append_be(ref out: Array<u8>, value: u256) {
     }
 }
 
-/// Ownership residual `s·G − R − c·pk` with the challenge derived on-chain
-/// exactly like `verify_ownership` (never caller-supplied). One equation.
+/// Ownership residual `s·G − R − c·pk`. The challenge is derived on-chain
+/// exactly like `verify_ownership` but **prepends the hand transcript
+/// domain** (DAPV_SOUNDNESS.md §9-L2 / §14.1: without the hand context an
+/// endorsement minted for hand A verifies unchanged under hand B — zero
+/// residuals stay zero for any rho, §8). One equation.
 fn ownership_terms(
+    protocol_name: Span<u8>,
     pk: (u256, u256),
     big_r: (u256, u256),
     s: u256,
@@ -149,6 +153,11 @@ fn ownership_terms(
         return false;
     }
     let mut input: Array<u8> = array![];
+    let mut d: u32 = 0;
+    while d < protocol_name.len() {
+        input.append(*protocol_name.at(d));
+        d += 1;
+    }
     append_compressed(ref input, GENERATOR_X, GENERATOR_Y);
     append_compressed(ref input, pk_x, pk_y);
     append_compressed(ref input, r_x, r_y);
@@ -536,7 +545,7 @@ pub fn verify_hand_batch(hand_id: Span<u8>, payload: Span<u256>) -> bool {
         let pk = (*payload.at(cursor), *payload.at(cursor + 1));
         let big_r = (*payload.at(cursor + 2), *payload.at(cursor + 3));
         let s = *payload.at(cursor + 4);
-        if !ownership_terms(pk, big_r, s, ref terms) {
+        if !ownership_terms(protocol_name, pk, big_r, s, ref terms) {
             return false;
         }
         eq_sizes.append(3);
@@ -606,9 +615,7 @@ mod tests {
     // 2 ownership + 1 reveal token + 1 leave DLEQ (2 cards), honest hand.
     fn hand_id() -> Array<u8> {
         array![
-            0xb4, 0x15, 0x39, 0xd9, 0x7a, 0x72, 0x39, 0x60, 0x04, 0x1d, 0xde, 0x6f, 0x40, 0x46,
-            0x03, 0xc9, 0x36, 0xe5, 0x59, 0xcf, 0x78, 0x1a, 0xa1, 0xff, 0x7b, 0x71, 0x12, 0x05,
-            0x73, 0x5c, 0x7d, 0xc8
+            0xb4, 0x15, 0x39, 0xd9, 0x7a, 0x72, 0x39, 0x60, 0x04, 0x1d, 0xde, 0x6f, 0x40, 0x46, 0x03, 0xc9, 0x36, 0xe5, 0x59, 0xcf, 0x78, 0x1a, 0xa1, 0xff, 0x7b, 0x71, 0x12, 0x05, 0x73, 0x5c, 0x7d, 0xc8
         ]
     }
 
@@ -619,14 +626,14 @@ mod tests {
             1,
             0xe893b6bfd1531b78ecfd7c39ba5b1194d97ff860d80888a23594e5a67206077e,
             0x454acdcf653c7dd410d02c5b7212efaf0899c2b68623ab03864cdbedcbe7af1e,
-            0x09ed2dba2e1acd43482cd5ad42a715e848f8a29f9aef11bd10a63ea1913b2242,
-            0x8ddfdf57ab96d644d15bc76eed74d08608e9a7107eaa874def40886294126a53,
-            0x3e4dfc49c6fb3612e34fe96bf167d24df4f8060da1ee02cffa78c9b4c478d20c,
+            0x54d2fdc58dce65546664a08130e5f74a7d5fccfb16e168211f3c667e8b05a91b,
+            0xefb379900276d424c524895bc2ee58aed3385e967d077192b9373142da1dd23d,
+            0x09eda62d939f8fb2e5df578426206d0a5c2e480b78ce0ed6c2692e0bbe925619,
             0x18481e889a19b0f03f7c1e924741eb49f6a5b3d1a176daf8efdccd9338d0e3d4,
             0xe3047c491ece7f81a5583223ab7c9d9a4cd36b7f6dd05d114c4d4fd88cebcc9f,
-            0xa3b1b9daa2587319791c23f1acaecb67403fe8c516c3c8b724749cb2ac7d021d,
-            0x06df2f1a0850f5ffc19a1843e4f36839361562590508614d62a648e70135aef8,
-            0xca0fc188810a4948e8275dea453a283faef8e94378890a47423d8255ba2ea07b,
+            0x1904015e15da909e3419adcea6aad7be0bd1685a2ee16484c493305e8d2f9045,
+            0xf532019133867c78a906e7911fbf17156f774b903915bb6e542c2f112b7f8e7d,
+            0x7ba7a9ad8c13ad54c2866738261b20bc85d4d4f7d565da7f75898cd0d4a851de,
             0x0115a7ff47c69918c434bd481f480ba962f647cd2d08f71b60d1f7650cfda25a,
             0xa499291fdb78f7de732127a8523dedada0def1db567d229a54b271794054a28b,
             0x4ab7d017949f4be93c7ca4e06a9a6ff8c7201b2f05517ea19094a73663f452d6,
@@ -635,19 +642,19 @@ mod tests {
             0xf66154259e38534c23d4517d64f5124a698806878eabcc34698be9e1a7c17626,
             0xe676890d4599831075ba0182fb7adeb19990a810abae89abcbb48db2a978037b,
             0x474e24495802b59ff2e7e3dee254cea2204e3e77cb58132d1d3540eb63ba544e,
-            0xfef5bfceb9dd8f73d1511051de0c022282fde5d3613569c5c9696d98b32d0bef,
-            0xe9c25386fcfecfbb562ed9bbf8b89efd6ab16fa37b364850139ed2d54ff04a1a,
-            0x940499b9d1a8a8a17ba912f990ca2b29846939aa4ffcd039de1d5c3e65ca67ba,
-            0xd747f86ff4a457a6cf5d14bf2a2fd43ed377b4a1296c8829d80227b54031ec8c,
-            0x756dcd93b1bfaeaf0a503583b9f614c5d1bb8b6f9b442a39584ea107fee17bbd,
-            0x6039808ddb7a8c771ed11eddf500eb1c8ef89534b1a19f1e78e57ad3b408fd77,
+            0x45e22fd4e7aff1e92c5bb2778c466c3b84b5f642f05690a83d8e7e534a84ca0c,
+            0x3634893cb63c9fcb6ba1b4d5c45aaa3c52411e5dc899d4ada49a0279ec6b1a57,
+            0xeaf205e58ef8a82e0aafba26f7381d65d71e60e71aa5750d20c2f8e268d980f2,
+            0x0302b300317b5a5ef63bc87a5d45658bda928211a5f598237792c2d94a11984c,
+            0x0a0b7991a1d0e8064ceced9ab533c919aa5a324ee8671f54cdd0ae2c07cbb86a,
+            0x64efa66a9a1bbc909b96ca3e8a38f6a7c99051cf330e0dc13fb76105e9d30387,
             2,
             0x1fbc46f1b57c18c2964c0508efd6f235dc4993931e142f50c4024424ecf915bf,
             0xcb3be79e7e8dd8f91a5a5398ca07ab65c322fac09caf7e70cee89142ba899d74,
-            0xa62b400656d57fab18da98270f1ef59ff6bd918e7caed95ec406f0f7fc1aa9b0,
-            0x825ac6206ad012cd3451188149378d31c3807f3b8687d540af1f4e76b9a03d0c,
-            0x771a721650718422dd28d2335f28fc91d56797e2e9844234e3ed497130e4d287,
-            0xb476ce1ef9e4e3323aff2554cd89877fe30a68c7102a0f417c487ff6c7413a21,
+            0x27643c3e10865508b6b8c708d056d4e24067cc1378bea5af59db7118b5b7a92a,
+            0x25495f6ed0dfc3046ce80179bc7ed65f8146ddd1c43ff42f362c8112d90d929a,
+            0x99c8c21994a1bbc60da46401aa2ef4d7bf0d6c27f56da529f41b09f5aef39c47,
+            0xad83788a16712fb846221e93dc43986f7e24beb1d7ffbf478b659eef6850effc,
             0xbed68acd83b2364772afd90f646cc7f944430b60bf2151c68a159391de314cbf,
             0x3c4eeccb09025ff89029e2b04f8329946513d982373f1626471ee3f56a8fe97a,
             0x37d68f1915a2a6557b7be888f35553ec5bd8415d0237d9137b52ed1d1e047dad,
@@ -664,13 +671,12 @@ mod tests {
             0xb1c69fe7507026527fe8a93ffd7dc558978cc873e74fd1218f7ea8f5a5e04d97,
             0xf8067dfd2789badb95acf8b9c59e81ac8010a3bed5ab7484d841cf34aa6a3c97,
             0x4a56e997d55278a71694469fa59fca41da4ca6547426e5b09cd104ace4af1113,
-            0x561cdd8c2eb7c5ec15c6227e625e79965e7da280428bb9283508bac3b5e23143,
-            0x6f8cdbc4b71c1794aaec8903959a480e81760abf426ec09ddd92e870b9c7d02e,
-            0x639279c7fe134d63a98f2e2a3bfa30b1481e2ffb22383ec70af26ef240500f31,
-            0x5352e3247e6a047cce3a6614151b20171ac49a12e5f9f2301f7f3bb68611bfe3,
+            0x4e8384ba82a411d85b288749983efb8fb38b9457d6ec13fedd66e93d700a6858,
+            0x8eb25e88ff04fc9679ad523d9872ba938049676e05bbdae6753a2324558f7406,
+            0xa626b2add8feb693b1fc96e2ecd1eb70ab8e07478650cbfa2eaa1c2fedb5cfc1,
+            0x5809d54f093b4eff9599764b0aec3014f3426dbaaa501575b2192bf45e91dd7f,
         ]
     }
-
 
     // Arrays have no at_mut in this Cairo version; tamper by copying.
     fn bumped(payload: Array<u256>, index: u32) -> Array<u256> {

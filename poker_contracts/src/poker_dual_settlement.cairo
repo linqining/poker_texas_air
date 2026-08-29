@@ -61,6 +61,29 @@ pub trait IPokerDualSettlement<TContractState> {
         p_proof_limbs: Span<u256>,
     );
 
+    /// DAPV settlement (DUAL_PROOF_PROTOCOL.md v2.8 / DAPV_SOUNDNESS.md):
+    /// the whole P layer is folded into ONE residual check
+    /// `L == Σ ρⁱ·Lᵢ == O` on-chain (`dual::hand_batch::verify_hand_batch`),
+    /// instead of one verifier call per proof.
+    ///
+    /// `hand_id_bytes` — the 32 big-endian bytes of `hand_binding`; the
+    /// batch's transcript domain and ρ derive from it, binding every folded
+    /// proof to exactly this registered hand instance (replay protection:
+    /// §9-L2 via the hand-prefixed ownership challenge, §8 for the fold).
+    /// `p_batch` — the hand-batch payload layout documented on
+    /// `verify_hand_batch` ([n_own, n_reveal, n_fold, proofs…], u256 words).
+    /// Every settling participant must appear as an ownership endorsement
+    /// (`n_own == players.len()`).
+    fn verify_and_settle_dapv(
+        ref self: TContractState,
+        hand_binding: felt252,
+        hand_id_bytes: Span<u8>,
+        hand_id: u64,
+        players: Span<ContractAddress>,
+        deltas: Span<i128>,
+        p_batch: Span<u256>,
+    );
+
     fn set_prover(ref self: TContractState, prover: ContractAddress);
     fn remove_prover(ref self: TContractState, prover: ContractAddress);
     fn is_prover(self: @TContractState, prover: ContractAddress) -> bool;
@@ -80,7 +103,20 @@ pub mod PokerDualSettlement {
         StoragePointerWriteAccess,
     };
     use super::super::dual::secp256k1_verifier::{verify_p_proof, PROOF_KIND_OWNERSHIP};
+    use super::super::dual::hand_batch::verify_hand_batch;
     use super::IVaultDispatcherDispatcherTrait;
+
+/// Big-endian bytes → felt252 (Horner). Used to bind the DAPV batch's
+/// hand-domain input to the registered `hand_binding` felt.
+fn bytes_to_felt(bytes: Span<u8>) -> felt252 {
+    let mut acc: felt252 = 0;
+    let mut i: u32 = 0;
+    while i < bytes.len() {
+        acc = acc * 256 + (*bytes.at(i)).into();
+        i += 1;
+    }
+    acc
+}
 
     component!(path: OwnableComponent, storage: ownable, event: OwnableEvent);
 
@@ -276,6 +312,100 @@ pub mod PokerDualSettlement {
                     settlement_digest: registered_digest,
                     participant_count: players.len(),
                     p_proofs_verified: verified,
+                },
+            );
+        }
+
+        fn verify_and_settle_dapv(
+            ref self: ContractState,
+            hand_binding: felt252,
+            hand_id_bytes: Span<u8>,
+            hand_id: u64,
+            players: Span<ContractAddress>,
+            deltas: Span<i128>,
+            p_batch: Span<u256>,
+        ) {
+            assert!(hand_binding != 0, "Zero binding");
+            assert!(players.len() == deltas.len(), "Players/deltas mismatch");
+            assert!(players.len() > 0_u32, "No participants");
+            assert!(players.len() < 10_u32, "Too many participants");
+            assert!(!self.settled_bindings.read(hand_binding), "Hand already settled");
+            assert!(
+                bytes_to_felt(hand_id_bytes) == hand_binding,
+                "Batch domain not bound to hand_binding"
+            );
+
+            // (a) The binding must have been registered (G Phase 1).
+            let (registered_digest, _g_attestation, registered_flag) =
+                self.bindings.read(hand_binding);
+            assert!(registered_flag == 1, "Binding not registered");
+
+            // (b) Recompute the settlement commitment (same layout as
+            // verify_and_settle / settlement_hash.cairo) and require an
+            // exact match with the registered digest.
+            let mut felements: Array<felt252> = array![hand_id.into()];
+            let mut i: u32 = 0;
+            while i < players.len() {
+                felements.append((*players.at(i)).into());
+                let delta = *deltas.at(i);
+                if delta >= 0_i128 {
+                    let as_u: u64 = delta.try_into().expect('delta fits u64');
+                    felements.append(1);
+                    felements.append(as_u.into());
+                } else {
+                    let abs_delta = -delta;
+                    let as_u: u64 = abs_delta.try_into().expect('abs delta fits u64');
+                    felements.append(0);
+                    felements.append(as_u.into());
+                }
+                i += 1;
+            }
+            let computed = poseidon_hash_span(felements.span());
+            assert!(computed == registered_digest, "Settlement digest mismatch");
+
+            // (c) DAPV: every settling participant must have endorsed via an
+            // ownership proof inside the batch, and the whole P layer must
+            // fold to L == O under the hand-bound rho.
+            assert!(p_batch.len() >= 1_u32, "Empty batch");
+            let n_own_f = *p_batch.at(0);
+            let n_own: u32 = n_own_f.try_into().expect('n_own fits u32');
+            assert!(
+                n_own == players.len(),
+                "Every participant needs an endorsement"
+            );
+            assert!(
+                verify_hand_batch(hand_id_bytes, p_batch),
+                "DAPV batch rejected"
+            );
+
+            // (d) Zero-sum.
+            let zero: i128 = 0_i128;
+            let mut sum: i128 = 0_i128;
+            let mut d: u32 = 0;
+            while d < deltas.len() {
+                sum += *deltas.at(d);
+                d += 1;
+            }
+            assert!(sum == zero, "Settlement not zero-sum");
+
+            // Apply per-player net deltas through the vault.
+            let vault_addr = self.vault_address.read();
+            let mut m: u32 = 0;
+            while m < players.len() {
+                let player = *players.at(m);
+                let delta = *deltas.at(m);
+                let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
+                vault.apply_settlement(player, delta);
+                m += 1;
+            }
+
+            self.settled_bindings.write(hand_binding, true);
+            self.emit(
+                DualProofSettled {
+                    hand_binding,
+                    settlement_digest: registered_digest,
+                    participant_count: players.len(),
+                    p_proofs_verified: n_own,
                 },
             );
         }

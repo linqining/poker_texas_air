@@ -39,7 +39,14 @@ D_OUT=$($SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" deploy --class-hash "$
 SETTLEMENT=$(ADDR_OF "$D_OUT")
 echo "SETTLEMENT=$SETTLEMENT"
 
-$SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" invoke --contract "$VAULT" --fn set_settlement_contract --calldata "$SETTLEMENT" >/dev/null
+DS_CLASS=$(declare_one PokerDualSettlement)
+D_OUT=$($SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" deploy --class-hash "$DS_CLASS" --calldata "$OWNER,$VAULT,$OWNER" 2>&1)
+DUAL=$(ADDR_OF "$D_OUT")
+echo "DUAL=$DUAL"
+
+# DAPV 为默认结算路径：vault 的 settlement 绑定指向 PokerDualSettlement
+#（legacy 回退时由 server 自动重绑）。
+$SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" invoke --contract "$VAULT" --fn set_settlement_contract --calldata "$DUAL" >/dev/null
 $SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" invoke --contract "$TOKEN" --fn mint --calldata "$OWNER,1000000000000000000000,0" >/dev/null
 $SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" invoke --contract "$TOKEN" --fn approve --calldata "$VAULT,100000000000000000000000,0" >/dev/null
 DEPOSIT=$(TX_OF "$($SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" invoke --contract "$VAULT" --fn deposit --calldata 100000000000000000000,0 2>&1)")
@@ -50,6 +57,8 @@ STARKNET_RPC_URL=$URL
 STARKNET_STRK_ADDRESS=$TOKEN
 STARKNET_VAULT_ADDRESS=$VAULT
 STARKNET_SETTLEMENT_ADDRESS=$SETTLEMENT
+STARKNET_DUAL_SETTLEMENT_ADDRESS=$DUAL
+STARKNET_SETTLEMENT_MODE=auto
 STARKNET_OPERATOR_ADDRESS=$OWNER
 STARKNET_OPERATOR_PRIVATE_KEY=$OPKEY
 DEPOSIT_TX=$DEPOSIT

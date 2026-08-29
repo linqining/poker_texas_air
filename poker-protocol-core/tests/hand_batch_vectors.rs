@@ -108,14 +108,8 @@ fn print_hand_batch_cairo_vectors() {
     let one = Sc::one();
 
     // ---------- hand construction ----------
-    let mut ownership = Vec::new();
-    for label in [b"hb_own_a".as_slice(), b"hb_own_b".as_slice()] {
-        let sk = hs(label);
-        let pk = g * sk;
-        let proof = PKOwnershipProof::<Secp256k1Curve>::prove(&sk, &pk, &mut rand_core::OsRng);
-        ownership.push((pk, proof));
-    }
-
+    // hand_id must be fixed BEFORE minting: the ownership challenge is
+    // hand-bound (DAPV_SOUNDNESS.md §9-L2): c = H(hand_proto ‖ G ‖ pk ‖ R).
     let hand_id: [u8; 32] = {
         use sha3::Digest;
         let mut h = sha3::Keccak256::new();
@@ -125,6 +119,23 @@ fn print_hand_batch_cairo_vectors() {
     // Transcript domain derived from the hand instance, mirroring
     // hand_batch.cairo::hand_transcript_domain (replay binding).
     let hand_proto = hand_transcript_domain(&hand_id);
+
+    let mut ownership = Vec::new();
+    for label in [b"hb_own_a".as_slice(), b"hb_own_b".as_slice()] {
+        let sk = hs(label);
+        let pk = g * sk;
+        // Hand-bound Schnorr: w random, R = w·G,
+        // c = H(hand_proto ‖ G ‖ pk ‖ R), s = w + c·sk.
+        let w = hs(format!("{}/w", String::from_utf8_lossy(label)).as_bytes());
+        let commitment = g * w;
+        let mut ch_in = hand_proto.clone();
+        ch_in.extend_from_slice(g.compress().as_ref());
+        ch_in.extend_from_slice(pk.compress().as_ref());
+        ch_in.extend_from_slice(commitment.compress().as_ref());
+        let c = <Secp256k1Curve as Curve>::hash_to_scalar(&ch_in);
+        let response = w + c * sk;
+        ownership.push((pk, commitment, response));
+    }
 
     let sk_r = hs(b"hb_reveal_sk");
     let pk_r = g * sk_r;
@@ -170,9 +181,18 @@ fn print_hand_batch_cairo_vectors() {
         &mut KeccakTranscript::new(&hand_proto),
     );
 
-    // Per-proof parity.
-    for (pk, proof) in &ownership {
-        assert!(proof.verify(pk), "ownership parity");
+    // Per-proof parity (hand-bound ownership: s·G == R + c·pk with the
+    // domain-prefixed challenge).
+    for (pk, commitment, response) in &ownership {
+        let mut ch_in = hand_proto.clone();
+        ch_in.extend_from_slice(g.compress().as_ref());
+        ch_in.extend_from_slice(pk.compress().as_ref());
+        ch_in.extend_from_slice(commitment.compress().as_ref());
+        let c = <Secp256k1Curve as Curve>::hash_to_scalar(&ch_in);
+        assert!(
+            g * *response == *commitment + *pk * c,
+            "ownership parity"
+        );
     }
     assert!(
         reveal
@@ -198,15 +218,15 @@ fn print_hand_batch_cairo_vectors() {
     let mut terms: Vec<Term> = Vec::new();
     let mut eq_sizes: Vec<usize> = Vec::new();
 
-    for (pk, proof) in &ownership {
-        let mut input = Vec::new();
+    for (pk, commitment, response) in &ownership {
+        let mut input = hand_proto.clone();
         input.extend_from_slice(g.compress().as_ref());
         input.extend_from_slice(pk.compress().as_ref());
-        input.extend_from_slice(proof.commitment.compress().as_ref());
+        input.extend_from_slice(commitment.compress().as_ref());
         let c = <Secp256k1Curve as Curve>::hash_to_scalar(&input);
-        terms.push(Term { coeff: proof.response, point: g });
+        terms.push(Term { coeff: *response, point: g });
         terms.push(Term { coeff: neg(&c), point: *pk });
-        terms.push(Term { coeff: neg(&one), point: proof.commitment });
+        terms.push(Term { coeff: neg(&one), point: *commitment });
         eq_sizes.push(3);
     }
 
@@ -316,14 +336,14 @@ fn print_hand_batch_cairo_vectors() {
     println!("    let hand_id = b\"{}\";", to_hex(&hand_id));
 
     let mut payload: Vec<String> = vec!["2".into(), "1".into(), "1".into()];
-    for (pk, proof) in &ownership {
+    for (pk, commitment, response) in &ownership {
         let (px, py) = point_hex(pk);
-        let (rx, ry) = point_hex(&proof.commitment);
+        let (rx, ry) = point_hex(commitment);
         payload.push(format!("0x{px}"));
         payload.push(format!("0x{py}"));
         payload.push(format!("0x{rx}"));
         payload.push(format!("0x{ry}"));
-        payload.push(format!("0x{}", scalar_hex(&proof.response)));
+        payload.push(format!("0x{}", scalar_hex(response)));
     }
     {
         let (x, y) = point_hex(&reveal.user_public_key);
