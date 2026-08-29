@@ -23,6 +23,13 @@ use starknet::storage::{
 pub trait IPokerVault<TContractState> {
     /// Deposit STRK20 tokens and credit chip balance 1:1.
     fn deposit(ref self: TContractState, amount: u256);
+    /// Deposit STRK20 tokens credited to `player` (caller pays, 1:1).
+    ///
+    /// Permissionless by design: the STRK20 privacy-pool anonymizer calls this
+    /// inside a private transaction, so the on-chain payer is the anonymizer
+    /// (funded by the pool) while the chips land on the game player. Anyone
+    /// may also gift chips to another player through the same path.
+    fn deposit_for(ref self: TContractState, player: ContractAddress, amount: u256);
     /// Withdraw up to `amount` chips as STRK20 tokens.
     fn withdraw(ref self: TContractState, amount: u256);
     /// Read chip balance of a player.
@@ -46,6 +53,7 @@ pub trait IPokerVault<TContractState> {
 
 #[starknet::contract]
 pub mod PokerVault {
+    use core::num::traits::Zero;
     use openzeppelin::access::ownable::OwnableComponent;
     use openzeppelin::security::pausable::PausableComponent;
     use openzeppelin::token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTrait};
@@ -143,19 +151,14 @@ pub mod PokerVault {
             self.pausable.assert_not_paused();
             assert!(amount > 0_u256, "Amount must be > 0");
             let caller = starknet::get_caller_address();
-            let token = self.token_address.read();
+            self.pull_and_credit(caller, amount);
+        }
 
-            // Pull STRK20 from the caller into this contract. Requires the
-            // caller to have approved this vault for `amount`.
-            let dispatcher = IERC20Dispatcher { contract_address: token };
-            let ok = dispatcher
-                .transfer_from(caller, starknet::get_contract_address(), amount);
-            assert!(ok, "Token transfer failed");
-
-            let current = self.chip_balances.read(caller);
-            self.chip_balances.write(caller, current + amount);
-            self.total_chips.write(self.total_chips.read() + amount);
-            self.emit(Deposit { player: caller, amount });
+        fn deposit_for(ref self: ContractState, player: ContractAddress, amount: u256) {
+            self.pausable.assert_not_paused();
+            assert!(amount > 0_u256, "Amount must be > 0");
+            assert!(!player.is_zero(), "Player must be set");
+            self.pull_and_credit(player, amount);
         }
 
         fn withdraw(ref self: ContractState, amount: u256) {
@@ -235,6 +238,29 @@ pub mod PokerVault {
 
         fn paused(self: @ContractState) -> bool {
             self.pausable.is_paused()
+        }
+    }
+
+    /// Shared deposit path: pull STRK20 from the caller (caller must have
+    /// approved the vault) and credit `player` 1:1. Used by both `deposit`
+    /// (self-credit) and `deposit_for` (anonymizer / gifting credit).
+    #[generate_trait]
+    impl VaultInternalImpl of VaultInternalTrait {
+        fn pull_and_credit(
+            ref self: ContractState, player: ContractAddress, amount: u256,
+        ) {
+            let caller = starknet::get_caller_address();
+            let token = self.token_address.read();
+
+            let dispatcher = IERC20Dispatcher { contract_address: token };
+            let ok = dispatcher
+                .transfer_from(caller, starknet::get_contract_address(), amount);
+            assert!(ok, "Token transfer failed");
+
+            let current = self.chip_balances.read(player);
+            self.chip_balances.write(player, current + amount);
+            self.total_chips.write(self.total_chips.read() + amount);
+            self.emit(Deposit { player, amount });
         }
     }
 }
