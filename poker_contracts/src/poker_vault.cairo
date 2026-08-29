@@ -32,6 +32,17 @@ pub trait IPokerVault<TContractState> {
     fn deposit_for(ref self: TContractState, player: ContractAddress, amount: u256);
     /// Withdraw up to `amount` chips as STRK20 tokens.
     fn withdraw(ref self: TContractState, amount: u256);
+
+    /// Plan D P2.2 (unshield): burn `player`'s chips without any token
+    /// movement. Only the authorized helper (PokerVaultAnonymizer) may call
+    /// it; the STRK conservation happens inside the privacy pool (the pool
+    /// transfers the user's burned input note to the helper, which returns
+    /// it to the pool as the recipient's output note).
+    fn burn_chips(ref self: TContractState, player: ContractAddress, amount: u256);
+
+    /// Owner-gated: authorize the helper contract allowed to call
+    /// `burn_chips` (the PokerVaultAnonymizer deployment).
+    fn set_authorized_helper(ref self: TContractState, helper: ContractAddress);
     /// Read chip balance of a player.
     fn chip_balance(self: @TContractState, player: ContractAddress) -> u256;
     /// Token (STRK20) address.
@@ -84,6 +95,8 @@ pub mod PokerVault {
         total_chips: u256,
         /// Settlement contract authorized to call apply_settlement.
         settlement_contract: ContractAddress,
+        /// Helper contract authorized to call burn_chips (PokerVaultAnonymizer).
+        authorized_helper: ContractAddress,
         #[substorage(v0)]
         ownable: OwnableComponent::Storage,
         #[substorage(v0)]
@@ -102,6 +115,12 @@ pub mod PokerVault {
         ChipCredited: ChipCredited,
         ChipDebited: ChipDebited,
         SettlementContractSet: SettlementContractSet,
+        AuthorizedHelperSet: AuthorizedHelperSet,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct AuthorizedHelperSet {
+        helper: ContractAddress,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -143,6 +162,7 @@ pub mod PokerVault {
         self.ownable.initializer(owner);
         self.token_address.write(token_address);
         self.settlement_contract.write(settlement_contract);
+        self.authorized_helper.write(starknet::get_contract_address());
     }
 
     #[abi(embed_v0)]
@@ -178,6 +198,28 @@ pub mod PokerVault {
             assert!(ok, "Token transfer failed");
 
             self.emit(Withdraw { player: caller, amount });
+        }
+
+        fn burn_chips(ref self: ContractState, player: ContractAddress, amount: u256) {
+            self.pausable.assert_not_paused();
+            assert!(
+                starknet::get_caller_address() == self.authorized_helper.read(),
+                "Only the authorized helper"
+            );
+            assert!(amount > 0_u256, "Amount must be > 0");
+            assert!(!player.is_zero(), "Player must be set");
+
+            let current = self.chip_balances.read(player);
+            assert!(current >= amount, "Insufficient chip balance");
+            self.chip_balances.write(player, current - amount);
+            self.total_chips.write(self.total_chips.read() - amount);
+            self.emit(ChipDebited { player, amount });
+        }
+
+        fn set_authorized_helper(ref self: ContractState, helper: ContractAddress) {
+            self.ownable.assert_only_owner();
+            self.authorized_helper.write(helper);
+            self.emit(AuthorizedHelperSet { helper });
         }
 
         fn chip_balance(self: @ContractState, player: ContractAddress) -> u256 {

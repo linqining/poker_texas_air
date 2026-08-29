@@ -1173,6 +1173,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "lambdaworks-crypto"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58b1a1c1102a5a7fbbda117b79fb3a01e033459c738a3c1642269603484fd1c1"
+dependencies = [
+ "lambdaworks-math",
+ "rand 0.8.7",
+ "rand_chacha 0.3.1",
+ "serde",
+ "sha2",
+ "sha3",
+]
+
+[[package]]
+name = "lambdaworks-math"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "018a95aa873eb49896a858dee0d925c33f3978d073c64b08dd4f2c9b35a017c6"
+dependencies = [
+ "getrandom 0.2.17",
+ "num-bigint",
+ "num-traits",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1466,7 +1494,7 @@ dependencies = [
  "poker_texas_air",
  "rand 0.8.7",
  "rayon",
- "starknet-crypto",
+ "starknet-crypto 0.6.2",
 ]
 
 [[package]]
@@ -1488,6 +1516,7 @@ version = "0.1.0"
 dependencies = [
  "blstrs",
  "borsh",
+ "crypto-bigint",
  "curve25519-dalek",
  "ff",
  "group",
@@ -1499,6 +1528,9 @@ dependencies = [
  "rayon",
  "sha2",
  "sha3",
+ "starknet-crypto 0.8.1",
+ "starknet-curve 0.6.0",
+ "starknet-types-core",
 ]
 
 [[package]]
@@ -1610,7 +1642,7 @@ dependencies = [
  "rayon",
  "secp256k1",
  "serde",
- "starknet-crypto",
+ "starknet-crypto 0.6.2",
  "starknet-ff",
  "stwo",
  "stwo-air-utils",
@@ -2142,8 +2174,27 @@ dependencies = [
  "rfc6979",
  "sha2",
  "starknet-crypto-codegen",
- "starknet-curve",
+ "starknet-curve 0.4.2",
  "starknet-ff",
+ "zeroize",
+]
+
+[[package]]
+name = "starknet-crypto"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1004a16c25dc6113c19d4f9d0c19ff97d85804829894bba22c0d0e9e7b249812"
+dependencies = [
+ "crypto-bigint",
+ "hex",
+ "hmac",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "rfc6979",
+ "sha2",
+ "starknet-curve 0.6.0",
+ "starknet-types-core",
  "zeroize",
 ]
 
@@ -2153,7 +2204,7 @@ version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbc159a1934c7be9761c237333a57febe060ace2bc9e3b337a59a37af206d19f"
 dependencies = [
- "starknet-curve",
+ "starknet-curve 0.4.2",
  "starknet-ff",
  "syn 2.0.119",
 ]
@@ -2168,6 +2219,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "starknet-curve"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22c898ae81b6409532374cf237f1bd752d068b96c6ad500af9ebbd0d9bb712f6"
+dependencies = [
+ "starknet-types-core",
+]
+
+[[package]]
 name = "starknet-ff"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2179,6 +2239,24 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "serde",
+]
+
+[[package]]
+name = "starknet-types-core"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90d23b1bc014ee4cce40056ab3114bcbcdc2dbc1e845bbfb1f8bd0bab63507d4"
+dependencies = [
+ "blake2",
+ "digest",
+ "lambdaworks-crypto",
+ "lambdaworks-math",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "rand 0.9.5",
+ "serde",
+ "zeroize",
 ]
 
 [[package]]
@@ -2208,7 +2286,7 @@ dependencies = [
  "rand 0.8.7",
  "rayon",
  "serde",
- "starknet-crypto",
+ "starknet-crypto 0.6.2",
  "starknet-ff",
  "stwo-std-shims",
  "thiserror 2.0.20",

@@ -43,6 +43,7 @@ pub struct OpenNoteDeposit {
 #[starknet::interface]
 pub trait IVaultLike<TContractState> {
     fn deposit_for(ref self: TContractState, player: ContractAddress, amount: u256);
+    fn burn_chips(ref self: TContractState, player: ContractAddress, amount: u256);
     fn token(self: @TContractState) -> ContractAddress;
 }
 
@@ -56,6 +57,20 @@ pub trait IPokerVaultAnonymizer<TContractState> {
         player: ContractAddress,
         amount: u256,
         change_note_id: felt252,
+    ) -> Span<OpenNoteDeposit>;
+
+    /// Plan D P2.2 (unshield): called by the STRK20 privacy pool inside a
+    /// private transaction. The pool has already moved the user's burned
+    /// input-note STRK to this helper; the helper burns `player`'s chips
+    /// 1:1 and returns the helper's whole balance as the recipient's
+    /// output note (`recipient_note_id`) for the pool to pull. STRK
+    /// conservation stays inside the pool; the link between the chip
+    /// account and the payout address is cut by the pool.
+    fn privacy_withdraw(
+        ref self: TContractState,
+        player: ContractAddress,
+        amount: u256,
+        recipient_note_id: felt252,
     ) -> Span<OpenNoteDeposit>;
 }
 
@@ -92,6 +107,7 @@ pub mod PokerVaultAnonymizer {
     #[derive(Drop, starknet::Event)]
     enum Event {
         BuyInExecuted: BuyInExecuted,
+        UnshieldExecuted: UnshieldExecuted,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -99,6 +115,14 @@ pub mod PokerVaultAnonymizer {
         player: ContractAddress,
         amount: u256,
         change: u128,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct UnshieldExecuted {
+        player: ContractAddress,
+        amount: u256,
+        recipient_note_id: felt252,
+        out: u128,
     }
 
     #[constructor]
@@ -154,6 +178,50 @@ pub mod PokerVaultAnonymizer {
 
             let mut deposits = core::array::ArrayTrait::new();
             deposits.append(OpenNoteDeposit { note_id: change_note_id, token, amount: change });
+            deposits.span()
+        }
+
+        fn privacy_withdraw(
+            ref self: ContractState,
+            player: ContractAddress,
+            amount: u256,
+            recipient_note_id: felt252,
+        ) -> Span<OpenNoteDeposit> {
+            let pool = self.pool.read();
+            assert!(get_caller_address() == pool, "caller is not the pool");
+            assert!(!player.is_zero(), "player required");
+            assert!(amount > 0_u256, "amount must be > 0");
+            assert!(recipient_note_id != 0, "recipient note id required");
+
+            let vault = self.vault.read();
+            let vault_dispatcher = IVaultLikeDispatcher { contract_address: vault };
+            let token = vault_dispatcher.token();
+            let token_dispatcher = IERC20Dispatcher { contract_address: token };
+            let self_address = get_contract_address();
+
+            // 1. Burn the player's chips 1:1 (no token movement here — the
+            // STRK the user burned as the pool input note is already in the
+            // helper, transferred by the pool before the call).
+            vault_dispatcher.burn_chips(player, amount);
+
+            // 2. Return the helper's whole balance as the recipient's output
+            // note: approve the pool to pull it. Surplus (if any) rides
+            // along; u128 guard because pool note amounts are u128.
+            let remaining = token_dispatcher.balance_of(self_address);
+            assert!(!remaining.is_zero(), "no unshield funds in helper");
+            assert!(remaining.high == 0_u128, "unshield overflows u128");
+            let out: u128 = remaining.low;
+            let ok = token_dispatcher.approve(pool, remaining);
+            assert!(ok, "pool approve failed");
+
+            self.emit(UnshieldExecuted { player, amount, recipient_note_id, out });
+
+            let mut deposits = core::array::ArrayTrait::new();
+            deposits.append(OpenNoteDeposit {
+                note_id: recipient_note_id,
+                token,
+                amount: out,
+            });
             deposits.span()
         }
     }
@@ -382,5 +450,83 @@ mod tests {
         let s = setup(stranger); // pool != test contract
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
         anon.privacy_invoke(s.player, 100, 1);
+    }
+
+    // ---- Plan D P2.2: privacy_withdraw (unshield) ----
+
+    #[test]
+    fn privacy_withdraw_burns_chips_and_returns_output_note() {
+        let test_addr = get_contract_address();
+        let s = setup(test_addr); // pool == test contract
+        let tok = IMockTokenDispatcher { contract_address: s.token };
+        let vault = IPokerVaultDispatcher { contract_address: s.vault };
+
+        // Authorize the helper, then fund the player's chips (buy-in path).
+        vault.set_authorized_helper(s.anonymizer);
+        tok.mint(test_addr, 1000);
+        tok.approve(s.vault, 400);
+        vault.deposit_for(s.player, 400);
+        assert!(vault.chip_balance(s.player) == 400, "chips credited");
+
+        // The pool moves the user's burned input-note STRK to the helper
+        // before privacy_withdraw runs.
+        tok.mint(test_addr, 300);
+        tok.transfer(s.anonymizer, 300);
+
+        let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
+        let deposits = anon.privacy_withdraw(s.player, 300, 42);
+
+        assert!(deposits.len() == 1, "one output note");
+        let note = *deposits.at(0);
+        assert!(note.note_id == 42, "recipient note id");
+        assert!(note.token == s.token, "token mismatch");
+        assert!(note.amount == 300, "output amount");
+
+        // Chips burned 1:1. The helper still holds the output STRK until
+        // the pool pulls it via the approval (same lifecycle as buy-in).
+        assert!(vault.chip_balance(s.player) == 100, "chips burned");
+        assert!(vault.total_chips() == 100, "total chips reduced");
+        assert!(tok.balance_of(s.anonymizer) == 300, "helper holds output pre-pull");
+
+        // The pool pulls the output note via the helper's approval.
+        assert!(tok.transfer_from(s.anonymizer, test_addr, 300), "pool pull");
+        assert!(tok.balance_of(s.anonymizer) == 0, "helper must be empty after pull");
+    }
+
+    #[test]
+    #[should_panic(expected: "Only the authorized helper")]
+    fn privacy_withdraw_fails_without_helper_authorization() {
+        let test_addr = get_contract_address();
+        let s = setup(test_addr);
+        let tok = IMockTokenDispatcher { contract_address: s.token };
+        tok.mint(test_addr, 300);
+        tok.transfer(s.anonymizer, 300);
+        // set_authorized_helper NOT called — burn_chips must refuse.
+        let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
+        anon.privacy_withdraw(s.player, 300, 42);
+    }
+
+    #[test]
+    #[should_panic(expected: "caller is not the pool")]
+    fn privacy_withdraw_rejects_non_pool_caller() {
+        let stranger: ContractAddress = 987654.try_into().unwrap();
+        let s = setup(stranger);
+        let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
+        anon.privacy_withdraw(s.player, 100, 1);
+    }
+
+    #[test]
+    #[should_panic(expected: "Insufficient chip balance")]
+    fn privacy_withdraw_rejects_overdraw() {
+        let test_addr = get_contract_address();
+        let s = setup(test_addr);
+        let tok = IMockTokenDispatcher { contract_address: s.token };
+        let vault = IPokerVaultDispatcher { contract_address: s.vault };
+        vault.set_authorized_helper(s.anonymizer);
+        // Player has NO chips; pool still funds the helper.
+        tok.mint(test_addr, 300);
+        tok.transfer(s.anonymizer, 300);
+        let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
+        anon.privacy_withdraw(s.player, 300, 42);
     }
 }

@@ -5,10 +5,19 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::crypto::curve::{Bls12381Curve, Curve, CurvePoint, ElGamalCiphertextGeneric};
+#[cfg(feature = "stark-curve")]
+use crate::crypto::curve::StarkCurve;
+use crate::crypto::curve::{Curve, CurvePoint, ElGamalCiphertextGeneric};
+#[cfg(not(feature = "stark-curve"))]
+use crate::crypto::curve::Bls12381Curve;
 
 /// The default curve used by the project.
-/// Change this single line to switch the entire project to a different curve.
+/// Plan D：`stark-curve` 构建把镜像切到 Cairo 原生 STARK 曲线
+/// （hand_batch_stark 的 EC_OP 折叠、hand_binding 承诺链同曲线）。
+/// 默认 legacy：poker_l1 VM 层仍有 85 处 blstrs 硬绑定待迁移。
+#[cfg(feature = "stark-curve")]
+pub type DefaultCurve = StarkCurve;
+#[cfg(not(feature = "stark-curve"))]
 pub type DefaultCurve = Bls12381Curve;
 
 pub const N_CARDS: usize = 52;
@@ -57,12 +66,14 @@ impl ECPoint {
     }
 }
 
+#[cfg(not(feature = "stark-curve"))]
 impl From<blstrs::G1Projective> for ECPoint {
     fn from(point: blstrs::G1Projective) -> Self {
         Self(point)
     }
 }
 
+#[cfg(not(feature = "stark-curve"))]
 impl From<ECPoint> for blstrs::G1Projective {
     fn from(point: ECPoint) -> Self {
         point.0
@@ -102,12 +113,14 @@ impl ECScalar {
     }
 }
 
+#[cfg(not(feature = "stark-curve"))]
 impl From<blstrs::Scalar> for ECScalar {
     fn from(scalar: blstrs::Scalar) -> Self {
         Self(scalar)
     }
 }
 
+#[cfg(not(feature = "stark-curve"))]
 impl From<ECScalar> for blstrs::Scalar {
     fn from(scalar: ECScalar) -> Self {
         scalar.0

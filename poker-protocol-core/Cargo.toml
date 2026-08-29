@@ -6,6 +6,8 @@ description = "Shared cryptographic primitives and native curve backends"
 
 [features]
 borsh = ["dep:borsh"]
+# STARK curve backend (Cairo-native EC_OP settlement route, Plan D)
+stark-backend = []
 
 [dependencies]
 rand_core = "0.6.4"
@@ -19,6 +21,10 @@ group = "0.13"
 ff = "0.13"
 halo2curves = { version = "0.7", default-features = false }
 k256 = { version = "0.13", default-features = false, features = ["arithmetic", "alloc", "precomputed-tables", "std", "expose-field", "hash2curve"] }
+starknet-crypto = "0.8.1"
+starknet-curve = "0.6"
+starknet-types-core = { version = "0.2", default-features = false, features = ["curve", "hash"] }
+crypto-bigint = "0.5.5"
 borsh = { version = "1.5", optional = true }
 
 [dev-dependencies]

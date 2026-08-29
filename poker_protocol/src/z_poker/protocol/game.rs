@@ -16,6 +16,7 @@ use crate::crypto::curve::{Curve, CurvePoint, CurveScalar};
 use crate::z_poker::card::{standard_deck, PlayingCard};
 use crate::z_poker::key_manager::KeyManager;
 use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+#[cfg(not(feature = "stark-curve"))]
 use blstrs::G1Projective;
 use rand_core::OsRng;
 use std::collections::HashMap;
@@ -25,12 +26,25 @@ use std::collections::HashMap;
 /// Uses BLS12-381 hash_to_g1 with label "texas_poker/card/{i}",
 /// matching the Move contract's `generate_plaintext_cards()`.
 /// DST 必须与 Sui `bls12381::hash_to_g1` 一致：`BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_`
+#[cfg(not(feature = "stark-curve"))]
 pub fn new_plain_text() -> Vec<Plaintext> {
     const BLS_DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
     (0..N_CARDS)
         .map(|i| {
             let label = format!("texas_poker/card/{}", i);
             G1Projective::hash_to_curve(label.as_bytes(), BLS_DST, b"")
+        })
+        .collect()
+}
+
+/// Plan D：STARK 曲线世界的明文牌 = DefaultCurve::hash_to_curve
+/// （poseidon try-and-increment，与本仓库主协议一致）。
+#[cfg(feature = "stark-curve")]
+pub fn new_plain_text() -> Vec<Plaintext> {
+    (0..N_CARDS)
+        .map(|i| {
+            let label = format!("texas_poker/card/{}", i);
+            <DefaultCurve as Curve>::hash_to_curve(label.as_bytes())
         })
         .collect()
 }

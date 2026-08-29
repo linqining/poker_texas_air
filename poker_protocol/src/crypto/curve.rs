@@ -8,3 +8,5 @@ pub use poker_protocol_core::{
     CompressedPoint, Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric, RistrettoCurve,
     RistrettoElGamalCiphertext,
 };
+#[cfg(feature = "stark-curve")]
+pub use poker_protocol_core::{StarkCurve, StarkElGamalCiphertext};

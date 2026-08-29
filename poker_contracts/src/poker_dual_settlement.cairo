@@ -84,6 +84,22 @@ pub trait IPokerDualSettlement<TContractState> {
         p_batch: Span<u256>,
     );
 
+    /// Plan D STARK-curve variant of `verify_and_settle_dapv`: the P layer
+    /// folds on the Cairo-native STARK curve via the EC_OP builtin
+    /// (`dual::hand_batch_stark::verify_hand_batch_stark`). Payload words
+    /// are felt252-range u256s (coordinates/scalars are < n < P and convert
+    /// losslessly); challenges and rho are Poseidon (host
+    /// `StarkCurve::hash_to_scalar`), transcript domain stays keccak.
+    fn verify_and_settle_dapv_stark(
+        ref self: TContractState,
+        hand_binding: felt252,
+        hand_id_bytes: Span<u8>,
+        hand_id: u64,
+        players: Span<ContractAddress>,
+        deltas: Span<i128>,
+        p_batch: Span<felt252>,
+    );
+
     fn set_prover(ref self: TContractState, prover: ContractAddress);
     fn remove_prover(ref self: TContractState, prover: ContractAddress);
     fn is_prover(self: @TContractState, prover: ContractAddress) -> bool;
@@ -104,6 +120,7 @@ pub mod PokerDualSettlement {
     };
     use super::super::dual::secp256k1_verifier::{verify_p_proof, PROOF_KIND_OWNERSHIP};
     use super::super::dual::hand_batch::verify_hand_batch;
+    use super::super::dual::hand_batch_stark::verify_hand_batch_stark;
     use super::IVaultDispatcherDispatcherTrait;
 
 /// Big-endian bytes → felt252 (Horner). Used to bind the DAPV batch's
@@ -389,6 +406,94 @@ fn bytes_to_felt(bytes: Span<u8>) -> felt252 {
             assert!(sum == zero, "Settlement not zero-sum");
 
             // Apply per-player net deltas through the vault.
+            let vault_addr = self.vault_address.read();
+            let mut m: u32 = 0;
+            while m < players.len() {
+                let player = *players.at(m);
+                let delta = *deltas.at(m);
+                let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
+                vault.apply_settlement(player, delta);
+                m += 1;
+            }
+
+            self.settled_bindings.write(hand_binding, true);
+            self.emit(
+                DualProofSettled {
+                    hand_binding,
+                    settlement_digest: registered_digest,
+                    participant_count: players.len(),
+                    p_proofs_verified: n_own,
+                },
+            );
+        }
+
+        /// Plan D STARK-curve settlement: same binding/digest/zero-sum
+        /// checks as `verify_and_settle_dapv`; the P layer folds through
+        /// `hand_batch_stark` on the EC_OP builtin. Accepts ownership-only
+        /// batches with felt252-range payload words.
+        fn verify_and_settle_dapv_stark(
+            ref self: ContractState,
+            hand_binding: felt252,
+            hand_id_bytes: Span<u8>,
+            hand_id: u64,
+            players: Span<ContractAddress>,
+            deltas: Span<i128>,
+            p_batch: Span<felt252>,
+        ) {
+            assert!(hand_binding != 0, "Zero binding");
+            assert!(players.len() == deltas.len(), "Players/deltas mismatch");
+            assert!(players.len() > 0_u32, "No participants");
+            assert!(players.len() < 10_u32, "Too many participants");
+            assert!(!self.settled_bindings.read(hand_binding), "Hand already settled");
+            assert!(
+                bytes_to_felt(hand_id_bytes) == hand_binding,
+                "Batch domain not bound to hand_binding"
+            );
+
+            let (registered_digest, _g_attestation, registered_flag) =
+                self.bindings.read(hand_binding);
+            assert!(registered_flag == 1, "Binding not registered");
+
+            let mut felements: Array<felt252> = array![hand_id.into()];
+            let mut i: u32 = 0;
+            while i < players.len() {
+                felements.append((*players.at(i)).into());
+                let delta = *deltas.at(i);
+                if delta >= 0_i128 {
+                    let as_u: u64 = delta.try_into().expect('delta fits u64');
+                    felements.append(1);
+                    felements.append(as_u.into());
+                } else {
+                    let abs_delta = -delta;
+                    let as_u: u64 = abs_delta.try_into().expect('abs delta fits u64');
+                    felements.append(0);
+                    felements.append(as_u.into());
+                }
+                i += 1;
+            }
+            let computed = poseidon_hash_span(felements.span());
+            assert!(computed == registered_digest, "Settlement digest mismatch");
+
+            assert!(p_batch.len() >= 1_u32, "Empty batch");
+            let n_own: u32 = (*p_batch.at(0)).try_into().expect('n_own fits u32');
+            assert!(
+                n_own == players.len(),
+                "Every participant needs an endorsement"
+            );
+            assert!(
+                verify_hand_batch_stark(hand_binding, p_batch),
+                "DAPV STARK batch rejected"
+            );
+
+            let zero: i128 = 0_i128;
+            let mut sum: i128 = 0_i128;
+            let mut d: u32 = 0;
+            while d < deltas.len() {
+                sum += *deltas.at(d);
+                d += 1;
+            }
+            assert!(sum == zero, "Settlement not zero-sum");
+
             let vault_addr = self.vault_address.read();
             let mut m: u32 = 0;
             while m < players.len() {

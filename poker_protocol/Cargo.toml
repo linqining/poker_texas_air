@@ -13,6 +13,11 @@ required-features = ["legacy-bls381", "borsh"]
 
 [features]
 default = ["legacy-bls381"]
+# Plan D: STARK-curve protocol world (Cairo-native EC_OP settlement)
+stark-curve = [
+    "dep:poker-protocol-core",
+    "poker-protocol-core/stark-backend",
+]
 # Retained temporarily for the original client while its BLS12-381 / Move
 # protocol is removed.
 legacy-bls381 = [

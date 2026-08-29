@@ -7,6 +7,8 @@
 
 mod backend;
 pub mod curve;
+#[cfg(feature = "stark-backend")]
+pub mod stark_curve;
 pub mod error;
 pub mod transcript;
 
@@ -17,6 +19,10 @@ pub use backend::{
     ec_encrypt_batch_generic, Bls12381Curve, Bls12381ElGamalCiphertext, BlsCompressedPoint,
     Bn254Curve, Bn254ElGamalCiphertext, BnCompressedPoint, CompressedPoint, RistrettoCurve,
     RistrettoElGamalCiphertext, Secp256k1Curve, Secp256k1ElGamalCiphertext, SecpCompressedPoint,
+};
+#[cfg(feature = "stark-backend")]
+pub use stark_curve::{
+    StarkCompressedPoint, StarkCurve, StarkElGamalCiphertext, StarkPoint, StarkScalar,
 };
 pub use curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
 pub use error::VerificationError;
