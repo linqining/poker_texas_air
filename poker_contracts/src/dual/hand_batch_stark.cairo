@@ -34,7 +34,7 @@
 //! reserved, same as the secp variant).
 
 use core::array::{ArrayTrait, SpanTrait};
-use core::ec::{EcPointTrait, EcStateTrait};
+use core::ec::{EcPoint, EcPointTrait, EcStateTrait, NonZeroEcPoint};
 use core::num::traits::Zero;
 use core::option::Option;
 use core::poseidon::poseidon_hash_span;
@@ -119,104 +119,135 @@ pub struct TermStark {
 /// Ownership residual `s·G − R − c·pk` with the hand-bound challenge
 /// c = poseidon(domain ‖ G32 ‖ pk32 ‖ R32) mod n — byte-identical to
 /// `client-wasm::endorsement_mint` / `dual_settle::mint_endorsement`.
-fn ownership_terms(
+/// Per-endorsement residual as ONE equation point (A/B optimization):
+///   eq = s·G − c·pk − R = s·G + c·(−pk) + (−R)
+/// Negative terms use POINT negation (felt-level −y, the true group
+/// inverse); c is the RAW poseidon output (< P) used directly as an EC
+/// scalar — EC scalar mult is invariant under m → m mod n (group order),
+/// so the host's reduced-c minting (s = w + c·sk in Z_n) and this raw-c
+/// replay verify the same equation. No u256 arithmetic anywhere.
+fn ownership_equation(
     hand_binding: felt252,
     pk: (felt252, felt252),
     big_r: (felt252, felt252),
-    s: u256,
-    ref terms: Array<TermStark>,
-) -> bool {
+    s: felt252,
+) -> Option<EcPoint> {
     let (pk_x, pk_y) = pk;
     let (r_x, r_y) = big_r;
-    // Fail-closed on off-curve payload points (EcPoint::new checks the
-    // curve equation via the builtin).
-    if EcPointTrait::new(pk_x, pk_y).is_none() || EcPointTrait::new(r_x, r_y).is_none() {
-        return false;
-    }
-    // Gas-compressed challenge (felt-direct Poseidon; matches the Rust core
-    // canonical `dapv_endorsement_challenge`):
-    //   c = poseidon([proto_label, hand_binding, Gx, Gy, pkx, pky, Rx, Ry]) mod n
-    // No byte serialization, no keccak — full affine coordinates are
-    // injective, so the parity bit of the compressed form is unneeded.
+    let pk_point = match EcPointTrait::new(pk_x, pk_y) {
+        Option::Some(p) => p,
+        Option::None => { return Option::None; }, // off-curve: fail-closed
+    };
+    let r_point = match EcPointTrait::new(r_x, r_y) {
+        Option::Some(p) => p,
+        Option::None => { return Option::None; },
+    };
+    // c = poseidon([proto_label, hand_binding, Gx, Gy, pkx, pky, Rx, Ry])
+    // — RAW (< P), no mod-n reduction (see fn doc).
     let input: Array<felt252> = array![
         DAPV_PROTO_LABEL, hand_binding, GENERATOR_X, GENERATOR_Y, pk_x, pk_y, r_x, r_y
     ];
-    let c = poseidon_span_mod_n(input.span());
-    terms.append(TermStark { coeff: s, x: GENERATOR_X, y: GENERATOR_Y });
-    terms.append(TermStark { coeff: fr_neg(c), x: pk_x, y: pk_y });
-    terms.append(TermStark { coeff: fr_neg(1_u256), x: r_x, y: r_y });
-    true
+    let c = poseidon_hash_span(input.span());
+
+    let g_nz: NonZeroEcPoint = EcPointTrait::new(GENERATOR_X, GENERATOR_Y).unwrap().try_into().unwrap();
+    // 负项用点取反：−c·pk = c·(−pk)，−R 直接加 −R（域级 −y 即群逆）。
+    let pk_neg_nz: NonZeroEcPoint = match (-pk_point).try_into() {
+        Option::Some(nz) => nz,
+        Option::None => { return Option::None; },
+    };
+    let r_neg_nz: NonZeroEcPoint = match (-r_point).try_into() {
+        Option::Some(nz) => nz,
+        Option::None => { return Option::None; },
+    };
+    let mut state = EcStateTrait::init();
+    state.add_mul(s, g_nz);
+    state.add_mul(c, pk_neg_nz);
+    state.add(r_neg_nz);
+    Option::Some(state.finalize())
 }
+
 
 /// rho = poseidon("poker/hand-batch/v1" ‖ hand_id ‖ per-term
 /// (coeff_be ‖ x_be ‖ y_be)) mod n — byte-identical to
 /// `dual_settle::host_fold_check`'s rho derivation.
-fn hand_rho(hand_binding: felt252, terms: Span<TermStark>) -> u256 {
-    // Gas-compressed rho (felt-direct Poseidon; matches the Rust core
-    // canonical `dapv_hand_rho`):
-    //   rho = poseidon([v1_label, hand_binding, n_terms, (coeff, x, y)*]) mod n
+/// rho over the EQUATION words (A optimization):
+///   rho = poseidon([v1_label, hand_binding, n_eq, (s, pkx, pky, Rx, Ry)*])
+/// — RAW (< P) used directly as the Horner scalar; the host's
+/// `dapv_hand_rho` reduces mod n and the two are EC-equivalent.
+fn hand_rho(hand_binding: felt252, equations: Span<EquationWords>) -> felt252 {
     let mut input: Array<felt252> = array![DAPV_V1_LABEL, hand_binding];
-    input.append(terms.len().into());
-    for term in terms {
-        let value: TermStark = *term;
-        // coeff < n < P：单 felt（与 host dapv_hand_rho 的 word_to_felt 同构）
-        let coeff_felt: felt252 = value.coeff.try_into().expect('coeff fits felt');
-        input.append(coeff_felt);
-        input.append(value.x);
-        input.append(value.y);
+    input.append(equations.len().into());
+    for eq in equations {
+        let e: EquationWords = *eq;
+        input.append(e.s);
+        input.append(e.pk_x);
+        input.append(e.pk_y);
+        input.append(e.r_x);
+        input.append(e.r_y);
     }
-    poseidon_span_mod_n(input.span())
+    poseidon_hash_span(input.span())
 }
+
+/// Wire words of one ownership equation (rho transcript input).
+#[derive(Copy, Drop, Debug)]
+pub struct EquationWords {
+    pub s: felt252,
+    pub pk_x: felt252,
+    pub pk_y: felt252,
+    pub r_x: felt252,
+    pub r_y: felt252,
+}
+
 
 /// Fold all residuals with powers of rho and accept iff `L == O`.
 ///
 /// `EcState::add_mul` accumulates `lambda · point` in one EC_OP circuit per
 /// term; `finalize_nz() == None` is the group's own identity test. The host
-/// (`host_fold_check`) performs the identical accumulation over the same
-/// rho schedule, so honest batches agree on both sides.
-fn fold_and_check(hand_binding: felt252, terms: Array<TermStark>) -> bool {
-    if terms.len() == 0 {
+/// Horner fold (A optimization; host mirror: `dual_settle::host_fold_check`): accept iff
+///   L = ρ·(ρ·(…(ρ·eq_N + eq_{N−1})…) + eq_1) == O.
+/// Per equation: ONE add_mul(ρ, acc) + ONE add(eq) — no ρ power table,
+/// no λ mod-n multiplications (the ±1 special case of optimization B
+/// disappears structurally). `finalize_nz() == None` is the identity test.
+fn fold_and_check(hand_binding: felt252, equations: Array<EcPoint>, words: Array<EquationWords>) -> bool {
+    let n = equations.len();
+    if n == 0 {
         return false;
     }
-    let rho = hand_rho(hand_binding, terms.span());
-    // rpow advances once per EQUATION (3 terms in the ownership-only
-    // batch), exactly like the host's `terms.chunks(3)` schedule and the
-    // secp variant's eq_sizes walk.
-    let mut rpow: u256 = u256 { low: 1_u128, high: 0_u128 };
-    let mut state = EcStateTrait::init();
-    let mut i: u32 = 0;
-    let mut in_eq: u32 = 0;
-    while i < terms.len() {
-        let term = *terms.at(i);
-        let lambda = fr_mul(rpow, term.coeff);
-        if lambda != 0 {
-            let lambda_felt = match u256_to_felt(lambda) {
-                Option::Some(f) => f,
-                Option::None => { return false; },
-            };
-            let point = match EcPointTrait::new(term.x, term.y) {
-                Option::Some(p) => p,
-                Option::None => { return false; },
-            };
-            let point_nz = match point.try_into() {
-                Option::Some(nz) => nz,
-                Option::None => { return false; },
-            };
-            state.add_mul(lambda_felt, point_nz);
+    let rho = hand_rho(hand_binding, words.span());
+    let rho_nz_scalar = rho; // raw felt scalar; EC mult handles mod-n implicitly
+
+    let mut acc = *equations.at(n - 1);
+    let mut i: u32 = n - 1;
+    while i > 0 {
+        i -= 1;
+        let eq_point = *equations.at(i);
+        let eq_opt: Option<NonZeroEcPoint> = eq_point.try_into();
+        // eq_i = O contributes nothing (ρ·acc + O = ρ·acc).
+        if eq_opt.is_none() {
+            continue;
         }
-        in_eq += 1;
-        if in_eq == 3 {
-            in_eq = 0;
-            rpow = fr_mul(rpow, rho);
+        let acc_opt: Option<NonZeroEcPoint> = acc.try_into();
+        // acc = O mid-chain: ρ·O + eq_i = eq_i — restart accumulator here;
+        // subsequent Horner steps resume correctly.
+        if acc_opt.is_none() {
+            acc = eq_point;
+            continue;
         }
-        i += 1;
+        let acc_nz = acc_opt.unwrap();
+        let eq_nz = eq_opt.unwrap();
+        let mut state = EcStateTrait::init();
+        state.add_mul(rho_nz_scalar, acc_nz);
+        state.add(eq_nz);
+        acc = state.finalize();
     }
-    match state.finalize_nz() {
-        // L == O: the identity point. Accept.
+    // Accept iff the final accumulator is the identity point.
+    let final_opt: Option<NonZeroEcPoint> = acc.try_into();
+    match final_opt {
         Option::None => true,
         Option::Some(_) => false,
     }
 }
+
 
 /// Verify a hand's ownership-endorsement batch in one folded EC_OP check.
 /// Fail-closed on malformed payloads and off-curve points. Reveal-token and
@@ -239,20 +270,24 @@ pub fn verify_hand_batch_stark(hand_binding: felt252, payload: Span<felt252>) ->
     if payload.len() != 3 + 5 * n_own_u32 {
         return false;
     }
-    let mut terms: Array<TermStark> = array![];
+    let mut equations: Array<EcPoint> = array![];
+    let mut words: Array<EquationWords> = array![];
     let mut i: u32 = 0;
     let mut cursor: u32 = 3;
     while i < n_own_u32 {
-        let pk = (*payload.at(cursor), *payload.at(cursor + 1));
-        let big_r = (*payload.at(cursor + 2), *payload.at(cursor + 3));
-        let s = felt_to_u256(*payload.at(cursor + 4));
-        if !ownership_terms(hand_binding, pk, big_r, s, ref terms) {
-            return false;
-        }
+        let s_felt = *payload.at(cursor + 4);
+        let (pk_x, pk_y) = (*payload.at(cursor), *payload.at(cursor + 1));
+        let (r_x, r_y) = (*payload.at(cursor + 2), *payload.at(cursor + 3));
+        let eq = match ownership_equation(hand_binding, (pk_x, pk_y), (r_x, r_y), s_felt) {
+            Option::Some(p) => p,
+            Option::None => { return false; }, // off-curve: fail-closed
+        };
+        equations.append(eq);
+        words.append(EquationWords { s: s_felt, pk_x, pk_y, r_x, r_y });
         cursor += 5;
         i += 1;
     }
-    fold_and_check(hand_binding, terms)
+    fold_and_check(hand_binding, equations, words)
 }
 
 #[cfg(target: 'test')]
@@ -276,14 +311,14 @@ mod tests {
             0x0000000000000000000000000000000000000000000000000000000000000000,
             0x0601d3d2e265c10ff645e1554c435e72ce6721f0ba5fc96f0c650bfc6231191a,
             0x007da2512be6af510d63c0ab9e35876669d1665d3acff5a23de0aeb806d7fcb8,
-            0x05f63e824a08cdde327be42e37882ea15a04a05a476ede275404edb1b0b2be21,
-            0x078ef4ba64382241399d1ce587e355fa8529177c81e4cb5d4acc7cd16980542d,
-            0x068ec04f7a378a9029215082e8f0a120a0972080726c9d2df36628bd3f02f964,
+            0x008e1475872ab7fa8f247671c8526184cf3140deacb88ff63eca1c9e282bc567,
+            0x012b53567909e5daeea0e7d61cecb60c45ffab5d3d193c8f864e44c6bb3d9272,
+            0x0704a9551604bb681fc6f4c0f3f80cadd1172c33998b8dd955d520a15e001e27,
             0x04851321b0e0fb93d9aa4871cb6989e7cf815348b63b453ae4bd5602ae3ac4f8,
             0x0503df15cad1b85900b4cd3bf0d3dfcacaff1a6a9b77e6dceffeed432bc4d164,
-            0x04c450cbddab24859a41c751e06c5f70921bc32f1421570377ed846623f2b511,
-            0x0652ca10974cbf996a14eec9c58c4f79dc9dfca21b07001dedff7da83eb43fd7,
-            0x02e309592a8301d7dc233a03dd499da843c23cd19d4a6edd3f6ed66764f485da,
+            0x06b7c2678fcb75d3a3274a8e4f9bfd7eaea15ac5df005e29cb02d6dc319bc8dd,
+            0x046d8027c41b3b608eb2c4d3d8c1ba5f51c6a18150a77c7a9773cf59d32c6c2e,
+            0x0733726b021bb21119cbf90e1af1c9c42cb99afe08281979b07096ce293a681d,
         ]
     }
 
@@ -294,24 +329,24 @@ mod tests {
             0x0000000000000000000000000000000000000000000000000000000000000000,
             0x0601d3d2e265c10ff645e1554c435e72ce6721f0ba5fc96f0c650bfc6231191a,
             0x007da2512be6af510d63c0ab9e35876669d1665d3acff5a23de0aeb806d7fcb8,
-            0x025eeb3d4e0194d3446344d000108c0a84af5bed0792851f72e922d249081214,
-            0x02602213ba164c3eb99f766caf41a32e28481ebb676a6ecad34f9aa9efd18066,
-            0x031a78ad846ac81808bb47831294f690c8b03d4c14e23814e0c3bf5ca925cfa4,
+            0x07ac8da974d6fc688ecf4d042f982f5e8dd22d87aa33956ccd615218203a9c2f,
+            0x02791185f3a1df929bb9065521376751b96c715be988a03620456851cac8498f,
+            0x057bcc7b014f4203cfc75e6a62cd96369c4a99cbc209e2011d6fcf508b4d8ed2,
             0x04851321b0e0fb93d9aa4871cb6989e7cf815348b63b453ae4bd5602ae3ac4f8,
             0x0503df15cad1b85900b4cd3bf0d3dfcacaff1a6a9b77e6dceffeed432bc4d164,
-            0x019d60692b8dcc56e6e2444f97aecc1a774b32998e136efa0061e32fbf1eb96a,
-            0x007e667ba5ea4e23c1d47d96c7122a0b18392cdafae81e5f689863d16a10ab03,
-            0x07ee79bcfdafc7f046c77d1de342cf52ac8ce0b6aaa9d65268e8b9b0b8b07e93,
+            0x029a372f6ab027091704abee01c143c78b4c37e73cf3fe066e81649bb6e4a9c8,
+            0x0618bca189f992d14b3f22108887bf30a319d28b842a762e3544585f5b3e2df8,
+            0x0688fe3085f835af850691b92c53defd7b6ba18e569065ec2aed3904aad5b9b4,
             0x0746db56abc4d9fab4832ee42e92e96bbbf8cf4c9fd063b8515bda90d1e8aa5d,
             0x03805c7ba66d3a13a63fc943fe082cc9b35a8786bdf1749b44615e58bbea7d80,
-            0x04265b48984cce591735fbfed6c4a428521c1fe0e778cd73b9ea76685deb8d80,
-            0x02f3c1c2e5d3b3cf21846b1d47e3c3387d4d5bfa8b361254969ba76df6e12836,
-            0x00a54d0c32093ee5907997579560e03b5455c51e60a3e2eabb1920a5256c491c,
+            0x01b6b01ec7e83e160fa85a812ce608862c5d9e8908264bcbd16bb9c011249fd6,
+            0x06afceb06f3e2b0fff42c1b49e86df9535c5b752c63756c3c3337900d67ca66e,
+            0x03845eb69dbe58b2aca9f3d882635865f3734706e60c11724f494f087e584f10,
             0x07a21231a533d41e642c324d2420a0437f7357878a70dd6176f8d79db1a00ec3,
             0x05b6b70c6530acb53145a40f452b440f83e98c29bcf54cd27cf0182bd4bc086c,
-            0x042538c15248b44e7ad07af031c60b286885d107286353bc7207a98345e7ff16,
-            0x007fd8a137e1a6af0cae1c56fa71ddfa72f65f768c1c912a7a2323216c53a0d0,
-            0x03ae28b37d498528a41bc8f4481d4a6832e22f10a5c429b1a11d5b3cacf00642,
+            0x030c4da1a363c0ed797bc5c1b4cc1e442b23956e7eefc69e8f7cc97a3f2b08a5,
+            0x0402839e8eab8312454f2dfdac3b78cca78583e147eeb0e9ea0e0f24a1125648,
+            0x04261a7653284169e3e39943a29994f3fd49ed62632f69c92994b422d2455388,
         ]
     }
 
