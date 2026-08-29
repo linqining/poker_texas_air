@@ -1,32 +1,49 @@
 {
   "network": "sepolia",
   "chain_id": "SN_SEPOLIA",
-  "rpc_url": "",
+  "rpc_url": "https://starknet-sepolia-rpc.publicnode.com",
   "explorer_url": "https://sepolia.starkscan.co",
   "contracts": {
     "poker_token": {
-      "address": "",
+      "address": "0x4bfad561733ba5bef162be3606cada13bc85a8a69fd6a52dae2b844d431f9db",
       "class_name": "PokerToken",
       "class_hash": "",
-      "constructor": ["owner", "name", "symbol", "initial_supply"]
+      "constructor": [
+        "owner",
+        "name",
+        "symbol",
+        "initial_supply"
+      ]
     },
     "poker_vault": {
-      "address": "",
+      "address": "0xf4801c358d18bf8b35d84fd9442e931e68bc432f343b1e11178099f674a570",
       "class_name": "PokerVault",
       "class_hash": "",
-      "constructor": ["owner", "token_address", "settlement_contract"]
+      "constructor": [
+        "owner",
+        "token_address",
+        "settlement_contract"
+      ]
     },
     "poker_settlement": {
-      "address": "",
+      "address": "0x6148290134fff75f8fe54a74a3459980072f754e17980c0c177f51d27ff1486",
       "class_name": "PokerSettlement",
       "class_hash": "",
-      "constructor": ["owner", "vault_address", "initial_prover"]
+      "constructor": [
+        "owner",
+        "vault_address",
+        "initial_prover"
+      ]
     },
     "poker_dual_settlement": {
       "address": "",
       "class_name": "PokerDualSettlement",
       "class_hash": "",
-      "constructor": ["owner", "vault_address", "initial_prover"],
+      "constructor": [
+        "owner",
+        "vault_address",
+        "initial_prover"
+      ],
       "note": "Dual-proof settlement (DUAL_PROOF_PROTOCOL.md v2.3): verifies secp256k1 sigma ownership proofs on-chain via the EC_OP builtin; G-STARK stays host-verified (Phase 1 registration)."
     }
   },
@@ -54,8 +71,8 @@
     "settlement_commitment": "poseidon over hand_id then (player, sign, magnitude)* per participant, address-ascending; rust: starknet_settlement::SettleHandCalldata",
     "delta_encoding": "i128 felt; negative values encoded as modular complement; magnitude bounded to u64",
     "calldata_builder": "poker_texas_air::starknet_settlement::{RegisterAggregateCalldata, SettleHandCalldata}",
-    "hand_binding_encoding": "single felt252; poseidon_hash_many over the DUAL_PROOF_PROTOCOL.md §6 field order (domain tag poker_dual_hand_binding_v1, table/hand/players/deck-chain/reveal/state/settlement); rust: poker_texas_air::hand_binding",
-    "dual_ownership_proof_encoding": "per player: 1 kind felt (=1) + 5 u256 (pk_x, pk_y, r_x, r_y, s); challenge derived on-chain as keccak256(G_compressed ‖ pk_compressed ‖ R_compressed) little-endian mod n; curve CurveId::Secp256k1 = 5, transcript TranscriptId::Keccak256 = 7"
+    "hand_binding_encoding": "single felt252; poseidon_hash_many over the DUAL_PROOF_PROTOCOL.md \u00a76 field order (domain tag poker_dual_hand_binding_v1, table/hand/players/deck-chain/reveal/state/settlement); rust: poker_texas_air::hand_binding",
+    "dual_ownership_proof_encoding": "per player: 1 kind felt (=1) + 5 u256 (pk_x, pk_y, r_x, r_y, s); challenge derived on-chain as keccak256(G_compressed \u2016 pk_compressed \u2016 R_compressed) little-endian mod n; curve CurveId::Secp256k1 = 5, transcript TranscriptId::Keccak256 = 7"
   },
   "transactions": [],
   "demo_video": "",

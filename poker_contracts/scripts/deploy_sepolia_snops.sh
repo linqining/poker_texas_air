@@ -27,7 +27,7 @@ ADDR_OF() { python3 -c "import sys,re; m=re.search(r'CONTRACT_ADDRESS=(0x[0-9a-f
 # 0) 检查部署者账户已部署且有余额
 echo "== deployer: $OWNER"
 # 账户未部署则先发 deploy_account（salt=0，与 gen-key 的地址推导一致）
-$SNOPS --url "$URL" --pk "$PK" deployacct 2>&1 | grep -E "ADDRESS|TX=" || echo "   account already deployed (or deploy failed)"
+$SNOPS --url "$URL" --pk "$PK" deploy-acct 2>&1 | grep -E "ADDRESS|TX=" || echo "   account already deployed (or deploy failed)"
 BALANCE=$($SNOPS --url "$URL" call --contract 0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d --fn balance_of --calldata "$OWNER" 2>/dev/null | head -1 | grep -oE "0x[0-9a-f]+" || echo 0)
 echo "   STRK balance(low) = ${BALANCE:-<balance_of call failed>}"
 
@@ -50,6 +50,8 @@ print(m.group(1) if m else '', end='')
 T_CLASS=$(declare_one PokerToken); echo "TOKEN_CLASS=$T_CLASS"
 V_CLASS=$(declare_one PokerVault); echo "VAULT_CLASS=$V_CLASS"
 S_CLASS=$(declare_one PokerSettlement); echo "SETTLEMENT_CLASS=$S_CLASS"
+# Sepolia：declare 交易需要 inclusion 后才能被 UDC deploy 引用
+sleep 12
 
 # 2) deploy
 D_OUT=$($SNOPS --url "$URL" --pk "$PK" --addr "$OWNER" deploy --class-hash "$T_CLASS" --calldata "$OWNER,@str:PokerSTRK,@str:pSTRK,0,0" 2>&1)
@@ -62,6 +64,7 @@ SETTLEMENT=$(ADDR_OF <<< "$D_OUT"); echo "SETTLEMENT=$SETTLEMENT"
 DUAL=""
 if [ "${USE_DUAL:-0}" = "1" ]; then
   DS_CLASS=$(declare_one PokerDualSettlement); echo "DUAL_CLASS=$DS_CLASS"
+sleep 12
   D_OUT=$($SNOPS --url "$URL" --pk "$PK" --addr "$OWNER" deploy --class-hash "$DS_CLASS" --calldata "$OWNER,$VAULT,$OWNER" 2>&1)
   DUAL=$(ADDR_OF <<< "$D_OUT"); echo "DUAL=$DUAL"
 fi

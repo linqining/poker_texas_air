@@ -10,3 +10,4 @@ coverage.lcov
 target-bench/
 /poker_contracts/target/*
 /poker_contracts/.snfoundry_cache/*
+.env.dev
