@@ -29,6 +29,7 @@ import { logger } from '../../helpers/logger';
 import { STAND_UP_TIMEOUT_MS } from '../../clientConfig';
 import { useAccount } from '@starknet-react/core';
 import { submitBuyIn } from '../../starknet/starknetGameActions';
+import { activeAccount } from '../../starknet/devAccount';
 
 export interface UseGameActionsParams {
   socket: Socket | null;
@@ -88,7 +89,9 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
   } = params;
 
   const { walletAddress } = useContext(authContext)!;
-  const { account } = useAccount();
+  const connected = useAccount();
+  // dev 直签账户（VITE_DEV_ACCOUNT_*，testnet 联调）优先于连接的钱包
+  const account = activeAccount(connected.account);
 
   /**
    * 当玩家在手牌进行中且未 fold 时点击离开，置为 true 以触发确认弹窗。

@@ -2,6 +2,7 @@ import React, { useContext, useEffect } from 'react';
 import ReactDOM from 'react-dom';
 import styled from 'styled-components';
 import { useAccount, useConnect, useDisconnect } from '@starknet-react/core';
+import { activeAddress } from '../../starknet/devAccount';
 import authContext from '../../context/auth/authContext';
 import contentContext from '../../context/content/contentContext';
 import CloseButton from '../buttons/CloseButton';
@@ -102,9 +103,11 @@ interface LoginModalProps {
 }
 
 const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
-  const { isLoggedIn } = useContext(authContext)!;
+  const isLoggedIn = useContext(authContext)!.isLoggedIn;
   const { getLocalizedString: t } = useContext(contentContext)!;
-  const { address } = useAccount();
+  const connected = useAccount();
+  // dev 直签账户（VITE_DEV_ACCOUNT_*，testnet 联调）优先于连接的钱包
+  const address = activeAddress(connected.address);
   const { connect, connectors, connectAsync, isPending, error } = useConnect();
   const { disconnect } = useDisconnect();
 

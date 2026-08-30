@@ -60,6 +60,11 @@ impl StarknetChain {
                     chain_id,
                     starknet::accounts::ExecutionEncoding::New,
                 );
+                // starknet-rs 0.16 默认 block_id 已是 PreConfirmed（nonce 读取
+                // 包含已提交未 accepted 的交易，公共 RPC 上连续结算交易不撞
+                // nonce）；显式标注仅为防止未来依赖升级改变默认值。
+                let mut account = account;
+                account.set_block_id(BlockId::Tag(BlockTag::PreConfirmed));
                 Some(Arc::new(account))
             })
             .await

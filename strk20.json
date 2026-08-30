@@ -45,6 +45,16 @@
         "initial_prover"
       ],
       "note": "Not deployed for this submission by design: the game currently settles in 'linear' mode (PokerSettlement aggregate digests + host-side G verification, browser-verifiable proof bundles). PokerDualSettlement (on-chain secp256k1 EC_OP sigma verification) is the Phase 2 upgrade path (DUAL_PROOF_PROTOCOL.md v2.3); its Cairo code compiles and passes 89 snforge tests."
+    },
+    "poker_swap": {
+      "address": "",
+      "class_name": "PokerSwap",
+      "class_hash": "0x682e15685f0b336e88b4b2d067bff95ebf6d5c296ecd1a7d8a5ca596745a592",
+      "constructor": [
+        "owner",
+        "pstrk_address"
+      ],
+      "note": "Bidirectional fixed-rate STRK<->pSTRK swap (1:1000). Sepolia/mainnet address TBD; see poker_contracts/DEPLOYMENTS.md. Devnet: 0x44185be81c5671147abd228b859e4af07b732880265cf85b90bbc61df579234"
     }
   },
   "token": {

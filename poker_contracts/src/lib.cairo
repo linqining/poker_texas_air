@@ -1,6 +1,7 @@
 mod poker_token;
 mod poker_vault;
 /// STRK20 privacy-pool anonymizer (Plan B): private buy-ins via privacy_invoke.
+mod poker_swap;
 mod poker_vault_anonymizer;
 mod poker_settlement;
 mod settlement_hash;

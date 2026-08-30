@@ -73,6 +73,8 @@ export interface StarknetConfig {
   /** 多 RPC 端点（failover 顺序即优先级，去重后至少 1 个）。 */
   rpcUrls: string[];
   strk20Address: string;
+  /** PokerSwap 合约（固定 1 STRK = 1000 pSTRK）。未配置时兑换入口隐藏。 */
+  swapAddress: string;
   pokerVaultAddress: string;
   pokerSettlementAddress: string;
   paymaster: PaymasterRelayConfig;
@@ -120,6 +122,7 @@ export const starknetConfig: StarknetConfig = {
   ),
   rpcUrls: buildRpcUrls(chainId),
   strk20Address: readEnv('VITE_STRK_TOKEN_ADDRESS', STRK20_SEPOLIA_ADDRESS),
+  swapAddress: readEnv('VITE_POKER_SWAP_ADDRESS', ''),
   pokerVaultAddress: readEnv('VITE_POKER_VAULT_ADDRESS', ''),
   pokerSettlementAddress: readEnv('VITE_POKER_SETTLEMENT_ADDRESS', ''),
   paymaster: {

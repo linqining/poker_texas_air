@@ -13,7 +13,7 @@
 // Plan C: 写操作统一经 submitCalls() 提交 —— paymaster 中继优先（链上发送者
 // 与用户地址解耦），失败自动回退 session key 直签。
 
-import { Contract, type Abi, cairo, uint256, type AccountInterface, type Call } from 'starknet';
+import { Account, Contract, RpcProvider, BlockTag, type Abi, cairo, uint256, type AccountInterface, type Call } from 'starknet';
 import { STRK20_ABI, POKER_VAULT_ABI } from './abis';
 import { starknetConfig, WEI_PER_CHIP } from './config';
 import { POKER_VAULT_ANONYMIZER_ABI } from './abis';
@@ -239,4 +239,173 @@ async function withdrawViaPrivacyPool(
     logger.error('[starknet] privacy_withdraw failed:', msg);
     return { hash: '', success: false, error: msg };
   }
+}
+// ===== PokerSwap：固定 1 STRK = 1000 pSTRK 兑换 =====
+
+const POKER_SWAP_ABI = [
+  {
+    name: 'PokerSwap',
+    type: 'struct abi',
+    items: [],
+  },
+  {
+    type: 'function',
+    name: 'swap',
+    inputs: [{ name: 'strk_amount', type: 'core::integer::u256' }],
+    outputs: [],
+    state_mutability: 'external',
+  },
+  {
+    type: 'function',
+    name: 'fund_pstrk',
+    inputs: [{ name: 'amount', type: 'core::integer::u256' }],
+    outputs: [],
+    state_mutability: 'external',
+  },
+] as const;
+
+const STRK_ERC20_ABI = [
+  {
+    type: 'function',
+    name: 'approve',
+    inputs: [
+      { name: 'spender', type: 'core::starknet::contract_address::ContractAddress' },
+      { name: 'amount', type: 'core::integer::u256' },
+    ],
+    outputs: [{ type: 'core::bool' }],
+    state_mutability: 'external',
+  },
+  {
+    type: 'function',
+    name: 'balance_of',
+    inputs: [{ name: 'account', type: 'core::starknet::contract_address::ContractAddress' }],
+    outputs: [{ type: 'core::integer::u256' }],
+    state_mutability: 'view',
+  },
+] as const;
+
+/** 规范 STRK 地址（mainnet/Sepolia/devnet 一致，与 PokerSwap 合约内一致）。 */
+export const CANONICAL_STRK_ADDRESS =
+  '0x4718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d';
+
+export type SwapDirection = 'strk-to-pstrk' | 'pstrk-to-strk';
+
+/** 兑换入口是否可用（配置了 PokerSwap 地址）。 */
+export function isSwapConfigured(): boolean {
+  return !!starknetConfig.swapAddress;
+}
+
+/**
+ * devnet 浏览器联调用直签账户（可选）：VITE_DEV_ACCOUNT_ADDRESS +
+ * VITE_DEV_ACCOUNT_PRIVATE_KEY 配置后，兑换交易用该账户直接签名提交到
+ * 当前 RPC（参考 starkware-libs/starknet-privacy demo 的 plain Account
+ * 用法）。生产环境不配置，走连接的钱包。
+ */
+export function getDevSwapAccount(): AccountInterface | null {
+  const addr = import.meta.env.VITE_DEV_ACCOUNT_ADDRESS as string | undefined;
+  const pk = import.meta.env.VITE_DEV_ACCOUNT_PRIVATE_KEY as string | undefined;
+  if (!addr || !pk) return null;
+  // devnet 的交易停留在 pre-confirmed 状态；默认 latest 读 nonce 会拿到旧值
+  // （52: Invalid transaction nonce），与 starknet-privacy demo 一致改用
+  // PRE_CONFIRMED 作为 provider 默认块。
+  const provider = new RpcProvider({
+    nodeUrl: import.meta.env.VITE_STARKNET_RPC_URL as string,
+    blockIdentifier: BlockTag.PRE_CONFIRMED,
+  });
+  return new Account({ provider, address: addr, signer: pk });
+}
+
+/**
+ * 双向固定汇率兑换（1 STRK = 1000 pSTRK）。直接构造 Call（不经 ABI 解析）：
+ * - strk-to-pstrk：approve 规范 STRK → swap_strk_to_pstrk；
+ * - pstrk-to-strk：approve pSTRK → swap_pstrk_to_strk（数量需整除 0.001）。
+ * 完成后调用方需自行刷新余额。
+ */
+export async function swapTokens(
+  account: AccountInterface,
+  direction: SwapDirection,
+  amountWei: bigint,
+): Promise<TxResult> {
+  if (!isSwapConfigured()) {
+    return { hash: '', success: false, error: 'PokerSwap address not configured' };
+  }
+  if (direction === 'pstrk-to-strk' && amountWei % BigInt(SWAP_RATE) !== 0n) {
+    return { hash: '', success: false, error: 'pSTRK 数量需为 0.001 的整数倍' };
+  }
+  try {
+    const amount = uint256.bnToUint256(amountWei);
+    const amountWords = [amount.low.toString(), amount.high.toString()];
+    const swapAddress = starknetConfig.swapAddress;
+
+    const approveCall: Call =
+      direction === 'strk-to-pstrk'
+        ? {
+            contractAddress: CANONICAL_STRK_ADDRESS,
+            entrypoint: 'approve',
+            calldata: [swapAddress, ...amountWords],
+          }
+        : {
+            contractAddress: starknetConfig.strk20Address,
+            entrypoint: 'approve',
+            calldata: [swapAddress, ...amountWords],
+          };
+    const swapCall: Call = {
+      contractAddress: swapAddress,
+      entrypoint:
+        direction === 'strk-to-pstrk' ? 'swap_strk_to_pstrk' : 'swap_pstrk_to_strk',
+      calldata: amountWords,
+    };
+
+    // 先 approve 再 swap：两笔独立交易（保证 nonce 顺序）。
+    // 配置了 dev 直签账户时用直签（浏览器可真实跑通 devnet 链），
+    // 否则走连接的钱包（Sepolia/主网）。dev 路径显式管理 nonce
+    // （pre-confirmed 状态下自动 nonce 会读到过期值）。
+    const devSigner = getDevSwapAccount();
+    const signer = devSigner ?? account;
+    const exec = signer as never as {
+      execute: (c: Call, d?: { nonce?: string }) => Promise<{ transaction_hash: string }>;
+    };
+
+    if (devSigner) {
+      const nonce = await (devSigner as never as { getNonce: () => Promise<string> }).getNonce();
+      const next = (BigInt(nonce) + 1n).toString();
+      const r1 = await exec.execute(approveCall, { nonce });
+      const r2 = await exec.execute(swapCall, { nonce: next });
+      return { hash: r2.transaction_hash, success: true };
+    }
+
+    const r1 = await exec.execute(approveCall);
+    await getProvider().waitForTransaction(r1.transaction_hash);
+    const r2 = await exec.execute(swapCall);
+    await getProvider().waitForTransaction(r2.transaction_hash);
+
+    return { hash: r2.transaction_hash, success: true };
+  } catch (err) {
+    logger.error('[starknet] swapTokens failed:', err);
+    return { hash: '', success: false, error: String(err) };
+  }
+}
+
+/** 1 STRK = 1000 pSTRK。 */
+export const SWAP_RATE = 1000;
+
+/** 查询原生 STRK 余额（规范 fee token，用于兑换页展示）。 */
+export async function getNativeStrkBalance(address: string): Promise<bigint> {
+  try {
+    const contract = new Contract({
+      abi: STRK_ERC20_ABI as Abi,
+      address: CANONICAL_STRK_ADDRESS,
+      providerOrAccount: getProvider(),
+    });
+    const raw = await contract.balance_of(address);
+    return uint256.uint256ToBN(raw);
+  } catch (err) {
+    logger.error('[starknet] getNativeStrkBalance failed:', err);
+    return 0n;
+  }
+}
+
+/** 查询 pSTRK 余额（PokerToken，同 getStrkBalance，语义别名）。 */
+export async function getPstrkBalance(address: string): Promise<bigint> {
+  return getStrkBalance(address);
 }

@@ -6,6 +6,7 @@ import { useGlobalContext } from '../context/global/globalContext';
 import { useAccount } from '@starknet-react/core';
 import { getStrkBalance } from '../starknet/starknetGameActions';
 import { starknetConfig } from '../starknet/config';
+import { activeAccount, activeAddress } from '../starknet/devAccount';
 import type { AuthMethod } from '../context/auth/authContext';
 import { logger } from '../helpers/logger';
 
@@ -47,7 +48,11 @@ const useAuth = (): UseAuthReturn => {
     (localStorage.getItem('authMethod') as AuthMethod) || null
   );
 
-  const { address, account } = useAccount();
+  const { address: connectedAddress, account: connectedAccount } = useAccount();
+  // dev 直签账户（VITE_DEV_ACCOUNT_*，testnet 联调）优先于连接的钱包：
+  // 登录签名、余额读取、游戏身份都用它，无需钱包弹窗。
+  const address = activeAddress(connectedAddress);
+  const account = activeAccount(connectedAccount);
 
   useEffect(() => {
     let cancelled = false;
