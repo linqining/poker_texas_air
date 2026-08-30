@@ -1,0 +1,69 @@
+[package]
+name = "texas"
+version = "0.2.0"
+edition = "2024"
+license = "BUSL-1.1"
+description = "Secret poker game server: socket.io game loop + Starknet settlement (STRK20 RFP-03)"
+
+[dependencies]
+axum = "0.7"
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+socketioxide = { version = "0.18.3", features = ["state"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# json feature：Starknet JSON-RPC 调用需要 serde_json 序列化请求体。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+uuid = { version = "1", features = ["v4"] }
+jsonwebtoken = "9"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenv = "0.15"
+itertools = "0.14"
+hex = "0.4"
+blake2b_simd = "1"
+base64 = "0.22"
+thiserror = "2"
+ed25519-dalek = "2"
+bech32 = "0.9"
+bcs = "0.1"
+hmac = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["alloc"] }
+futures-util = "0.3"
+
+# ===== 工作区内协议栈（单一真源）=====
+poker_protocol = { path = "../poker_protocol", features = ["borsh", "legacy-bls381"] }
+poker_l1 = { path = "../poker_l1" }
+poker_texas_air = { path = ".." }
+poker-protocol-core = { path = "../poker-protocol-core" }
+# 注：镜像层的 ptx_protocol 别名已改为在 mirror.rs 内 `use poker_protocol as ptx_protocol;`
+# （cargo 不允许同一路径依赖以不同名字出现两次）。
+
+# --- Starknet 链上交互 ---
+starknet = "0.17"
+url = "2"
+clap = { version = "4", features = ["derive"] }
+borsh = "1.5"
+starknet-ff = "0.3"
+# Poseidon（Plan D v2 reveal_commitment + settlement digest 重算）。
+# 保持 0.6（Felt = starknet-ff FieldElement，与既有 calldata 类型一致）；
+# Poseidon 规格跨版本一致，与 poker-protocol-core 的 0.8.1 结果相同。
+starknet-crypto = "0.6"
+# STARK 曲线参数（BETA）与 types-core Felt：P 层认可点解析/校验
+starknet-curve = "0.6"
+starknet-types-core = "0.2"
+# DAPV（P 层 ρ 折叠残差）：secp256k1 sigma + 仿射坐标编码
+k256 = { version = "0.13", default-features = false, features = ["arithmetic", "alloc", "std", "expose-field"] }
+sha3 = "0.10"
+rand_core = "0.6"
+
+[features]
+default = []
+
+[[bin]]
+name = "snops"
+path = "src/bin/snops.rs"
