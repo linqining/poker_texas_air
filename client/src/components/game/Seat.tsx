@@ -28,7 +28,7 @@ import { Table } from '../../types/game';
 import authContext from '../../context/auth/authContext';
 import { EmptySeat } from './seatStyles';
 import { getStrkBalance } from '../../starknet/starknetGameActions';
-import { CHIPS_PER_STRK, STRK_DECIMALS } from '../../starknet/config';
+import { CHIPS_PER_STRK, STRK_DECIMALS, WEI_PER_CHIP } from '../../starknet/config';
 import { logger } from '../../helpers/logger';
 
 const StyledSeat = styled.div`
@@ -180,7 +180,13 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
     Number(strkBalanceWei / BigInt(10) ** BigInt(STRK_DECIMALS)) +
     Number(strkBalanceWei % BigInt(10) ** BigInt(STRK_DECIMALS)) /
       10 ** STRK_DECIMALS;
-  const availableChips = chipsAmount ?? 0;
+  // 可买筹码 = max(服务端结余, 钱包 pSTRK 余额可兑换数量)。STRK20 模式下
+  // 首次买入是链上 vault.deposit（按 WEI_PER_CHIP 换算），服务端 chipsAmount
+  // 是历史结算存量（首次为 0）——只按它会永远挡住首次买入。
+  const availableChips = Math.max(
+    chipsAmount ?? 0,
+    Number(strkBalanceWei / BigInt(WEI_PER_CHIP)),
+  );
 
   // 兑换指定筹码需要的 STRK 数量
   const strkCostForChips = (chips: number): number => chips / CHIPS_PER_STRK;

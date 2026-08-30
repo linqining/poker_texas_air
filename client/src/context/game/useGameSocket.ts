@@ -105,6 +105,10 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
   const { walletAddress } = useContext(authContext)!;
 
   useEffect(() => {
+    // StrictMode dev 双挂载会把 isUnmountingRef 置 true 且无人复位，导致
+    // 之后每次依赖变化（服务端 TABLE_UPDATED 广播）的 cleanup 都误发
+    // STAND_UP，玩家在牌局中被服务端反复移座。effect 重新激活即视为挂载。
+    isUnmountingRef.current = false;
     const onUnload = () => leaveTable(false, pkHex || undefined, true);
     window.addEventListener('unload', onUnload);
     window.addEventListener('close', onUnload);

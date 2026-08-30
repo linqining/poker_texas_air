@@ -15,8 +15,10 @@ import { STRK20_SEPOLIA_ADDRESS } from './abis';
 
 export const STRK_DECIMALS = 18;
 
-/** 1 chip = 100_000 wei of STRK. */
-export const WEI_PER_CHIP = 100_000n;
+/** 1 chip = 1e14 wei of STRK（0.0001 STRK）。与 texas 服务端
+ *  starknet::config::WEI_PER_CHIP 及买入弹窗 "1 STRK = 10,000 chips" 一致。
+ *  旧值 1e5 与服务端相差 9 个数量级，会导致服务端判定筹码不足。 */
+export const WEI_PER_CHIP = 100_000_000_000_000n;
 
 /** 1 STRK = 10_000 chips. */
 export const CHIPS_PER_STRK = 10_000;
