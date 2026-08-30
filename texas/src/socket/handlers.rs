@@ -771,6 +771,23 @@ async fn advance_reveal_phase_locally(
 
 
 
+
+/// 统一 payload 解析：socketioxide 的 `Data::<T>` 解析失败是静默的
+/// （handler 不执行、无任何日志），两端字段命名漂移时表现为“消息消失”。
+/// 所有 handler 统一先收 `serde_json::Value`，再用本宏显式解析并记录
+/// 失败原因与原始 JSON。
+macro_rules! parse_payload {
+    ($event:expr, $raw:expr, $ty:ty) => {
+        match serde_json::from_value::<$ty>($raw.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("[{}] payload parse failed: {}, raw: {}", $event, e, $raw);
+                return;
+            }
+        }
+    };
+}
+
 pub fn register_handlers(io: &SocketIo) {
     io.ns("/", async move |socket: SocketRef, io: SocketIo, State(state): State<Arc<SocketState>>| {
         on_connect(socket, io, state);
@@ -778,7 +795,14 @@ pub fn register_handlers(io: &SocketIo) {
 }
 
 fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
-    socket.on(actions::FETCH_LOBBY_INFO, async move |s: SocketRef, Data::<String>(token), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::FETCH_LOBBY_INFO, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let token = match payload_raw.as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                tracing::error!("[FETCH_LOBBY_INFO] payload parse failed: expected string, raw: {}", payload_raw);
+                return;
+            }
+        };
         let claims = match auth::verify_token(&token, &state.config.jwt_secret) {
             Ok(c) => c,
             Err(_) => return,
@@ -891,7 +915,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         let _ = io.emit(actions::PLAYERS_UPDATED, &players_info).await;
     });
 
-    socket.on(actions::JOIN_TABLE, async move |s: SocketRef, Data::<JoinTablePayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::JOIN_TABLE, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::JOIN_TABLE, payload_raw, JoinTablePayload);
         let table_id = payload.table_id;
         s.join(table_room_name(table_id));
         tracing::info!("join_table: {} {}", payload.pk_hex, table_id);
@@ -939,7 +964,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         broadcast::broadcast_to_table(&io, &state, table_id, Some("player joined")).await;
     });
 
-    socket.on(actions::LEAVE_TABLE, async move |s: SocketRef, Data::<LeaveTablePayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::LEAVE_TABLE, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::LEAVE_TABLE, payload_raw, LeaveTablePayload);
         let socket_id = s.id.to_string();
         let table_id = payload.table_id;
         let wallet_address = { state.state.read().await.players.get(&socket_id).map(|p| p.wallet_address.clone()) };
@@ -1039,25 +1065,29 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
     });
 
-    socket.on(actions::FOLD, async move |s: SocketRef, Data::<u32>(table_id), _io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::FOLD, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let table_id = parse_payload!(actions::FOLD, payload_raw, u32);
         if !try_on_chain_action(&s, &state, table_id, "fold", None).await {
             send_simple_action(&s, &state, table_id, "fold").await;
         }
     });
 
-    socket.on(actions::CHECK, async move |s: SocketRef, Data::<u32>(table_id), _io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::CHECK, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let table_id = parse_payload!(actions::CHECK, payload_raw, u32);
         if !try_on_chain_action(&s, &state, table_id, "check", None).await {
             send_simple_action(&s, &state, table_id, "check").await;
         }
     });
 
-    socket.on(actions::CALL, async move |s: SocketRef, Data::<u32>(table_id), _io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::CALL, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let table_id = parse_payload!(actions::CALL, payload_raw, u32);
         if !try_on_chain_action(&s, &state, table_id, "call", None).await {
             send_simple_action(&s, &state, table_id, "call").await;
         }
     });
 
-    socket.on(actions::RAISE, async move |s: SocketRef, Data::<RaisePayload>(payload), _io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::RAISE, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::RAISE, payload_raw, RaisePayload);
         if !try_on_chain_action(&s, &state, payload.table_id, "raise", Some(payload.amount)).await {
             let socket_id = s.id.to_string();
             let pk_hex = {
@@ -1071,7 +1101,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
     });
 
-    socket.on(actions::TABLE_MESSAGE, async move |_s: SocketRef, Data::<TableMessagePayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::TABLE_MESSAGE, async move |_s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::TABLE_MESSAGE, payload_raw, TableMessagePayload);
         let socket_ids = {
             let gs = state.state.read().await;
             gs.tables.get(&payload.table_id).map(|t| {
@@ -1108,13 +1139,15 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
     });
 
-    socket.on(actions::SIT_DOWN, async move |s: SocketRef, Data::<SitDownPayload>(payload), _io: SocketIo, _state: State<Arc<SocketState>>| {
+    socket.on(actions::SIT_DOWN, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, _state: State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::SIT_DOWN, payload_raw, SitDownPayload);
         let socket_id = s.id.to_string();
         tracing::warn!("[SIT_DOWN] Deprecated SIT_DOWN action received from {}, please use SIT_DOWN_V2. table_id={}, seat_id={}", socket_id, payload.table_id, payload.seat_id);
         let _ = s.emit("error", &serde_json::json!({"msg": "SIT_DOWN is deprecated, please use SIT_DOWN_V2"}));
     });
 
-    socket.on(actions::SIT_DOWN_V2, async move |s: SocketRef, Data::<SitDownV2Payload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::SIT_DOWN_V2, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::SIT_DOWN_V2, payload_raw, SitDownV2Payload);
         // 1. Validate request (auth, amount, pk, player, balance)
         let (player, player_pk) = match validate_sit_down_request(&s, &state, &payload).await {
             Some(v) => v,
@@ -1173,7 +1206,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         ).await;
     });
 
-    socket.on(actions::REBUY, async move |s: SocketRef, Data::<RebuyPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::REBUY, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::REBUY, payload_raw, RebuyPayload);
         let socket_id = s.id.to_string();
 
         // E3 修复：校验 amount > 0
@@ -1239,7 +1273,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
     });
 
-    socket.on(actions::STAND_UP, async move |s: SocketRef, Data::<StandUpPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::STAND_UP, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::STAND_UP, payload_raw, StandUpPayload);
         let socket_id = s.id.to_string();
         let table_id = payload.table_id;
         let pk_hex = GamePkHex::new(payload.pk_hex.to_lowercase());
@@ -1293,7 +1328,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         handle_stand_up_local(&state, &io, &payload, &pk_hex, &player_pk, table_id, &socket_id).await;
     });
 
-    socket.on(actions::SITTING_OUT, async move |_s: SocketRef, Data::<SittingPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::SITTING_OUT, async move |_s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::SITTING_OUT, payload_raw, SittingPayload);
         {
             let mut gs = state.state.write().await;
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
@@ -1305,7 +1341,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
     });
 
-    socket.on(actions::SITTING_IN, async move |_s: SocketRef, Data::<SittingPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::SITTING_IN, async move |_s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::SITTING_IN, payload_raw, SittingPayload);
         let should_start = {
             let mut gs = state.state.write().await;
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
@@ -1404,7 +1441,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
 
 
-    socket.on(actions::RECONSTRUCT_SUBMIT, async move |s: SocketRef, Data::<ReconstructSubmitPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::RECONSTRUCT_SUBMIT, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::RECONSTRUCT_SUBMIT, payload_raw, ReconstructSubmitPayload);
         let socket_id = s.id.to_string();
         let pk_hex = GamePkHex::new(payload.pk_hex.to_lowercase());
         tracing::info!("[RECONSTRUCT_SUBMIT] request received, pk_hex={}, table_id={}", pk_hex, payload.table_id);
@@ -1474,7 +1512,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
     // Plan D P2.1：Hand-batch 认可提交（客户端本地铸造的成品认可；
     // 服务器 on-curve/域校验后入 registry，结算聚合时取用）。
-    socket.on(actions::ENDORSEMENT_SUBMIT, async move |s: SocketRef, Data::<crate::socket::EndorsementSubmitPayload>(payload), _io: SocketIo, _state: State<Arc<SocketState>>| {
+    socket.on(actions::ENDORSEMENT_SUBMIT, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, _state: State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::ENDORSEMENT_SUBMIT, payload_raw, crate::socket::EndorsementSubmitPayload);
         let socket_id = s.id.to_string();
         let session_wallet = _state.state.read().await
             .players.get(&socket_id).map(|p| p.wallet_address.to_string());
@@ -1509,7 +1548,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             ),
         }
     });
-    socket.on(actions::REVEAL_SUBMIT, async move |s: SocketRef, Data::<RevealSubmitPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::REVEAL_SUBMIT, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::REVEAL_SUBMIT, payload_raw, RevealSubmitPayload);
         // tracing::info!("[REVEAL_SUBMIT] Received RevealSubmitPayload: {:?}", payload);
         let socket_id = s.id.to_string();
         let wallet_address = {
@@ -1683,7 +1723,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
     });
 
-    socket.on(actions::REDEAL_REQUEST, async move |s: SocketRef, Data::<RedealRequestPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::REDEAL_REQUEST, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::REDEAL_REQUEST, payload_raw, RedealRequestPayload);
         let player_pk = GamePkHex::new(payload.player_pk.to_lowercase());
         tracing::info!("[REDEAL_REQUEST] Player {} requests redeal for {} failed cards on table {}",
             player_pk, payload.failed_card_indices.len(), payload.table_id);
@@ -1724,7 +1765,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
     });
 
-    socket.on(actions::RECONSTRUCT_INITIATE, async move |_s: SocketRef, Data::<ReconstructInitiatePayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::RECONSTRUCT_INITIATE, async move |_s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        let payload = parse_payload!(actions::RECONSTRUCT_INITIATE, payload_raw, ReconstructInitiatePayload);
         let result = {
             let mut gs = state.state.write().await;
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {

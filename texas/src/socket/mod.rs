@@ -54,6 +54,7 @@ pub(crate) struct LeaveTablePayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct TableSummary {
     pub id: u32,
     pub name: String,
