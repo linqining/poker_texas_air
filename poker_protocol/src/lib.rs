@@ -37,3 +37,14 @@ pub mod borsh_impls;
 /// interoperability checks.
 #[cfg(all(feature = "legacy-bls381", feature = "borsh"))]
 pub mod browser_proof_bundle;
+
+/// Per-player unified Σ-protocol (standard settlement proof shape):
+/// one proof per player per hand covering ownership + fold + reveals with a
+/// single challenge and response. See `poker-protocol-proofs::unified_sigma`.
+#[cfg(feature = "legacy-bls381")]
+pub mod unified_sigma {
+    pub use poker_protocol_proofs::unified_sigma::{
+        labels, PlayerHandSigma, UnifiedFoldCard, UnifiedRevealCard, UnifiedSigmaError,
+        UnifiedStatement, UNIFIED_SIGMA_PROTOCOL_NAME,
+    };
+}

@@ -198,6 +198,16 @@ impl ClientPlayer {
         LeaveGameRound::execute(input_cards, &self.sk, &self.pk)
     }
 
+    /// 离开/弃牌剥层（排除自己手牌槽）：见
+    /// [`LeaveGameRound::execute_with_exclusions`] 的安全动机。
+    pub fn leave_game_with_exclusions(
+        &self,
+        input_cards: &[ElGamalCiphertext],
+        excluded_indices: &[usize],
+    ) -> LeaveGameRound {
+        LeaveGameRound::execute_with_exclusions(input_cards, excluded_indices, &self.sk, &self.pk)
+    }
+
     pub fn reveal_own_card(
         &self,
         hand_index: usize,

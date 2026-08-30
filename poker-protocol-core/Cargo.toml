@@ -5,6 +5,7 @@ edition = "2021"
 description = "Shared cryptographic primitives and native curve backends"
 
 [features]
+default = ["stark-backend"]
 borsh = ["dep:borsh"]
 # STARK curve backend (Cairo-native EC_OP settlement route, Plan D)
 stark-backend = []

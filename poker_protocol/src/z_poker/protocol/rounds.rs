@@ -154,4 +154,65 @@ impl LeaveGameRound {
             leave_proof,
         }
     }
+
+    /// 离开/弃牌剥层，**排除指定牌槽**（玩家自己的手牌）。
+    ///
+    /// 安全动机：剥层输出公开即公开 `sk·c1`（= 该玩家对这些牌的
+    /// reveal token，任何人都可从 input.c2 − output.c2 算出）。若不排除
+    /// 自己的手牌，其余玩家串谋（合计 N−1 份 token）即可解密已弃牌
+    /// 玩家的底牌——违反扑克规则。排除槽的输出 = 输入原样（层保留，
+    /// token 不泄露）；这些牌在规则上是死牌，永远无需解密。
+    ///
+    /// DLEq 证明覆盖**剥层子集**（非排除槽的 input/output 切片），
+    /// transcript 绑定切片本身；排除槽由验证方从自己的状态推导
+    /// （发牌记录公开），不信任离开者的声明。
+    pub fn execute_with_exclusions(
+        input_cards: &[ElGamalCiphertext],
+        excluded_indices: &[usize],
+        player_sk: &Scalar,
+        player_pk: &EcPoint,
+    ) -> Self {
+        let mut rng = OsRng;
+        let output_cards: Vec<ElGamalCiphertext> = input_cards
+            .iter()
+            .enumerate()
+            .map(|(i, ct)| {
+                if excluded_indices.contains(&i) {
+                    // 排除槽：原样保留（不剥层、不泄露 token）。
+                    ct.clone()
+                } else {
+                    leave_ciphertext(ct, player_sk, player_pk, &mut rng).unwrap()
+                }
+            })
+            .collect();
+
+        // DLEq 只覆盖剥层子集。
+        let sub_input: Vec<ElGamalCiphertext> = input_cards
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !excluded_indices.contains(i))
+            .map(|(_, ct)| ct.clone())
+            .collect();
+        let sub_output: Vec<ElGamalCiphertext> = output_cards
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !excluded_indices.contains(i))
+            .map(|(_, ct)| ct.clone())
+            .collect();
+
+        let mut transcript = FiatShamirTranscript::new(b"zk_leave_proof_v1");
+        let leave_proof = LeaveProof::<DefaultCurve>::prove(
+            &sub_input,
+            &sub_output,
+            player_sk,
+            player_pk,
+            &mut transcript,
+        );
+
+        Self {
+            input_cards: input_cards.to_vec(),
+            output_cards,
+            leave_proof,
+        }
+    }
 }
