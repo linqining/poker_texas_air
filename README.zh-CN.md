@@ -7,7 +7,7 @@
 本项目为 [STRK20 Private Sprint](https://strk20.starknet.io/hackathon) **RFP-03**（"作弊在数学上不可能的可验证公平扑克"）构建的全栈可验证公平在线德州扑克：
 
 - **Mental poker V2（心灵扑克）** —— 完全没有受信发牌方。扑克牌以 ElGamal 加密，由玩家联合洗牌，每一步（洗牌 / 重掩码 / 离开 / 翻牌 / 重构）都携带 sigma 证明。
-- **双证明结算（P/G）** —— P 层（每玩家的 secp256k1 所有权/弃牌/翻牌 sigma 证明）由 `PokerDualSettlement` Cairo 合约通过 Starknet EC_OP 内置件**链上验证**；G 层（牌桌规范状态转移批次，用 Stwo circle-STARK 证明）目前由主机验证，浏览器可独立验证，链上验证在路线图中。
+- **双证明结算（P/G）** —— P 层（每玩家的 secp256k1 所有权/弃牌/翻牌 sigma 证明）由 `PokerDualSettlement` Cairo 合约通过 Starknet EC_OP 内置件**链上验证**；G 层（牌桌规范状态转移批次，用 Stwo circle-STARK 证明）目前由主机验证、浏览器可独立验证（当前结算运行于 linear 模式，链上双证明验证器为 Phase 2 升级项）。
 - **STRK20 作为筹码** —— 玩家将 STRK20 存入 `PokerVault`（1:1 兑换筹码），对局后经隐私池结算。测试网提供本地测试代币 `PokerToken`。
 - **Lean 4 形式化验证** —— 重构协议用 Lean 4 + Mathlib 形式化；该过程发现了重构 V2 的不健全性（机器检查的反例），并产出修复后的 V3 及机器检查的完备性与健全性定理（[poker_protocol_lean](poker_protocol_lean)）。
 

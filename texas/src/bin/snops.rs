@@ -27,6 +27,11 @@ enum Cmd {
         #[arg(long)] class: String,
         #[arg(long)] compiled: String,
         #[arg(long, default_value = "")] compiled_hash: String,
+        /// 跳过链上估算，直接给定资源上限（某些公共 RPC 对 estimateFee
+        /// 的请求体大小有限制，大合约会 503）。
+        #[arg(long, default_value = "")] l1_gas: String,
+        #[arg(long, default_value = "")] l1_data_gas: String,
+        #[arg(long, default_value = "")] l2_gas: String,
     },
     Deploy {
         #[arg(long)] class_hash: String,
@@ -44,6 +49,11 @@ enum Cmd {
     },
     /// 生成随机账户密钥并计算 OZ 账户地址（不部署、不上链）。
     GenKey,
+    /// 计算契约类的 sierra / casm class hash（离线，不连链）。
+    ClassHash {
+        #[arg(long)] class: String,
+        #[arg(long)] compiled: String,
+    },
     /// 部署账户（deploy_account 交易；需账户地址已有 STRK 支付费用）。
     DeployAcct {
         #[arg(long, default_value = "0x05b4b537eaa2399e3aa99c4e2e0208ebd6c71bc1467938cd52c798c601e43564")]
@@ -139,6 +149,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // class-hash：纯离线计算，不需要账户。
+    if let Cmd::ClassHash { class, compiled } = cli.cmd {
+        use starknet::core::types::contract::{CompiledClass, SierraClass};
+        let sierra: SierraClass = serde_json::from_reader(std::fs::File::open(&class)?)?;
+        let compiled_cls: CompiledClass = serde_json::from_reader(std::fs::File::open(&compiled)?)?;
+        println!("SIERRA_CLASS_HASH={:#x}", sierra.class_hash()?);
+        println!("CASM_CLASS_HASH={:#x}", compiled_cls.class_hash()?);
+        return Ok(());
+    }
+
     let Cmd::Call { contract, r#fn, calldata } = cli.cmd.clone() else {
         let signer = LocalWallet::from_signing_key(SigningKey::from_secret_scalar(felt(&cli.pk)));
         let account = Arc::new(SingleOwnerAccount::new(
@@ -149,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             starknet::accounts::ExecutionEncoding::New,
         ));
         match cli.cmd {
-            Cmd::Declare { class, compiled, compiled_hash: forced_hash } => {
+            Cmd::Declare { class, compiled, compiled_hash: forced_hash, l1_gas, l1_data_gas, l2_gas } => {
                 use starknet::core::types::contract::{CompiledClass, SierraClass};
                 let sierra: SierraClass =
                     serde_json::from_reader(std::fs::File::open(&class)?)?;
@@ -162,13 +182,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     Felt::from_hex(&forced_hash)?
                 };
+                // 显式资源上限（--l*-gas 给出时跳过链上估算）：某些公共 RPC
+                // 对 estimateFee 的请求体大小有限制，大合约会直接 503。
+                let parse_gas = |s: &str, dflt: u64| -> u64 {
+                    if s.is_empty() { dflt } else { felt(s).to_string().parse().unwrap_or(dflt) }
+                };
+                let manual = !l1_gas.is_empty() || !l2_gas.is_empty();
                 // starknet-core 的 casm hash 与 devnet 计算可能有版本差异：
                 // 首次提交失败时从错误中提取 Actual hash 重试一次。
-                let res = match account
-                    .declare_v3(Arc::new(flattened.clone()), compiled_hash)
-                    .send()
-                    .await
-                {
+                let declare = account.declare_v3(Arc::new(flattened.clone()), compiled_hash);
+                let declare = if manual {
+                    declare
+                        .l1_gas(parse_gas(&l1_gas, 800))
+                        .l1_data_gas(parse_gas(&l1_data_gas, 1_000))
+                        .l2_gas(parse_gas(&l2_gas, 20_000_000))
+                } else {
+                    declare
+                };
+                let res = match declare.send().await {
                     Ok(r) => r,
                     Err(e) if format!("{e:?}").contains("Mismatch compiled class hash") => {
                         // 从嵌套/终态错误文本提取 devnet 计算的 casm hash
@@ -237,7 +268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("ADDRESS={:#x}", res.contract_address);
                 println!("TX={:#x}", res.transaction_hash);
             }
-            Cmd::GenKey | Cmd::Call { .. } => unreachable!(),
+            Cmd::GenKey | Cmd::Call { .. } | Cmd::ClassHash { .. } => unreachable!(),
         }
         return Ok(());
     };

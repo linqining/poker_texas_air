@@ -15,7 +15,7 @@ A full-stack, provably fair online Texas Hold'em built for the
   ownership/fold/reveal sigma proofs) is verified **on-chain** by the
   `PokerDualSettlement` Cairo contract via the Starknet EC_OP builtin; the
   G layer (canonical table-transition batches proven with Stwo
-  circle-STARKs) is host-verified today with a browser-verification path, and
+  circle-STARKs) is host-verified today with a browser-verification path (settlement runs in `linear` mode; the on-chain dual-proof verifier is the Phase 2 upgrade), and
   is on the roadmap for on-chain verification.
 - **STRK20 as chips** — players deposit STRK20 into `PokerVault`
   (1:1 chips), play, and settle through the privacy pool. A local test token
