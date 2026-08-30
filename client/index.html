@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+  <meta name="theme-color" content="#eae1cd" />
+  <title>Secret Poker | The classy online poker experience</title>
+  <link rel="canonical" href="https://www.secretpokers.com/">
+  <meta name="description"
+    content="A classy online poker experience, true secret style, awaits you. No real money involved. Start playing texas hold'em poker today for free!" />
+  <meta name="keywords"
+    content="poker, online poker, texas holdem, texas hold'em, free online poker, free poker, social poker, social casino, casino, online casino, table games, classy poker">
+  <meta http-equiv="X-UA-Compatible" content="ie=edge">
+  <meta name="robots" content="noindex, nofollow">
+
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/favicon.ico" />
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+  <link rel="apple-touch-icon" sizes="57x57" href="/apple-icon-57x57.png">
+  <link rel="apple-touch-icon" sizes="60x60" href="/apple-icon-60x60.png">
+  <link rel="apple-touch-icon" sizes="72x72" href="/apple-icon-72x72.png">
+  <link rel="apple-touch-icon" sizes="76x76" href="/apple-icon-76x76.png">
+  <link rel="apple-touch-icon" sizes="114x114" href="/apple-icon-114x114.png">
+  <link rel="apple-touch-icon" sizes="120x120" href="/apple-icon-120x120.png">
+  <link rel="apple-touch-icon" sizes="144x144" href="/apple-icon-144x144.png">
+  <link rel="apple-touch-icon" sizes="152x152" href="/apple-icon-152x152.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-icon-180x180.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display&family=Roboto&display=auto" rel="stylesheet">
+
+  <meta property="og:url" content="https://www.secretpokers.com/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Secret Poker">
+  <meta property="og:image"
+    content="https://images.ctfassets.net/4tlsutsg5se1/4dtgDU3MZwM8NMTJoSj1tI/8c3ed626a406021b747ca9f48dd535dc/card.jpg">
+  <meta property="og:description"
+    content="Secret Poker: Trustless by Default, Building the first multi-party conditional settlement protocol on Starknet.">
+  <meta property="og:site_name" content="Secret Poker">
+  <meta property="article:author" content="Patrick Obermeier">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:url" content="https://www.secretpokers.com/">
+  <meta name="twitter:title" content="Secret Poker">
+  <meta name="twitter:site" content="@Pobermeier87">
+  <meta name="twitter:creator" content="@Pobermeier87">
+  <meta name="twitter:description"
+    content="Secret Poker: Trustless by Default, Building the first multi-party conditional settlement protocol on Starknet.">
+  <meta name="twitter:image"
+    content="https://images.ctfassets.net/4tlsutsg5se1/4dtgDU3MZwM8NMTJoSj1tI/8c3ed626a406021b747ca9f48dd535dc/card.jpg">
+
+  <style>
+    :root {
+      box-sizing: border-box;
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: inherit;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      min-height: 100%;
+      background-color: #ffffff;
+    }
+
+    .loading-screen {
+      width: 100%;
+      padding: 0 1.5rem;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+      background-color: #ffffff;
+      background-image: radial-gradient(circle at 50% 35%, rgba(102, 126, 234, 0.06) 0%, transparent 60%);
+    }
+
+    .no-script {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .no-script img {
+      width: 100%;
+      max-width: 320px;
+    }
+
+    .no-script p {
+      font-size: 1.5rem;
+      font-family: 'Inter', sans-serif;
+      color: #475569;
+      text-align: center;
+      margin-top: 3rem;
+      padding: 1rem 2rem;
+      background: rgba(241, 245, 249, 0.9);
+      border: 1px solid rgba(226, 232, 240, 0.9);
+      border-radius: 1rem;
+    }
+
+    .custom-loader {
+      transform: scale(1);
+      animation: pulse 0.75s infinite;
+      filter: drop-shadow(0 0 16px rgba(102, 126, 234, 0.35));
+    }
+
+    @keyframes pulse {
+      0% {
+        transform: scale(0.85);
+      }
+
+      70% {
+        transform: scale(1.25);
+      }
+
+      100% {
+        transform: scale(0.85);
+      }
+    }
+
+    #root,
+    #cookie-banner {
+      opacity: 0;
+      animation: fade-in 0.75s ease-out forwards;
+    }
+
+    @keyframes fade-in {
+      100% {
+        opacity: 1;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="loading-screen" id="loading-screen">
+    <svg width="90" height="123" viewBox="118 86 360 492" fill="none" xmlns="http://www.w3.org/2000/svg" class="custom-loader" id="custom-loader" style="display: none;">
+      <defs>
+        <linearGradient id="cardFill" x1="156" y1="112" x2="440" y2="550" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#112F59"/>
+          <stop offset="1" stop-color="#0A1932"/>
+        </linearGradient>
+        <filter id="softShadow" x="118" y="86" width="360" height="492" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feDropShadow dx="0" dy="12" stdDeviation="12" flood-color="#071424" flood-opacity="0.16"/>
+        </filter>
+      </defs>
+
+      <g filter="url(#softShadow)">
+        <rect x="148" y="114" width="300" height="436" rx="34" fill="url(#cardFill)"/>
+        <text x="182" y="186" font-size="32" font-family="'SFMono-Regular', Consolas, 'Liberation Mono', monospace" fill="#EEF3F6" font-weight="800" letter-spacing="7">1010</text>
+        <text x="414" y="502" font-size="32" font-family="'SFMono-Regular', Consolas, 'Liberation Mono', monospace" fill="#EEF3F6" font-weight="800" letter-spacing="7" text-anchor="end">0101</text>
+
+        <path d="M298 246C286 264 269 281 252 297C236 312 226 330 226 350C226 376 246 394 269 394C282 394 292 389 298 379C304 389 314 394 327 394C350 394 370 376 370 350C370 330 360 312 344 297C327 281 310 264 298 246Z" fill="#F2F5F7"/>
+        <path d="M298 390C293 405 289 418 284 438H312C307 418 303 405 298 390Z" fill="#F2F5F7"/>
+
+        <path d="M190 206H238" stroke="#B2C0CF" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+        <path d="M358 468H406" stroke="#B2C0CF" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+      </g>
+    </svg>
+    <svg width="520" height="138" viewBox="170 24 520 138" fill="none"  xmlns="http://www.w3.org/2000/svg" id="custom-loader-text" style="display: none; margin-top: 2.5rem; animation: fade-in 0.6s ease-out 0.3s forwards; opacity: 0;">
+      <g fill="#0f172a">
+        <text x="176" y="95" font-size="74" font-family="Inter, Arial, Helvetica, sans-serif" font-weight="800" letter-spacing="0.2">Secret Poker</text>
+        <text x="179" y="136" font-size="20" font-family="Inter, Arial, Helvetica, sans-serif" font-weight="600" letter-spacing="5" fill="#475569">SECURE PLAY, REFINED IDENTITY</text>
+      </g>
+      <path d="M179 156H688" stroke="#cbd5e1" stroke-width="2.5" stroke-linecap="round"/>
+    </svg>
+
+    <noscript class="no-script">
+      <img src="/logo_with_text.svg" alt="Secret Poker" style="max-width: 280px;">
+      <p>Please enable <strong>JavaScript</strong> in order to use <strong style="color: #0f172a">Secret
+          Poker</strong>.</p>
+    </noscript>
+  </div>
+  <div id="root" style="display: none;"></div>
+  <div id="cookie-banner" style="display: none;"></div>
+  <div id="modal"></div>
+  <script>
+    document.getElementById("custom-loader").style.display = "block";
+    document.getElementById("custom-loader-text").style.display = "block";
+  </script>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+
+</html>

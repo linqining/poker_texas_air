@@ -2,6 +2,7 @@
 name = "poker-protocol-bg"
 version = "0.1.0"
 edition = "2021"
+license = "BUSL-1.1"
 description = "Curve-generic Bayer-Groth shuffle argument"
 
 [features]

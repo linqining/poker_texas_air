@@ -731,6 +731,381 @@ impl Curve for StarkCurve {
 /// Exponential-ElGamal ciphertext on the STARK curve.
 pub type StarkElGamalCiphertext = ElGamalCiphertextGeneric<StarkCurve>;
 
+// ============================================================
+// Hand-batch felt-native transcript helpers（Plan D gas 压缩版）
+//
+// 实测（snforge l2_gas）：EC_OP 单次 0.08M、poseidon 置换 <0.04M，
+// 但逐字节除法序列化（u256_to_be_bytes）与纯 Cairo keccak 占每认可
+// ~456M 开销的 ~95%。以下把 Hand-batch 的 challenge/rho 全部改为 felt 直通
+// Poseidon：无字节转换、无 keccak，三端（host/wasm/Cairo）共享本文件
+// 的同一规范公式。标签取 ASCII 字符串直接作 felt（≤31B，双端逐字节
+// 一致派生，无运行时哈希成本）。
+// ============================================================
+
+fn ascii_felt(s: &str) -> Felt {
+    let bytes = s.as_bytes();
+    assert!(bytes.len() <= 31, "ascii label must fit one felt");
+    let mut buf = [0u8; 32];
+    buf[32 - bytes.len()..].copy_from_slice(bytes);
+    Felt::from_bytes_be(&buf)
+}
+
+/// "poker/hand-batch/proto" 与 "poker/hand-batch/v1" 的 felt 标签。
+pub fn handbatch_proto_label() -> Felt {
+    ascii_felt("poker/hand-batch/proto")
+}
+
+pub fn handbatch_v1_label() -> Felt {
+    ascii_felt("poker/hand-batch/v1")
+}
+
+fn word_to_felt(w: &[u8; 32]) -> Felt {
+    Felt::from_bytes_be(w)
+}
+
+/// 认可挑战（gas 压缩版，取代 keccak 域 + 32B 压缩编码的字节流形态）：
+/// `c = poseidon([proto_label, hand_binding, Gx, Gy, pk_x, pk_y, R_x, R_y]) mod n`。
+/// hand_binding 是 Poseidon 输出（< P），坐标为完整仿射点——单射、无需
+/// 奇偶压缩位。Cairo 端 hand_batch_stark.cairo::ownership_terms 复刻同式。
+pub fn handbatch_endorsement_challenge(
+    hand_binding: &[u8; 32],
+    g: &StarkPoint,
+    pk: &StarkPoint,
+    r: &StarkPoint,
+) -> StarkScalar {
+    let (gx, gy) = g.to_affine_parts().expect("non-identity G");
+    let (pkx, pky) = pk.to_affine_parts().expect("non-identity pk");
+    let (rx, ry) = r.to_affine_parts().expect("non-identity R");
+    let felts = [
+        handbatch_proto_label(),
+        word_to_felt(hand_binding),
+        gx,
+        gy,
+        pkx,
+        pky,
+        rx,
+        ry,
+    ];
+    let h = poseidon_hash_many(&felts);
+    StarkScalar(reduce_mod_n(U256::from_be_slice(&h.to_bytes_be())))
+}
+
+/// 可折叠 reveal-token 挑战（felt 直通 Poseidon，与 ownership 的
+/// `handbatch_endorsement_challenge` 同纪律）：
+/// `c = poseidon([reveal_label, hand_binding, pk, c1, c2, token, t1, t2,
+///                nonce]) mod n`。
+/// 生产 reveal 证明用 FiatShamir(SHA3-256)——Cairo 只有 legacy Keccak
+/// syscall，无法逐字节重放；可折叠纪元把挑战改为本式（host/wasm 铸造
+/// 与 Cairo 重放三端同构，与 Hand-batch ownership 挑战的迁移同模式）。
+/// 方程不变：eq1: s·G − t1 − c·pk = O；eq2: s·c1 − t2 − c·token = O。
+pub fn handbatch_reveal_challenge(
+    hand_binding: &[u8; 32],
+    pk: &StarkPoint,
+    c1: &StarkPoint,
+    c2: &StarkPoint,
+    token: &StarkPoint,
+    t1: &StarkPoint,
+    t2: &StarkPoint,
+    nonce: &StarkScalar,
+) -> StarkScalar {
+    let (pkx, pky) = pk.to_affine_parts().expect("non-identity pk");
+    let (c1x, c1y) = c1.to_affine_parts().expect("non-identity c1");
+    let (c2x, c2y) = c2.to_affine_parts().expect("non-identity c2");
+    let (tokx, toky) = token.to_affine_parts().expect("non-identity token");
+    let (t1x, t1y) = t1.to_affine_parts().expect("non-identity t1");
+    let (t2x, t2y) = t2.to_affine_parts().expect("non-identity t2");
+    let felts = [
+        ascii_felt("poker/reveal-token/fold-v1"),
+        word_to_felt(hand_binding),
+        pkx, pky, c1x, c1y, c2x, c2y, tokx, toky, t1x, t1y, t2x, t2y,
+        Felt::from_bytes_be(&{
+            let mut b = [0u8; 32];
+            b.copy_from_slice(&nonce.as_bytes());
+            b
+        }),
+    ];
+    let h = poseidon_hash_many(&felts);
+    StarkScalar(reduce_mod_n(U256::from_be_slice(&h.to_bytes_be())))
+}
+
+/// 可折叠 leave/remask 批量 DLEQ 挑战（felt 直通）：
+/// `c = poseidon([leave_label, hand_binding, pk, cpk, nonce, n,
+///                (in_c1, in_c2, out_c1, out_c2, a_i, d2_i)*]) mod n`，
+/// 其中 `d2_i = in_c2_i − out_c2_i`（链上点减重算，进挑战）。
+/// 方程：eq0: s·G − cpk − c·pk = O；每卡 eq_i: s·in_c1ᵢ − aᵢ − c·d2ᵢ = O。
+pub fn handbatch_leave_challenge(
+    hand_binding: &[u8; 32],
+    pk: &StarkPoint,
+    cpk: &StarkPoint,
+    nonce: &StarkScalar,
+    cards: &[HandLeaveCardWords],
+) -> StarkScalar {
+    let (pkx, pky) = pk.to_affine_parts().expect("non-identity pk");
+    let (cpkx, cpky) = cpk.to_affine_parts().expect("non-identity cpk");
+    let mut felts = Vec::with_capacity(8 + 12 * cards.len());
+    felts.push(ascii_felt("poker/leave-fold/v1"));
+    felts.push(word_to_felt(hand_binding));
+    felts.push(pkx);
+    felts.push(pky);
+    felts.push(cpkx);
+    felts.push(cpky);
+    felts.push(Felt::from_bytes_be(&{
+        let mut b = [0u8; 32];
+        b.copy_from_slice(&nonce.as_bytes());
+        b
+    }));
+    felts.push(Felt::from(cards.len() as u64));
+    for card in cards {
+        // d2 = in_c2 − out_c2（链上同源重算）。d2 可能是恒等（in==out）
+        // ——此时该卡方程退化为 s·in_c1 = a，仍被折叠约束。
+        let d2 = card.in_c2 - card.out_c2;
+        let (in_c1x, in_c1y) = card.in_c1.to_affine_parts().expect("non-identity in_c1");
+        let (in_c2x, in_c2y) = card.in_c2.to_affine_parts().expect("non-identity in_c2");
+        let (out_c1x, out_c1y) = card.out_c1.to_affine_parts().expect("non-identity out_c1");
+        let (out_c2x, out_c2y) = card.out_c2.to_affine_parts().expect("non-identity out_c2");
+        let (ax, ay) = card.a.to_affine_parts().expect("non-identity a");
+        // d2 词：若非恒等取仿射坐标，恒等则记 (0, 0)（链上同判）
+        let (d2_x, d2_y) = if d2.is_identity() {
+            (Felt::ZERO, Felt::ZERO)
+        } else {
+            let (x, y) = d2.to_affine_parts().unwrap();
+            (x, y)
+        };
+        felts.push(in_c1x);
+        felts.push(in_c1y);
+        felts.push(in_c2x);
+        felts.push(in_c2y);
+        felts.push(out_c1x);
+        felts.push(out_c1y);
+        felts.push(out_c2x);
+        felts.push(out_c2y);
+        felts.push(ax);
+        felts.push(ay);
+        felts.push(d2_x);
+        felts.push(d2_y);
+    }
+    let h = poseidon_hash_many(&felts);
+    StarkScalar(reduce_mod_n(U256::from_be_slice(&h.to_bytes_be())))
+}
+
+/// leave 方程的每卡公开词（点为 StarkPoint）。
+pub struct HandLeaveCardWords {
+    pub in_c1: StarkPoint,
+    pub in_c2: StarkPoint,
+    pub out_c1: StarkPoint,
+    pub out_c2: StarkPoint,
+    pub a: StarkPoint,
+}
+
+/// 可折叠 reconstruct（CP-DLEQ）挑战（felt 直通，同上纪律）：
+/// `c = poseidon([recon_label, hand_binding, g1, g2, p1, p2, a, b]) mod n`。
+/// 方程（与 poker-protocol-proofs/src/reconstruction/chaum_pedersen.rs
+/// 的 DLEQ 同形）：
+///   eq1: s·G1 − A − c·P1 = O
+///   eq2: s·G2 − B − c·P2 = O
+pub fn handbatch_reconstruct_challenge(
+    hand_binding: &[u8; 32],
+    g1: &StarkPoint,
+    g2: &StarkPoint,
+    p1: &StarkPoint,
+    p2: &StarkPoint,
+    a: &StarkPoint,
+    b: &StarkPoint,
+) -> StarkScalar {
+    let (g1x, g1y) = g1.to_affine_parts().expect("non-identity g1");
+    let (g2x, g2y) = g2.to_affine_parts().expect("non-identity g2");
+    let (p1x, p1y) = p1.to_affine_parts().expect("non-identity p1");
+    let (p2x, p2y) = p2.to_affine_parts().expect("non-identity p2");
+    let (ax, ay) = a.to_affine_parts().expect("non-identity a");
+    let (bx, by) = b.to_affine_parts().expect("non-identity b");
+    let felts = [
+        ascii_felt("poker/reconstruct-fold/v1"),
+        word_to_felt(hand_binding),
+        g1x, g1y, g2x, g2y, p1x, p1y, p2x, p2y, ax, ay, bx, by,
+    ];
+    let h = poseidon_hash_many(&felts);
+    StarkScalar(reduce_mod_n(U256::from_be_slice(&h.to_bytes_be())))
+}
+
+/// 手级 ρ（Horner 折叠版，A 优化）：
+/// `rho = poseidon([v1_label, hand_binding, n_eq, (s, pk_x, pk_y, R_x, R_y)*]) mod n`。
+/// transcript 绑定每条方程的全部公开输入（s、pk、R；G 是全局常量）。
+/// Cairo 端 hand_batch_stark.cairo::hand_rho 复刻同输入集。
+/// host 侧返回归约标量（Horner 点乘等价：EC 标量乘对 m 与 m mod n 同结果）；
+/// Cairo 端用原始 poseidon felt 作标量，数学等价。
+pub fn handbatch_rho(
+    hand_binding: &[u8; 32],
+    equations: &[HandBatchEquationWords],
+) -> StarkScalar {
+    // 每方程 3 felt：(kind, s, c)。c 由链上从该方程全部公开输入重算
+    //（poseidon 抗碰撞），已整体绑定语句；ρ 只需绑定"哪些方程按序
+    // 折叠"，无需重复全部点词。
+    let mut felts = Vec::with_capacity(3 + 3 * equations.len());
+    felts.push(handbatch_v1_label());
+    felts.push(word_to_felt(hand_binding));
+    felts.push(Felt::from(equations.len() as u64));
+    for eq in equations {
+        felts.push(Felt::from(eq.kind as u64));
+        felts.push(word_to_felt(&eq.s));
+        felts.push(word_to_felt(&eq.c));
+    }
+    let h = poseidon_hash_many(&felts);
+    StarkScalar(reduce_mod_n(U256::from_be_slice(&h.to_bytes_be())))
+}
+
+/// 一条参与折叠的方程的 ρ 输入词。
+#[derive(Debug, Clone, Copy)]
+pub struct HandBatchEquationWords {
+    /// 1 = ownership（s·G − c·pk − R）；2 = reveal 两联方程。
+    pub kind: u8,
+    pub s: [u8; 32],
+    /// 挑战 c（ownership: handbatch_endorsement_challenge；reveal:
+    /// handbatch_reveal_challenge——链上从公开输入重算同一值）。
+    pub c: [u8; 32],
+}
+
+/// BG（Bayer-Groth）可折叠纪元的 Poseidon 海绵 transcript：单 felt 状态，
+/// 每步一次 `poseidon_hash_many`，可在 Cairo 端逐置换精确重放（无字节
+/// 序列化、无 keccak）。
+///
+/// 规范（三端一致，勿改）：
+/// - init:  `state = poseidon([ascii("poker/bg-fold/v1")])`（协议名经
+///   `append_message` 进入 transcript，见 BG 的 `bg12_protocol` 步）。
+/// - append_message(label, msg):
+///   `state = poseidon([state, ascii(label[..31]), felt(msg.len()), felt(msg)])`
+///   —— **约束**：msg 必须为 ≤31 字节的短消息（ASCII 标签 / 小端 u64），
+///   单 felt 大整数编码；超长消息按 31 字节大端块分多个 felt（BG 证明
+///   系统只使用 ≤31 字节消息，最长 `b"poker/bayer-groth-shuffle/v2"`）。
+/// - append_point(label, pt):
+///   `state = poseidon([state, ascii(label[..31]), x, y])`（仿射坐标，
+///   仅对 [`StarkPoint`] 定义；其他曲线后端走压缩字节回退，不可重放）。
+/// - append_scalar(label, s):
+///   `state = poseidon([state, ascii(label[..31]), felt(s)])`（s < n < P，
+///   单 felt 无截断）。
+/// - challenge(label):
+///   `out = poseidon([state, ascii(label[..31]), ascii("chal")])`；
+///   返回 `out mod n`；随后 `state = poseidon([state, out])`。
+#[derive(Debug, Clone)]
+pub struct PoseidonFeltTranscript {
+    state: Felt,
+}
+
+/// transcript 域标签（≤31 字节，felt 直通）。
+const BG_FOLD_DOMAIN: &str = "poker/bg-fold/v1";
+
+impl PoseidonFeltTranscript {
+    /// 规范初始状态（不经 [`CryptoTranscript::new`] 也可直接构造）。
+    pub fn new_bg_fold() -> Self {
+        Self {
+            state: poseidon_hash_many(&[ascii_felt(BG_FOLD_DOMAIN)]),
+        }
+    }
+
+    /// 当前海绵状态（诊断/向量导出用）。
+    pub fn state(&self) -> Felt {
+        self.state
+    }
+
+    fn absorb_label_and(&mut self, label: &[u8], extra: &[Felt]) {
+        let mut input = Vec::with_capacity(2 + extra.len());
+        input.push(self.state);
+        input.push(ascii_bytes31(label));
+        input.extend_from_slice(extra);
+        self.state = poseidon_hash_many(&input);
+    }
+}
+
+/// 任意 ≤31 字节标签 → felt（超长取前 31 字节，规范级截断）。
+fn ascii_bytes31(bytes: &[u8]) -> Felt {
+    let bytes = &bytes[..bytes.len().min(31)];
+    let mut buf = [0u8; 32];
+    buf[32 - bytes.len()..].copy_from_slice(bytes);
+    Felt::from_bytes_be(&buf)
+}
+
+/// ≤31 字节消息 → 单 felt；更长消息按 31 字节大端块拆分。
+fn message_felts(msg: &[u8]) -> Vec<Felt> {
+    msg.chunks(31)
+        .map(|chunk| {
+            let mut buf = [0u8; 32];
+            buf[32 - chunk.len()..].copy_from_slice(chunk);
+            Felt::from_bytes_be(&buf)
+        })
+        .collect()
+}
+
+impl crate::CryptoTranscript for PoseidonFeltTranscript {
+    fn new(_protocol_name: &[u8]) -> Self {
+        // 协议名由调用方 append_message 绑定（BG 的 bg12_protocol 步）；
+        // 海绵初始化固定为 BG 折叠纪元域标签，保证 Cairo 重放唯一。
+        Self::new_bg_fold()
+    }
+
+    fn append_message(&mut self, label: &[u8], message: &[u8]) {
+        let mut extra = Vec::with_capacity(2);
+        extra.push(Felt::from(message.len() as u64));
+        extra.extend(message_felts(message));
+        self.absorb_label_and(label, &extra);
+    }
+
+    fn append_point<C: crate::Curve>(&mut self, label: &[u8], point: &C::Point) {
+        // 仿射 (x, y) 直通路径只对 StarkPoint 定义（Cairo 重放目标）；
+        // 其他曲线后端退化为压缩字节块（仅 host 测试可用，不可重放）。
+        use std::any::Any;
+        let any_point: &dyn Any = point;
+        if let Some(p) = any_point.downcast_ref::<StarkPoint>() {
+            let (x, y) = p.to_affine_parts().expect("non-identity transcript point");
+            self.absorb_label_and(label, &[x, y]);
+        } else {
+            let compressed = point.compress();
+            let bytes = compressed.as_ref();
+            let mut extra = Vec::with_capacity(2);
+            extra.push(Felt::from(bytes.len() as u64));
+            extra.extend(message_felts(bytes));
+            self.absorb_label_and(label, &extra);
+        }
+    }
+
+    fn append_scalar<C: crate::Curve>(&mut self, label: &[u8], scalar: &C::Scalar) {
+        let bytes = scalar.as_bytes();
+        // StarkScalar 恒 < n < P：单 felt 无截断。其他后端走分块回退。
+        if bytes.len() == 32 && bytes[0] <= 0x07 {
+            let mut buf = [0u8; 32];
+            buf.copy_from_slice(&bytes);
+            self.absorb_label_and(label, &[Felt::from_bytes_be(&buf)]);
+        } else {
+            let mut extra = Vec::with_capacity(2);
+            extra.push(Felt::from(bytes.len() as u64));
+            extra.extend(message_felts(&bytes));
+            self.absorb_label_and(label, &extra);
+        }
+    }
+
+    fn challenge_bytes(&mut self, label: &[u8], dest: &mut [u8]) {
+        let out = poseidon_hash_many(&[
+            self.state,
+            ascii_bytes31(label),
+            ascii_felt("chal"),
+        ]);
+        let bytes = out.to_bytes_be();
+        let copy_len = dest.len().min(bytes.len());
+        dest[..copy_len].copy_from_slice(&bytes[..copy_len]);
+    }
+
+    fn challenge<C: crate::Curve>(&mut self, label: &[u8]) -> crate::Challenge<C> {
+        let out = poseidon_hash_many(&[
+            self.state,
+            ascii_bytes31(label),
+            ascii_felt("chal"),
+        ]);
+        // 与 StarkScalar::from_bytes_mod_order 同一归约（右侧对齐 32B 后
+        // mod n）；对 StarkCurve 即 reduce_mod_n(poseidon felt)。
+        let scalar = C::Scalar::from_bytes_mod_order(&out.to_bytes_be());
+        self.state = poseidon_hash_many(&[self.state, out]);
+        crate::Challenge { scalar }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

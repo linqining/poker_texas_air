@@ -22,7 +22,10 @@ pub use backend::{
 };
 #[cfg(feature = "stark-backend")]
 pub use stark_curve::{
-    StarkCompressedPoint, StarkCurve, StarkElGamalCiphertext, StarkPoint, StarkScalar,
+    handbatch_endorsement_challenge, handbatch_leave_challenge, handbatch_proto_label,
+    handbatch_reconstruct_challenge, handbatch_reveal_challenge, handbatch_v1_label,
+    PoseidonFeltTranscript, StarkCompressedPoint, StarkCurve, StarkElGamalCiphertext, StarkPoint,
+    StarkScalar,
 };
 pub use curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
 pub use error::VerificationError;

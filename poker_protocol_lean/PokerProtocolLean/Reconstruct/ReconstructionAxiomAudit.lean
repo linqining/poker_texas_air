@@ -1,0 +1,41 @@
+import PokerProtocolLean.Reconstruct.ReconstructProof
+import PokerProtocolLean.PKOwnership.PKOwnershipProof
+
+/-!
+# Axiom audit for the reconstruction deliverable
+
+Run with:
+
+`lake env lean PokerProtocolLean/Reconstruct/ReconstructionAxiomAudit.lean`
+
+The commands below report the trusted Lean axioms used by the main mechanised
+results.  No protocol-specific axiom is introduced in the reconstruction
+modules.
+-/
+
+#print axioms PokerProtocolLean.Reconstruct.V2Counterexample.misplaced_swap_satisfies_corrected_relation
+#print axioms PokerProtocolLean.Reconstruct.V2Counterexample.misplaced_output_is_not_an_honest_branch
+#print axioms PokerProtocolLean.Reconstruct.V2Counterexample.recover_plaintext_from_known_randomness
+#print axioms PokerProtocolLean.Reconstruct.ReadableCardProvenance.authenticated_prior_hand_yields_user_readable_card
+#print axioms PokerProtocolLean.Reconstruct.ReadableCardProvenance.honest_rerandomizer_translation_bijective
+#print axioms PokerProtocolLean.Reconstruct.V3.relation_complete
+#print axioms PokerProtocolLean.Reconstruct.V3.valid_relation_complete
+#print axioms PokerProtocolLean.Reconstruct.V3.readable_equations_of_authenticated_lineage
+#print axioms PokerProtocolLean.Reconstruct.V3.accepted_contribution_is_zero_or_negative_card
+#print axioms PokerProtocolLean.Reconstruct.V3.corrected_slot_semantics
+#print axioms PokerProtocolLean.Reconstruct.V3.cross_key_negation_complete
+#print axioms PokerProtocolLean.Reconstruct.V3.cross_key_negation_binds_plaintexts
+#print axioms PokerProtocolLean.Reconstruct.V3.aggregatePlaintext_unique_removal
+#print axioms PokerProtocolLean.Reconstruct.V3.JointSigma.relation_iff_cross_key
+#print axioms PokerProtocolLean.Reconstruct.V3.JointSigma.sigma_complete
+#print axioms PokerProtocolLean.Reconstruct.V3.JointSigma.sigma_speciallySound
+#print axioms PokerProtocolLean.Reconstruct.V3.JointSigma.sigma_perfect_hvzk
+#print axioms PokerProtocolLean.Reconstruct.V3.SlotOr.honest_accepts
+#print axioms PokerProtocolLean.Reconstruct.V3.SlotOr.specially_sound
+#print axioms PokerProtocolLean.Reconstruct.V3.SlotOr.perfect_hvzk_algebraic
+#print axioms PokerProtocolLean.Reconstruct.V3.Security.completeness_under_assumptions
+#print axioms PokerProtocolLean.Reconstruct.V3.Security.knowledge_soundness_under_assumptions
+#print axioms PokerProtocolLean.Reconstruct.V3.Security.zero_knowledge_under_assumptions
+#print axioms PokerProtocolLean.PKOwnership.sigma_complete
+#print axioms PokerProtocolLean.PKOwnership.sigma_speciallySound
+#print axioms PokerProtocolLean.PKOwnership.sigma_perfect_hvzk
