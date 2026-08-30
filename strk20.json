@@ -7,7 +7,7 @@
     "poker_token": {
       "address": "0x4bfad561733ba5bef162be3606cada13bc85a8a69fd6a52dae2b844d431f9db",
       "class_name": "PokerToken",
-      "class_hash": "",
+      "class_hash": "0x5d745b518295d8ffede689e51f4ec26b020e831b19d2b50546206e5037efe8d",
       "constructor": [
         "owner",
         "name",
@@ -16,9 +16,9 @@
       ]
     },
     "poker_vault": {
-      "address": "0xf4801c358d18bf8b35d84fd9442e931e68bc432f343b1e11178099f674a570",
+      "address": "0x6c8ac4202222a9bcf1f69cc213a2570a393bb83ca64666c7a5cd4a5894c1321",
       "class_name": "PokerVault",
-      "class_hash": "",
+      "class_hash": "0x2bf5d0dc6d58cf64eedad5a5747e3d8a7e426028ecf73263a7558162fdf46c9",
       "constructor": [
         "owner",
         "token_address",
@@ -26,9 +26,9 @@
       ]
     },
     "poker_settlement": {
-      "address": "0x6148290134fff75f8fe54a74a3459980072f754e17980c0c177f51d27ff1486",
+      "address": "0x76a0b49a40c706d438c5f8675165d462de5a0a7d5183183e8b4746b955b5194",
       "class_name": "PokerSettlement",
-      "class_hash": "",
+      "class_hash": "0x6cc6ff2c1753f8ab5ff9dc155b461cb0d8650332f648888751ae31adc520d9c",
       "constructor": [
         "owner",
         "vault_address",
@@ -44,17 +44,17 @@
         "vault_address",
         "initial_prover"
       ],
-      "note": "Not deployed for this submission by design: the game currently settles in 'linear' mode (PokerSettlement aggregate digests + host-side G verification, browser-verifiable proof bundles). PokerDualSettlement (on-chain secp256k1 EC_OP sigma verification) is the Phase 2 upgrade path (DUAL_PROOF_PROTOCOL.md v2.3); its Cairo code compiles and passes 89 snforge tests."
+      "note": "Not deployable on Sepolia as-is: casm bytecode 81,175 felts exceeds the 80,000 on-chain limit (declare rejected by sequencer; devnet has no such limit). Settlement runs legacy PokerSettlement (STARKNET_SETTLEMENT_MODE=legacy, vault.settlement_contract -> PokerSettlement). Phase 2 must shrink the contract below the limit before on-chain DAPV."
     },
     "poker_swap": {
-      "address": "",
+      "address": "0x45a5d045fad8ba092e7919e26b34fa9e901b3ebc93b42120262dbade6cbcee9",
       "class_name": "PokerSwap",
       "class_hash": "0x682e15685f0b336e88b4b2d067bff95ebf6d5c296ecd1a7d8a5ca596745a592",
       "constructor": [
         "owner",
         "pstrk_address"
       ],
-      "note": "Bidirectional fixed-rate STRK<->pSTRK swap (1:1000). Sepolia/mainnet address TBD; see poker_contracts/DEPLOYMENTS.md. Devnet: 0x44185be81c5671147abd228b859e4af07b732880265cf85b90bbc61df579234"
+      "note": "Bidirectional fixed-rate STRK<->pSTRK swap (1:1000). Declared+deployed on Sepolia 2026-08-31 via deploy_sepolia_full.sh; reserves: 100,000 pSTRK + 15 STRK."
     }
   },
   "token": {
@@ -83,8 +83,8 @@
     "settlement_commitment": "poseidon over hand_id then (player, sign, magnitude)* per participant, address-ascending; rust: starknet_settlement::SettleHandCalldata",
     "delta_encoding": "i128 felt; negative values encoded as modular complement; magnitude bounded to u64",
     "calldata_builder": "poker_texas_air::starknet_settlement::{RegisterAggregateCalldata, SettleHandCalldata}",
-    "hand_binding_encoding": "single felt252; poseidon_hash_many over the DUAL_PROOF_PROTOCOL.md §6 field order (domain tag poker_dual_hand_binding_v1, table/hand/players/deck-chain/reveal/state/settlement); rust: poker_texas_air::hand_binding",
-    "dual_ownership_proof_encoding": "per player: 1 kind felt (=1) + 5 u256 (pk_x, pk_y, r_x, r_y, s); challenge derived on-chain as keccak256(G_compressed ‖ pk_compressed ‖ R_compressed) little-endian mod n; curve CurveId::Secp256k1 = 5, transcript TranscriptId::Keccak256 = 7"
+    "hand_binding_encoding": "single felt252; poseidon_hash_many over the DUAL_PROOF_PROTOCOL.md \u00a76 field order (domain tag poker_dual_hand_binding_v1, table/hand/players/deck-chain/reveal/state/settlement); rust: poker_texas_air::hand_binding",
+    "dual_ownership_proof_encoding": "per player: 1 kind felt (=1) + 5 u256 (pk_x, pk_y, r_x, r_y, s); challenge derived on-chain as keccak256(G_compressed \u2016 pk_compressed \u2016 R_compressed) little-endian mod n; curve CurveId::Secp256k1 = 5, transcript TranscriptId::Keccak256 = 7"
   },
   "transactions": [],
   "demo_video": "",

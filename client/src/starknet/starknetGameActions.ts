@@ -370,7 +370,11 @@ export async function swapTokens(
       const nonce = await (devSigner as never as { getNonce: () => Promise<string> }).getNonce();
       const next = (BigInt(nonce) + 1n).toString();
       const r1 = await exec.execute(approveCall, { nonce });
+      // 等 approve 落地再发 swap：公共 RPC 的 pre_confirmed 不一定立刻包含
+      // 刚提交的交易，swap 的 estimateFee 模拟会因 allowance=0 revert。
+      await getProvider().waitForTransaction(r1.transaction_hash);
       const r2 = await exec.execute(swapCall, { nonce: next });
+      await getProvider().waitForTransaction(r2.transaction_hash);
       return { hash: r2.transaction_hash, success: true };
     }
 

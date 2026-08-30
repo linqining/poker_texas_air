@@ -149,11 +149,17 @@ const useAuth = (): UseAuthReturn => {
       const signature = await acct.signMessage(typedDataObj);
       const typedDataMod = await import('starknet');
       const messageHash = typedDataMod.typedData.getMessageHash(typedDataObj, addr);
+      // plain Account（dev 直签）的 signMessage / getMessageHash 返回 bigint，
+      // axios 的 JSON 序列化无法处理 bigint（同步抛
+      // "Do not know how to serialize a BigInt"）——统一转成 felt 字符串。
+      const signatureFelts = Array.isArray(signature)
+        ? signature.map((s) => String(s))
+        : [String(signature)];
 
       const res = await httpClient.post('/auth/wallet', {
         address: addr,
-        messageHash,
-        signature,
+        messageHash: String(messageHash),
+        signature: signatureFelts,
         message,
       });
 

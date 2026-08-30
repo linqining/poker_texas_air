@@ -119,11 +119,13 @@ const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
 
   // If a wallet is already connected but we're not logged in, the auth flow
   // will trigger automatically via useAuth. We close the modal in that case.
+  // 注意：只按"真实连接的钱包地址"判断 —— dev 直签账户（VITE_DEV_ACCOUNT_*）
+  // 的 address 恒非空，不能拿来关弹窗（否则弹窗一打开就闪退）。
   useEffect(() => {
-    if (isOpen && address) {
+    if (isOpen && connected.address) {
       onClose();
     }
-  }, [isOpen, address, onClose]);
+  }, [isOpen, connected.address, onClose]);
 
   const handleConnect = async (connector: (typeof connectors)[number]) => {
     try {

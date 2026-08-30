@@ -36,6 +36,8 @@ cd poker_contracts && scarb build
 
 # 部署工具：snops（zgame 仓库）或 sncast；deploy_sepolia.sh 为参考脚本
 OWNER=<owner 地址> OPKEY=<owner 私钥> URL=<rpc> ./scripts/local_deploy.sh  # devnet
+# Sepolia 全量部署（含 PokerSwap，源 .env.dev）：
+URL=https://starknet-sepolia-rpc.publicnode.com ./scripts/deploy_sepolia_full.sh
 ```
 
 1. `PokerToken(owner, "PokerSTRK", "pSTRK", 0)` — 初始供应走 owner mint，便于审计。
@@ -55,6 +57,32 @@ server .env:  STARKNET_STRK_ADDRESS / STARKNET_VAULT_ADDRESS /
 client .env:  VITE_STRK_TOKEN_ADDRESS / VITE_POKER_VAULT_ADDRESS /
               VITE_POKER_SETTLEMENT_ADDRESS / VITE_POKER_SWAP_ADDRESS
 ```
+
+## 当前部署：Starknet Sepolia 测试网（2026-08-31，deploy_sepolia_full.sh）
+
+chain id `SN_SEPOLIA`，RPC `https://starknet-sepolia-rpc.publicnode.com`。
+部署者/owner/operator = `.env.dev` 账户 `0x6e37d33462f7319261396d7d7f669d147e40cdef91c6a8305cfde771805c782`。
+
+| 合约 | 地址 | class hash |
+|---|---|---|
+| PokerToken (pSTRK) | `0x4bfad561733ba5bef162be3606cada13bc85a8a69fd6a52dae2b844d431f9db` | `0x5d745b518295d8ffede689e51f4ec26b020e831b19d2b50546206e5037efe8d` |
+| PokerVault | `0x6c8ac4202222a9bcf1f69cc213a2570a393bb83ca64666c7a5cd4a5894c1321` | `0x2bf5d0dc6d58cf64eedad5a5747e3d8a7e426028ecf73263a7558162fdf46c9` |
+| PokerSettlement (legacy) | `0x76a0b49a40c706d438c5f8675165d462de5a0a7d5183183e8b4746b955b5194` | `0x6cc6ff2c1753f8ab5ff9dc155b461cb0d8650332f648888751ae31adc520d9c` |
+| PokerSwap（双向 1:1000） | `0x45a5d045fad8ba092e7919e26b34fa9e901b3ebc93b42120262dbade6cbcee9` | `0x682e15685f0b336e88b4b2d067bff95ebf6d5c296ecd1a7d8a5ca596745a592` |
+| PokerDualSettlement | —（见下） | —（见下） |
+
+- Token 复用上一轮（2026-08-29）UDC salt=0 部署；Vault/Settlement/Swap 为本轮全新部署
+  （本轮起 vault lib 类已在链上声明，UDC 确定性地址不再与 unittest 旧类冲突）。
+- 链上验证：`vault.token` ✓、`settle.vault` ✓、`swap.rate = 1000` ✓、
+  swap 双侧储备 100,000 pSTRK + 15 STRK ✓。
+- vault.settlement_contract → legacy PokerSettlement（服务端 `STARKNET_SETTLEMENT_MODE=legacy`）。
+- **PokerDualSettlement 无法在 Sepolia 部署**：casm 字节码 81,175 felts 超过链上 80,000
+  上限（节点拒绝声明；devnet 无此限制故本地 e2e 可跑 DAPV）。Phase 2 需先瘦身
+  （当前超出约 1,175 felts）再走 on-chain DAPV。
+- snops 补丁（zgame/texas/src/bin/snops.rs）：`SNOPS_GAS_AMOUNT_MULT` /
+  `SNOPS_GAS_PRICE_MULT` 可收紧默认 1.5× 估价系数（低余额账户 declare 用）。
+- 浏览器直签联调：`client/.env.development` 的 `VITE_DEV_ACCOUNT_*` 指向同一
+  `.env.dev` 账户，登录签名/兑换/买入/提现全部直签（生产删除即回退钱包）。
 
 ## 当前部署：本地 devnet（starknet-devnet --seed 0，端口 5051）
 
