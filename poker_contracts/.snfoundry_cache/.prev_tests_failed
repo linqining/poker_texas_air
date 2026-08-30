@@ -1,5 +1,0 @@
-poker_contracts::dual::secp256k1_verifier::tests::bg_shuffle_rust_vector_verifies_and_tamper_rejected
-poker_contracts::dual::hand_batch::tests::tampered_ownership_response_rejected
-poker_contracts::dual::secp256k1_verifier::tests::unified_sigma_rust_vector_verifies_and_tamper_rejected
-poker_contracts::dual::hand_batch::tests::cross_hand_replay_rejected
-poker_contracts::dual::hand_batch::tests::honest_hand_accepts

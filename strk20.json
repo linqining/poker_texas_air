@@ -63,7 +63,8 @@
       "g": "stwo circle-stark (canonical tagged batches), host-verified; commitments bound via hand_binding"
     },
     "off_chain_trust": "operator_must_verify_stwo_outer_aggregate_before_register_aggregate",
-    "replay_protection": "hand_binding_unique_and_settled_map"
+    "replay_protection": "hand_binding_unique_and_settled_map",
+    "prover_service": "not deployed for this submission: G-STARK generated and verified host-side by the operator (proving-tool); browser-verifiable via client-wasm proof bundles; on-chain G verifier is Phase 2"
   },
   "abi_notes": {
     "aggregate_digest_encoding": "(felt252, felt252) dual felt; hi = be bytes[0..16], lo = be bytes[16..32]; rust: starknet_settlement::AggregateDigestFelts::split/merge",
@@ -71,10 +72,12 @@
     "settlement_commitment": "poseidon over hand_id then (player, sign, magnitude)* per participant, address-ascending; rust: starknet_settlement::SettleHandCalldata",
     "delta_encoding": "i128 felt; negative values encoded as modular complement; magnitude bounded to u64",
     "calldata_builder": "poker_texas_air::starknet_settlement::{RegisterAggregateCalldata, SettleHandCalldata}",
-    "hand_binding_encoding": "single felt252; poseidon_hash_many over the DUAL_PROOF_PROTOCOL.md \u00a76 field order (domain tag poker_dual_hand_binding_v1, table/hand/players/deck-chain/reveal/state/settlement); rust: poker_texas_air::hand_binding",
-    "dual_ownership_proof_encoding": "per player: 1 kind felt (=1) + 5 u256 (pk_x, pk_y, r_x, r_y, s); challenge derived on-chain as keccak256(G_compressed \u2016 pk_compressed \u2016 R_compressed) little-endian mod n; curve CurveId::Secp256k1 = 5, transcript TranscriptId::Keccak256 = 7"
+    "hand_binding_encoding": "single felt252; poseidon_hash_many over the DUAL_PROOF_PROTOCOL.md §6 field order (domain tag poker_dual_hand_binding_v1, table/hand/players/deck-chain/reveal/state/settlement); rust: poker_texas_air::hand_binding",
+    "dual_ownership_proof_encoding": "per player: 1 kind felt (=1) + 5 u256 (pk_x, pk_y, r_x, r_y, s); challenge derived on-chain as keccak256(G_compressed ‖ pk_compressed ‖ R_compressed) little-endian mod n; curve CurveId::Secp256k1 = 5, transcript TranscriptId::Keccak256 = 7"
   },
-  "transactions": [],,
+  "transactions": [],
   "demo_video": "",
-  "demo_url": ""
+  "demo_url": "",
+  "rfp_id": "RFP-03",
+  "rfp_title": "Provably fair poker where cheating is mathematically impossible"
 }

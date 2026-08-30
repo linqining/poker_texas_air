@@ -83,3 +83,32 @@ jobs:
       # visible without turning the current warning backlog into a false-green
       # or permanently failing merge gate; tighten to -D warnings incrementally.
       - run: cargo clippy --workspace --all-targets --all-features
+
+  cairo:
+    name: Cairo contracts (scarb + snforge)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: software-mansion/setup-scarb@v1
+        with:
+          scarb-version: "2.11.4"
+      - uses: foundry-rs/setup-snforge@v1
+        with:
+          snforge-version: "0.39.0"
+      - working-directory: poker_contracts
+        run: scarb build
+      # dual::secp256k1_verifier / hand_batch tests exceed the default step
+      # budget (real EC_OP sigma verification on-chain); raise the limit.
+      - working-directory: poker_contracts
+        run: snforge test --max-n-steps 100000000
+
+  wasm:
+    name: client-wasm (wasm-pack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-04-15
+      - uses: jetli/wasm-pack-action@v0.4.0
+      - run: wasm-pack build client-wasm --target web
