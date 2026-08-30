@@ -2,6 +2,7 @@
 name = "poker-protocol-proofs"
 version = "0.1.0"
 edition = "2021"
+license = "BUSL-1.1"
 description = "Complete proof suite for the mental-poker protocol"
 
 [features]

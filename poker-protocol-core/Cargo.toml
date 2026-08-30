@@ -2,6 +2,7 @@
 name = "poker-protocol-core"
 version = "0.1.0"
 edition = "2021"
+license = "BUSL-1.1"
 description = "Shared cryptographic primitives and native curve backends"
 
 [features]

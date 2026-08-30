@@ -2,6 +2,7 @@
 name = "poker_l1"
 version = "0.1.0"
 edition = "2024"
+license = "BUSL-1.1"
 
 [features]
 # test-helpers：暴露 StubVrfVerifier 等测试专用类型，仅供集成测试 / 基准测试使用。

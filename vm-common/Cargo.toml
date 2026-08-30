@@ -2,6 +2,7 @@
 name = "vm-common"
 version = "0.1.0"
 edition = "2024"
+license = "BUSL-1.1"
 description = "Shared cross-cutting concerns for poker_l1 vm and poker_zkvm (gas/syscall_id/precompile/crypto/gas_strategy)"
 
 [lib]

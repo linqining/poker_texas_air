@@ -10,4 +10,14 @@ coverage.lcov
 target-bench/
 /poker_contracts/target/*
 /poker_contracts/.snfoundry_cache/*
-.env.dev
+.env.devtexas/target/
+proving-tool/target/
+proving-tool/output/
+third_party/proving/target/
+third_party/corelib-2.19.4/target/
+client/node_modules/
+client/dist/
+client/.env*
+!.env.example
+poker_protocol_lean/.lake/
+texas/.env
