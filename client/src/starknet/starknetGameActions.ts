@@ -1,6 +1,6 @@
 // Starknet game actions for the zgame frontend.
 //
-// This module is the Sui-gameActions replacement. In the Starknet world the
+// In the Starknet world the
 // client only needs to talk to two contracts for chip operations:
 //   1. STRK20 (canonical Sepolia STRK) — approve the vault to pull STRK
 //   2. PokerVault — deposit (pulls STRK via transferFrom, credits chips 1:1)

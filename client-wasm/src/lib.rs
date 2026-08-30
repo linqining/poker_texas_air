@@ -719,93 +719,6 @@ pub fn encrypt_plaintext(plaintext_hex: &str, pk_hex: &str) -> Result<JsValue, J
     Ok(json_val_to_jsvalue(ct_to_json(&ct)))
 }
 
-// ===========================================================================
-// Sui 链上 Move 合约序列化格式转换
-//
-// 实际逻辑已抽离为独立 crate `sui-serialization`（纯 Rust，前后端共用）。
-// 此处仅保留 `#[wasm_bindgen]` 薄包装，将错误类型转换为 JsValue，
-// 维持原有 JS API 不变。
-// ===========================================================================
-
-/// 序列化 pk（G1 compressed 48 bytes）为 Move 合约期望的字节格式。
-///
-/// 输入: pk_hex (48 bytes hex)
-/// 输出: 48 bytes
-#[wasm_bindgen]
-pub fn serialize_pk_to_move_bytes(pk_hex: &str) -> Result<Vec<u8>, JsValue> {
-    sui_serialization::serialize_pk_to_move_bytes(pk_hex)
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// 序列化 pk_ownership_proof 为 Move 合约期望的字节格式。
-///
-/// 输入 JSON: {"commitment_hex":"...","response_hex":"..."}
-/// 输出: commitment(48) + response(32) = 80 bytes
-#[wasm_bindgen]
-pub fn serialize_pk_ownership_proof_to_move_bytes(proof_json: &str) -> Result<Vec<u8>, JsValue> {
-    sui_serialization::serialize_pk_ownership_proof_to_move_bytes(proof_json)
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// 序列化 ElGamalCiphertext 数组为 Move 合约期望的 flat bytes 格式。
-///
-/// 输入 JSON: [{"c1_hex":"...","c2_hex":"..."}, ...]
-/// 输出: flat c1(48) + c2(48) per card = 96*N bytes
-#[wasm_bindgen]
-pub fn serialize_ciphertexts_to_move_bytes(cts_json: &str) -> Result<Vec<u8>, JsValue> {
-    sui_serialization::serialize_ciphertexts_to_move_bytes(cts_json)
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// 序列化 RemaskProof 为 Move 合约期望的字节格式。
-///
-/// 输入 JSON: {"per_card_commitments_hex":["...",...],"commitment_pk_hex":"...","response_hex":"...","nonce_hex":"..."}
-/// 输出: u16(count) + count*48(per_card_commitments) + 48(commitment_pk) + 32(response) + 32(nonce)
-#[wasm_bindgen]
-pub fn serialize_remask_proof_to_move_bytes(proof_json: &str) -> Result<Vec<u8>, JsValue> {
-    sui_serialization::serialize_remask_proof_to_move_bytes(proof_json)
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// 阶段 0：链上 V1 shuffle verifier 已禁用。本入口在 Bayer--Groth V2
-/// precompile 接通前会明确返回错误。
-///
-/// 输入 JSON: {"sum_c1_commit_hex":"...","sum_c2_commit_hex":"...","combined_schnorr_proof":{...},"sum_c1_schnorr_proof":{...},"sum_c2_schnorr_proof":{...},"nonce_hex":"..."}
-/// 输出: 48(sum_c1_commit) + 48(sum_c2_commit) + 32(nonce) + 3*schnorr_proof
-///   schnorr_proof: 48(commitment) + u16(count) + count*32(responses)
-#[wasm_bindgen]
-pub fn serialize_shuffle_proof_to_move_bytes(proof_json: &str) -> Result<Vec<u8>, JsValue> {
-    sui_serialization::serialize_shuffle_proof_to_move_bytes(proof_json)
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// 序列化 LeaveProof 为 Move 合约期望的字节格式（与 RemaskProof 格式相同）。
-///
-/// 输入 JSON: {"per_card_commitments_hex":["...",...],"commitment_pk_hex":"...","response_hex":"...","nonce_hex":"..."}
-/// 输出: u16(count) + count*48 + 48 + 32 + 32
-#[wasm_bindgen]
-pub fn serialize_leave_proof_to_move_bytes(proof_json: &str) -> Result<Vec<u8>, JsValue> {
-    sui_serialization::serialize_leave_proof_to_move_bytes(proof_json)
-        .map_err(|e| JsValue::from_str(&e))
-}
-
-/// 一次性将 join_game_and_shuffle 的完整结果转换为 Move 合约期望的字节格式。
-///
-/// 输入: join_game_and_shuffle 返回的 JSON 字符串
-/// 输出: JsValue (JSON 字符串) 包含 5 个 base64 编码的字段:
-///   - pk: base64(48 bytes)
-///   - pk_ownership_proof: base64(80 bytes)
-///   - output_cards: base64(96*N bytes)
-///   - remask_proof_bytes: base64(...)
-///   - shuffle_proof_bytes: base64(...)
-#[wasm_bindgen]
-pub fn serialize_join_and_shuffle_to_move_bytes(join_result_json: &str) -> Result<JsValue, JsValue> {
-    let result = sui_serialization::serialize_join_and_shuffle_to_move_bytes(join_result_json)
-        .map_err(|e| JsValue::from_str(&e))?;
-    let json = serde_json::to_string(&result)
-        .map_err(|e| JsValue::from_str(&format!("Serialize error: {}", e)))?;
-    Ok(JsValue::from_str(&json))
-}
 
 // ============================================================
 // Plan D P2.1：Hand-batch 认可密钥客户端化
@@ -824,7 +737,7 @@ pub fn serialize_join_and_shuffle_to_move_bytes(join_result_json: &str) -> Resul
 #[wasm_bindgen]
 pub fn endorsement_keypair() -> Result<JsValue, JsValue> {
     use poker_protocol::crypto::curve::{Curve, CurveScalar};
-    use poker_protocol::crypto::StarkCurve;
+    use poker_protocol::crypto::curve::StarkCurve;
 
     let sk = <StarkCurve as Curve>::Scalar::random(&mut rand_core::OsRng);
     let pk = <StarkCurve as Curve>::base_g() * sk;
@@ -854,7 +767,7 @@ pub fn endorsement_keypair() -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn endorsement_mint(sk_hex: &str, hand_binding_hex: &str) -> Result<JsValue, JsValue> {
     use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar};
-    use poker_protocol::crypto::StarkCurve;
+    use poker_protocol::crypto::curve::StarkCurve;
 
     let sk_bytes = hex::decode(sk_hex).map_err(|e| JsValue::from_str(&format!("sk hex: {e}")))?;
     let sk = <StarkCurve as Curve>::Scalar::from_canonical_bytes(&sk_bytes)

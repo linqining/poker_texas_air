@@ -7,7 +7,7 @@ const spin = keyframes`
 
 interface SpinnerProps {
   size?: number;
-  /** 圆环颜色（默认 brandSuiBlue） */
+  /** 圆环颜色（默认 brandBlue） */
   color?: string;
   /** 圆环底色（默认 borderMuted） */
   trackColor?: string;

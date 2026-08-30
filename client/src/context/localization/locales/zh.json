@@ -233,7 +233,7 @@
   "login_apple": "使用 Apple 登录",
   "login_twitch": "使用 Twitch 登录",
   "login_facebook": "使用 Facebook 登录",
-  "login_oauth-note-1": "社交登录使用 zkLogin — 无需钱包扩展。",
+  "login_oauth-note-1": "使用 Starknet 钱包登录 — 无需社交账号。",
   "login_oauth-note-2": "请使用 Starknet 钱包登录以进行游戏。",
   "common_loading": "加载中...",
   "common_brand-name": "Secret Poker",

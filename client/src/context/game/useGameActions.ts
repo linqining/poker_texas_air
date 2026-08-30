@@ -408,8 +408,8 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
       return;
     }
 
-    // Starknet 模式：离桌证明走 socket 由后端验证（与 Sui 链上 leave_with_proof_verified
-    // 对应的链上入口在 Starknet 上不存在，per-hand 操作全部离链）。
+    // Starknet 模式：离桌证明走 socket 由后端验证（per-hand 操作全部离链，
+    // 链上只涉及 PokerVault 的筹码出入）。
     let outputCardsJson: string;
     let leaveProofJson: string;
     let inputCards: unknown;

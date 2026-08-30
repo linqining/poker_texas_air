@@ -382,7 +382,7 @@
       },
       "s3": {
         "title": "Gasfreies Erlebnis",
-        "p1": "Durch gesponserte Transaktionen liefert ZGame ein gasfreies Spielerlebnis. Spieler müssen keinen nativen Token für Gas halten; alles Gas wird vom Protokoll bezahlt. Kombiniert mit zkLogin für Social-Account-Anmeldung wird die Web3-Onboarding-Reibung drastisch reduziert."
+        "p1": "Durch gesponserte Transaktionen liefert ZGame ein gasfreies Spielerlebnis. Spieler müssen keinen nativen Token für Gas halten; alles Gas wird vom Protokoll bezahlt. Die Wallet-basierte Anmeldung hält die Web3-Onboarding-Reibung gering."
       }
     },
     "ch7": {

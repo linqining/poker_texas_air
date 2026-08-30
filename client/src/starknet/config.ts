@@ -15,10 +15,10 @@ import { STRK20_SEPOLIA_ADDRESS } from './abis';
 
 export const STRK_DECIMALS = 18;
 
-/** 1 chip = 100_000 wei of STRK. Matches the old Sui MIST_PER_CHIP ratio. */
+/** 1 chip = 100_000 wei of STRK. */
 export const WEI_PER_CHIP = 100_000n;
 
-/** 1 STRK = 10_000 chips (mirror of the old 1 SUI = 10_000 chips). */
+/** 1 STRK = 10_000 chips. */
 export const CHIPS_PER_STRK = 10_000;
 
 const DEFAULT_SEPOLIA_RPCS = [

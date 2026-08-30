@@ -233,7 +233,7 @@
   "login_apple": "Sign in with Apple",
   "login_twitch": "Sign in with Twitch",
   "login_facebook": "Sign in with Facebook",
-  "login_oauth-note-1": "Social login uses zkLogin — no wallet extension needed.",
+  "login_oauth-note-1": "Sign in with a Starknet wallet — no email or social account needed.",
   "login_oauth-note-2": "Use a Starknet wallet (ArgentX or Braavos) to sign in.",
   "common_loading": "Loading...",
   "common_brand-name": "Secret Poker",
@@ -525,7 +525,7 @@
       },
       "s3": {
         "title": "Zero-Gas Experience",
-        "p1": "Through sponsored transactions, ZGame delivers a zero-Gas game experience. Players do not need to hold any native token for Gas; all Gas is paid by the protocol. Combined with zkLogin for social-account sign-in, the Web3 onboarding friction is dramatically reduced."
+        "p1": "Through sponsored transactions, ZGame delivers a zero-Gas game experience. Players do not need to hold any native token for Gas; all Gas is paid by the protocol. Wallet-based sign-in keeps the Web3 onboarding friction low."
       }
     },
     "ch7": {

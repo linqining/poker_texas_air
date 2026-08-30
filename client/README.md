@@ -204,7 +204,7 @@ client/
 │   ├── components/      # UI 组件
 │   ├── context/         # React Context 状态管理
 │   ├── pages/           # 页面组件
-│   ├── sui/             # Sui 区块链集成
+│   ├── starknet/       # Starknet 钱包与链上交互
 │   ├── clientConfig.ts  # 环境变量配置读取
 │   └── main.tsx         # 入口文件
 ├── dist/                # 构建产物（部署目标，被 .gitignore 忽略）

@@ -45,8 +45,8 @@ const BuyinInfo = styled.div`
   gap: 0.5rem;
   margin-bottom: 0.75rem;
   padding: 0.75rem 1rem;
-  background: ${({ theme }) => theme.colors.brandSuiBlueAlpha08};
-  border: 1px solid ${({ theme }) => theme.colors.brandSuiBlueAlpha20};
+  background: ${({ theme }) => theme.colors.brandBlueAlpha08};
+  border: 1px solid ${({ theme }) => theme.colors.brandBlueAlpha20};
   border-radius: ${({ theme }) => theme.radius.md};
   font-size: 0.85rem;
   color: ${({ theme }) => theme.colors.fontColorDarkLighter};
@@ -102,9 +102,9 @@ const FaucetButton = styled.button`
   width: 100%;
   padding: 0.55rem 1rem;
   border-radius: ${({ theme }) => theme.radius.md};
-  border: 1px dashed ${({ theme }) => theme.colors.brandSuiBlueAlpha20};
-  background: ${({ theme }) => theme.colors.brandSuiBlueAlpha08};
-  color: ${({ theme }) => theme.colors.brandSuiBlue};
+  border: 1px dashed ${({ theme }) => theme.colors.brandBlueAlpha20};
+  background: ${({ theme }) => theme.colors.brandBlueAlpha08};
+  color: ${({ theme }) => theme.colors.brandBlue};
   font-size: 0.85rem;
   font-weight: 500;
   cursor: pointer;
@@ -121,8 +121,8 @@ const FaucetButton = styled.button`
   }
 
   &:hover:not(:disabled) {
-    background: ${({ theme }) => theme.colors.brandSuiBlueAlpha08};
-    border-color: ${({ theme }) => theme.colors.brandSuiBlue};
+    background: ${({ theme }) => theme.colors.brandBlueAlpha08};
+    border-color: ${({ theme }) => theme.colors.brandBlue};
     opacity: 0.95;
   }
 
@@ -194,8 +194,8 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [faucetMsg, setFaucetMsg] = useState<string | null>(null);
 
-  // Faucet: Starknet Sepolia STRK has no SDK-style programmatic faucet the way
-  // Sui does, so we open the official Starknet Sepolia STRK faucet in a new
+  // Faucet: there is no SDK-style programmatic faucet, so we open the official
+  // Starknet Sepolia STRK faucet in a new
   // tab and ask the user to paste their address.
   const handleFaucetRequest = async () => {
     if (!walletAddress || faucetLoading) return;

@@ -30,10 +30,10 @@ interface ThemeColors {
   brandIndigoAlpha25: string; // rgba(102,126,234,0.25)
   brandIndigoAlpha35: string; // rgba(102,126,234,0.35)
 
-  // === Brand Sui Blue (formerly hardcoded #4DA2FF) ===
-  brandSuiBlue: string;
-  brandSuiBlueAlpha08: string;
-  brandSuiBlueAlpha20: string;
+  // === Brand Blue ===
+  brandBlue: string;
+  brandBlueAlpha08: string;
+  brandBlueAlpha20: string;
 
   // === Backgrounds ===
   darkBg: string;
@@ -241,10 +241,10 @@ const theme: Theme = {
     brandIndigoAlpha20: 'rgba(102, 126, 234, 0.20)',
     brandIndigoAlpha25: 'rgba(102, 126, 234, 0.25)',
     brandIndigoAlpha35: 'rgba(102, 126, 234, 0.35)',
-    // Brand Sui Blue (formerly #4DA2FF)
-    brandSuiBlue: '#4DA2FF',
-    brandSuiBlueAlpha08: 'rgba(77, 162, 255, 0.08)',
-    brandSuiBlueAlpha20: 'rgba(77, 162, 255, 0.20)',
+    // Brand Blue
+    brandBlue: '#4DA2FF',
+    brandBlueAlpha08: 'rgba(77, 162, 255, 0.08)',
+    brandBlueAlpha20: 'rgba(77, 162, 255, 0.20)',
     // Backgrounds
     darkBg: '#e2e8f0',
     lightBg: '#f1f5f9',

@@ -69,7 +69,7 @@ export function OnchainVerificationBadge({
   }
 
   // Starknet block explorer (Starkscan). Transaction hashes are 0x-prefixed
-  // 64-hex strings just like Sui digests, so the URL shape is the same.
+  // 64-hex (32-byte) values.
   const href = `https://${network === 'mainnet' ? '' : 'sepolia.'}starkscan.co/tx/${txDigest}`
   // verified=true 用 ShieldCheck 图标 + 绿色；verified=false 用 ExternalLink 图标 + 红色
   const Icon = verified ? ShieldCheck : ExternalLink
