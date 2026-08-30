@@ -582,7 +582,8 @@ struct WalletLoginRequest {
     #[serde(default)]
     signature: serde_json::Value,
     /// SNIP-12 消息哈希（前端 TypedData.getMessageHash 的结果）。
-    #[serde(default)]
+    /// alias 兼容前端 camelCase（client useAuth 发送 messageHash）。
+    #[serde(default, alias = "messageHash")]
     message_hash: Option<String>,
 }
 

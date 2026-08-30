@@ -197,6 +197,8 @@ pub(crate) struct ReconstructSubmitPayload {
     pub output_cards: Vec<ElGamalCiphertextJson>,
     pub swap_cards: Vec<ElGamalCiphertextJson>,
     /// Task 4: 用户可读牌（每个 swap_out 对应一张），on-chain 模式下需要传给 Move 合约
+    /// 旧客户端不发送该字段，缺省按空处理。
+    #[serde(default)]
     pub user_readable_cards: Vec<ElGamalCiphertextJson>,
     pub proof: ReconstructProofJson,
 }
@@ -239,7 +241,9 @@ pub(crate) struct ShuffleNoticePayload {
 }
 
 /// Plan D P2.1：Hand-batch 认可收集的请求/提交载荷。
+/// 客户端（useGameSocket）按 camelCase 读取，序列化须用 camelCase。
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct EndorsementRequestPayload {
     pub table_id: u32,
     pub hand_id: u32,
@@ -250,7 +254,9 @@ pub(crate) struct EndorsementRequestPayload {
 #[derive(Debug, Clone, Deserialize)]
 pub struct EndorsementSubmitPayload {
     pub wallet: String,
+    #[serde(alias = "tableId")]
     pub table_id: u32,
+    #[serde(alias = "handId")]
     pub hand_id: u32,
     pub pk_x_hex: String,
     pub pk_y_hex: String,

@@ -526,13 +526,15 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
   const sittingOut = () => {
     currentTableRef &&
       currentTableRef.current &&
-      socket?.emit(SITTING_OUT, currentTableRef.current.id);
+      seatId != null &&
+      socket?.emit(SITTING_OUT, { tableId: currentTableRef.current.id, seatId });
   };
 
   const sittingIn = () => {
     currentTableRef &&
       currentTableRef.current &&
-      socket?.emit(SITTING_IN, currentTableRef.current.id);
+      seatId != null &&
+      socket?.emit(SITTING_IN, { tableId: currentTableRef.current.id, seatId });
   };
 
   const expelInitiate = (tableId: string, targetPlayerPk: string) => {

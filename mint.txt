@@ -1,0 +1,5 @@
+S=/Users/mac/projects/zgame/target/debug/snops
+$S --url http://127.0.0.1:5051 --pk 0x71d7bb07b9a64f6f78ac4c816aff4da9 \
+   --addr 0x64b48806902a367c8598f4f95c305e8c1a1acba5f082d294a43793113115691 \
+   invoke --contract 0x508ab1bc518227bc444ced3b720f3e4f36309f53a32303fd2498ab26c5acb57 \
+   --fn transfer --calldata 0x03af032bc00274a7b4cefcb9e9da0268616089dca02504ff2129a8f4a6939695,100000000000000000000,0

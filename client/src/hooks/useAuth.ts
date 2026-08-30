@@ -18,11 +18,12 @@ interface UseAuthReturn {
   authMethod: AuthMethod;
 }
 
-/** Typed-data domain for the login message (SNIP-12). */
+/** Typed-data domain for the login message (SNIP-12 revision 1). */
 const LOGIN_DOMAIN = {
   name: 'zgame',
   version: '1',
   chainId: starknetConfig.chainId,
+  revision: '1',
 };
 
 const useAuth = (): UseAuthReturn => {
@@ -111,22 +112,34 @@ const useAuth = (): UseAuthReturn => {
   ): Promise<void> => {
     setIsLoading(true);
     try {
+      // SNIP-12 rev1 typed message: 服务端需要 messageHash 做 isValidSignature 验证。
+      // 约束来自 Cartridge controller wasm 内嵌的 starknet-core 严格解析：
+      // - domain 类型名必须是 "StarknetDomain"（小写 net）且带 revision 字段；
+      // - 只支持 felt/shortstring/ContractAddress/timestamp 等内置类型（无 ByteArray）；
+      // - 每个字段值必须能编码成单个 felt（不能放长文本）。
+      // 服务端只校验 (address, messageHash, signature)，不解析 message 内容。
       const message = `zgame-login:${addr}:${Date.now()}`;
-      // SNIP-12 typed message: 服务端需要 messageHash 做 isValidSignature 验证。
       const typedDataObj = {
         domain: LOGIN_DOMAIN,
         types: {
-          StarkNetDomain: [
+          StarknetDomain: [
             { name: 'name', type: 'shortstring' },
             { name: 'version', type: 'shortstring' },
             { name: 'chainId', type: 'shortstring' },
+            { name: 'revision', type: 'shortstring' },
           ],
           Message: [
-            { name: 'contents', type: 'string' },
+            { name: 'action', type: 'shortstring' },
+            { name: 'address', type: 'ContractAddress' },
+            { name: 'timestamp', type: 'timestamp' },
           ],
         },
         primaryType: 'Message',
-        message: { contents: message },
+        message: {
+          action: 'zgame-login',
+          address: addr,
+          timestamp: Math.floor(Date.now() / 1000),
+        },
       };
       const signature = await acct.signMessage(typedDataObj);
       const typedDataMod = await import('starknet');
