@@ -2134,19 +2134,57 @@ pub fn apply_fold_with_proof(
         )));
     }
 
-    // 2. 验证 DLEq layer-removal proof。
-    // typed 化后无需反序列化。
+    // 2. 验证 DLEq layer-removal proof（排除集强校验，防亮牌）：
+    //    剥层输出公开 input.c2 − output.c2 = sk·c1（= 该玩家对每张牌的
+    //    reveal token）。弃牌者自己的手牌槽必须原样保留——否则其余玩家
+    //    串谋（N−1 份 token + 公开的这份）即可解密其底牌，违反规则。
+    //    排除集从 reveal assignments 推导（公开状态），不信任提交方。
     let output_cts = output_cards;
     let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.to_vec();
     let player_pk = *table.seats[seat_index as usize]
         .pk()
         .ok_or_else(|| PokerL1Error::Serialization("fold seat has no live key".into()))?;
+
+    let excluded: Vec<usize> = table
+        .reveal_assignments()
+        .iter()
+        .filter_map(|a| match a.target {
+            RevealTarget::Hole { seat_index: s, .. } if s == seat_index => {
+                Some(usize::from(a.encrypted_card_index))
+            }
+            _ => None,
+        })
+        .collect();
+    for &i in &excluded {
+        if i >= output_cts.len() {
+            return Err(PokerL1Error::Serialization(format!(
+                "fold_with_proof: excluded slot {i} out of range"
+            )));
+        }
+        if output_cts[i].c1 != input_cts[i].c1 || output_cts[i].c2 != input_cts[i].c2 {
+            return Err(PokerL1Error::Serialization(format!(
+                "fold_with_proof: own hole card slot {i} must stay unchanged (anti-reveal rule)"
+            )));
+        }
+    }
+    let sub_input: Vec<ElGamalCiphertext> = input_cts
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !excluded.contains(i))
+        .map(|(_, ct)| ct.clone())
+        .collect();
+    let sub_output: Vec<ElGamalCiphertext> = output_cts
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !excluded.contains(i))
+        .map(|(_, ct)| ct.clone())
+        .collect();
     let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
         let mut t = utils::new_leave_transcript();
         let ok = DLEqProof::<DefaultCurve, LeaveKind>::verify(
             &fold_proof,
-            &input_cts,
-            &output_cts,
+            &sub_input,
+            &sub_output,
             &player_pk,
             &mut t,
         );
