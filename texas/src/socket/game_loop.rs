@@ -718,6 +718,16 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
     let action = {
         let gs = state.state.read().await;
         if let Some(table) = gs.tables.get(&table_id) {
+            // 自动行动闸门：下注轮开始后至少等待 AUTO_ACT_DELAY_SECS 秒才
+            // 替当前行动者行动，给真实玩家（与 mirror/客户端的相位同步）
+            // 留出操作窗口；否则 500ms tick 会把整手牌在数秒内推完。
+            const AUTO_ACT_DELAY_MS: u64 = 5_000;
+            let started = table.betting_started_at();
+            if started == 0
+                || now_ms().saturating_sub(started) < AUTO_ACT_DELAY_MS
+            {
+                return false;
+            }
             if let Some(turn_id) = table.turn() {
                 table.seats().get(&turn_id).and_then(|seat| {
                     if seat.folded {

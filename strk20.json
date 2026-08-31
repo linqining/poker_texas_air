@@ -36,15 +36,15 @@
       ]
     },
     "poker_dual_settlement": {
-      "address": "",
+      "address": "0x4d8e1f155aec13d43d3e7b1bce739412ddb8d3a85a51d3378db22f62bd88308",
       "class_name": "PokerDualSettlement",
-      "class_hash": "0x3f5952d7706dd42fc6f59e7e540178d6adc9c3cc83b0c12f7e21843e7d33153",
+      "class_hash": "0x44c425ff6d28fb7d4d1350ea3f63153b0debc4195eb39db6edc8d4243373256",
       "constructor": [
         "owner",
         "vault_address",
         "initial_prover"
       ],
-      "note": "Not deployable on Sepolia as-is: casm bytecode 81,175 felts exceeds the 80,000 on-chain limit (declare rejected by sequencer; devnet has no such limit). Settlement runs legacy PokerSettlement (STARKNET_SETTLEMENT_MODE=legacy, vault.settlement_contract -> PokerSettlement). Phase 2 must shrink the contract below the limit before on-chain DAPV."
+      "note": "2026-09-01 deployed on Sepolia (trimmed: legacy verify_and_settle/verify_and_settle_dapv/proved paths removed for the 80k casm limit; keeps register_hand + verify_and_settle_dapv_stark). Vault settlement_contract rebound to this address."
     },
     "poker_swap": {
       "address": "0x45a5d045fad8ba092e7919e26b34fa9e901b3ebc93b42120262dbade6cbcee9",
@@ -83,8 +83,8 @@
     "settlement_commitment": "poseidon over hand_id then (player, sign, magnitude)* per participant, address-ascending; rust: starknet_settlement::SettleHandCalldata",
     "delta_encoding": "i128 felt; negative values encoded as modular complement; magnitude bounded to u64",
     "calldata_builder": "poker_texas_air::starknet_settlement::{RegisterAggregateCalldata, SettleHandCalldata}",
-    "hand_binding_encoding": "single felt252; poseidon_hash_many over the DUAL_PROOF_PROTOCOL.md \u00a76 field order (domain tag poker_dual_hand_binding_v1, table/hand/players/deck-chain/reveal/state/settlement); rust: poker_texas_air::hand_binding",
-    "dual_ownership_proof_encoding": "per player: 1 kind felt (=1) + 5 u256 (pk_x, pk_y, r_x, r_y, s); challenge derived on-chain as keccak256(G_compressed \u2016 pk_compressed \u2016 R_compressed) little-endian mod n; curve CurveId::Secp256k1 = 5, transcript TranscriptId::Keccak256 = 7"
+    "hand_binding_encoding": "single felt252; poseidon_hash_many over the DUAL_PROOF_PROTOCOL.md §6 field order (domain tag poker_dual_hand_binding_v1, table/hand/players/deck-chain/reveal/state/settlement); rust: poker_texas_air::hand_binding",
+    "dual_ownership_proof_encoding": "per player: 1 kind felt (=1) + 5 u256 (pk_x, pk_y, r_x, r_y, s); challenge derived on-chain as keccak256(G_compressed ‖ pk_compressed ‖ R_compressed) little-endian mod n; curve CurveId::Secp256k1 = 5, transcript TranscriptId::Keccak256 = 7"
   },
   "transactions": [],
   "demo_video": "",

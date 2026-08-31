@@ -57,6 +57,25 @@ pub async fn table_event_consumer(
             TableEvent::ReconstructNotice => {
                 game_loop::broadcast_reconstruct_notice_if_active(&io, &state, table_id).await;
             }
+            TableEvent::RevealResult { phase } => {
+                // 与 WS REVEAL_SUBMIT handler 的 advance_reveal_phase_locally 相同的
+                // 分发语义，但挂在游戏层完成点上，覆盖所有提交路径。
+                match phase {
+                    crate::pokergame::game_state::RevealPhase::HandReveal => {
+                        state.broadcast_hand_reveal_result(table_id).await;
+                    }
+                    crate::pokergame::game_state::RevealPhase::ShowdownReveal => {
+                        state.broadcast_showdown_result(table_id).await;
+                    }
+                    crate::pokergame::game_state::RevealPhase::CommunityReveal => {
+                        state.broadcast_community_cards(table_id).await;
+                    }
+                    crate::pokergame::game_state::RevealPhase::RedealReveal => {
+                        state.broadcast_redeal_result(table_id).await;
+                    }
+                    crate::pokergame::game_state::RevealPhase::None => {}
+                }
+            }
         }
     }
     tracing::info!("[TABLE-EVENTS] Consumer stopped for table {}", table_id);

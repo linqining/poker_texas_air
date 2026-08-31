@@ -98,6 +98,28 @@ const useAuth = (): UseAuthReturn => {
     return () => { cancelled = true; };
   }, [address, setStrkBalance]);
 
+  // 会话过期统一处理：httpClient 在 401 时派发 zgame:session-expired，
+  // 这里清理前端登录态（等同 logout，但不调后端——后端已不认识这个 token）。
+  useEffect(() => {
+    const onSessionExpired = () => {
+      logger.warn('[Auth] session expired — clearing login state');
+      localStorage.removeItem('token');
+      localStorage.removeItem('walletAddress');
+      localStorage.removeItem('authMethod');
+      setWalletAddress(null);
+      setAuthToken(null);
+      setIsLoggedIn(false);
+      setId(null);
+      setUserName(null);
+      setEmail(null);
+      setChipsAmount(null);
+      setStrkBalance(null);
+      setAuthMethod(null);
+    };
+    window.addEventListener('zgame:session-expired', onSessionExpired);
+    return () => window.removeEventListener('zgame:session-expired', onSessionExpired);
+  }, [setId, setUserName, setEmail, setChipsAmount, setStrkBalance]);
+
   // Auto-authenticate with the backend after wallet connection
   useEffect(() => {
     if (address && !isLoggedIn && account) {
@@ -190,8 +212,20 @@ const useAuth = (): UseAuthReturn => {
       }
       setChipsAmount(chipsAmount ?? 0);
     } catch (error) {
+      // 登录会话已失效（401 token 无效 / 404 服务端重启清空了会话用户）：
+      // 彻底清理前端登录态，UI 回到未登录（Sign In 可见），不再残留半登录态。
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      logger.warn('loadUser failed (status=%s) — clearing login state:', status, error);
       localStorage.removeItem('token');
-      logger.error('loadUser failed:', error);
+      localStorage.removeItem('walletAddress');
+      localStorage.removeItem('authMethod');
+      setAuthToken(null);
+      setIsLoggedIn(false);
+      setWalletAddress(null);
+      setAuthMethod(null);
+      setId(null);
+      setUserName(null);
+      setChipsAmount(null);
     }
   };
 

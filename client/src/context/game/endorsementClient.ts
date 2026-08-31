@@ -55,15 +55,17 @@ async function loadWasmEndorsement(): Promise<WasmEndorsementModule | null> {
 /** 取（或首次生成）本地认可私钥。wasm 能力缺失时返回 null。 */
 export async function ensureEndorsementSk(): Promise<string | null> {
   const wasm = await loadWasmEndorsement();
-  if (!wasm) return null;
+  if (!wasm) { ((window as any).__edbg = (window as any).__edbg || []).push('sk:wasm-null'); return null; }
   let sk = localStorage.getItem(ENDORSEMENT_SK_KEY);
   if (!sk) {
     try {
-      const kp = await wasm.endorsement_keypair?.();
-      if (!kp?.sk_hex) return null;
-      sk = kp.sk_hex;
-      localStorage.setItem(ENDORSEMENT_SK_KEY, sk);
-    } catch {
+      const kp = asPlainObject(await wasm.endorsement_keypair?.());
+      if (!kp.sk_hex) return null;
+      const skHex: string = kp.sk_hex;
+      sk = skHex;
+      localStorage.setItem(ENDORSEMENT_SK_KEY, skHex);
+    } catch (e) {
+      ((window as any).__edbg = (window as any).__edbg || []).push('sk:err=' + (e as any)?.message);
       return null;
     }
   }
@@ -79,13 +81,27 @@ export interface EndorsementSubmission {
 }
 
 /** 对 hand_binding 域本地铸造认可；wasm 能力缺失时返回 null。 */
+/** serde_wasm_bindgen 会把 struct/map 序列化成 JS Map（Object.keys 为空），
+ *  这里统一还原成普通对象，兼容普通对象与 JSON 字符串两种历史形态。 */
+function asPlainObject(v: unknown): Record<string, any> {
+  if (v instanceof Map) return Object.fromEntries(v as Map<string, unknown>);
+  if (typeof v === 'string') {
+    try { return JSON.parse(v); } catch { return {}; }
+  }
+  return (v && typeof v === 'object' ? (v as Record<string, any>) : {});
+}
+
+/** 对 hand_binding 域本地铸造认可；wasm 能力缺失时返回 null。 */
 export async function mintEndorsement(handBindingHex: string): Promise<EndorsementSubmission | null> {
   const wasm = await loadWasmEndorsement();
   if (!wasm) return null;
   const sk = await ensureEndorsementSk();
   if (!sk) return null;
   try {
-    return (await wasm.endorsement_mint?.(sk, handBindingHex)) ?? null;
+    const out = await wasm.endorsement_mint?.(sk, handBindingHex);
+    const obj = asPlainObject(out);
+    if (!obj.pk_x_hex || !obj.s_hex) return null;
+    return obj as EndorsementSubmission;
   } catch {
     return null;
   }

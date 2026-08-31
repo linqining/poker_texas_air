@@ -45,4 +45,8 @@ pub enum TableEvent {
     RevealNotice,
     /// 发送 RECONSTRUCT_NOTICE 给活跃玩家。
     ReconstructNotice,
+    /// reveal 阶段完成：按阶段广播 HAND_REVEAL_RESULT / COMMUNITY_REVEAL_RESULT /
+    /// REDEAL_RESULT / 摊牌视图。由 `on_reveal_complete` 统一发出（WS 与进程内
+    /// 两条提交路径的共同单点），保证无论哪条路径完成 reveal 都会广播结果。
+    RevealResult { phase: crate::pokergame::game_state::RevealPhase },
 }

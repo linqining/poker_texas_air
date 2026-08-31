@@ -40,6 +40,31 @@
   构建 settlement；phase-2 用镜像快照（Clone）构建 dual，不再借用注册表；
   hand_id 以 unix 秒为种子的每桌单调计数（服务器重启后仍满足链上 hand_id 严格递增）。
   链上已核对：`settlement.is_prover(operator)=1`、`settlement.vault()=配置 vault`。
+- **DAPV 上链 + 翻后抽水 + 跨手显示（2026-09-01 第二轮实证）**：
+  - PokerDualSettlement 裁剪（移除 per-proof 验证器/BLS 变体/proved 路径，
+    casm 81,175 → 23,816 felts）后 Sepolia 部署成功：
+    `0x4d8e1f155aec13d43d3e7b1bce739412ddb8d3a85a51d3378db22f62bd88308`
+    （class 0x44c425ff…，vault.settlement_contract 已重绑定）；
+  - 服务器 `STARKNET_SETTLEMENT_MODE=dapv`：`register_hand` +
+    `verify_and_settle_dapv_stark` 两笔 **ACCEPTED_ON_L2 / SUCCEEDED**
+    （hand 1788186794，settle=0x2e9f165b…），链上 ρ 折叠校验通过；
+  - 翻后抽水：争夺底池 5%（cap 1000 chips），翻前结束不抽（VM 硬性不变量
+    `uncontested pot must not be raked`）；calldata 实测 bot +90 / user −90
+    （treasury 抽水 10 已并入输家条目，零和成立）；
+  - DAPV 认可链路：浏览器端修复 serde_wasm_bindgen Map 序列化兼容
+    （endorsementClient `asPlainObject`）+ wasm pkg 同步（含 endorsement 导出）；
+    dev_bot 认可私钥服务器托管、进程内铸造（`register_bot_endorsement_key`）；
+  - 结算重投：PENDING_SETTLE 按桌保留构建时快照（settlement+binding+mirror 克隆），
+    tick 重投同一快照，绝不读已被新手替换的 mirror 活状态；
+  - 系统性阻塞修复：finish_showdown 在 state 写锁 + mirror 注册表锁内做证明
+    （数十秒），阻塞 bot 与全部 WS 处理器 → on_hand_complete 改为锁内克隆、
+    锁外重活；
+  - 自动行动闸门：handle_auto_fold 增加 5 秒延迟（此前每 500ms tick 直接替
+    当前行动者行动，整手牌数秒内被自动推完，客户端/mirror 全部相位错开）；
+  - 跨手显示根因修复：reset() 初始牌组预置聚合层 (G, m+agg)——SHUFFLE_SUBMIT
+    路径无 mask，shuffle-only 手牌的 deck = m + (s−1)·agg，token 和消不掉
+    聚合层导致第二手起全部无法解密；预置后恒等式 m + s·agg 成立
+    （离线对拍 `rejoin_after_kick_materializes` 复现并验证修复）。
 - **B4 Sepolia 端到端实证（2026-09-01）**：真实浏览器买入（Cartridge 钱包
   `0x6e37…c782`，deposit tx `0x6f6dd876…`）+ dev_bot（`0xba7f00d`）双人整手到摊牌，
   `register_aggregate` 与 `settle_hand` 两笔交易 **ACCEPTED_ON_L2 / SUCCEEDED**

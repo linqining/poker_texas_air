@@ -69,6 +69,13 @@ pub struct StarknetConfig {
     pub prover_work_dir: String,
     /// true = 钱包签名必须通过 isValidSignature 链上验证；false = dev 模式放行。
     pub auth_strict: bool,
+    /// 平台 treasury 地址（抽水接收方，`STARKNET_TREASURY_ADDRESS`）。
+    /// 留空回退 operator 地址。
+    pub treasury_address: String,
+    /// 抽水比例（basis points，`STARKNET_RAKE_BPS`，默认 500 = 5%）。
+    pub rake_bps: u16,
+    /// 单手抽水上限（chips，`STARKNET_RAKE_CAP`，默认 1000）。
+    pub rake_cap: u64,
 }
 
 impl StarknetConfig {
@@ -97,6 +104,15 @@ impl StarknetConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(false),
+            treasury_address: std::env::var("STARKNET_TREASURY_ADDRESS").unwrap_or_default(),
+            rake_bps: std::env::var("STARKNET_RAKE_BPS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(500),
+            rake_cap: std::env::var("STARKNET_RAKE_CAP")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1_000),
         }
     }
 

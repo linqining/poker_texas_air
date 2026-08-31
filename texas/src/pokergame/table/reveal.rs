@@ -143,6 +143,11 @@ impl Table {
         let phase = self.reveal_token_state.phase;
         self.reveal_token_state.reset();
 
+        // 方案A 单点广播：reveal 结果事件从游戏层完成点统一发出（此前只挂在
+        // WS REVEAL_SUBMIT handler，bot 等进程内路径完成时会绕过广播，导致
+        // 前端收不到 HAND_REVEAL_RESULT / COMMUNITY_REVEAL_RESULT 而不显示牌）。
+        self.emit_event(crate::pokergame::table::events::TableEvent::RevealResult { phase });
+
         match phase {
             RevealPhase::None => {
                 // 不应到达（is_active 已检查），防御性处理

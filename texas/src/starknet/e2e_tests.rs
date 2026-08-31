@@ -525,3 +525,73 @@ async fn live_flow_assignments_match_mirror_targets() {
         }
     }
 }
+
+/// 踢出后重入对拍：join → 踢出 bot（leave_player）→ bot 重入
+/// （join_game_and_shuffle）→ 发牌 → 全员 token → 断言公共牌可物化。
+/// 复现"第二手起不显示"（kick+rejoin 后 deck 不变量破坏假设）。
+#[test]
+fn rejoin_after_kick_materializes() {
+    use poker_protocol::z_poker::protocol::MentalPokerGame;
+
+    let sk1 = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
+    let sk2 = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
+    let c1 = ClientPlayer { sk: sk1.clone(), pk: <DefaultCurve as Curve>::base_g() * &sk1 };
+    let c2 = ClientPlayer { sk: sk2.clone(), pk: <DefaultCurve as Curve>::base_g() * &sk2 };
+
+    let mut game = MentalPokerGame::new(poker_protocol::z_poker::GameConfig {
+        num_players: 2, cards_per_player: 2, community_cards: 5,
+    });
+    game_layer_join(&mut game, &c1);
+    game_layer_join(&mut game, &c2);
+
+    // ---- 踢出 c2（模拟 reveal 超时 kick → leave_player）----
+    let pk2 = hex_pk(&c2.pk);
+    game.leave_player(&pk2).expect("leave c2");
+
+    // ---- 模拟服务端 reset_for_next_hand（deck 重建，含 agg 预置层）----
+    game.reset();
+
+    // ---- c2 重入（重走 join_game_and_shuffle）----
+    game_layer_join(&mut game, &c2);
+
+    // ---- 发牌：底牌 + 公共牌（对齐真实手牌流程）----
+    let pk1h = hex_pk(&c1.pk);
+    let pk2h = hex_pk(&c2.pk);
+    for _ in 0..2 {
+        game.deal_to_player(&pk1h, 1).expect("deal p1");
+        game.deal_to_player(&pk2h, 1).expect("deal p2");
+    }
+    game.deal_community_cards_encrypted(3);
+
+    // ---- 全员对公共牌提交 token（两个玩家都交，模拟真实 reveal 完成）----
+    let all_cts: Vec<_> = game.community_cards_encrypted.iter()
+        .map(|c| c.encrypted_card.clone()).collect();
+    for client in [&c1, &c2] {
+        for ct in &all_cts {
+            game.submit_reveal_token(
+                client.generate_reveal_token(ct),
+                &(if client.pk == c1.pk { pk1h.clone() } else { pk2h.clone() }),
+            ).expect("community token accepted");
+        }
+    }
+    // 物化结果：3 张公共牌必须全部解出
+    let revealed = game.list_revealed_community_cards();
+    if revealed.len() != 3 {
+        // 诊断：残余层 = c2 − Σtokens − m，看它等于谁的公钥
+        use poker_protocol::crypto::curve::{Curve, CurveScalar, CurvePoint};
+        let card = &game.community_cards_encrypted[0];
+        let sum_tok: poker_protocol::crypto::EcPoint = card.reveal_state.reveal_tokens.iter()
+            .map(|t| t.reveal_token).sum();
+        let leftover = card.encrypted_card.c2 - sum_tok - game.deck_plaintext[4];
+        let lo = poker_protocol::z_poker::convert::ecpoint_to_hex(&leftover);
+        let p1 = poker_protocol::z_poker::convert::ecpoint_to_hex(&c1.pk);
+        let p2 = poker_protocol::z_poker::convert::ecpoint_to_hex(&c2.pk);
+        let p1s = poker_protocol::z_poker::convert::ecpoint_to_hex(&(c1.pk + c1.pk));
+        let p2s = poker_protocol::z_poker::convert::ecpoint_to_hex(&(c2.pk + c2.pk));
+        let agg = poker_protocol::z_poker::convert::ecpoint_to_hex(&game.key_manager.get_aggregated_pk());
+        panic!("leftover={} || pk1={} pk2={} 2pk1={} 2pk2={} agg={} players={} keyentries={}",
+            &lo[..20], &p1[..20], &p2[..20], &p1s[..20], &p2s[..20], &agg[..20],
+            game.players.len(), game.key_manager.player_count());
+    }
+    assert_eq!(revealed.len(), 3, "all 3 flop cards must materialize after rejoin");
+}

@@ -119,6 +119,18 @@ pub fn register_client_endorsement(
     Ok(())
 }
 
+/// 进程内 bot 认可注册（bot 无 WS 会话，由服务器代持认可私钥后本地铸造；
+/// 与 `register_client_endorsement` 等价，只是免去 hex 往返）。
+pub fn register_client_endorsement_raw(wallet: &str, hand_id: u32, e: Endorsement) {
+    let registry = CLIENT_ENDORSEMENTS.get_or_init(|| std::sync::Mutex::new(Default::default()));
+    registry
+        .lock()
+        .expect("client endorsement registry lock")
+        .entry(wallet.to_string())
+        .or_default()
+        .insert(hand_id, ClientEndorsement { pk: e.pk, r: e.r, s: e.s });
+}
+
 /// 取客户端已提交的认可（结算聚合用）；缺失返回 None。
 pub fn take_client_endorsements(
     wallets: &[Ff],
@@ -164,7 +176,10 @@ fn hand_transcript_domain(hand_id: &[u8; 32]) -> [u8; 32] {
 }
 
 /// 铸造 hand-bound 认可。
-#[cfg(test)]
+///
+/// 生产用途限定：仅供**服务器自己托管的测试玩家（dev_bot）**在进程内铸造——
+/// 真实客户端的认可私钥保持在浏览器（client-wasm `endorsement_mint`），
+/// 服务器不持有、也无法调用此函数代铸。
 pub fn mint_endorsement(
     sk: &Sc,
     pk: &Pt,
@@ -553,10 +568,16 @@ fn build_dual_settlement_with(
     for p in &settlement.players_remapped {
         settle_calldata.push(ff_to_felt(*p));
     }
-    // deltas: Span<i128>（负数取模补，与合约 from_felt_signed_i128 对齐）
+    // deltas: Span<i128>（负数取模补，与合约 from_felt_signed_i128 对齐）。
+    // 单位与 legacy 路径一致：vault 以 wei 记账，这里放大为 wei，
+    // 与 register 的 settlement_digest（同样按 wei 计算）保持一致。
+    const DAPV_WEI_PER_CHIP: i128 = 100_000_000_000_000;
     settle_calldata.push(Felt::from(settlement.deltas.len() as u64));
     for d in &settlement.deltas {
-        settle_calldata.push(ff_to_felt(i128_to_ff(*d)));
+        let wei = d
+            .checked_mul(DAPV_WEI_PER_CHIP)
+            .ok_or("delta wei overflow")?;
+        settle_calldata.push(ff_to_felt(i128_to_ff(wei)));
     }
     // p_batch: Span<felt252> —— 每字单 felt（STARK 曲线基域 == felt252，
     // 点坐标/标量词天然在域内；越界词在此报错不上链）。提交入口为
@@ -598,7 +619,10 @@ fn build_dual_settlement_with(
     }
     proved_settle_calldata.push(Felt::from(settlement.deltas.len() as u64));
     for d in &settlement.deltas {
-        proved_settle_calldata.push(ff_to_felt(i128_to_ff(*d)));
+        let wei = d
+            .checked_mul(DAPV_WEI_PER_CHIP)
+            .ok_or("delta wei overflow")?;
+        proved_settle_calldata.push(ff_to_felt(i128_to_ff(wei)));
     }
     // 无 p_batch：只有承诺 + 词数。
     proved_settle_calldata.push(ff_to_felt(p_batch_commitment));
@@ -1150,7 +1174,7 @@ pub async fn submit_dual_settlement(
             ),
         };
 
-    let register_hash = operator
+    let register_hash = match operator
         .execute_v3(vec![Call {
             to: contract,
             selector: starknet_keccak(register_selector.as_bytes()),
@@ -1158,7 +1182,43 @@ pub async fn submit_dual_settlement(
         }])
         .send()
         .await
-        .map_err(|e| format!("{register_selector} submit failed: {e}"))?;
+    {
+        Ok(r) => format!("{:#x}", r.transaction_hash),
+        Err(e) => {
+            let text = format!("{e}");
+            // 幂等重放：本手 binding 已注册（此前某次尝试已成功）。
+            if text.contains("already registered") || text.contains("Binding already") {
+                "already-registered".to_string()
+            } else {
+                return Err(format!("{register_selector} submit failed: {e}"));
+            }
+        }
+    };
+
+    // settle 断言 binding 已注册；两笔交易存在包含时差——轮询等注册可见
+    // 再提交 settle（hand_binding view 的第三位 = registered 标记）。
+    {
+        use starknet::providers::Provider;
+        let selector = starknet_keccak("hand_binding".as_bytes());
+        let binding_felt = super::chain::parse_felt(&format!("{:#x}", dual.hand_binding))
+            .ok_or("invalid hand binding felt")?;
+        let mut visible = false;
+        for _ in 0..45 {
+            if let Ok(felts) = chain
+                .call_contract(contract, selector, vec![binding_felt])
+                .await
+            {
+                if felts.get(2).map(|f| *f == Felt::ONE).unwrap_or(false) {
+                    visible = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        }
+        if !visible {
+            return Err("hand_binding registration not visible on-chain within 45s".into());
+        }
+    }
 
     let settle_hash = operator
         .execute_v3(vec![Call {
@@ -1171,7 +1231,7 @@ pub async fn submit_dual_settlement(
         .map_err(|e| format!("{settle_selector} submit failed: {e}"))?;
 
     Ok((
-        format!("{:#x}", register_hash.transaction_hash),
+        register_hash,
         format!("{:#x}", settle_hash.transaction_hash),
     ))
 }

@@ -46,6 +46,9 @@ pub struct TableMirror {
     /// 服务器 caller 地址（镜像内管理操作如 advance_deadline 的 caller）。
     caller: poker_l1::Address,
     block_height: u64,
+    /// 抽水参数（begin_reveal_hand 时写入镜像桌面）。
+    pub rake_bps: u16,
+    pub rake_cap: u64,
 }
 
 impl TableMirror {
@@ -74,6 +77,8 @@ impl TableMirror {
             pre_settlement: None,
             caller,
             block_height: 1,
+            rake_bps: poker_l1::vm::contracts::texas_poker::constants::DEFAULT_RAKE_BPS,
+            rake_cap: poker_l1::vm::contracts::texas_poker::constants::DEFAULT_RAKE_CAP,
         }
     }
 
@@ -178,6 +183,14 @@ impl TableMirror {
         // button 对齐：游戏层按钮在参与座位中的 rank（VM post_blinds 据此
         // 计算盲注位置，与游戏层盲注玩家保持一致）。
         self.table.button = button_rank.min(self.table.seats.len().saturating_sub(1) as u8);
+
+        // 抽水规则：到手牌进入翻后（flop 及以后，即出现公共牌的争夺底池）才抽，
+        // 翻前结束（无人跟注的 uncontested 底池）不抽。VM 结算的硬性不变量
+        // `uncontested pot must not be raked` 天然满足前半条；这里启用百分比
+        // 模式使"到翻后的争夺底池"按 bps 抽水（有单手 cap）。
+        self.table.rake_mode = poker_l1::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+        self.table.rake_bps = self.rake_bps;
+        self.table.rake_cap = self.rake_cap;
 
         // deck 注入 + contributor 全量 + 直接进入 DealHole：
         // pending_mask = 0（游戏层洗牌已在注入前完成，VM 跳过洗牌阶段），

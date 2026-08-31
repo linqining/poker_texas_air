@@ -96,17 +96,21 @@ impl MentalPokerGame {
     }
 
     pub fn reset(&mut self) {
-        // 对齐 Move 合约 set_initial_encrypted_deck: (g1_generator, plaintext_i)
-        // 不加 agg_pk — 与 new() 和链上 set_initial_encrypted_deck 保持一致。
-        // 此前版本误加 agg_pk 导致 LOCAL trivial deck 与链上不同，
-        // 由于 submit_shuffle_verified 跳过证明验证，前端会基于错误牌组洗牌并上链，
-        // 导致 reveal 阶段 decrypt_readable_card 失败。
+        // 初始牌组 (G, m + agg)：把当前注册玩家的聚合钥层预置进 c2。
+        //
+        // 为什么必须 + agg：SHUFFLE_SUBMIT 路径没有 mask 步骤（纯重加密），
+        // 若初始 c2 = m，则 shuffle-only 手牌的 deck = m + (s−1)·agg，
+        // reveal 的 token 和只消掉 s·agg，解出 m − agg ≠ 任何规范明文
+        // ——表现为"第一手正常、第二手起手牌/公共牌全部无法解密显示"。
+        // 预置 +agg 后 deck = m + s·agg 恒成立（s = c1 标量），token 和
+        // 恰好消去聚合层。s·G = c1 从 1 起步（c1 = G），与 join 路径一致。
+        let agg = self.key_manager.get_aggregated_pk();
         let initial_encrypt_deck = self
             .deck_plaintext
             .iter()
             .map(|c| ElGamalCiphertext {
                 c1: *BASE_G,
-                c2: *c,
+                c2: *c + agg,
             })
             .collect();
         self.deck_encrypted = initial_encrypt_deck;
@@ -419,6 +423,15 @@ impl MentalPokerGame {
                             .sum::<EcPoint>();
                     let playing_card =
                         Self::plaintext_to_playingcard_static(&self.deck_plaintext, &plain_text);
+                    if playing_card.is_none() {
+                        // 诊断：物化失败 = 解密明文不在规范域（deck 不变量破坏）
+                        tracing::error!(
+                            "[submit_reveal_token] card {} materialize FAILED: plain={:?} c1={:?}",
+                            card.card_index,
+                            hex::encode(plain_text.compress().as_ref()).get(..24).unwrap_or(""),
+                            hex::encode(card.encrypted_card.c1.compress().as_ref()).get(..24).unwrap_or("")
+                        );
+                    }
                     card.playing_card = playing_card;
                 }
             }

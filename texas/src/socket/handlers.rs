@@ -326,10 +326,12 @@ async fn broadcast_sit_down(
                 None,
             ).await;
 
-            if all_complete {
-                tracing::info!("[SIT_DOWN_V2] All players shuffled, starting game loop for table {}", table_id);
-                state.start_game_loop(io.clone(), state.clone(), table_id).await;
-            }
+            // 无条件确保 game loop 运行（start_game_loop 内部按 registry 去重）。
+            // 此前仅 all_complete（入座即完成末次洗牌）时拉起；若上一手结束后
+            // loop 已退出且新入座玩家不是末次洗牌者，牌桌会永久停在 Waiting。
+            let _ = all_complete;
+            tracing::info!("[SIT_DOWN_V2] ensuring game loop running for table {}", table_id);
+            state.start_game_loop(io.clone(), state.clone(), table_id).await;
         }
         Err(e) => {
             tracing::warn!("[SIT_DOWN_V2] Failed to join and shuffle: {}", e);
@@ -731,41 +733,6 @@ async fn verify_shuffle_proofs_core(
     }
 }
 
-
-
-
-
-
-
-/// Advances the reveal phase locally when all players have completed.
-/// Calls the appropriate broadcast function based on the reveal phase.
-async fn advance_reveal_phase_locally(
-    state: &Arc<SocketState>,
-    table_id: u32,
-    all_complete: bool,
-    reveal_phase: RevealPhase,
-) {
-    if all_complete {
-        tracing::info!("[REVEAL_SUBMIT] All players completed reveal for table {}", table_id);
-        match reveal_phase {
-            RevealPhase::None => {
-                tracing::warn!("[REVEAL_SUBMIT] all_complete but reveal_phase is None, table_id={}", table_id);
-            }
-            RevealPhase::HandReveal => {
-                state.broadcast_hand_reveal_result(table_id).await;
-            }
-            RevealPhase::ShowdownReveal => {
-                state.broadcast_showdown_result(table_id).await;
-            }
-            RevealPhase::CommunityReveal => {
-                state.broadcast_community_cards(table_id).await;
-            }
-            RevealPhase::RedealReveal => {
-                state.broadcast_redeal_result(table_id).await;
-            }
-        }
-    }
-}
 
 
 
@@ -1683,7 +1650,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 }
             };
 
-            advance_reveal_phase_locally(&state, payload.table_id, all_complete, reveal_phase).await;
+            // reveal 结果广播已下沉到 on_reveal_complete 的单点（TableEvent::RevealResult），
+            // 这里不再重复分发。
             broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
             return;
         }
@@ -1718,7 +1686,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 false
             }
         };
-        advance_reveal_phase_locally(&state, payload.table_id, all_complete, reveal_phase).await;
+        // reveal 结果广播已下沉到 on_reveal_complete 的单点（TableEvent::RevealResult）。
         broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
     });
 

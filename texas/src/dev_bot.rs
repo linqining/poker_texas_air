@@ -117,6 +117,16 @@ pub async fn start_bot(
 
     eprintln!("[bot] deposit verified OK");
     let player = ClientPlayer::new_with_wallet_address(&wallet);
+
+    // 进程内 bot 的认可私钥注册（DAPV 结算需要所有参与玩家的认可；
+    // 真实客户端的认可私钥在浏览器 localStorage，bot 的托管在服务器）。
+    {
+        use poker_protocol::crypto::curve::{Curve, CurveScalar};
+        use poker_protocol::crypto::curve::StarkCurve;
+        let sk = <StarkCurve as Curve>::Scalar::random(&mut rand::rngs::OsRng);
+        crate::starknet::hooks::register_bot_endorsement_key(&wallet, sk);
+        eprintln!("[bot] endorsement key registered for {wallet}");
+    }
     let my_addr = match crate::starknet::mirror::TableMirror::addr_from_starknet(&wallet) {
         Some(a) => a,
         None => return Err("bad wallet for mirror".into()),

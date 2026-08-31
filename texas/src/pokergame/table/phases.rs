@@ -204,6 +204,30 @@ impl Table {
         let mut order: Vec<u32> = self.local_seats.keys().copied().collect();
         order.sort_unstable();
 
+        // 诊断：聚合钥 vs 玩家公钥和（重入场景 double-count 检测）
+        {
+            let agg = self.mental_poker_game.key_manager.get_aggregated_pk();
+            let sum = self.mental_poker_game.players.values().fold(
+                poker_protocol::crypto::EcPoint::identity(),
+                |acc, p| acc + p.pk,
+            );
+            let players_cnt = self.mental_poker_game.players.len();
+            let key_cnt = self.mental_poker_game.key_manager.player_count();
+            tracing::warn!(
+                "[deal-diag] players={} key_entries={} agg_eq_sum={}",
+                players_cnt,
+                key_cnt,
+                ecpoint_to_hex(&agg) == ecpoint_to_hex(&sum)
+            );
+            if ecpoint_to_hex(&agg) != ecpoint_to_hex(&sum) {
+                tracing::error!(
+                    "[deal-diag] agg={} sum={} (MISMATCH → deck 不变量破坏，公共牌/手牌将无法解密)",
+                    poker_protocol::z_poker::convert::ecpoint_to_hex(&agg),
+                    poker_protocol::z_poker::convert::ecpoint_to_hex(&sum)
+                );
+            }
+        }
+
         for &seat_id in &order {
             let is_turn = self.turn() == Some(seat_id);
             if let Some(seat) = self.local_seats.get_mut(&seat_id) {
