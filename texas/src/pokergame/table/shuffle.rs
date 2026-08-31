@@ -338,6 +338,10 @@ impl Table {
                 self.on_before_preflop_shuffle_complete();
                 self.transition_to(RoundState::PreFlop);
                 self.start_preflop_reveal_phase();
+                // 方案A：此刻发牌用 deck 已终局（全部客户端洗牌已验证）。
+                // 把这份 deck 原样注入 mirror VM 并让 VM 直接进入 DealHole，
+                // 两条 deck 链自此逐字节同源（MIRROR_UNIFICATION_PLAN 方案A）。
+                crate::starknet::hooks::mirror_begin_reveal(self);
             } else {
                 // Reconstruct 完成 → 清空 reconstruct_state + reveal_token_state
                 // + 根据 round_state 启动对应 reveal

@@ -1167,7 +1167,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
 
         // 2.5 Starknet 镜像：缓冲 join（poker_l1 join_table 仅允许 Waiting，
-        //     洗牌期入座的 join 会在下一手 mirror_begin_hand 时批量应用）
+        //     洗牌期入座的 join 会在下一手 mirror_begin_reveal 时重放应用）
         {
             let gs = state.state.read().await;
             if let Some(table) = gs.tables.get(&payload.table_id) {
@@ -1387,7 +1387,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             if let (Ok(out), Ok(proof)) = (out, payload.shuffle_proof.to_proof()) {
                 let gs = state.state.read().await;
                 if let Some(table) = gs.tables.get(&payload.table_id) {
-                    crate::starknet::hooks::mirror_shuffle_submit(table, &pk_hex, &out, &proof);
+                    // 方案A：SHUFFLE_SUBMIT 不再转发 mirror（deck 终局注入）。
                 }
             }
         }
@@ -1657,7 +1657,6 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             {
                 let gs = state.state.read().await;
                 if let Some(table) = gs.tables.get(&payload.table_id) {
-                    crate::starknet::hooks::mirror_reveal_submit(table, &pk_hex, &tokens);
                 }
             }
 

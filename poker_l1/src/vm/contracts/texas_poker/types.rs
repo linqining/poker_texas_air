@@ -1447,15 +1447,27 @@ pub struct PartialHoleCard {
     pub encrypted_card_index: u8,
     /// Ciphertext after every non-owner reveal layer has been removed.
     pub ciphertext: ElGamalCiphertext,
+    /// The pre-reveal deck ciphertext every non-owner proof was generated against.
+    ///
+    /// Client reveal-token proofs bind the full ciphertext (the challenge hashes
+    /// `c2`), while showdown decryption must use the partial ciphertext. Storing
+    /// both keeps verification self-contained in this ledger (immune to a deck
+    /// rebuild after reconstruct) without weakening the proof binding.
+    pub full_ciphertext: ElGamalCiphertext,
 }
 
 impl PartialHoleCard {
     /// Construct one lineage-bound owner-readable partial ciphertext.
     #[must_use]
-    pub const fn new(encrypted_card_index: u8, ciphertext: ElGamalCiphertext) -> Self {
+    pub const fn new(
+        encrypted_card_index: u8,
+        ciphertext: ElGamalCiphertext,
+        full_ciphertext: ElGamalCiphertext,
+    ) -> Self {
         Self {
             encrypted_card_index,
             ciphertext,
+            full_ciphertext,
         }
     }
 }
@@ -3167,6 +3179,10 @@ mod tests {
     fn partial_hole_card(deck_index: u8) -> PartialHoleCard {
         PartialHoleCard::new(
             deck_index,
+            ElGamalCiphertext {
+                c1: G1Projective::generator(),
+                c2: G1Projective::generator(),
+            },
             ElGamalCiphertext {
                 c1: G1Projective::generator(),
                 c2: G1Projective::generator(),

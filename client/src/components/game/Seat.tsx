@@ -303,14 +303,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
                 <ConfirmButton primary type="submit" fullWidth>
                   {getLocalizedString('game_rebuy-modal_confirm')}
                 </ConfirmButton>
-                <FaucetButton
-                  type="button"
-                  onClick={handleFaucetRequest}
-                  disabled={faucetLoading || !walletAddress}
-                >
-                  <img src="/strk-logo.svg" alt={getLocalizedString('seat_strk-logo-alt')} />
-                  {faucetLoading ? getLocalizedString('seat_claiming-btn') : getLocalizedString('seat_claim-faucet-btn')}
-                </FaucetButton>
+                {/* 水龙头选项移除：测试网 STRK 由 swap/服务端渠道获取 */}
                 {faucetMsg && (
                   <Text textAlign="center" style={{ fontSize: '0.8rem' }}>
                     {faucetMsg}
@@ -427,19 +420,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
                           <ConfirmButton primary type="submit" fullWidth>
                             {getLocalizedString('game_buyin-modal_confirm')}
                           </ConfirmButton>
-                          <FaucetButton
-                            type="button"
-                            onClick={handleFaucetRequest}
-                            disabled={faucetLoading || !walletAddress}
-                          >
-                            <img src="/strk-logo.svg" alt={getLocalizedString('seat_strk-logo-alt')} />
-                            {faucetLoading ? getLocalizedString('seat_claiming-btn') : getLocalizedString('seat_claim-faucet-btn')}
-                          </FaucetButton>
-                          {faucetMsg && (
-                            <Text textAlign="center" style={{ fontSize: '0.8rem' }}>
-                              {faucetMsg}
-                            </Text>
-                          )}
+                          {/* 水龙头选项移除 */}
                         </ButtonGroup>
                       </Form>
                     ),

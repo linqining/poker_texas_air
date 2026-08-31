@@ -1,74 +1,71 @@
-//! Starknet 接入端到端测试（cargo test -p texas e2e_starknet）：
-//! 买入（join_table）→ 开局（start_hand）→ 真实洗牌证明 ×2 → 下注（raise/fold）
-//! → 结算（derive_settlement_plan）→ 证明（Orchestrator + outer aggregate）
-//! → Starknet calldata（register_aggregate / settle_hand）。
+//! Starknet 接入端到端测试（cargo test -p texas e2e_starknet）。
 //!
-//! 洗牌证明用 zgame poker_protocol（与前端 wasm 同源代码）真实生成，
-//! 检验 poker_l1 dispatch 能否接受真实客户端证明——这是前后端证明协议对齐的
-//! 核心集成事实。
+//! 方案A（MIRROR_UNIFICATION_PLAN.md）对拍基线：
+//! 1. 以**游戏层真实流程**构造牌局——两个客户端用 zgame poker_protocol
+//!    （与前端 wasm 同源代码）执行 join_game_and_shuffle，deck 链由客户端洗牌驱动；
+//! 2. 游戏层发完底牌后（deck 终局），把 deck **原样注入** mirror VM
+//!    （`begin_reveal_hand`），断言 deck 逐字节一致；
+//! 3. 客户端对游戏层密文生成的 reveal token（含摊牌阶段对**完整密文**的证明）
+//!    必须被 VM 的 reveal 窗口逐个接受（DealHole / Board / ShowdownOwner）；
+//! 4. 下注推进到 river（board == 5）→ 结算（derive_settlement_plan）→
+//!    证明（Orchestrator + outer aggregate）→ Starknet calldata
+//!    （register_aggregate / settle_hand）。
+//!
+//! 洗牌在 VM 中不再重放（方案A：deck 同源注入），因此证明链由
+//! reveal-token 任务构成——这正是玩家实际参与的那副牌。
 
 use poker_l1::signature::TaggedPubkey;
 use poker_protocol::crypto::{DefaultCurve};
-use poker_protocol::crypto::curve::{Curve, ElGamalCiphertextGeneric};
-use poker_protocol::zk_shuffle::ShuffleProof;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::crypto::curve::{Curve, CurveScalar};
+use poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript as _CT;
 use rand::rngs::OsRng;
-use poker_protocol::crypto::curve::CurveScalar;
 
 use super::mirror::TableMirror;
+use poker_protocol::z_poker::protocol::{ClientPlayer, MentalPokerGame};
 
 type ZgCt = poker_protocol::crypto::ElGamalCiphertext;
 
-fn real_shuffle(
-    input: &[ZgCt],
-    aggregate_pk: &<DefaultCurve as Curve>::Point,
-) -> (Vec<ZgCt>, ShuffleProof) {
-    let n = input.len();
-    // 真实随机置换（确定性置换会让每手牌局完全相同）
-    let mut permutation: Vec<usize> = (0..n).collect();
-    for i in (1..n).rev() {
-        let j = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=i);
-        permutation.swap(i, j);
-    }
-    let rerandomizers: Vec<_> = (0..n)
-        .map(|_| <DefaultCurve as Curve>::Scalar::random(&mut OsRng))
-        .collect();
-    let output: Vec<_> = (0..n)
-        .map(|i| input[permutation[i]].re_encrypt(aggregate_pk, &rerandomizers[i]))
-        .collect();
-    let proof = ShuffleProof::prove(
-        input,
-        &output,
-        &permutation,
-        &rerandomizers,
-        aggregate_pk,
-        &mut OsRng,
-        &mut FiatShamirTranscript::new(b"zk_shuffle_proof_v2"),
-    )
-    .expect("Bayer--Groth proof should build");
-    (output, proof)
+/// 模拟游戏层两名客户端 join_game_and_shuffle 入座（服务器验证语义与
+/// `Table::join_player_and_shuffle` 一致：proof verify → register → deck := output）。
+fn game_layer_join(
+    game: &mut MentalPokerGame,
+    player: &ClientPlayer,
+) {
+    let agg_prev = game.key_manager.get_aggregated_pk();
+    let round = player.join_game_and_shuffle(&game.deck_encrypted, &agg_prev);
+    let ms = &round.mask_and_shuffle_round;
+    // 服务器侧验证（与 join_player_and_shuffle 相同的两步证明校验）
+    let mut transcript = poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript::new(
+        b"zk_mask_shuffle_proof_v2",
+    );
+    let input_cards: Vec<ZgCt> = game.deck_encrypted.clone();
+    assert!(
+        ms.remask_proof.verify(
+            &input_cards,
+            &ms.mask_cards,
+            &player.pk,
+            &mut transcript,
+        ),
+        "remask proof must verify"
+    );
+    let share_pk = agg_prev + player.pk;
+    assert!(
+        ms.proof.verify(
+            &ms.mask_cards,
+            &ms.output_cards,
+            &share_pk,
+            &mut transcript,
+        )
+        .is_ok(),
+        "join shuffle proof must verify"
+    );
+    game.register_player(hex_pk(&player.pk), player.pk, round.pk_ownership_proof);
+    game.deck_encrypted = ms.output_cards.clone();
 }
 
-/// 把 ptx 密文（c1/c2: G1Projective）桥接为 zgame 密文（borsh roundtrip）。
-fn to_zg_ct(ct: &super::mirror::PtxElGamalCiphertext) -> ZgCt {
-    // 两份 poker_protocol 副本共享同一 blstrs G1Projective（Cargo 统一版本），
-    // c1/c2 是裸点，直接字段拷贝即可。
-    ZgCt { c1: ct.c1, c2: ct.c2 }
-}
-
-/// 把 zgame 密文列表桥接回 ptx 密文（borsh roundtrip）。
-fn to_ptx_cts(cts: &[ZgCt]) -> Vec<super::mirror::PtxElGamalCiphertext> {
-    super::mirror::conv::ciphertexts(cts).expect("borsh bridge")
-}
-
-/// 完整链路测试：买入 → 开局 → 真实洗牌 → 揭牌 → 下注 → 结算 → calldata。
-///
-/// 当前状态：已验证到「翻牌前 hole reveal 通过 + 下注轮开启」。
-/// 剩余问题：flop 街 reveal 解密报 "decrypted plaintext is not a canonical
-/// Texas Poker card"——需要核对 poker_l1 多街 reveal 的 card_index/密文谱系
-/// （hole 用 live deck 已通过，flop 用同一 deck 失败，疑似 deal 时密文迁移）。
-/// 修复该谱系后取消 #[ignore] 即可驱动完整结算断言。
-/// 牌力完全平分（awards==total_bets）时换随机密钥重打，最多 5 次。
+/// 完整链路测试：游戏层 join×2 → 发底牌 → deck 注入 mirror →
+/// reveal ×(DealHole/Board/Showdown) → 下注 → 结算 → calldata。
+/// 牌力完全平分（awards==total_bets）时换随机密钥重打，最多 20 次。
 #[test]
 fn e2e_starknet_buyin_play_settle_calldata() {
     for attempt in 0..20 {
@@ -91,113 +88,100 @@ fn play_full_hand() -> Result<(), String> {
     let p1: poker_l1::Address = [0x11; 20];
     let p2: poker_l1::Address = [0x22; 20];
 
-    // 玩家 mental-poker 密钥（真实 scalar）。
+    // 客户端（真实 scalar 密钥，与 wasm ClientPlayer 同一代码）。
     let sk1 = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
     let sk2 = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
-    let pk1 = <DefaultCurve as Curve>::base_g() * sk1;
-    let pk2 = <DefaultCurve as Curve>::base_g() * sk2;
-    let aggregate = pk1 + pk2;
+    let client1 = ClientPlayer { sk: sk1.clone(), pk: <DefaultCurve as Curve>::base_g() * &sk1 };
+    let client2 = ClientPlayer { sk: sk2.clone(), pk: <DefaultCurve as Curve>::base_g() * &sk2 };
 
-    let mut mirror = TableMirror::new(1, "e2e", creator, 4, 10, 20, creator);
+    // ---- 游戏层：两名客户端先后 join_game_and_shuffle（deck 由客户端驱动）----
+    let mut game = MentalPokerGame::new(poker_protocol::z_poker::GameConfig {
+        num_players: 2,
+        cards_per_player: 2,
+        community_cards: 5,
+    });
+    game_layer_join(&mut game, &client1);
+    game_layer_join(&mut game, &client2);
 
-    // ---- 买入：join_table（buy_in 计入 stack，真实 Schnorr 所有权证明）----
+    // ---- 游戏层发底牌（升序座位 ×2，对齐 deal_preflop 的 VM 规范顺序）----
+    let pk_hex1 = hex_pk(&client1.pk);
+    let pk_hex2 = hex_pk(&client2.pk);
+    for _ in 0..2 {
+        game.deal_to_player(&pk_hex1, 1).map_err(|e| format!("deal p1: {e:?}"))?;
+        game.deal_to_player(&pk_hex2, 1).map_err(|e| format!("deal p2: {e:?}"))?;
+    }
+    // 此刻 deck 终局（后续 street 不再改写整副 deck）
+    let game_deck: Vec<ZgCt> = game.deck_encrypted.clone();
+
+    // ---- 方案A：deck 原样注入全新 mirror VM，VM 直接进入 DealHole ----
     use poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof;
-    let zpk1 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(pk1)).unwrap();
-    let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(pk2)).unwrap();
-    let nonce1 = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
-    let nonce2 = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
-    let proof1 = create_pk_ownership_proof(&sk1, &nonce1).expect("proof p1");
-    let proof2 = create_pk_ownership_proof(&sk2, &nonce2).expect("proof p2");
-    mirror.join(p1, 1000, zpk1, proof1).expect("join p1");
-    mirror.join(p2, 1000, zpk2, proof2).expect("join p2");
-    assert_eq!(mirror.seat_index_of(p1), Some(0));
-    assert_eq!(mirror.seat_index_of(p2), Some(1));
-
-    // ---- 开局：start_hand（盲注 + sk=0 牌组 + 进入洗牌阶段）----
-    mirror.begin_hand(creator).expect("start_hand");
-
-    // ---- 洗牌 ×2（真实 Bayer-Groth 证明，前端 wasm 同一代码）----
-    // 与真实客户端一致：首洗输入即 start_hand 的 sk=0 牌组 (G, m)，各玩家在
-    // 聚合钥下重加密（c1 含 +1·G 项，这是 reveal token = sk·c1 求和能解密
-    // 到明文的关键）。poker_l1 会在验证后自动注入洗牌者公钥层，所以 p2 的
-    // 输入含 p1 的层。
-    let seeded: Vec<ZgCt> = mirror.deck().iter().map(to_zg_ct).collect();
-    let (out1, proof1) = real_shuffle(&seeded, &aggregate);
+    let zpk1 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client1.pk)).unwrap();
+    let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
+    let proof1 = create_pk_ownership_proof(&sk1, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng))
+        .expect("proof p1");
+    let proof2 = create_pk_ownership_proof(&sk2, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng))
+        .expect("proof p2");
+    let plan = vec![
+        (p1, 1000u64, zpk1, proof1),
+        (p2, 1000u64, zpk2, proof2),
+    ];
+    let mut mirror = TableMirror::new(1, "e2e", creator, 4, 10, 20, creator);
     mirror
-        .submit_shuffle(0, to_ptx_cts(&out1), super::mirror::conv::shuffle_proof(&proof1).unwrap())
-        .expect("p1 shuffle dispatch + verify");
+        .begin_reveal_hand(
+            super::mirror::conv::ciphertexts(&game_deck).expect("deck bridge"),
+            &plan,
+            0,
+            7,
+        )
+        .map_err(|e| format!("begin_reveal_hand: {e}"))?;
 
-    let deck_after_p1: Vec<ZgCt> = mirror.deck().iter().map(to_zg_ct).collect();
-    let (out2, proof2) = real_shuffle(&deck_after_p1, &aggregate);
-    mirror
-        .submit_shuffle(1, to_ptx_cts(&out2), super::mirror::conv::shuffle_proof(&proof2).unwrap())
-        .expect("p2 shuffle dispatch + verify");
-    assert!(mirror.has_provable_activity(), "shuffles must emit prove tasks");
+    // 对拍断言（B0 核心）：注入后 mirror deck 与游戏层 deck 逐字节一致。
+    assert_eq!(
+        mirror.deck(),
+        super::mirror::conv::ciphertexts(&game_deck).unwrap(),
+        "mirror deck must byte-match the game deck after injection"
+    );
 
-    // 洗牌后牌组快照：reveal token 必须基于提交时的密文（后续 street 可能改写 deck）
-    let deck_snapshot: Vec<ZgCt> = mirror.deck().iter().map(to_zg_ct).collect();
-
-    // ---- 推进：reveal 阶段与下注轮交替，直到公共牌到河牌 ----
-    // 与真实协议一致：shuffle → 翻牌前 reveal → preflop 下注 → flop reveal →
-    // flop 下注 → ... → river。reveal 每个玩家对全部 pending assignment 提交
-    // token = sk·c1 + Schnorr 证明（与真实客户端同一证明代码）。
-    use poker_protocol::crypto::curve::CurveScalar;
-    use poker_protocol::zk_shuffle::transcript_ext::MerlinTranscript;
+    // ---- reveal / betting 交替推进到 river ----
+    // 客户端语义：每个玩家对"待揭示密文"生成 token = sk·c1 + Schnorr 证明
+    // （证明绑定完整密文——包括摊牌阶段，与真实客户端一致）。
+    use poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript as FsT;
     use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof as ZgRevealProof;
 
-    let sks: [<DefaultCurve as Curve>::Scalar; 2] = [sk1, sk2];
+    let clients: [&ClientPlayer; 2] = [&client1, &client2];
     for _step in 0..64 {
         if mirror.table.reveal_token_state().is_some() {
-            // reveal 阶段：pending 座位中编号最小者提交其全部 pending assignments
+            // pending 座位中编号最小者提交其全部 pending assignments（canonical 顺序）
             let reveal_state = mirror.table.reveal_token_state().unwrap();
             let min_pending_seat = reveal_state.assignments.iter()
                 .filter(|a| !a.is_ready())
                 .filter_map(|a| (0u8..2).find(|s| a.pending_mask() & (1u16 << s) != 0))
                 .min();
             let Some(seat) = min_pending_seat else { break };
-            let ais: Vec<usize> = reveal_state.assignments.iter().enumerate()
-                .filter(|(_, a)| a.pending_mask() & (1u16 << seat) != 0)
-                .map(|(ai, _)| ai)
-                .collect();
-            let sk = sks[seat as usize];
-            let pk = <DefaultCurve as Curve>::base_g() * sk;
-            // showdown 阶段用 owner 账本的部分密文（非 owner 层已剥离），
-            // 其余阶段用当前牌组快照密文——与 poker_l1 验证端谱系一致。
-            let is_showdown = mirror.table.reveal_phase()
-                == poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN;
+            let client = clients[seat as usize];
+            // canonical 目标密文（showdown 为 ledger 保存的完整密文）
+            let targets = mirror
+                .pending_reveal_ciphertexts(seat)
+                .map_err(|e| format!("pending targets: {e}"))?;
             let mut tokens = Vec::new();
             let mut proofs = Vec::new();
-            for ai in &ais {
-                let assignment = &mirror.table.reveal_assignments()[*ai];
-                let ct = if is_showdown {
-                    let poker_l1::vm::contracts::texas_poker::types::RevealTarget::Hole {
-                        seat_index: owner,
-                        card_slot,
-                    } = assignment.target
-                    else {
-                        panic!("showdown assignment must target a hole slot");
-                    };
-                    let partial = mirror
-                        .table
-                        .deck_state
-                        .owner_readable_hole_cards
-                        .get(owner, card_slot)
-                        .expect("showdown ledger partial must exist");
-                    to_zg_ct(&partial.ciphertext)
-                } else {
-                    deck_snapshot[assignment.encrypted_card_index as usize].clone()
-                };
-                let token = ct.gen_reveal_token(&sk);
+            for target in &targets {
+                let ct = super::mirror::conv::ciphertexts(std::slice::from_ref(
+                    &poker_protocol::crypto::ElGamalCiphertext { c1: target.c1, c2: target.c2 },
+                ))
+                .expect("ct bridge")
+                .remove(0);
+                let token = ct.gen_reveal_token(&client.sk);
                 let proof = ZgRevealProof::prove(
-                    &sk, &pk, &ct, &token, &mut OsRng,
-                    &mut MerlinTranscript::new(b"reveal_token_proof_v3"),
+                    &client.sk, &client.pk, &ct, &token, &mut OsRng,
+                    &mut FsT::new(b"reveal_token_proof_v3"),
                 );
                 tokens.push(super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)).unwrap());
                 proofs.push(super::mirror::conv::reveal_token_proof(&proof).unwrap());
             }
             mirror
                 .submit_reveal_tokens(seat, tokens, proofs)
-                .unwrap_or_else(|e| panic!("seat {seat} reveal submit failed: {e}"));
+                .map_err(|e| format!("seat {seat} reveal submit failed: {e}"))?;
             continue;
         }
         if let Some(actor) = mirror.table.current_turn_option() {
@@ -205,9 +189,9 @@ fn play_full_hand() -> Result<(), String> {
             let facing_bet = mirror.table.seats[actor as usize].total_bet()
                 < mirror.table.seats[other as usize].total_bet();
             if facing_bet {
-                mirror.call(actor).expect("call");
+                mirror.call(actor).map_err(|e| format!("call: {e}"))?;
             } else {
-                mirror.check(actor).expect("check");
+                mirror.check(actor).map_err(|e| format!("check: {e}"))?;
             }
             continue;
         }
@@ -220,6 +204,10 @@ fn play_full_hand() -> Result<(), String> {
     }
 
     assert_eq!(mirror.table.community_cards.to_vec().len(), 5, "board should reach river");
+    assert!(
+        mirror.has_provable_activity(),
+        "reveal tasks must form the provable activity of this hand"
+    );
 
     // 平分检测（须在派奖前：派奖后 board 复位无法 derive）
     let plan_check = poker_l1::vm::contracts::texas_poker::settlement::derive_settlement_plan(&mirror.table)
@@ -228,10 +216,6 @@ fn play_full_hand() -> Result<(), String> {
         plan_check.awards.get(i).copied().unwrap_or(0) as i128 == s.total_bet() as i128
     });
     if all_zero_delta {
-        eprintln!("[debug] awards={:?} winner_mask={} total_bets={:?} hands={:?}",
-            plan_check.awards, plan_check.winner_mask,
-            mirror.table.seats.iter().map(|s| s.total_bet()).collect::<Vec<_>>(),
-            mirror.table.seats.iter().map(|s| s.hand().map(|h| h.to_vec())).collect::<Vec<_>>());
         return Err("split pot".into());
     }
 
@@ -246,21 +230,16 @@ fn play_full_hand() -> Result<(), String> {
     let settlement = super::submit::settle_hand(&mirror, Some(creator))
         .map_err(|e| format!("settlement: {e}"))?;
 
-    assert_eq!(settlement.hand_id, 1);
+    assert_eq!(settlement.hand_id, 7, "hand_id must come from the injected counter");
     assert!(!settlement.register_calldata.is_empty());
     assert!(!settlement.settle_calldata.is_empty());
-    // settle_calldata 布局：digest(hi, lo) + hand_id + players.len + ... + deltas.len + ...
     assert!(settlement.settle_calldata.len() >= 6);
-    // 零和：deltas felts 之和按模意义应为 0（由 SettleHandCalldata 零和校验保证）。
-    // 聚合摘要非零。
     assert_ne!(settlement.aggregate_digest, [0u8; 32]);
 
     // ---- Hand-batch（PokerDualSettlement）：hand_binding + hand-bound 认可批次 ----
     // P2.1 后服务器不持有认可密钥：测试在 host 侧生成密钥并铸造（角色
     // 等价于客户端 wasm endorsement_mint），再走客户端构建路径。
-    use poker_protocol::crypto::curve::{Curve, CurvePoint};
     let binding = super::dual_settle::prepare_handbatch_binding(&mirror, &settlement)?;
-    // gas 压缩版：挑战域 = hand_binding 本身（felt 直通 Poseidon），无 keccak。
     let endorsements: Vec<super::dual_settle::ClientEndorsement> = settlement
         .players_remapped
         .iter()
@@ -275,18 +254,12 @@ fn play_full_hand() -> Result<(), String> {
         .map_err(|e| format!("dapv build: {e}"))?;
     assert_ne!(dual.hand_binding, starknet_ff::FieldElement::ZERO);
     assert_eq!(dual.batch_words.len(), 5 + 5 * settlement.players_remapped.len());
-    // register_hand calldata：binding + settlement_digest + g_attestation
-    // + 3 个零的期望桶计数尾部（新兼容字段，零 = 链上不约束）。
     assert_eq!(dual.register_calldata.len(), 6);
-    // settle calldata 布局：binding + [32, bytes…] + hand_id + [n, players…] + [n, deltas…] + [m, felt×m]
-    // （_stark 入口 Span<felt252> 单 felt/词）
     let expect_len = 1 + 1 + 32 + 1
         + 1 + settlement.players_remapped.len()
         + 1 + settlement.deltas.len()
         + 1 + dual.batch_words.len();
     assert_eq!(dual.settle_calldata.len(), expect_len);
-    // proved 工件：承诺存在、register 8 词、settle calldata 无 p_batch
-    // （同前缀，但去掉了 [m, felt×m] 尾巴，只补承诺+词数两个词）。
     assert_ne!(dual.proved.p_batch_commitment, starknet_ff::FieldElement::ZERO);
     assert_eq!(dual.proved.register_calldata.len(), 8);
     assert_eq!(
@@ -294,10 +267,7 @@ fn play_full_hand() -> Result<(), String> {
         expect_len - (1 + dual.batch_words.len()) + 2
     );
 
-    // 宿主折叠 parity（链上 fold_and_check 的同构镜像）：本手通过；
-    // 跨手（翻转 binding 首字节）按链上视角——用错误域重放挑战后折叠——
-    // 必须拒绝（L2 hand 绑定；§8 引理：对诚实残差换 ρ 折叠恒为零，
-    // 防重放靠的是挑战域错位，不是 ρ 本身）。
+    // 宿主折叠 parity（链上 fold_and_check 的同构镜像）
     let hb_bytes = dual.hand_binding.to_bytes_be();
     let terms =
         super::dual_settle::parse_batch_terms(&hb_bytes, &dual.batch_words)
@@ -317,65 +287,74 @@ fn play_full_hand() -> Result<(), String> {
     Ok(())
 }
 
+fn hex_pk(pk: &poker_protocol::crypto::EcPoint) -> String {
+    poker_protocol::z_poker::convert::ecpoint_to_hex(pk)
+}
 
-/// 已验证前缀：买入（真实 Schnorr 证明）→ start_hand → 真实 Bayer-Groth 洗牌
-/// 证明在 poker_l1 dispatch 下验证通过 → 翻牌前 hole reveal 通过 → 下注轮开启。
-/// 这是前后端证明协议对齐（zgame poker_protocol ↔ poker_texas_air）的核心集成事实。
+/// 注入前缀对拍：join×2 → 发底牌 → deck 注入 → 翻牌前 hole reveal 全部通过 →
+/// 下注轮开启；全程断言 mirror deck 与游戏层 deck 逐字节一致。
 #[test]
-fn e2e_starknet_prefix_join_shuffle_reveal_betting() {
-    // 与完整测试相同的前置（最多到第一次下注行动前）
+fn e2e_starknet_prefix_join_inject_reveal_betting() {
     let creator: poker_l1::Address = [0xC0; 20];
     let p1: poker_l1::Address = [0x11; 20];
     let p2: poker_l1::Address = [0x22; 20];
     let sk1 = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
     let sk2 = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
-    let pk1 = <DefaultCurve as Curve>::base_g() * sk1;
-    let pk2 = <DefaultCurve as Curve>::base_g() * sk2;
-    let aggregate = pk1 + pk2;
+    let client1 = ClientPlayer { sk: sk1.clone(), pk: <DefaultCurve as Curve>::base_g() * &sk1 };
+    let client2 = ClientPlayer { sk: sk2.clone(), pk: <DefaultCurve as Curve>::base_g() * &sk2 };
 
-    let mut mirror = TableMirror::new(1, "e2e-prefix", creator, 4, 10, 20, creator);
+    let mut game = MentalPokerGame::new(poker_protocol::z_poker::GameConfig {
+        num_players: 2,
+        cards_per_player: 2,
+        community_cards: 5,
+    });
+    game_layer_join(&mut game, &client1);
+    game_layer_join(&mut game, &client2);
+    let pk_hex1 = hex_pk(&client1.pk);
+    let pk_hex2 = hex_pk(&client2.pk);
+    for _ in 0..2 {
+        game.deal_to_player(&pk_hex1, 1).expect("deal p1");
+        game.deal_to_player(&pk_hex2, 1).expect("deal p2");
+    }
+    let game_deck: Vec<ZgCt> = game.deck_encrypted.clone();
+
     use poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof;
-    use poker_protocol::crypto::curve::CurveScalar;
-    let zpk1 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(pk1)).unwrap();
-    let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(pk2)).unwrap();
+    let zpk1 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client1.pk)).unwrap();
+    let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
     let proof1 = create_pk_ownership_proof(&sk1, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng)).unwrap();
     let proof2 = create_pk_ownership_proof(&sk2, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng)).unwrap();
-    mirror.join(p1, 1000, zpk1, proof1).expect("join p1");
-    mirror.join(p2, 1000, zpk2, proof2).expect("join p2");
-    mirror.begin_hand(creator).expect("start_hand");
+    let plan = vec![(p1, 1000u64, zpk1, proof1), (p2, 1000u64, zpk2, proof2)];
+    let mut mirror = TableMirror::new(1, "e2e-prefix", creator, 4, 10, 20, creator);
+    mirror
+        .begin_reveal_hand(super::mirror::conv::ciphertexts(&game_deck).unwrap(), &plan, 0, 1)
+        .expect("inject");
 
-    let seeded: Vec<ZgCt> = mirror.deck().iter().map(to_zg_ct).collect();
+    assert_eq!(
+        mirror.deck(),
+        super::mirror::conv::ciphertexts(&game_deck).unwrap(),
+        "deck parity after injection"
+    );
 
-    let (out1, prf1) = real_shuffle(&seeded, &aggregate);
-    mirror.submit_shuffle(0, to_ptx_cts(&out1), super::mirror::conv::shuffle_proof(&prf1).unwrap()).expect("p1 shuffle");
-    let deck_after_p1: Vec<ZgCt> = mirror.deck().iter().map(to_zg_ct).collect();
-    let (out2, prf2) = real_shuffle(&deck_after_p1, &aggregate);
-    mirror.submit_shuffle(1, to_ptx_cts(&out2), super::mirror::conv::shuffle_proof(&prf2).unwrap()).expect("p2 shuffle");
-
-    // hole reveal ×2 玩家
-    use poker_protocol::zk_shuffle::transcript_ext::MerlinTranscript;
+    // hole reveal ×2（客户端 token 基于游戏层密文生成）
+    use poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript as FsT;
     use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof as ZgRevealProof;
-    let sks = [sk1, sk2];
+    let clients: [&ClientPlayer; 2] = [&client1, &client2];
     loop {
         let Some(rs) = mirror.table.reveal_token_state() else { break };
         let Some(seat) = rs.assignments.iter().filter(|a| !a.is_ready())
             .filter_map(|a| (0u8..2).find(|s| a.pending_mask() & (1u16 << s) != 0))
             .min() else { break };
-        let ais: Vec<usize> = rs.assignments.iter().enumerate()
-            .filter(|(_, a)| a.pending_mask() & (1u16 << seat) != 0)
-            .map(|(ai, _)| ai).collect();
-        let sk = sks[seat as usize];
-        let pk = <DefaultCurve as Curve>::base_g() * sk;
+        let client = clients[seat as usize];
+        let targets = mirror.pending_reveal_ciphertexts(seat).expect("targets");
         let mut tokens = Vec::new();
         let mut proofs = Vec::new();
-        for ai in &ais {
-            let ci = mirror.table.reveal_assignments()[*ai].encrypted_card_index as usize;
-            let ct = to_zg_ct(&mirror.deck()[ci]);
-            let token = ct.gen_reveal_token(&sk);
+        for target in &targets {
+            let ct = poker_protocol::crypto::ElGamalCiphertext { c1: target.c1, c2: target.c2 };
+            let token = ct.gen_reveal_token(&client.sk);
             tokens.push(super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)).unwrap());
             proofs.push(super::mirror::conv::reveal_token_proof(
-                &ZgRevealProof::prove(&sk, &pk, &ct, &token, &mut OsRng,
-                    &mut MerlinTranscript::new(b"reveal_token_proof_v3"))).unwrap());
+                &ZgRevealProof::prove(&client.sk, &client.pk, &ct, &token, &mut OsRng,
+                    &mut FsT::new(b"reveal_token_proof_v3"))).unwrap());
         }
         mirror.submit_reveal_tokens(seat, tokens, proofs).expect("hole reveal");
     }

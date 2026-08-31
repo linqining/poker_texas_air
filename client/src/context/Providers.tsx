@@ -17,9 +17,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   StarknetConfig,
   starkscan,
-  InjectedConnector,
-  argent,
-  braavos,
   jsonRpcProvider,
 } from '@starknet-react/core';
 import { cartridgeConnector } from '../starknet/cartridge';
@@ -27,14 +24,10 @@ import { sepolia, mainnet } from '@starknet-react/chains';
 
 const queryClient = new QueryClient();
 
-// Connector list. Cartridge Controller first: passkey smart wallet with
+// Connector list. 仅保留 Cartridge Controller：passkey smart wallet with
 // session keys — approve/deposit/withdraw run without per-action popups.
-// ArgentX/Braavos (browser extensions) remain as alternatives.
-const connectors = [
-  cartridgeConnector,
-  new InjectedConnector({ options: argent() }),
-  new InjectedConnector({ options: braavos() }),
-];
+// （ArgentX/Braavos 注入钱包按产品决策下线。）
+const connectors = [cartridgeConnector];
 
 // Per-chain RPC endpoints (public Blast endpoints; override by editing here).
 const RPC_URLS: Record<string, string> = {

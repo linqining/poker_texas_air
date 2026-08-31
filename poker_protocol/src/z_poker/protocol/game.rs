@@ -23,12 +23,13 @@ use std::collections::HashMap;
 
 /// Derive 52 deterministic, independent EcPoints as card plaintexts.
 ///
-/// Uses BLS12-381 hash_to_g1 with label "texas_poker/card/{i}",
-/// matching the Move contract's `generate_plaintext_cards()`.
-/// DST 必须与 Sui `bls12381::hash_to_g1` 一致：`BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_`
+/// Uses BLS12-381 hash_to_g1 with label "texas_poker/card/{i}".
+/// DST 对齐 poker_l1 VM 的 `generate_plaintext_cards`（BLS_G1_DST）——
+/// 方案A 的 deck 同源要求：游戏层与 VM 必须共享同一规范明文域，
+/// 否则注入 VM 的 deck 在解密时无法 canonical-match。
 #[cfg(not(feature = "stark-curve"))]
 pub fn new_plain_text() -> Vec<Plaintext> {
-    const BLS_DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
+    const BLS_DST: &[u8] = b"POKER_L1_BLS12381G1_XMD:SHA-256_SSWU_RO_";
     (0..N_CARDS)
         .map(|i| {
             let label = format!("texas_poker/card/{}", i);
@@ -227,6 +228,12 @@ impl MentalPokerGame {
             .get_mut(player_pk)
             .ok_or(VerificationError::PlayerNotFound)?;
 
+        // 每名玩家每手牌的底牌数量硬上限（德扑 = 2）。任何重复发牌路径
+        // （双重 advance、洗牌后重发等）到这里都会被拒绝，防止手牌无限增长。
+        if player.hand_encrypted.len() + n > self.config.cards_per_player {
+            return Err(VerificationError::TooManyCardsReplaced);
+        }
+
         let pk_hex = player.pk_hex.clone();
         let mut card_index =
             Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted);
@@ -276,6 +283,17 @@ impl MentalPokerGame {
             .values()
             .map(|p| p.pk.clone())
             .collect::<Vec<_>>();
+        // 公共牌总数硬上限（德扑 = 5）。超出的部分截断（而非报错），保证
+        // 双重推进等异常路径不会产生多于 5 张的公共牌。
+        let remaining = self.config.community_cards.saturating_sub(self.community_cards_encrypted.len());
+        let n = n.min(remaining);
+        if n == 0 {
+            tracing::warn!(
+                "[deal_community] community cards capped at {} — ignoring extra deal request",
+                self.config.community_cards
+            );
+            return encrypted_cards;
+        }
         let deal_num =
             Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted);
         for num in 0..n {

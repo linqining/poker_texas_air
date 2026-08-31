@@ -170,11 +170,20 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
         return false;
     }
 
-    // mirror 状态机由服务端 tick 驱动：deadline（reveal/betting/showdown 超时
-    // → refund+reset）与缺失份额补齐（浏览器玩家无法产 mirror 层 token）。
-    crate::starknet::hooks::mirror_advance_deadline(table_id);
-    crate::starknet::hooks::mirror_fill_pending_reveals(table_id);
-    crate::starknet::hooks::mirror_replay_buffered_bets(table_id);
+    // 方案A：mirror 全部事件由游戏层接受点单点派发，tick 只负责两件事——
+    // 1) mirror 处于 ShowdownDisplay 时推进 VM 派奖/复位（为下一手腾位）；
+    // 2) 游戏手已结束（hand_over）而链上结算未成功时，有界重试上链。
+    // 严禁在此恢复 fill/autoplay/replay 等事后追赶补丁（见计划文档禁止事项）。
+    crate::starknet::hooks::mirror_advance_showdown_display(table_id);
+    {
+        let hand_over = {
+            let gs = state.state.read().await;
+            gs.tables.get(&table_id).map(|t| t.summary.hand_over).unwrap_or(false)
+        };
+        if hand_over {
+            crate::starknet::hooks::retry_pending_settlement(table_id).await;
+        }
+    }
 
     // ===== Priority 1: reconstruct =====
     if reconstruct_active {
@@ -872,15 +881,8 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                     "allin" => table.handle_allin(&req.pk_hex), // D2 fix
                     _ => None,
                 };
-                if action_result.is_some() {
-                    // Starknet 镜像：下注动作同步到 poker_l1（失败仅告警）
-                    crate::starknet::hooks::mirror_betting(
-                        table,
-                        &req.pk_hex,
-                        &req.action,
-                        req.amount,
-                    );
-                }
+                // 方案A：下注动作的 mirror 派发已移入 betting.rs 各 handle_*
+                // 的接受点（含超时自动行动路径），此处不再重复派发。
                 action_result
             }
         } else { None }

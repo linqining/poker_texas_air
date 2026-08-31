@@ -20,6 +20,7 @@ impl Table {
         // 对齐 Move do_fold: 重置 betting_started_at = 0，为下一玩家准备
         // （Move 中设为 0，由 tick 重新设置；Rust 直接设为 now_ms 等效）
         self.set_betting_started_at(now_ms());
+        crate::starknet::hooks::mirror_betting(self, pk, "fold", None);
         Some(ActionResult { seat_id, message: format!("{} folds", player_name) })
     }
 
@@ -43,6 +44,7 @@ impl Table {
         self.add_to_pot(added_to_pot);
         // 对齐 handle_fold：重置下注计时，为下一玩家准备
         self.set_betting_started_at(now_ms());
+        crate::starknet::hooks::mirror_betting(self, pk, "call", None);
         Some(ActionResult { seat_id, message: format!("{} calls ${:.2}", player_name, added_to_pot) })
     }
 
@@ -63,6 +65,7 @@ impl Table {
         }
         // 对齐 handle_fold：重置下注计时，为下一玩家准备
         self.set_betting_started_at(now_ms());
+        crate::starknet::hooks::mirror_betting(self, pk, "check", None);
         Some(ActionResult { seat_id, message: format!("{} checks", player_name) })
     }
 
@@ -114,6 +117,7 @@ impl Table {
         }
         // 对齐 handle_fold：重置下注计时，为下一玩家准备
         self.set_betting_started_at(now_ms());
+        crate::starknet::hooks::mirror_betting(self, pk, "raise", Some(amount));
         Some(ActionResult { seat_id, message: format!("{} raises to ${:.2}", player_name, amount) })
     }
 

@@ -33,12 +33,11 @@ pub use ptx_protocol::crypto::DefaultCurve as PtxCurve;
 
 
 /// 单桌镜像。生命周期：建桌 → 每手 start → 操作 → 结算 → 下一手。
+#[derive(Clone)]
 pub struct TableMirror {
     pub table: TexasPokerTable,
     /// 当前手牌收集的证明任务（每手结算后清空）。
     pub tasks: Vec<ProveTask>,
-    /// 待应用 join（下一手 begin_hand 前批量 dispatch join_table）。
-    pub pending_joins: Vec<(poker_l1::Address, u64, PtxECPoint, Vec<u8>)>,
     /// 派奖前快照（board/pot/total_bet 完整），供 SettleHandCalldata 构建。
     /// 在 showdown 展示期结束、advance_deadline 派奖之前调用 [`mark_pre_settlement`]。
     pub pre_settlement: Option<TexasPokerTable>,
@@ -72,7 +71,6 @@ impl TableMirror {
             table,
             table_seed: table_id_seed,
             tasks: Vec::new(),
-            pending_joins: Vec::new(),
             pre_settlement: None,
             caller,
             block_height: 1,
@@ -98,7 +96,7 @@ impl TableMirror {
     }
 
     /// dispatch 一个动作并收集产出的 ProveTask。
-    fn apply(
+    pub fn apply(
         &mut self,
         caller: poker_l1::Address,
         selector: &[u8; 32],
@@ -113,37 +111,6 @@ impl TableMirror {
         if let Some(task) = output.prove_task {
             self.tasks.push(task);
         }
-        Ok(())
-    }
-
-    /// 设置初始加密牌组并进入洗牌阶段（每手开始时调用）。
-    ///
-    /// `deck` 为服务端 deck.rs 维护的 52 张加密牌（zgame 类型，经 borsh 转换），
-    /// `pending_mask` 的每一位对应一个需要洗牌的座位。
-    pub fn start_hand(
-        &mut self,
-        deck: Vec<PtxElGamalCiphertext>,
-        pending_mask: SeatMask,
-        contributor_mask: SeatMask,
-    ) -> Result<(), String> {
-        // 新一手开始：上一手的结算快照失效（settle_hand 若未跑也不能跨手复用）。
-        self.pre_settlement = None;
-        let cards: [PtxElGamalCiphertext; 52] = deck
-            .try_into()
-            .map_err(|_| "mirror deck must contain exactly 52 cards".to_string())?;
-        self.table.deck_state.encrypted =
-            CipherDeck::Active(Box::new(cards));
-        self.table.deck_state.contributor_mask = contributor_mask;
-        self.table
-            .enter_initial_shuffling(
-                ShuffleState {
-                    pending_mask,
-                    completed_mask: 0,
-                },
-                now_ms(),
-            )
-            .map_err(|e| format!("mirror enter_initial_shuffling failed: {e}"))?;
-        self.tasks.clear();
         Ok(())
     }
 
@@ -169,18 +136,130 @@ impl TableMirror {
         self.apply(player, &texas_dispatch::selectors::join_table(), args)
     }
 
-    /// 用服务端真实的初始牌组覆写镜像牌组。
+    /// 方案A 注入式开局：把游戏层**已终局**（全部客户端洗牌已验证、底牌已发）的
+    /// deck 原样注入 VM，并让 VM 直接进入 DealHole reveal 窗口。
     ///
-    /// start_hand 内部生成的 sk=0 牌组与 zgame 服务器 MentalPokerGame 生成的
-    /// 聚合密钥牌组在密钥层上不同；客户端洗牌证明是针对后者生成的，
-    /// 因此 begin_hand 之后、首个洗牌提交之前调用此方法对齐输入
-    /// （与 poker_texas_air 官方 e2e 测试的手工 deck 注入方式一致）。
-    pub fn set_deck(&mut self, deck: Vec<PtxElGamalCiphertext>) -> Result<(), String> {
+    /// `plan` 为按游戏座位号升序排列的参与座位（与 VM DealHole 的升序座位规范
+    /// 对齐，保证 deck index → 玩家映射逐字节一致）；`button_rank` 是游戏层按钮
+    /// 在该序列中的序号。此调用发生在任何 dispatch 之前，不产生 ProveTask，
+    /// 后续 reveal/bet 任务在该注入状态上连续（满足 MethodBatch 状态连续性）。
+    pub fn begin_reveal_hand(
+        &mut self,
+        deck: Vec<PtxElGamalCiphertext>,
+        plan: &[(poker_l1::Address, u64, PtxECPoint, Vec<u8>)],
+        button_rank: u8,
+        hand_id: u32,
+    ) -> Result<(), String> {
+        // 全新手状态（TableMirror 由调用方刚构造）：清上一手残留，保证
+        // deck 注入点是干净 canonical 状态。
+        self.pre_settlement = None;
+        self.tasks.clear();
+        self.table.community_cards.clear();
+        self.table.pot = 0;
+        self.table.hand_id = hand_id;
+
+        // join：按升序座位计划重放（VM find_empty_seat 顺序填座 →
+        // mirror 座位 rank == 游戏座位 rank）。
+        for (player, buy_in, pk, proof) in plan {
+            self.join(*player, *buy_in, pk.clone(), proof.clone())
+                .map_err(|e| format!("begin_reveal join: {e}"))?;
+        }
+        if self.table.seats.iter().all(|s| seat_player_addr(s).is_none()) {
+            return Err("begin_reveal: no joined seats".into());
+        }
+        // join_table 产生的座位是 Waiting（等待大盲）状态；VM 原生流程由
+        // start_hand 的 promote_waiting_for_big_blind 提升，注入式开局跳过
+        // start_hand，这里等价执行"全新桌全体 Waiting 座位同时入局"规则，
+        // 使 DealHole 的 active 座位集合与游戏层参与者一致。
+        for seat in self.table.seats.iter_mut() {
+            seat.promote_waiting();
+        }
+
+        // button 对齐：游戏层按钮在参与座位中的 rank（VM post_blinds 据此
+        // 计算盲注位置，与游戏层盲注玩家保持一致）。
+        self.table.button = button_rank.min(self.table.seats.len().saturating_sub(1) as u8);
+
+        // deck 注入 + contributor 全量 + 直接进入 DealHole：
+        // pending_mask = 0（游戏层洗牌已在注入前完成，VM 跳过洗牌阶段），
+        // advance_shuffle 触发 ShuffleComplete → start_preflop_reveal_phase →
+        // 按 VM 规范（升序座位，每人 2 张）创建 DealHole reveal 窗口。
         let cards: [PtxElGamalCiphertext; 52] = deck
             .try_into()
             .map_err(|_| "mirror deck must contain exactly 52 cards".to_string())?;
         self.table.deck_state.encrypted = CipherDeck::Active(Box::new(cards));
+        self.table.deck_state.cards_dealt = 0;
+        self.table.deck_state.owner_readable_hole_cards.clear();
+        let mut contributor_mask: SeatMask = 0;
+        for idx in 0..self.table.seats.len().min(16) {
+            if seat_player_addr(&self.table.seats[idx]).is_some() {
+                contributor_mask |= 1u16 << idx;
+            }
+        }
+        self.table.deck_state.contributor_mask = contributor_mask;
+        self.table
+            .enter_initial_shuffling(
+                ShuffleState {
+                    pending_mask: 0,
+                    completed_mask: 0,
+                },
+                now_ms(),
+            )
+            .map_err(|e| format!("mirror enter_initial_shuffling failed: {e}"))?;
+        // 规范化推进：武装 deadline + 驱动 ShuffleComplete → DealHole，
+        // 与 dispatch 后的 canonical 归一化保持一致。
+        let mut events = Vec::new();
+        poker_l1::vm::contracts::texas_poker::state_machine::normalize_until_blocked(
+            &mut self.table,
+            now_ms(),
+            &mut events,
+        )
+        .map_err(|e| format!("mirror normalize after deck injection: {e}"))?;
+        if self.table.reveal_token_state().is_none() {
+            return Err("begin_reveal: DealHole reveal window did not start".into());
+        }
         Ok(())
+    }
+
+    /// 当前 DealHole/Board/Showdown reveal 窗口中该座位待提交的密文
+    /// （canonical 顺序）。调用方据此把客户端提交的 token 集合重排成
+    /// VM 要求的 canonical 顺序（全有或全无）。
+    pub fn pending_reveal_ciphertexts(&self, seat_index: u8) -> Result<Vec<PtxElGamalCiphertext>, String> {
+        let Some(state) = self.table.reveal_token_state() else {
+            return Err("reveal phase is NONE".into());
+        };
+        let mut out = Vec::new();
+        for a in &state.assignments {
+            if a.pending_mask & (1u16 << seat_index) != 0 {
+                // showdown：验证目标是 ledger 保存的完整密文（与客户端生成
+                // 证明所用密文逐字节一致）；其他阶段用当前 deck 密文。
+                let ct = if self.table.reveal_phase()
+                    == poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN
+                {
+                    let poker_l1::vm::contracts::texas_poker::types::RevealTarget::Hole {
+                        seat_index: owner,
+                        card_slot,
+                    } = a.target
+                    else {
+                        return Err("showdown assignment must target hole".into());
+                    };
+                    self.table
+                        .deck_state
+                        .owner_readable_hole_cards
+                        .get(owner, card_slot)
+                        .map(|p| p.full_ciphertext)
+                        .ok_or_else(|| "showdown partial ledger missing".to_string())?
+                } else {
+                    *self
+                        .table
+                        .deck_state
+                        .encrypted
+                        .get(a.encrypted_card_index as usize)
+                        .ok_or_else(|| "reveal card index out of range".to_string())?
+                };
+                out.push(ct);
+            }
+        }
+        Ok(out)
     }
 
     /// 玩家洗牌提交（对应 WS `SHUFFLE_SUBMIT`）。
@@ -277,92 +356,6 @@ impl TableMirror {
         self.apply(self.caller, &texas_dispatch::selectors::advance_deadline(), Vec::new())
     }
 
-    /// 缓冲一个 join（等待 begin_hand 应用）。
-    pub fn buffer_join(&mut self, player: poker_l1::Address, buy_in: u64, pk: PtxECPoint, proof: Vec<u8>) {
-        self.pending_joins.push((player, buy_in, pk, proof));
-    }
-
-
-    /// mirror 自治初始洗牌：对当前 sk=0 牌组，按 poker_l1 的 shuffler 轮转，
-    /// 为每个已 join 座位生成真实 BG 洗牌证明并 dispatch（产 dual-proof 任务）。
-    pub fn autonomous_initial_shuffle(&mut self) -> Result<(), String> {
-        use poker_protocol::crypto::DefaultCurve;
-        use poker_protocol::crypto::curve::{Curve, CurveScalar};
-        use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
-        use rand::rngs::OsRng;
-
-        // 派生各座位 pk（mirror table 的座位 pk）
-        let mut rounds = 0;
-        loop {
-            let seat_index = self.table.shuffle_state().derived_current_shuffler();
-            if seat_index == u8::MAX || self.table.shuffle_state().pending_mask == 0 {
-                break;
-            }
-            if rounds > 9 {
-                return Err("too many shuffle rounds".into());
-            }
-            rounds += 1;
-            let Some(seat_pk) = self.table.seats[seat_index as usize].pk().copied() else {
-                return Err(format!("seat {seat_index} has no pk"));
-            };
-            let agg_pk = self
-                .table
-                .derived_aggregated_pk()
-                .map_err(|e| format!("agg pk: {e}"))?
-                .map(|p| p.0)
-                .unwrap_or_else(|| <DefaultCurve as Curve>::base_g());
-
-            // 输入 = mirror 当前 deck（zgame 类型），输出 = 真实重加密+置换
-            let input: Vec<poker_protocol::crypto::ElGamalCiphertext> = self
-                .table
-                .deck_state
-                .encrypted
-                .to_vec()
-                .iter()
-                .map(|ct| poker_protocol::crypto::ElGamalCiphertext { c1: ct.c1, c2: ct.c2 })
-                .collect();
-            let n = input.len();
-            let mut permutation: Vec<usize> = (0..n).collect();
-            for i in (1..n).rev() {
-                let j = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=i);
-                permutation.swap(i, j);
-            }
-            let rerandomizers: Vec<_> = (0..n)
-                .map(|_| <DefaultCurve as Curve>::Scalar::random(&mut OsRng))
-                .collect();
-            let output: Vec<_> = (0..n)
-                .map(|i| input[permutation[i]].re_encrypt(&agg_pk, &rerandomizers[i]))
-                .collect();
-            let proof = poker_protocol::zk_shuffle::ShuffleProof::prove(
-                &input,
-                &output,
-                &permutation,
-                &rerandomizers,
-                &agg_pk,
-                &mut OsRng,
-                &mut FiatShamirTranscript::new(b"zk_shuffle_proof_v2"),
-            )
-            .map_err(|e| format!("autonomous shuffle prove: {e}"))?;
-
-            let out_ptx = conv::ciphertexts(&output)?;
-            let proof_ptx = conv::shuffle_proof(&proof)?;
-            self.submit_shuffle(seat_index, out_ptx, proof_ptx)
-                .map_err(|e| format!("autonomous shuffle dispatch: {e}"))?;
-        }
-        Ok(())
-    }
-
-    /// 开局（对应服务端 start_preflop_shuffle）：应用缓冲 joins 后 dispatch start_hand。
-    /// poker_l1 的 start_hand 内部生成 52 张 sk=0 初始加密牌组并进入洗牌阶段。
-    pub fn begin_hand(&mut self, creator: poker_l1::Address) -> Result<(), String> {
-        // 应用缓冲 joins（poker_l1 join_table 仅允许 Waiting，洗牌期入座延迟至此）
-        let joins = std::mem::take(&mut self.pending_joins);
-        for (player, buy_in, pk, proof) in joins {
-            self.join(player, buy_in, pk, proof)
-                .map_err(|e| format!("buffered join: {e}"))?;
-        }
-        self.apply(creator, &texas_dispatch::selectors::start_hand(), Vec::new())
-    }
 
 
 
@@ -485,21 +478,12 @@ impl MirrorRegistry {
         f(mirror)
     }
 
-    /// 丢弃该桌 mirror 状态并在全新实例上执行 `f`。
-    /// 用于 mirror 卡死在中间态（超时/弃牌把 round_state 停在非 Waiting）、
-    /// begin_hand 永久失败的自愈。
-    pub fn with_fresh_mirror<F, R>(
-        &self,
-        table_id: u32,
-        create: impl FnOnce() -> TableMirror,
-        f: F,
-    ) -> Result<R, String>
-    where
-        F: FnOnce(&mut TableMirror) -> Result<R, String>,
-    {
-        let mut guards = self.mirrors.lock().map_err(|e| e.to_string())?;
-        guards.remove(&table_id);
-        let mirror = guards.entry(table_id).or_insert_with(create);
-        f(mirror)
+    /// 用新构造的 mirror 替换该桌现有实例（仅限手牌边界的
+    /// mirror_begin_reveal 调用；手牌进行中禁止替换）。
+    pub fn install(&self, table_id: u32, mirror: TableMirror) {
+        if let Ok(mut guards) = self.mirrors.lock() {
+            guards.insert(table_id, mirror);
+        }
     }
+
 }

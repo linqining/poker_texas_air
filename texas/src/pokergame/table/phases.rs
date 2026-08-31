@@ -62,9 +62,6 @@ impl Table {
         // 对齐 Move：phase = BeforePreflop
         self.shuffle_state.phase = ShufflePhase::BeforePreflop;
         self.shuffle_state.timeout_seconds = 45;
-
-        // Starknet 镜像：批量应用缓冲 join + poker_l1 start_hand
-        crate::starknet::hooks::mirror_begin_hand(self);
     }
 
     /// 对齐 Move：BeforePreflop 洗牌完成后发牌（在 advance_shuffle 中调用）。
@@ -200,9 +197,11 @@ impl Table {
     }
 
     pub fn deal_preflop(&mut self) {
-        let max = self.max_players();
-        let button = self.button().unwrap_or(1);
-        let order: Vec<u32> = (button..=max).chain(1..button).collect();
+        // 升序座位发牌（对齐 poker_l1 VM 的 DealHole 规范顺序）。
+        // deck 已被客户端洗牌随机化，发牌顺序不影响公平性；升序保证
+        // deck index → 玩家的映射与 mirror VM 逐字节一致（结算对拍前提）。
+        let mut order: Vec<u32> = self.local_seats.keys().copied().collect();
+        order.sort_unstable();
 
         for _ in 0..2 {
             for &seat_id in &order {

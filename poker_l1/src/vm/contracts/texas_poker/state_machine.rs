@@ -1633,7 +1633,10 @@ pub fn apply_submit_player_reveal_tokens(
                     partial.encrypted_card_index
                 )));
             }
-            partial.ciphertext
+            // 客户端 reveal-token 证明绑定的是发牌时的完整密文（challenge 含
+            // c2），而非剥层后的 partial 密文；验证必须用 ledger 保存的完整
+            // 密文（自包含，reconstruct 重建 deck 后仍可验证）。
+            partial.full_ciphertext
         } else {
             if card_index as usize >= table.deck_state.encrypted.len() {
                 return Err(PokerL1Error::Serialization(format!(
@@ -1770,6 +1773,7 @@ fn materialize_completed_reveal_assignments(
                             c1: encrypted.c1,
                             c2: partial_decrypt_c2(&encrypted.c2, &tokens),
                         },
+                        *encrypted,
                     ),
                 )?;
             }
@@ -4333,7 +4337,11 @@ mod tests {
             .insert(
                 0,
                 0,
-                PartialHoleCard::new(44, table.deck_state.encrypted[44]),
+                PartialHoleCard::new(
+                    44,
+                    table.deck_state.encrypted[44],
+                    table.deck_state.encrypted[44],
+                ),
             )
             .unwrap();
         table.active_reveal_state_mut().unwrap().assignments = vec![RevealAssignment {
@@ -4409,6 +4417,11 @@ mod tests {
                         record_index as u8,
                         PartialHoleCard::new(
                             (20 + seat_index * 2 + record_index) as u8,
+                            ElGamalCiphertext::encrypt(
+                                &plaintext,
+                                &owner_public_keys[seat_index],
+                                &randomness,
+                            ),
                             ElGamalCiphertext::encrypt(
                                 &plaintext,
                                 &owner_public_keys[seat_index],

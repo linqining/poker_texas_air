@@ -734,8 +734,8 @@ impl SocketState {
         if let Some(table) = gs.tables.get_mut(&table_id) {
                     match table.submit_verified_shuffle(pk_hex, output_cards.clone(), shuffle_proof.clone()) {
                         Ok(()) => {
-                            // Starknet 镜像：同步洗牌证明（失败仅告警）
-                            crate::starknet::hooks::sync_shuffle(table, pk_hex, &output_cards, &shuffle_proof);
+                            // 方案A：洗牌不再转发 mirror（deck 由游戏层验证后
+                            // 在 advance_shuffle 终局点整体注入）。
                             if table.is_all_players_shuffled()
                                 && table.complete_shuffle_player_count() >= MIN_START_NUM as usize
                             {

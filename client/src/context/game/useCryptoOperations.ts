@@ -314,10 +314,17 @@ export const useCryptoOperations = (
       logger.warn('[HandReveal] playerPk mismatch, ignoring:', { playerPk, currentPkHex });
       return null;
     }
+    // 底牌数量硬上限（德扑 = 2）。服务端异常路径若下发多于 2 张，只取前 2 张
+    // 并告警，防止"手牌不限"透出到 UI。
+    const MAX_HOLE_CARDS = 2;
+    const cappedCards = readableCards.length > MAX_HOLE_CARDS ? readableCards.slice(0, MAX_HOLE_CARDS) : readableCards;
+    if (cappedCards.length !== readableCards.length) {
+      logger.error(`[HandReveal] payload carried ${readableCards.length} hole cards (max ${MAX_HOLE_CARDS}) — capped`);
+    }
     const decFailedCards: unknown[] = [];
     const decrypted: string[] = [];
-    for (let i = 0; i < readableCards.length; i++) {
-      const card = readableCards[i];
+    for (let i = 0; i < cappedCards.length; i++) {
+      const card = cappedCards[i];
       const ctJson = JSON.stringify(card);
       const deckPlaintextJson = JSON.stringify(deckPlaintext);
       try {
@@ -364,8 +371,16 @@ export const useCryptoOperations = (
       return;
     }
 
-    setCommunityCards(cards);
-    addMessage(`Community cards revealed: ${cards.length} cards`);
+    // 公共牌数量硬上限（德扑 = 5）。服务端异常路径若下发多于 5 张，只取前 5 张
+    // 并告警，防止"公共牌不限"透出到 UI。
+    const MAX_COMMUNITY_CARDS = 5;
+    const capped = cards.length > MAX_COMMUNITY_CARDS ? cards.slice(0, MAX_COMMUNITY_CARDS) : cards;
+    if (capped.length !== cards.length) {
+      logger.error(`[CommunityReveal] payload carried ${cards.length} community cards (max ${MAX_COMMUNITY_CARDS}) — capped`);
+    }
+
+    setCommunityCards(capped);
+    addMessage(`Community cards revealed: ${capped.length} cards`);
   }, [addMessage]);
 
   const handleReconstructNotice = useCallback(async (data: ReconstructNoticeData): Promise<ReconstructSubmitPayload | void> => {

@@ -234,80 +234,11 @@ pub async fn start_bot(
     while started.elapsed().as_secs() < 600 {
         tokio::time::sleep(Duration::from_millis(700)).await;
 
-        // ---- mirror 直驱：mirror 状态活跃时优先推进 mirror 状态机 ----
-        if crate::starknet::hooks::mirror_hand_active(1) {
-            if step % 4 == 0 {
-                if let Some(snap) = crate::starknet::hooks::mirror_state_snapshot(1) {
-                    println!("[bot {seat_id}] mirror state: {snap}");
-                }
-            }
-            // 1) reveal：mirror 待提交卡 → 用自己 sk 生成 token（对 mirror deck）
-            if let Ok(Some(cards)) = crate::starknet::hooks::mirror_pending_reveal_cards(1, my_addr) {
-                if !cards.is_empty() {
-                    // poker_l1 验证端用 MerlinTranscript —— 与 e2e 测试相同的证明路径
-                    use rand::rngs::OsRng as _OsRngType;
-                    use poker_protocol::crypto::{DefaultCurve};
-                    use poker_protocol::crypto::curve::{Curve, CurveScalar};
-                    use poker_protocol::crypto::curve::Curve as _CurveTrait;
-                    use poker_protocol::zk_shuffle::transcript_ext::{FiatShamirTranscript, MerlinTranscript};
-                    use poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript as _MT;
-                    use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof as ZgRevealProof;
-                    let sk = player.sk;
-                    let pk = player.pk;
-                    let mut pt_tokens = Vec::new();
-                    let mut pt_proofs = Vec::new();
-                    for ct in &cards {
-                        let zct = poker_protocol::crypto::ElGamalCiphertext { c1: ct.c1, c2: ct.c2 };
-                        let token = zct.gen_reveal_token(&sk);
-                        let proof = ZgRevealProof::prove(
-                            &sk, &pk, &zct, &token, &mut rand::rngs::OsRng,
-                            &mut FiatShamirTranscript::new(b"reveal_token_proof_v3"),
-                        );
-                        if let (Ok(tok), Ok(proof)) = (
-                            crate::starknet::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)),
-                            crate::starknet::mirror::conv::reveal_token_proof(&proof),
-                        ) {
-                            pt_tokens.push(tok);
-                            pt_proofs.push(proof);
-                        }
-                    }
-                    if !pt_tokens.is_empty() {
-                        match crate::starknet::hooks::mirror_submit_reveal(1, my_addr, pt_tokens.clone(), pt_proofs.clone()) {
-                            Ok(()) => println!("[bot {seat_id}] mirror reveal submitted ({})", pt_tokens.len()),
-                            Err(e) => println!("[bot {seat_id}] mirror reveal failed: {e}"),
-                        }
-                    }
-                    // 不再 continue：mirror 提交后必须让游戏层 reveal 也有机会提交，
-                    // 否则 reveal_token_state 10s 超时把 bot 踢出（e2e 卡死根因）。
-                }
-            }
-            // 1.5) ShowdownDisplay 过期 → advance_deadline 派奖 → 触发结算上链
-            if crate::starknet::hooks::mirror_showdown_display_expired(1) {
-                println!("[bot {seat_id}] mirror showdown display expired, advancing…");
-                if let Err(e) = crate::starknet::hooks::mirror_advance_deadline(1) {
-                    println!("[bot {seat_id}] mirror advance failed: {e}");
-                }
-                crate::starknet::hooks::on_hand_complete(1);
-                tokio::time::sleep(Duration::from_millis(700)).await;
-                continue;
-            }
-            // 2) betting：mirror 下注轮到自己 → check/call
-            if let Some((actor, other_bet)) = crate::starknet::hooks::mirror_betting_state(1, my_addr) {
-                let my_mirror_seat = crate::starknet::hooks::mirror_seat_bet(1, my_addr).map(|_| ()).and_then(|_| crate::starknet::hooks::mirror_my_seat(1, my_addr)).unwrap_or(u8::MAX);
-                if actor == my_mirror_seat {
-                    let my_bet = mirror_my_bet(1, my_addr);
-                    let action = if other_bet > my_bet { "call" } else { "check" };
-                    match crate::starknet::hooks::mirror_submit_betting(1, my_addr, action, None) {
-                        Ok(()) => println!("[bot {seat_id}] mirror {action} sent"),
-                        Err(e) => println!("[bot {seat_id}] mirror {action} failed: {e}"),
-                    }
-                }
-                // 不 continue：游戏层下注（process_action）仍需本 tick 推进
-            }
-            // 去掉分支末尾的无条件 sleep+continue：mirror 活跃时游戏层
-            // （reveal/下注/结算驱动）必须每 tick 都有机会执行，否则
-            // reveal 10s 超时把 bot 踢出（e2e 卡死根因）。
-        }
+        // ---- 方案A：mirror 由游戏层接受点单点驱动，bot 不再平行直驱。----
+        // bot 通过下方 WS 流程正常打牌（洗牌/reveal/下注），游戏层把这些
+        // 已验证事件同步派发给 poker_l1 VM；ShowdownDisplay 推进与结算
+        // 重试由 game_loop tick 负责。
+
 
         step += 1;
         eprintln!("[bot] step {step}");
@@ -483,8 +414,3 @@ use poker_protocol::crypto::Scalar;
 #[allow(dead_code)]
 fn _witness(_: (Scalar, ElGamalCiphertext)) {}
 
-
-/// mirror 中该地址座位的 total_bet。
-fn mirror_my_bet(table_id: u32, addr: poker_l1::Address) -> u64 {
-    crate::starknet::hooks::mirror_seat_bet(table_id, addr).unwrap_or(0)
-}
