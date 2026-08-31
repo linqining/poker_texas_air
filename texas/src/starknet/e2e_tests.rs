@@ -360,3 +360,168 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
     }
     assert!(mirror.table.current_turn_option().is_some(), "betting round should start");
 }
+
+// ============================================================
+// 方案A 实况对拍：走真实 Table 路径（join_player_and_shuffle →
+// start_shuffle → mirror_begin_reveal），断言游戏层 reveal
+// assignment 密文与 mirror VM pending 目标逐字节一致。
+// 复现线上 "reveal set does not cover vm assignments byte-wise"。
+// ============================================================
+#[tokio::test]
+async fn live_flow_assignments_match_mirror_targets() {
+    use crate::config::Config;
+    use crate::models::Database;
+    use crate::pokergame::game_state::{MaskAndShuffleRoundJson, PkProofJson};
+    use crate::pokergame::player::{GamePkHex, Player, WalletAddress};
+    use crate::pokergame::table::Table;
+    use crate::socket::SocketState;
+    use crate::starknet::hooks;
+
+    fn ec_hex(p: &poker_protocol::crypto::EcPoint) -> String {
+        poker_protocol::z_poker::convert::ecpoint_to_hex(p)
+    }
+    fn sc_hex(s: &poker_protocol::crypto::Scalar) -> String {
+        poker_protocol::z_poker::convert::scalar_to_hex(s)
+    }
+    fn shuffle_proof_json(proof: &poker_protocol::zk_shuffle::ShuffleProof) -> serde_json::Value {
+        use poker_protocol::zk_shuffle::versioned::VersionedShuffleProof;
+        match proof {
+            VersionedShuffleProof::BayerGrothV2(p) => {
+                let m = &p.multi_exponentiation;
+                let pr = &p.product;
+                serde_json::json!({
+                    "version": 2,
+                    "proof": {
+                        "c_permutation_hex": ec_hex(&p.c_permutation),
+                        "c_permuted_powers_hex": ec_hex(&p.c_permuted_powers),
+                        "multi_exponentiation": {
+                            "c_alpha_hex": ec_hex(&m.c_alpha),
+                            "c_beta_hex": ec_hex(&m.c_beta),
+                            "ciphertext_0": {"c1_hex": ec_hex(&m.ciphertext_0.c1), "c2_hex": ec_hex(&m.ciphertext_0.c2)},
+                            "ciphertext_1": {"c1_hex": ec_hex(&m.ciphertext_1.c1), "c2_hex": ec_hex(&m.ciphertext_1.c2)},
+                            "alpha_response_hex": m.alpha_response.iter().map(sc_hex).collect::<Vec<_>>(),
+                            "commitment_response_hex": sc_hex(&m.commitment_response),
+                            "beta_hex": sc_hex(&m.beta),
+                            "beta_blinding_response_hex": sc_hex(&m.beta_blinding_response),
+                            "rerandomization_response_hex": sc_hex(&m.rerandomization_response),
+                        },
+                        "product": {
+                            "c_d_hex": ec_hex(&pr.c_d),
+                            "c_delta_hex": ec_hex(&pr.c_delta),
+                            "c_capital_delta_hex": ec_hex(&pr.c_capital_delta),
+                            "a_response_hex": pr.a_response.iter().map(sc_hex).collect::<Vec<_>>(),
+                            "b_response_hex": pr.b_response.iter().map(sc_hex).collect::<Vec<_>>(),
+                            "r_response_hex": sc_hex(&pr.r_response),
+                            "s_response_hex": sc_hex(&pr.s_response),
+                        },
+                    }
+                })
+            }
+            VersionedShuffleProof::LegacyV1(_) => serde_json::Value::Null,
+        }
+    }
+    fn join_payload(player: &ClientPlayer, deck: &[poker_protocol::crypto::ElGamalCiphertext], agg_pk: &poker_protocol::crypto::EcPoint)
+        -> (PkProofJson, MaskAndShuffleRoundJson, String)
+    {
+        use serde_json::json;
+        let round = player.join_game_and_shuffle(deck, agg_pk);
+        let ms = &round.mask_and_shuffle_round;
+        let ct_json = |ct: &poker_protocol::crypto::ElGamalCiphertext| {
+            json!({"c1_hex": ec_hex(&ct.c1), "c2_hex": ec_hex(&ct.c2)})
+        };
+        let ct_vec_json = |cts: &[poker_protocol::crypto::ElGamalCiphertext]| {
+            serde_json::Value::Array(cts.iter().map(ct_json).collect())
+        };
+        let mask_and_shuffle: MaskAndShuffleRoundJson = serde_json::from_value(json!({
+            "mask_cards": ct_vec_json(&ms.mask_cards),
+            "output_cards": ct_vec_json(&ms.output_cards),
+            "remask_proof": {
+                "per_card_commitments_hex": ms.remask_proof.per_card_commitments.iter().map(ec_hex).collect::<Vec<_>>(),
+                "commitment_pk_hex": ec_hex(&ms.remask_proof.commitment_pk),
+                "response_hex": sc_hex(&ms.remask_proof.response),
+                "nonce_hex": sc_hex(&ms.remask_proof.nonce),
+            },
+            "shuffle_proof": shuffle_proof_json(&ms.proof),
+        })).expect("mask and shuffle json");
+        let pk_proof: PkProofJson = serde_json::from_value(json!({
+            "commitment_hex": ec_hex(&round.pk_ownership_proof.commitment),
+            "response_hex": sc_hex(&round.pk_ownership_proof.response),
+        })).expect("pk proof json");
+        (pk_proof, mask_and_shuffle, ec_hex(&player.pk))
+    }
+
+    // Rust 2024 下 set_var 是 unsafe；测试进程独占环境，直接包 unsafe
+    unsafe { std::env::set_var("JWT_SECRET", "test-secret") };
+    let state = std::sync::Arc::new(SocketState::new(
+        Database::new(),
+        std::collections::HashMap::new(),
+        Config::from_env(),
+    ));
+    {
+        let mut gs = state.state.write().await;
+        gs.tables.insert(1, Table::new(1, "Table 1".to_string(), 10000, 9, String::new()));
+    }
+
+    // 与线上一致：bot 先入座 seat 2，浏览器用户后入座 seat 1
+    let wallets = ["0xba7f00d", "0x6e37d33462f7319261396d7d7f669d147e40cdef91c6a8305cfde771805c782"];
+    let seat_ids = [2u32, 1u32];
+    let mut pks = Vec::new();
+    for (i, wallet) in wallets.iter().enumerate() {
+        let player = ClientPlayer::new_with_wallet_address(wallet);
+        let (pk_proof, round, pk_hex) = {
+            let gs = state.state.read().await;
+            let table = gs.tables.get(&1).unwrap();
+            let deck = table.mental_poker_game.deck_encrypted.clone();
+            let agg = poker_protocol::crypto::EcPoint::from(table.mental_poker_game.key_manager.get_aggregated_pk());
+            join_payload(&player, &deck, &agg)
+        };
+        let p = Player {
+            socket_id: format!("sock-{i}"),
+            id: format!("wallet:{wallet}"),
+            name: format!("p{i}"),
+            bankroll: 0,
+            wallet_address: WalletAddress(wallet.to_string()),
+        };
+        let res = state
+            .join_player_and_shuffle(1, p, player.pk.clone(), pk_proof, round, seat_ids[i], 1000)
+            .await;
+        assert!(res.is_ok(), "join {i} failed: {res:?}");
+        pks.push((pk_hex, player));
+    }
+
+    // 开局（对齐 game_loop：ready 倒计时后 start_shuffle）
+    {
+        let mut gs = state.state.write().await;
+        let table = gs.tables.get_mut(&1).unwrap();
+        table.start_shuffle();
+    }
+
+    hooks::mirror_registry();
+    let gs = state.state.read().await;
+    let table = gs.tables.get(&1).unwrap();
+    assert!(table.reveal_token_state.is_active(), "preflop reveal must be active");
+    let assignments = table.reveal_token_state.player_assignments.clone();
+    assert_eq!(assignments.len(), 2, "two players get assignments");
+
+    for (pk_hex, _player) in &pks {
+        let key = GamePkHex::new(pk_hex.clone());
+        let wallet = table.players().get(&key).unwrap().0.clone();
+        let addr = TableMirror::addr_from_starknet(&wallet).unwrap();
+        let assignment = assignments.get(&key).expect("assignment for player");
+        let targets = hooks::mirror_registry()
+            .with_mirror(1, || TableMirror::new(1, "t", [0xC0; 20], 9, 50, 100, [0xC0; 20]), |m| {
+                let Some(seat) = m.seat_index_of(addr) else { return Err("no seat".into()) };
+                m.pending_reveal_ciphertexts(seat)
+            })
+            .expect("mirror reachable");
+        assert_eq!(
+            targets.len(),
+            assignment.hand_card.len(),
+            "target/assignment size mismatch"
+        );
+        for card in &assignment.hand_card {
+            let hit = targets.iter().any(|t| t.c1 == card.c1 && t.c2 == card.c2);
+            assert!(hit, "assignment card not byte-matched in mirror targets");
+        }
+    }
+}

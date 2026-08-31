@@ -197,26 +197,25 @@ impl Table {
     }
 
     pub fn deal_preflop(&mut self) {
-        // 升序座位发牌（对齐 poker_l1 VM 的 DealHole 规范顺序）。
-        // deck 已被客户端洗牌随机化，发牌顺序不影响公平性；升序保证
-        // deck index → 玩家的映射与 mirror VM 逐字节一致（结算对拍前提）。
+        // 升序座位、每座连发 2 张（对齐 poker_l1 VM DealHole 的 canonical
+        // 顺序：per-seat 连续 card_slot，deck index 升序）。deck 已被客户端
+        // 洗牌随机化，发牌顺序不影响公平性；该顺序保证 deck index → 玩家
+        // 的映射与 mirror VM 逐字节一致（结算对拍前提）。
         let mut order: Vec<u32> = self.local_seats.keys().copied().collect();
         order.sort_unstable();
 
-        for _ in 0..2 {
-            for &seat_id in &order {
-                let is_turn = self.turn() == Some(seat_id);
-                if let Some(seat) = self.local_seats.get_mut(&seat_id) {
-                    if let Some(player) = &seat.player{
-                        if !seat.sitting_out {
-                            tracing::info!("player {} is not sitting out,deal to {}", player.name, seat_id);
-                            if let Err(e) = self.mental_poker_game.deal_to_player(&player.pk_hex.clone(), 1) {
-                                tracing::error!("[deal_preflop] deal_to_player failed for player {} seat {}: {:?}", player.name, seat_id, e);
-                            }
-                            seat.turn = is_turn;
-                        }else{
-                            tracing::info!("player {} is sitting out,no deal", player.name);
+        for &seat_id in &order {
+            let is_turn = self.turn() == Some(seat_id);
+            if let Some(seat) = self.local_seats.get_mut(&seat_id) {
+                if let Some(player) = &seat.player {
+                    if !seat.sitting_out {
+                        tracing::info!("player {} is not sitting out, deal 2 to {}", player.name, seat_id);
+                        if let Err(e) = self.mental_poker_game.deal_to_player(&player.pk_hex.clone(), 2) {
+                            tracing::error!("[deal_preflop] deal_to_player failed for player {} seat {}: {:?}", player.name, seat_id, e);
                         }
+                        seat.turn = is_turn;
+                    } else {
+                        tracing::info!("player {} is sitting out,no deal", player.name);
                     }
                 }
             }

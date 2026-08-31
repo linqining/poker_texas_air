@@ -136,8 +136,21 @@ pub fn settle_hand(
             .unwrap_or(p)
     };
     let players_remapped: Vec<Ff> = settle.players().iter().map(|p| remap_player(*p)).collect();
+
+    // 派彩单位换算：vault 的 chip_balance 以 STRK wei 记账（deposit 1:1 wei），
+    // SettlementPlan 的 deltas 以服务端 chips（1 chip = WEI_PER_CHIP wei）计。
+    // settle_hand 上链前必须放大到 wei，且 Poseidon digest 与 calldata 用同一
+    // 放大值（合约按 calldata 重算承诺与 register root 比对）。
+    const WEI_PER_CHIP: i128 = 100_000_000_000_000;
+    let deltas_wei: Vec<i128> = settle
+        .deltas()
+        .iter()
+        .map(|d| d.checked_mul(WEI_PER_CHIP))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("delta wei overflow")?;
+
     let mut digest_fields: Vec<Ff> = vec![Ff::from(u64::from(settle.hand_id()))];
-    for (p, d) in players_remapped.iter().zip(settle.deltas().iter()) {
+    for (p, d) in players_remapped.iter().zip(deltas_wei.iter()) {
         digest_fields.push(*p);
         let magnitude = u64::try_from(d.unsigned_abs()).map_err(|_| "delta magnitude overflow")?;
         if *d >= 0 {
@@ -159,7 +172,7 @@ pub fn settle_hand(
     .map_err(|e| format!("RegisterAggregateCalldata::new failed: {e}"))?;
 
     let register_calldata = register.to_felts().iter().map(|f| ff_to_felt(*f)).collect();
-    let settle_calldata = build_settle_calldata(digest, &settle, &players_remapped);
+    let settle_calldata = build_settle_calldata(digest, &settle, &players_remapped, &deltas_wei);
 
     // G 链首尾 state root（hand_binding 的输入）：首 receipt 的 pre、
     // 末 receipt 的 post。
@@ -194,7 +207,12 @@ pub fn settle_hand(
 ///
 /// 合约使用双 felt digest；Rust builder 的 `to_felts()` 是单 felt 旧格式，
 /// 这里按当前合约 ABI 手工组装。`players` 为重映射后的真实钱包地址。
-fn build_settle_calldata(digest: [u8; 32], settle: &SettleHandCalldata, players: &[Ff]) -> Vec<Felt> {
+fn build_settle_calldata(
+    digest: [u8; 32],
+    settle: &SettleHandCalldata,
+    players: &[Ff],
+    deltas_wei: &[i128],
+) -> Vec<Felt> {
     let felts = AggregateDigestFelts::split(&digest).expect("32-byte digest always splits");
     let mut out = Vec::with_capacity(4 + players.len() * 2);
     out.push(scale_felt(felts.hi));
@@ -202,12 +220,49 @@ fn build_settle_calldata(digest: [u8; 32], settle: &SettleHandCalldata, players:
     out.push(Felt::from(settle.hand_id()));
     out.push(Felt::from(players.len() as u64));
     out.extend(players.iter().map(|p| scale_felt(*p)));
-    out.push(Felt::from(settle.deltas().len() as u64));
-    out.extend(settle.deltas().iter().map(|d| scale_felt(i128_to_ff(*d))));
+    out.push(Felt::from(deltas_wei.len() as u64));
+    out.extend(deltas_wei.iter().map(|d| scale_felt(i128_to_ff(*d))));
     out
 }
 
+/// register 幂等重放：本手的 aggregate 已在链上注册（此前某次尝试已成功）。
+/// 这不是"已结算"——settle 仍必须继续提交。
+fn is_register_replay(e: &str) -> bool {
+    e.contains("Digest already registered") || e.contains("Aggregate already registered")
+}
+
+/// settle 幂等重放：本手已在链上结算过（真正意义上的已完成）。
+fn is_settle_replay(e: &str) -> bool {
+    e.contains("Hand already settled")
+}
+
+/// 等待 register_aggregate 在链上可见（settle_hand 会断言 aggregate 已注册；
+/// 两个交易先后提交存在包含时差，必须等 register 落地再提交 settle）。
+async fn wait_register_visible(
+    chain: &super::chain::StarknetChain,
+    contract: Felt,
+    hand_id: u32,
+) -> Result<(), String> {
+    use starknet::providers::Provider;
+    let selector = starknet_keccak("settlement_digest".as_bytes());
+    let hand_felt = Felt::from(hand_id);
+    for _ in 0..45 {
+        if let Ok(felts) = chain.call_contract(contract, selector, vec![hand_felt]).await {
+            if felts.first().map(|f| *f != Felt::ZERO).unwrap_or(false) {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    }
+    Err("register_aggregate not visible on-chain within 45s".into())
+}
+
 /// 把结算产物提交到链上。返回交易哈希（register, settle）。
+///
+/// 时序保证：settle_hand 在合约内断言 aggregate 已注册，而两笔交易的分池
+/// 提交存在包含时差——此前版本并发提交导致 "Aggregate not registered" 失败、
+/// 随后 register 的幂等错误又被误判为"已结算"而跳过 settle，结算永远无法
+/// 落地。这里改为：register（幂等重放放行）→ 轮询等待注册可见 → settle。
 pub async fn submit_settlement(
     settlement: &HandSettlement,
     settlement_address: &str,
@@ -228,22 +283,33 @@ pub async fn submit_settlement(
         calldata: settlement.settle_calldata.clone(),
     };
 
-    let register_hash = operator
-        .execute_v3(vec![register_call])
-        .send()
-        .await
-        .map_err(|e| format!("register_aggregate submit failed: {e}"))?;
+    let register_hash = match operator.execute_v3(vec![register_call]).send().await {
+        Ok(r) => format!("{:#x}", r.transaction_hash),
+        Err(e) => {
+            let text = format!("{e}");
+            if is_register_replay(&text) {
+                "already-registered".to_string()
+            } else {
+                return Err(format!("register_aggregate submit failed: {e}"));
+            }
+        }
+    };
 
-    let settle_hash = operator
-        .execute_v3(vec![settle_call])
-        .send()
-        .await
-        .map_err(|e| format!("settle_hand submit failed: {e}"))?;
+    wait_register_visible(&chain, contract, settlement.hand_id).await?;
 
-    Ok((
-        format!("{:#x}", register_hash.transaction_hash),
-        format!("{:#x}", settle_hash.transaction_hash),
-    ))
+    let settle_hash = match operator.execute_v3(vec![settle_call]).send().await {
+        Ok(r) => format!("{:#x}", r.transaction_hash),
+        Err(e) => {
+            let text = format!("{e}");
+            if is_settle_replay(&text) {
+                "already-settled".to_string()
+            } else {
+                return Err(format!("settle_hand submit failed: {e}"));
+            }
+        }
+    };
+
+    Ok((register_hash, settle_hash))
 }
 
 /// starknet-ff (0.3) FieldElement → starknet (0.13) Felt。两者均为 32 字节大端。

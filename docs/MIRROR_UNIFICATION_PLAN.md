@@ -40,6 +40,21 @@
   构建 settlement；phase-2 用镜像快照（Clone）构建 dual，不再借用注册表；
   hand_id 以 unix 秒为种子的每桌单调计数（服务器重启后仍满足链上 hand_id 严格递增）。
   链上已核对：`settlement.is_prover(operator)=1`、`settlement.vault()=配置 vault`。
+- **B4 Sepolia 端到端实证（2026-09-01）**：真实浏览器买入（Cartridge 钱包
+  `0x6e37…c782`，deposit tx `0x6f6dd876…`）+ dev_bot（`0xba7f00d`）双人整手到摊牌，
+  `register_aggregate` 与 `settle_hand` 两笔交易 **ACCEPTED_ON_L2 / SUCCEEDED**
+  （settle=`0x36aaf8241792…`，手 1788170046），`hand_settled=1`；
+  settle calldata deltas ±100 chips = ±1e16 wei，`vault.chip_balance` 变化与
+  净胜额精确一致（bot 1000→1100，user −100）。实跑中修复的三个生产 bug：
+  1. 发牌顺序错位——游戏层轮转发牌 vs VM 每座连发 2 张，deck index → 玩家映射
+     不一致（`deal_preflop` 改为升序座位每座连发 2 张，与 VM DealHole canonical 序一致）；
+  2. 单挑 postflop 行动顺序——VM 让 button(SB) 先行动，真实规则为 BB 先
+     （VM `start_betting_round` 对齐 button 之后第一个座位）；
+  3. 结算单位/时序——vault 以 wei 记账而 calldata 用 chips（差 1e14），
+     digest+calldata 统一放大为 wei；register 与 settle 的包含时差导致
+     "Aggregate not registered"、register 幂等错误被误判为已结算——
+     `submit_settlement` 改为 register → 轮询注册可见 → settle，
+     错误分类拆分（register 重放放行、仅 "Hand already settled" 视为完成）。
 - **验收（对拍测试全绿）**：`texas/src/starknet/e2e_tests.rs` 重写为注入流——
   游戏层客户端真实 join_game_and_shuffle → 发底牌 → 注入 → 断言 deck 逐字节一致 →
   DealHole/Board/ShowdownOwner 全窗口客户端 token 验证 → 下注到 river(board=5) →

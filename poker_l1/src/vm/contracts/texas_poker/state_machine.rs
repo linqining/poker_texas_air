@@ -649,11 +649,11 @@ fn start_betting_round(
                 .filter(|_| !is_heads_up)
                 .and_then(|bb| find_next_active_seat(&table.seats, bb, n))
         }
-    } else if is_heads_up {
-        // heads-up postflop: button(SB) 先行动
-        Some(table.button)
     } else {
-        // 非 heads-up postflop: button 之后第一个可行动座位
+        // postflop: BB 先行动（真实德扑规则）。heads-up 时 button=SB，
+        // BB 即 button 之后第一个活跃座位——与非 heads-up 相同的选法，
+        // 且与游戏层 start_betting_round(false) 的 next_unfolded_player(button)
+        // 一致（deck 同源对拍要求两边 turn 顺序逐位一致）。
         find_next_active_seat(&table.seats, table.button, n)
     };
 
@@ -992,7 +992,7 @@ fn start_preflop_reveal_phase(
     let mut card_idx = table.deck_state.cards_dealt;
 
     for &seat in &active_seats {
-        for _ in 0..CARDS_PER_PLAYER {
+        for _slot in 0..CARDS_PER_PLAYER {
             // pending_players = 除牌主外的所有活跃玩家（牌主不为自己提交 reveal token）
             let pending_mask = active_mask & !(1u16 << seat);
             assignments.push(RevealAssignment {
