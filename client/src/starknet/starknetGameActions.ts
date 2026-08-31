@@ -296,10 +296,9 @@ export function isSwapConfigured(): boolean {
 }
 
 /**
- * devnet 浏览器联调用直签账户（可选）：VITE_DEV_ACCOUNT_ADDRESS +
- * VITE_DEV_ACCOUNT_PRIVATE_KEY 配置后，兑换交易用该账户直接签名提交到
- * 当前 RPC（参考 starkware-libs/starknet-privacy demo 的 plain Account
- * 用法）。生产环境不配置，走连接的钱包。
+ * devnet 浏览器联调用直签账户（可选，fallback）：VITE_DEV_ACCOUNT_ADDRESS +
+ * VITE_DEV_ACCOUNT_PRIVATE_KEY 配置后，在没有任何钱包连接时，兑换交易用该
+ * 账户直接签名提交到当前 RPC。有连接账户（Cartridge Controller）时不使用。
  */
 export function getDevSwapAccount(): AccountInterface | null {
   const addr = import.meta.env.VITE_DEV_ACCOUNT_ADDRESS as string | undefined;
@@ -357,16 +356,16 @@ export async function swapTokens(
     };
 
     // 先 approve 再 swap：两笔独立交易（保证 nonce 顺序）。
-    // 配置了 dev 直签账户时用直签（浏览器可真实跑通 devnet 链），
-    // 否则走连接的钱包（Sepolia/主网）。dev 路径显式管理 nonce
+    // 优先走连接的钱包（Cartridge Controller，session key 免弹窗）；
+    // 无连接账户时才回退 dev 直签。dev 路径显式管理 nonce
     // （pre-confirmed 状态下自动 nonce 会读到过期值）。
     const devSigner = getDevSwapAccount();
-    const signer = devSigner ?? account;
+    const signer = account ?? devSigner;
     const exec = signer as never as {
       execute: (c: Call, d?: { nonce?: string }) => Promise<{ transaction_hash: string }>;
     };
 
-    if (devSigner) {
+    if (!account && devSigner) {
       const nonce = await (devSigner as never as { getNonce: () => Promise<string> }).getNonce();
       const next = (BigInt(nonce) + 1n).toString();
       const r1 = await exec.execute(approveCall, { nonce });

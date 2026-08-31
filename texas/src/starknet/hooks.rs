@@ -255,6 +255,9 @@ async fn run_settle_attempt(table_id: u32) {
             .as_ref()
             .map(|b| b.hand_id_bytes)
             .unwrap_or([0u8; 32]);
+        // 重投节流：请求广播只在前 3 次尝试发送（客户端每手只需回应一次；
+        // 无节流的重播会以 3.5s/次轰炸浏览器 wasm 铸造，把页面卡死）。
+        if pending.attempts <= 3 {
         if let Some(io) = crate::socket::get_socket_io() {
             let hand_binding_hex = hex_encode(&binding_bytes);
             if !hand_binding_hex.is_empty() {
@@ -266,6 +269,7 @@ async fn run_settle_attempt(table_id: u32) {
                 let room = crate::socket::table_room_name(table_id);
                 let _ = io.to(room).emit(crate::pokergame::actions::ENDORSEMENT_REQUEST, &request).await;
             }
+        }
         }
         mint_bot_endorsements(
             &binding_bytes,
@@ -329,7 +333,7 @@ async fn run_settle_attempt(table_id: u32) {
         }
         // dapv 严格模式不回退：保留待投递，等下一次尝试（认可可能迟到）。
         if !chain.config.dapv_fallback_legacy() {
-            PENDING_SETTLE.lock().ok().and_then(|mut g| g.insert(table_id, pending));
+            retry_later(pending, table_id);
             return;
         }
     }
@@ -366,8 +370,28 @@ async fn run_settle_attempt(table_id: u32) {
                 settlement.hand_id,
                 pending.attempts
             );
+            // 失败不是终点：保留同一快照由 game_loop tick 重投
+            // （nonce 竞争/RPC 抖动均可恢复），超过上限自动放弃。
+            retry_later(pending, table_id);
         }
     }
+}
+
+/// 有界重投：保留待投递快照等下一次 tick；超过 [`MAX_SETTLE_ATTEMPTS`]
+/// 放弃并丢弃（防镜像状态与游戏永久分歧时的无限重试轰炸 RPC）。
+fn retry_later(pending: PendingSettle, table_id: u32) {
+    if pending.attempts >= MAX_SETTLE_ATTEMPTS {
+        tracing::warn!(
+            "[starknet-settle] table {table_id} hand {} dropped after {} attempts",
+            pending.settlement.hand_id,
+            MAX_SETTLE_ATTEMPTS
+        );
+        return;
+    }
+    PENDING_SETTLE
+        .lock()
+        .ok()
+        .and_then(|mut g| g.insert(table_id, pending));
 }
 
 /// tick 驱动的重投：仅当仍有待投递快照时重试（同一快照，绝不读新 mirror）。
@@ -619,7 +643,24 @@ pub fn mirror_advance_showdown_display(table_id: u32) {
 
 fn apply_mirror_bet(m: &mut TableMirror, seat: u8, action: &str, total_bet: Option<u64>) -> Result<(), String> {
     match action {
-        "fold" => m.fold(seat),
+        "fold" => {
+            // 终局 fold 检测：本次弃牌后只剩 1 名未弃牌玩家时，VM 会在同一
+            // 次 fold 转换里直接派奖并 reset（pot 清零、回 Waiting）。而
+            // settle_hand 需要派奖前状态（pot/total_bet/folded 完整）——
+            // 派奖前先打 pre_settlement 快照，弃牌获胜手牌才有可证明结算。
+            let unfolded_others = m
+                .table
+                .seats
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != seat as usize)
+                .filter(|(_, s)| s.is_occupied() && !s.is_folded() && !s.is_waiting())
+                .count();
+            if unfolded_others == 1 {
+                m.mark_pre_settlement();
+            }
+            m.fold(seat)
+        }
         "check" => m.check(seat),
         "call" => m.call(seat),
         "raise" => match total_bet {

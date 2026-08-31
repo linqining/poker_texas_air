@@ -33,6 +33,12 @@ impl Table {
             self.summary.win_messages.push(format!("{} wins ${:.2}", player_name, total_win));
         }
         self.end_hand();
+
+        // fold-win 手牌同样上链结算（showdown 路径由 finish_showdown 触发）。
+        // 绝大多数手牌以弃牌告终——不接入这里，链上结算合约只会出现极少数
+        // 摊牌手的交易。镜像侧 pre_settlement 快照已在终局 fold 派发前打好；
+        // 镜像未同步成功时 settle 构建失败，走有界重投后自动放弃，不阻塞牌局。
+        crate::starknet::hooks::on_hand_complete(self.summary.id);
     }
 
     pub fn reset_empty_table(&mut self) {

@@ -104,6 +104,7 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
   } = params;
   const { walletAddress } = useContext(authContext)!;
 
+  const endorsedHandIdsRef = useRef<Set<number>>(new Set());
   useEffect(() => {
     // StrictMode dev 双挂载会把 isUnmountingRef 置 true 且无人复位，导致
     // 之后每次依赖变化（服务端 TABLE_UPDATED 广播）的 cleanup 都误发
@@ -153,8 +154,16 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       // 本地 wasm 铸造后交回成品（私钥不出客户端）。wasm pkg 未包含
       // 认可导出时 mintEndorsement 返回 null，静默跳过（Hand-batch 结算
       // 由服务器超时降级，legacy 结算不受影响）。
+      // 同一手只铸造/提交一次：服务器 DAPV 重投会重播请求（每 3.5s 一次），
+      // 无去重会导致浏览器反复做 wasm 铸造把页面卡死。
+      const endorsedHandIds = endorsedHandIdsRef.current;
       socket.on(ENDORSEMENT_REQUEST, async (data: { tableId: number; handId: number; handBindingHex: string }) => {
         logger.log('[ENDORSEMENT_REQUEST]', data);
+        if (endorsedHandIds.has(data.handId)) {
+          logger.log('[ENDORSEMENT_REQUEST] already endorsed hand', data.handId);
+          return;
+        }
+        endorsedHandIds.add(data.handId);
         const submission = await mintEndorsement(data.handBindingHex);
         if (!submission) {
           logger.warn('[ENDORSEMENT_REQUEST] wasm endorsement capability unavailable — skipping');
@@ -279,6 +288,12 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       // out of sync). For betting action errors, close the loading overlay
       // so the player can act again.
       socket.on('error', (data: { msg?: string; action?: string; table_id?: string }) => {
+        // 良性幂等：同一玩家重复提交 reveal token（同账号多浏览器/双触发竞态）
+        // 被服务器拒绝属正常现象，首次提交已生效，不作为错误展示。
+        if (data?.msg && data.msg.includes('already submitted or not pending')) {
+          logger.log('[Socket error] benign duplicate reveal submit:', data.msg);
+          return;
+        }
         logger.error('[Socket error]', data);
         if (data?.action && BETTING_ACTIONS.has(data.action)) {
           stopActionLoading();
@@ -310,4 +325,4 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       }
     };
   }, [socket, handleShuffleNotice, handleRevealNotice, handleReconstructNotice, handleHandRevealResult, handleCommunityRevealResult, resetRevealDedup, stopActionLoading, addMessage, currentTableRef, leaveTable, pkHex, setCommunityCards, setCryptoEvents, setCurrentTable, setDecryptedHandCards, setKickNotification, setLeaveDeferred, setMessages, isUnmountingRef]);
-};
+}

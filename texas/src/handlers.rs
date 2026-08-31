@@ -498,6 +498,15 @@ pub async fn submit_reveal_token(
     let pk_hex = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
 
     if let Err(e) = state.socket_state.submit_reveal_tokens_for_pk(table_id, &pk_hex, tokens).await {
+        // 良性幂等：重复提交（首次已推进状态机）按成功语义返回，不广播
+        // "proof verification failed"（客户端 UI 会当成真错误展示）。
+        if crate::pokergame::table::Table::is_benign_reveal_error(&e) {
+            tracing::info!(
+                "[submit_reveal_token] idempotent duplicate submit ignored, table_id={}, pk_hex={}",
+                table_id, pk_hex
+            );
+            return (StatusCode::OK, Json(serde_json::json!({"msg": "already submitted"}))).into_response();
+        }
         tracing::warn!("[submit_reveal_token] submit failed, table_id={}, pk_hex={}, error={}", table_id, pk_hex, e);
         // ZK 可视化：reveal_token 证明验证失败
         state.socket_state.broadcast_crypto_event(

@@ -1606,6 +1606,17 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             };
 
             if let Err(e) = state.submit_reveal_tokens_for_pk(payload.table_id, &pk_hex, tokens.clone()).await {
+                // 良性幂等：同一玩家重复提交（同账号多浏览器、REVEAL_NOTICE 与
+                // TABLE_UPDATED fallback 并发、服务器重播）到达时首次提交已推进
+                // 状态机。info 记录后直接返回——不广播误导性的 "proof verification
+                // failed"，也不回 error（UI 会当成真错误展示）。
+                if Table::is_benign_reveal_error(&e) {
+                    tracing::info!(
+                        "[REVEAL_SUBMIT] idempotent duplicate submit ignored, table_id={}, pk_hex={}",
+                        payload.table_id, pk_hex
+                    );
+                    return;
+                }
                 tracing::warn!("[REVEAL_SUBMIT] submit failed, table_id={}, pk_hex={}, error={}", payload.table_id, pk_hex, e);
                 state.broadcast_crypto_event(
                     payload.table_id,

@@ -41,13 +41,19 @@ export function getDevAccount(): Account | null {
 }
 
 /**
- * 活跃账户 = dev 直签账户（配置时）优先，否则连接的钱包账户。
+ * 活跃账户解析（对齐 Cartridge 官方集成模型：Controller 是内嵌 iframe 的
+ * passkey 智能钱包，无需浏览器插件；每个浏览器 profile 持有自己的 keychain
+ * 账户，多账号联调 = 每个浏览器各自连接自己的 Controller 账户）。
+ *
+ * 连接的钱包（Cartridge Controller）**优先**——游戏身份必须跟随真实连接的
+ * 账户，否则第二个浏览器永远拿不到自己的身份。dev 直签账户只在没有任何
+ * 钱包连接时兜底（离线/本地联调）。
  * hook 形态见 hooks/useActiveAccount.ts。
  */
 export function activeAddress(connected: string | null | undefined): string | null {
-  return getDevAccountAddress() ?? (connected ?? null);
+  return (connected ?? null) ?? getDevAccountAddress();
 }
 
 export function activeAccount(connected: AccountInterface | null | undefined): AccountInterface | null {
-  return getDevAccount() ?? (connected ?? null);
+  return (connected ?? null) ?? getDevAccount();
 }

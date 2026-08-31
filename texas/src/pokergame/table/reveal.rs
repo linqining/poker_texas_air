@@ -305,6 +305,11 @@ impl Table {
         None
     }
 
+    /// 玩家已不在本轮 pending（重复提交 / 状态已推进）的错误文本。
+    /// 多客户端同账号、广播与 TABLE_UPDATED fallback 并发、服务器重播等
+    /// 场景下重复到达属正常现象，提交方应按幂等成功处理（见 is_benign）。
+    pub const ERR_ALREADY_SUBMITTED: &str = "Player already submitted or not pending";
+
     pub fn submit_player_reveal_tokens(
         &mut self,
         player_pk: &GamePkHex,
@@ -314,7 +319,7 @@ impl Table {
             return Err("Reveal token phase not active".to_string());
         }
         if !self.reveal_token_state.pending_players.iter().any(|p| p == player_pk) {
-            return Err("Player already submitted or not pending".to_string());
+            return Err(Self::ERR_ALREADY_SUBMITTED.to_string());
         }
 
         let assign = match self.reveal_token_state.player_assignments.get(player_pk) {
@@ -356,6 +361,13 @@ impl Table {
         } else {
             None
         }
+    }
+
+    /// 提交错误是否为良性幂等场景（`ERR_ALREADY_SUBMITTED`）。调用方据此
+    /// 跳过"证明验证失败"广播与 error 回传——首次提交已推进状态机，
+    /// 结果广播由 on_reveal_complete 单点下发，无需重复告警。
+    pub fn is_benign_reveal_error(e: &str) -> bool {
+        e.contains(Self::ERR_ALREADY_SUBMITTED)
     }
 }
 

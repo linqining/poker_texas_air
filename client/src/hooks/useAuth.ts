@@ -3,7 +3,7 @@ import httpClient from '../helpers/httpClient';
 import setAuthToken from '../helpers/setAuthToken';
 import { getToken } from '../helpers/getToken';
 import { useGlobalContext } from '../context/global/globalContext';
-import { useAccount } from '@starknet-react/core';
+import { useAccount, useDisconnect } from '@starknet-react/core';
 import { getStrkBalance } from '../starknet/starknetGameActions';
 import { starknetConfig } from '../starknet/config';
 import { activeAccount, activeAddress } from '../starknet/devAccount';
@@ -49,6 +49,9 @@ const useAuth = (): UseAuthReturn => {
   );
 
   const { address: connectedAddress, account: connectedAccount } = useAccount();
+  // Cartridge 文档模型：登出必须 disconnect Controller（断开 keychain 会话），
+  // 否则连接仍在、自动重登立即登回同一账号，永远换不了用户。
+  const { disconnect: disconnectConnector } = useDisconnect();
   // dev 直签账户（VITE_DEV_ACCOUNT_*，testnet 联调）优先于连接的钱包：
   // 登录签名、余额读取、游戏身份都用它，无需钱包弹窗。
   const address = activeAddress(connectedAddress);
@@ -213,8 +216,15 @@ const useAuth = (): UseAuthReturn => {
       setChipsAmount(chipsAmount ?? 0);
     } catch (error) {
       // 登录会话已失效（401 token 无效 / 404 服务端重启清空了会话用户）：
-      // 彻底清理前端登录态，UI 回到未登录（Sign In 可见），不再残留半登录态。
+      // 彻底清理前端登录态。但只在失败的 token 仍是当前存储 token 时清理——
+      // 若自动重登已换发新 token（竞态），旧 token 的迟到失败必须忽略，
+      // 否则会把新登录态清掉（Sign In 闪退）。
       const status = (error as { response?: { status?: number } })?.response?.status;
+      const failedToken = getToken();
+      if (failedToken !== token) {
+        logger.warn('loadUser failed for a stale token — ignoring (already re-authenticated)');
+        return;
+      }
       logger.warn('loadUser failed (status=%s) — clearing login state:', status, error);
       localStorage.removeItem('token');
       localStorage.removeItem('walletAddress');
@@ -249,9 +259,16 @@ const useAuth = (): UseAuthReturn => {
         logger.error('wallet_logout backend call failed:', err);
       });
     }
+    // 先断开 Cartridge Controller 连接（passkey 会话失效），再清应用态。
+    // 否则连接的 address 仍存在，自动重登 effect 会立刻登回同一账号。
+    try {
+      disconnectConnector();
+    } catch (err) {
+      logger.warn('connector disconnect failed:', err);
+    }
     setWalletAddress(null);
     logout();
-  }, [logout]);
+  }, [logout, disconnectConnector]);
 
   return {
     isLoggedIn,
