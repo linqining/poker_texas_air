@@ -125,7 +125,7 @@ impl ShuffleState {
             phase: ShufflePhase::None,
             current_player_pk: None,
             timeout_start: None,
-            timeout_seconds: 10,
+            timeout_seconds: 45,
             completed_players: Vec::new(),
             pending_players: Vec::new(),
         }
@@ -236,7 +236,7 @@ impl RevealTokenState {
             total_cards_per_player: cards_per_player,
             total_community_cards: community_cards,
             timeout_start: None,
-            timeout_seconds: 10,
+            timeout_seconds: 45,
             completed_players: Vec::new(),
             pending_players: Vec::new(),
             player_assignments: HashMap::new(),

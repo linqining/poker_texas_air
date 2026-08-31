@@ -61,7 +61,7 @@ impl Table {
 
         // 对齐 Move：phase = BeforePreflop
         self.shuffle_state.phase = ShufflePhase::BeforePreflop;
-        self.shuffle_state.timeout_seconds = 10;
+        self.shuffle_state.timeout_seconds = 45;
 
         // Starknet 镜像：批量应用缓冲 join + poker_l1 start_hand
         crate::starknet::hooks::mirror_begin_hand(self);
@@ -285,7 +285,7 @@ impl Table {
             total_cards_per_player: 2,
             total_community_cards: 0,
             timeout_start: Some(std::time::Instant::now()),
-            timeout_seconds: 10,
+            timeout_seconds: 45,
             completed_players: Vec::new(),
             pending_players: player_pks.iter()
                 .filter(|pk| *pk != &**redealt_player_pk)

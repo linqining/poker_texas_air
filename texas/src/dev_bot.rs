@@ -208,7 +208,16 @@ pub async fn start_bot(
         state.start_game_loop(io, std::sync::Arc::clone(&state), 1).await;
         eprintln!("[bot] start_game_loop called");
     }
-    let joined = join_res.map_err(|e| format!("join: {e:?}"))?;
+    // 已在座（PlayerAlreadyInGame）时重新挂载驱动循环而非退出——
+    // 否则 bot 重启后 game loop 不再被拉起，牌桌永久停摆。
+    let joined = match join_res {
+        Ok(j) => Some(j),
+        Err(e) if format!("{e:?}").contains("PlayerAlreadyInGame") => {
+            println!("[bot {seat_id}] already in game — reattaching drive loop");
+            None
+        }
+        Err(e) => return Err(format!("join: {e:?}")),
+    };
     let _ = joined;
     println!("[bot {seat_id}] on table with real deposit tx {deposit_tx}");
 

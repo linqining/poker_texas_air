@@ -21,7 +21,7 @@ use poker_protocol::precompile_abi::{
 };
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
 use poker_protocol::zk_shuffle::reveal_token_proof::{REVEAL_TOKEN_PROOF_LABEL, RevealTokenProof};
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript, MerlinTranscript};
 use stwo::core::fields::m31::M31;
 
 use crate::error::{TexasAirError, TexasAirResult};
@@ -437,7 +437,7 @@ impl PrecompileCallBinding {
                     &item.encrypted_card,
                     &item.reveal_token.0,
                     &request.player_pk.0,
-                    &mut MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL),
+                    &mut FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL),
                 )
                 .map_err(|error| {
                     TexasAirError::SpecViolation(format!(

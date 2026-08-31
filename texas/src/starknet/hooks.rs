@@ -68,6 +68,11 @@ pub fn on_hand_complete(table_id: u32) {
         table_id,
         || TableMirror::new(u64::from(table_id), "table", [0xC0; 20], 9, 10, 20, [0xC0; 20]),
         |mirror| {
+            eprintln!("[starknet-settle-dbg] mirror hand_id={} tasks={} round={:?} reveal_active={}",
+                mirror.table.hand_id,
+                mirror.tasks.len(),
+                mirror.table.round_state(),
+                mirror.table.reveal_token_state().is_some());
             if !mirror.has_provable_activity() {
                 return Ok(None);
             }
@@ -336,23 +341,32 @@ pub fn mirror_buffer_join_pk(
 pub fn mirror_begin_hand(table: &Table) {
     let table_id = table.summary.id;
     let joins = with_pending(table_id, |p| std::mem::take(&mut p.joins));
-    let out = mirror_registry().with_mirror(
-        table_id,
-        || new_mirror(table_id),
-        |mirror| {
-            for (addr, buy_in, pk, proof) in joins {
-                if let Err(e) = mirror.join(addr, buy_in, pk, proof) {
+
+    // 单次尝试：应用缓冲 joins → begin_hand → 自治初始洗牌
+    let attempt = |fresh: bool| {
+        let run = |mirror: &mut TableMirror| {
+            for (addr, buy_in, pk, proof) in &joins {
+                if let Err(e) = mirror.join(*addr, *buy_in, pk.clone(), proof.clone()) {
                     tracing::warn!("[mirror] join buffered apply failed: {e}");
-                    continue;
                 }
             }
             mirror.begin_hand([0xC0; 20]).map_err(|e| format!("begin_hand: {e}"))?;
             // mirror 自治初始洗牌：每个已 join 座位一次真实 BG 洗牌
             mirror.autonomous_initial_shuffle()
-        },
-    );
+        };
+        if fresh {
+            mirror_registry().with_fresh_mirror(table_id, || new_mirror(table_id), run)
+        } else {
+            mirror_registry().with_mirror(table_id, || new_mirror(table_id), run)
+        }
+    };
+
+    let out = attempt(false);
     if let Err(e) = out {
-        tracing::warn!("[mirror] begin_hand: {e}");
+        tracing::warn!("[mirror] begin_hand on stale mirror failed ({e}) — resetting mirror state for table {table_id}");
+        // 自愈：mirror 卡死在旧手中间态时 begin_hand 永久失败；
+        // 丢弃整块 mirror 状态重开这一手（joins 已 take，重放即可）。
+        let _ = attempt(true);
     }
     // 新手开始：丢弃上一手残留的缓冲下注（不可跨手重放）
     if let Some(mut q) = pending_bets_queue(table_id) {
@@ -366,9 +380,18 @@ pub fn mirror_begin_hand(table: &Table) {
 /// 使 mirror 的 DealHole/CommunityReveal 闭环 → 产生 ProveTask → 可结算。
 /// 每 tick 由 game_loop 调用（幂等：无待提交份额时为空操作）。
 pub fn mirror_fill_pending_reveals(table_id: u32) {
-    for (addr, wallet) in seat_wallet_remaps() {
-        let Ok(Some(cards)) = mirror_pending_reveal_cards(table_id, addr) else { continue };
-        if cards.is_empty() { continue; }
+    let remaps = seat_wallet_remaps();
+    if remaps.is_empty() {
+        eprintln!("[mirror-fill] no seat wallet remaps registered");
+        return;
+    }
+    for (addr, wallet) in remaps {
+        let pending = mirror_pending_reveal_cards(table_id, addr);
+        eprintln!("[mirror-fill] seat pending_is_some={}", pending.is_ok());
+        let cards = match pending {
+            Ok(Some(c)) if !c.is_empty() => c,
+            _ => continue,
+        };
         let player = poker_protocol::z_poker::protocol::ClientPlayer::new_with_wallet_address(&wallet);
         let mut tokens = Vec::new();
         let mut proofs = Vec::new();
@@ -396,10 +419,39 @@ pub fn mirror_fill_pending_reveals(table_id: u32) {
             }
         }
         if tokens.is_empty() { continue; }
+        let n = tokens.len();
         if let Err(e) = mirror_submit_reveal(table_id, addr, tokens, proofs) {
-            tracing::debug!("[mirror] fill pending reveals for seat wallet failed: {e}");
+            eprintln!("[mirror-fill] submit failed: {e}");
+        } else {
+            eprintln!("[mirror-fill] submitted {n} shares");
         }
     }
+}
+
+/// mirror 下注轮自治推进：mirror 是与游戏平行的证明牌局，游戏层的
+/// 下注 sync 存在时序差（"not in betting round"/"bet < current_bet"）。
+/// 这里按 mirror 自身状态为轮到行动的座位代出 check/跟平动作，使
+/// mirror 的手牌独立推进到摊牌（与 mirror_fill_pending_reveals 同思路）。
+pub fn mirror_autoplay_betting(table_id: u32) {
+    let _ = mirror_registry().with_mirror(table_id, || new_mirror(table_id), |m| {
+        use poker_l1::vm::contracts::texas_poker::state_machine as tp_sm;
+        if !tp_sm::is_betting_round(&m.table) { return Ok(()); }
+        let call_amount = m.table.betting_round().map(|b| b.current_bet).unwrap_or(0);
+        let Some(turn_seat) = m.table.current_turn_option() else { return Ok(()) };
+        let my_bet = m.table.seats.iter()
+            .enumerate()
+            .filter(|(i, s)| (*i as u8) == turn_seat)
+            .map(|(_, s)| s.bet())
+            .sum::<u64>();
+        if call_amount == 0 || my_bet >= call_amount {
+            // 无需跟注：代用户 check 完成（零成本动作）
+            m.check(turn_seat)
+        } else {
+            // 存在未跟平下注且用户未操作：fold。绝不代用户 call
+            // （call 会加大用户损失）。mirror 手牌据此结束并完成证明链。
+            m.fold(turn_seat)
+        }
+    });
 }
 
 /// SHUFFLE_SUBMIT 成功后调用。
@@ -646,12 +698,14 @@ pub fn mirror_pending_reveal_cards(table_id: u32, addr: poker_l1::Address)
     -> Result<Option<Vec<crate::starknet::mirror::PtxElGamalCiphertext>>, String>
 {
     mirror_registry().with_mirror(table_id, || new_mirror(table_id), |m| {
-        let Some(seat) = m.seat_index_of(addr) else { return Ok(None) };
-        let Some(state) = m.table.reveal_token_state() else { return Ok(None) };
+        let Some(seat) = m.seat_index_of(addr) else { eprintln!("[mirror-fill-dbg] seat_index_of None for addr"); return Ok(None) };
+        let Some(state) = m.table.reveal_token_state() else { eprintln!("[mirror-fill-dbg] reveal state inactive (seat {seat})"); return Ok(None) };
         let is_showdown = m.table.reveal_phase()
             == poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN;
+        eprintln!("[mirror-fill-dbg] seat={seat} assignments={}", state.assignments.len());
         let mut out = Vec::new();
         for a in &state.assignments {
+            eprintln!("[mirror-fill-dbg]   card={} pending_mask={:b} mybit={}", a.encrypted_card_index, a.pending_mask, 1u16 << seat);
             if a.pending_mask & (1u16 << seat) != 0 {
                 // showdown：owner 账本的部分密文（非 owner 层已剥离）
                 let ct = if is_showdown {

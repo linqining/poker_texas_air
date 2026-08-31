@@ -701,18 +701,38 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
 }
 
 pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) -> bool {
-    let auto_fold = {
+    // 超时自动行动：
+    // 超时自动行动按游戏规则：可 check（无需跟注）→ Check；
+    // 面对 raise/all-in 无法 check → Fold。不按 socket 连接状态判断
+    // （网络抖动下"断连"误判会把在线玩家连弃带踢出局）。
+    enum AutoAction { Fold(String), Check(String), Call(String) }
+    let action = {
         let gs = state.state.read().await;
         if let Some(table) = gs.tables.get(&table_id) {
             if let Some(turn_id) = table.turn() {
-                table.seats().get(&turn_id)
-                    .and_then(|seat| {
-                        if seat.disconnected && !seat.folded {
-                            seat.player.as_ref().map(|p| p.pk_hex.clone())
-                        } else {
-                            None
-                        }
-                    })
+                table.seats().get(&turn_id).and_then(|seat| {
+                    if seat.folded {
+                        return None;
+                    }
+                    let pk_hex = seat.player.as_ref().map(|p| p.pk_hex.clone())?;
+                    // 超时自动行动按游戏规则决定（不按 socket 连接状态——
+                    // 网络可能抖动）：可 check 时绝不弃牌；普通跟注（盲注级
+                    // 别）自动跟注；只有面对超出大盲的 raise/all-in 才 fold。
+                    let call_amount = table.summary.call_amount.unwrap_or(0);
+                    let my_bet = seat.bet;
+                    // 大盲 = 2×min_bet（summary.meta.big_blind 是陈旧值 2，会把盲注
+                    // 跟注误判为 raise 而自动弃牌）
+                    let big_blind = table.summary.min_bet.saturating_mul(2);
+                    if call_amount == 0 || my_bet >= call_amount {
+                        Some(AutoAction::Check(pk_hex.to_string()))
+                    } else if call_amount - my_bet <= big_blind as u64 {
+                        // 普通跟注（盲注级别差额），自动跟注保住手牌
+                        Some(AutoAction::Call(pk_hex.to_string()))
+                    } else {
+                        // 面对超过大盲的加注：fold
+                        Some(AutoAction::Fold(pk_hex.to_string()))
+                    }
+                })
             } else {
                 None
             }
@@ -720,23 +740,58 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
             None
         }
     };
-    if let Some(pk_hex) = auto_fold {
-        let fold_result = {
-            let mut gs = state.state.write().await;
-            if let Some(table) = gs.tables.get_mut(&table_id) {
-                table.handle_fold(&pk_hex)
-            } else {
-                None
+    match action {
+        Some(AutoAction::Fold(pk_hex)) => {
+            let fold_result = {
+                let mut gs = state.state.write().await;
+                if let Some(table) = gs.tables.get_mut(&table_id) {
+                    table.handle_fold(&GamePkHex(pk_hex.clone()))
+                } else {
+                    None
+                }
+            };
+            if let Some(res) = fold_result {
+                broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
+                handle_turn_advance(io, state, table_id).await;
+                // 已 fold 并推进 turn，调用方不应再次检查 is_complete（避免双重推进）
+                return true;
             }
-        };
-        if let Some(res) = fold_result {
-            broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
-            handle_turn_advance(io, state, table_id).await;
-            // 已 fold 并推进 turn，调用方不应再次检查 is_complete（避免双重推进）
-            return true;
+            false
         }
+        Some(AutoAction::Check(pk_hex)) => {
+            let check_result = {
+                let mut gs = state.state.write().await;
+                if let Some(table) = gs.tables.get_mut(&table_id) {
+                    table.handle_check(&GamePkHex(pk_hex.clone()))
+                } else {
+                    None
+                }
+            };
+            if let Some(res) = check_result {
+                broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
+                handle_turn_advance(io, state, table_id).await;
+                return true;
+            }
+            false
+        }
+        Some(AutoAction::Call(pk_hex)) => {
+            let call_result = {
+                let mut gs = state.state.write().await;
+                if let Some(table) = gs.tables.get_mut(&table_id) {
+                    table.handle_call(&GamePkHex(pk_hex.clone()))
+                } else {
+                    None
+                }
+            };
+            if let Some(res) = call_result {
+                broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
+                handle_turn_advance(io, state, table_id).await;
+                return true;
+            }
+            false
+        }
+        None => false,
     }
-    false
 }
 
 pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) {

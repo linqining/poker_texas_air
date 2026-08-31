@@ -484,4 +484,22 @@ impl MirrorRegistry {
         let mirror = guards.entry(table_id).or_insert_with(create);
         f(mirror)
     }
+
+    /// 丢弃该桌 mirror 状态并在全新实例上执行 `f`。
+    /// 用于 mirror 卡死在中间态（超时/弃牌把 round_state 停在非 Waiting）、
+    /// begin_hand 永久失败的自愈。
+    pub fn with_fresh_mirror<F, R>(
+        &self,
+        table_id: u32,
+        create: impl FnOnce() -> TableMirror,
+        f: F,
+    ) -> Result<R, String>
+    where
+        F: FnOnce(&mut TableMirror) -> Result<R, String>,
+    {
+        let mut guards = self.mirrors.lock().map_err(|e| e.to_string())?;
+        guards.remove(&table_id);
+        let mirror = guards.entry(table_id).or_insert_with(create);
+        f(mirror)
+    }
 }
