@@ -170,6 +170,12 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
         return false;
     }
 
+    // mirror 状态机由服务端 tick 驱动：deadline（reveal/betting/showdown 超时
+    // → refund+reset）与缺失份额补齐（浏览器玩家无法产 mirror 层 token）。
+    crate::starknet::hooks::mirror_advance_deadline(table_id);
+    crate::starknet::hooks::mirror_fill_pending_reveals(table_id);
+    crate::starknet::hooks::mirror_replay_buffered_bets(table_id);
+
     // ===== Priority 1: reconstruct =====
     if reconstruct_active {
         // 1a. 检查 reconstruct 是否完成

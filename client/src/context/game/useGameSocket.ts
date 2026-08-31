@@ -114,7 +114,16 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
     window.addEventListener('close', onUnload);
 
     if (socket) {
+      (window as unknown as Record<string, unknown>).__sockDebug = {
+        reg: Date.now(),
+        sid: (socket as unknown as { id?: string }).id ?? null,
+      };
       socket.on(TABLE_UPDATED, ({ table, message, from }: TableUpdatedPayload) => {
+        (window as unknown as Record<string, unknown>).__sockDebug = {
+          ...(window as unknown as Record<string, unknown>).__sockDebug as object,
+          tu: Date.now(),
+          phase: (table as { roundState?: string }).roundState,
+        };
         logger.log(TABLE_UPDATED, table, message, from);
         if (table.roundState === 'waiting') {
           setDecryptedHandCards([]);

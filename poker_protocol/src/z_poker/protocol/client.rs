@@ -98,7 +98,7 @@ impl ClientPlayer {
         plain_cards: &[Plaintext],
     ) -> Result<(Plaintext, ElGamalCiphertext), VerificationError> {
         for token in tokens {
-            let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+            let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
             token
                 .proof
                 .verify(
@@ -127,7 +127,7 @@ impl ClientPlayer {
     pub fn verify_and_reveal_from_token(
         token: &RevealToken,
     ) -> Result<Plaintext, VerificationError> {
-        let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         token
             .proof
             .verify(
@@ -142,7 +142,7 @@ impl ClientPlayer {
 
     pub fn generate_reveal_token(&self, ct: &ElGamalCiphertext) -> RevealToken {
         let reveal_token = ct.gen_reveal_token(&self.sk);
-        let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         let proof = RevealTokenProof::<DefaultCurve>::prove(
             &self.sk,
             &self.pk,
@@ -221,7 +221,7 @@ impl ClientPlayer {
 
         let encrypted_card = hand_encrypted[hand_index].clone();
         let reveal_token = encrypted_card.gen_reveal_token(&self.sk);
-        let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         let proof = RevealTokenProof::<DefaultCurve>::prove(
             &self.sk,
             &self.pk,
@@ -243,7 +243,7 @@ impl ClientPlayer {
         let ct_for_self =
             ElGamalCiphertext::encrypt(&comm_plaintext, &self.pk, &Scalar::random(&mut OsRng));
         let reveal_token = ct_for_self.gen_reveal_token(&self.sk);
-        let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         let proof = RevealTokenProof::<DefaultCurve>::prove(
             &self.sk,
             &self.pk,
@@ -286,7 +286,7 @@ impl ClientPlayer {
         tokens: &[RevealToken],
     ) -> Result<Plaintext, VerificationError> {
         for token in tokens {
-            let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+            let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
             token
                 .proof
                 .verify(

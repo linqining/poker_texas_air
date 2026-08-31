@@ -240,7 +240,7 @@ pub async fn start_bot(
                     use poker_protocol::crypto::{DefaultCurve};
                     use poker_protocol::crypto::curve::{Curve, CurveScalar};
                     use poker_protocol::crypto::curve::Curve as _CurveTrait;
-                    use poker_protocol::zk_shuffle::transcript_ext::MerlinTranscript;
+                    use poker_protocol::zk_shuffle::transcript_ext::{FiatShamirTranscript, MerlinTranscript};
                     use poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript as _MT;
                     use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof as ZgRevealProof;
                     let sk = player.sk;
@@ -252,7 +252,7 @@ pub async fn start_bot(
                         let token = zct.gen_reveal_token(&sk);
                         let proof = ZgRevealProof::prove(
                             &sk, &pk, &zct, &token, &mut rand::rngs::OsRng,
-                            &mut MerlinTranscript::new(b"reveal_token_proof_v3"),
+                            &mut FiatShamirTranscript::new(b"reveal_token_proof_v3"),
                         );
                         if let (Ok(tok), Ok(proof)) = (
                             crate::starknet::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)),
@@ -268,8 +268,8 @@ pub async fn start_bot(
                             Err(e) => println!("[bot {seat_id}] mirror reveal failed: {e}"),
                         }
                     }
-                    tokio::time::sleep(Duration::from_millis(700)).await;
-                    continue;
+                    // 不再 continue：mirror 提交后必须让游戏层 reveal 也有机会提交，
+                    // 否则 reveal_token_state 10s 超时把 bot 踢出（e2e 卡死根因）。
                 }
             }
             // 1.5) ShowdownDisplay 过期 → advance_deadline 派奖 → 触发结算上链
@@ -293,11 +293,11 @@ pub async fn start_bot(
                         Err(e) => println!("[bot {seat_id}] mirror {action} failed: {e}"),
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(700)).await;
-                continue;
+                // 不 continue：游戏层下注（process_action）仍需本 tick 推进
             }
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            continue;
+            // 去掉分支末尾的无条件 sleep+continue：mirror 活跃时游戏层
+            // （reveal/下注/结算驱动）必须每 tick 都有机会执行，否则
+            // reveal 10s 超时把 bot 踢出（e2e 卡死根因）。
         }
 
         step += 1;

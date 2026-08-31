@@ -98,11 +98,11 @@ describe('revealOwnCardGuard', () => {
     expect(result.allowed).toContain(myCard);
   });
 
-  it('P0.4 冷启动：无锚点时 HandReveal 手牌整体保守拒绝', () => {
+  it('P0.4 冷启动（活性修复后）：无锚点时 HandReveal 手牌放行，避免首手死锁', () => {
     expect(hasOwnCardMarkers()).toBe(false);
     const result = guardRevealAssignment([otherCard, otherCard], [], 'HandReveal');
-    expect(result.conservativelyBlocked).toBe(true);
-    expect(result.allowed).toHaveLength(0);
+    expect(result.conservativelyBlocked).toBe(false);
+    expect(result.allowed).toHaveLength(2);
   });
 
   it('P0.4 冷启动：社区牌不受冷启动拒绝影响', () => {

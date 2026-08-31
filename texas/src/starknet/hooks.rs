@@ -284,6 +284,7 @@ use crate::pokergame::player::GamePkHex;
 use crate::pokergame::game_state::{ElGamalCiphertextJson, ShuffleProofJson};
 use crate::pokergame::table::Table;
 use poker_protocol::crypto::curve::Curve;
+use poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript as _CryptoTranscriptTrait;
 use std::collections::HashMap;
 
 /// 单桌缓冲：延迟 join（poker_l1 join_table 仅允许 Waiting，而服务器允许洗牌期入座）
@@ -353,6 +354,52 @@ pub fn mirror_begin_hand(table: &Table) {
     if let Err(e) = out {
         tracing::warn!("[mirror] begin_hand: {e}");
     }
+    // 新手开始：丢弃上一手残留的缓冲下注（不可跨手重放）
+    if let Some(mut q) = pending_bets_queue(table_id) {
+        q.remove(&table_id);
+    }
+}
+
+/// mirror reveal 份额自动补齐：浏览器玩家的 mirror 层份额（sk·c1_mirror）
+/// 无法由客户端产生（mirror 自治 deck 与游戏 deck 不同链），而玩家 sk 由
+/// 钱包地址确定性派生（new_with_wallet_address），服务端可代算缺失份额，
+/// 使 mirror 的 DealHole/CommunityReveal 闭环 → 产生 ProveTask → 可结算。
+/// 每 tick 由 game_loop 调用（幂等：无待提交份额时为空操作）。
+pub fn mirror_fill_pending_reveals(table_id: u32) {
+    for (addr, wallet) in seat_wallet_remaps() {
+        let Ok(Some(cards)) = mirror_pending_reveal_cards(table_id, addr) else { continue };
+        if cards.is_empty() { continue; }
+        let player = poker_protocol::z_poker::protocol::ClientPlayer::new_with_wallet_address(&wallet);
+        let mut tokens = Vec::new();
+        let mut proofs = Vec::new();
+        for ct in &cards {
+            let zct = poker_protocol::crypto::ElGamalCiphertext { c1: ct.c1, c2: ct.c2 };
+            let token = zct.gen_reveal_token(&player.sk);
+            let proof = poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof::<
+                poker_protocol::crypto::DefaultCurve,
+            >::prove(
+                &player.sk,
+                &player.pk,
+                &zct,
+                &token,
+                &mut rand::rngs::OsRng,
+                &mut <poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript as poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript>::new(
+                    poker_protocol::zk_shuffle::reveal_token_proof::REVEAL_TOKEN_PROOF_LABEL,
+                ),
+            );
+            match (
+                crate::starknet::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)),
+                crate::starknet::mirror::conv::reveal_token_proof(&proof),
+            ) {
+                (Ok(tok), Ok(prf)) => { tokens.push(tok); proofs.push(prf); }
+                _ => { /* 转换失败：跳过该卡 */ }
+            }
+        }
+        if tokens.is_empty() { continue; }
+        if let Err(e) = mirror_submit_reveal(table_id, addr, tokens, proofs) {
+            tracing::debug!("[mirror] fill pending reveals for seat wallet failed: {e}");
+        }
+    }
 }
 
 /// SHUFFLE_SUBMIT 成功后调用。
@@ -376,23 +423,69 @@ pub fn mirror_shuffle_submit(
 }
 
 /// 下注动作成功后调用。
+#[derive(Clone, Debug)]
+struct BufferedBet {
+    seat: u8,
+    action: String,
+    total_bet: Option<u64>,
+}
+
+static PENDING_BETS: OnceLock<std::sync::Mutex<std::collections::HashMap<u32, Vec<BufferedBet>>>> =
+    OnceLock::new();
+
+fn pending_bets_queue(table_id: u32) -> Option<std::sync::MutexGuard<'static, std::collections::HashMap<u32, Vec<BufferedBet>>>> {
+    PENDING_BETS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new())).lock().ok()
+}
+
+fn apply_mirror_bet(m: &mut TableMirror, seat: u8, action: &str, total_bet: Option<u64>) -> Result<(), String> {
+    match action {
+        "fold" => m.fold(seat),
+        "check" => m.check(seat),
+        "call" => m.call(seat),
+        "raise" => match total_bet {
+            Some(tb) => m.raise(seat, tb),
+            None => Err("raise requires total_bet".into()),
+        },
+        other => Err(format!("unknown betting action {other}")),
+    }
+}
+
 pub fn mirror_betting(table: &Table, pk_hex: &GamePkHex, action: &str, total_bet: Option<u64>) {
     let table_id = table.summary.id;
     let Some(seat) = mirror_seat_of(table, pk_hex) else { return };
     let result = mirror_registry().with_mirror(table_id, || new_mirror(table_id), |m| {
-        match action {
-            "fold" => m.fold(seat),
-            "check" => m.check(seat),
-            "call" => m.call(seat),
-            "raise" => match total_bet {
-                Some(tb) => m.raise(seat, tb),
-                None => Err("raise requires total_bet".into()),
-            },
-            other => Err(format!("unknown betting action {other}")),
-        }
+        apply_mirror_bet(m, seat, action, total_bet)
     });
     if let Err(e) = result {
-        tracing::warn!("[mirror] betting sync failed ({action}): {e}");
+        // mirror 尚未进入 betting round（DealHole 未闭合等时序差）：
+        // 缓冲后在 game loop tick 里按序重放，保证证明链完整。
+        tracing::warn!("[mirror] betting sync failed ({action}): {e} — buffered for replay");
+        if let Some(mut q) = pending_bets_queue(table_id) {
+            q.entry(table_id).or_default().push(BufferedBet {
+                seat,
+                action: action.to_string(),
+                total_bet,
+            });
+        }
+    }
+}
+
+/// game loop tick 调用：按序重放缓冲的 mirror 下注动作（成功的丢弃）。
+pub fn mirror_replay_buffered_bets(table_id: u32) {
+    let Some(queue) = pending_bets_queue(table_id).and_then(|mut q| q.get_mut(&table_id).map(|v| std::mem::take(v)))
+    else { return };
+    if queue.is_empty() { return; }
+    for b in &queue {
+        let r = mirror_registry().with_mirror(table_id, || new_mirror(table_id), |m| {
+            apply_mirror_bet(m, b.seat, &b.action, b.total_bet)
+        });
+        if let Err(e) = r {
+            tracing::warn!("[mirror] buffered bet replay failed ({} {}): {e}", b.action, b.seat);
+            // 后续动作依赖顺序，遇到失败即停止本轮重放，保留剩余
+            let mut q = pending_bets_queue(table_id).unwrap();
+            q.entry(table_id).or_default().splice(0..0, queue[queue.iter().position(|x| std::ptr::eq(x, b)).unwrap_or(0)..].to_vec());
+            return;
+        }
     }
 }
 

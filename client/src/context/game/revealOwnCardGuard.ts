@@ -144,8 +144,15 @@ export function guardRevealAssignment(
 
   if (handCards.length > 0 && !hasOwnCardMarkers()) {
     // P0.4 冷启动：尚未收到 HAND_REVEAL_RESULT（无锚点），无法区分
-    // "别人的牌" 与 "自己的牌"。保守拒绝整个手牌类 assignment。
-    return { allowed: [...communityCards], blocked: [], conservativelyBlocked: true };
+    // "别人的牌" 与 "自己的牌"。
+    //
+    // 活性修复（Sepolia e2e）：原实现保守拒绝整个手牌类 assignment，导致
+    // 首手 deal reveal 永远收集不齐 → 玩家超时被踢 → 永远拿不到
+    // HAND_REVEAL_RESULT → 锚点永不建立（首手不可玩死锁）。现改为冷启动
+    // 放行：代价是首手对恶意服务器存在 §0.2 隐私暴露面（服务器可把自有
+    // 底牌混入 assignment 骗取解密份额）；一旦锚点建立即恢复全保护。
+    // 服务器为我们自己运营的 testnet/正式环境时该代价可接受。
+    return { allowed: [...handCards, ...communityCards], blocked: [], conservativelyBlocked: false };
   }
 
   const blocked: unknown[] = [];

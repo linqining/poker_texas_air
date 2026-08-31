@@ -180,7 +180,11 @@ export const useCryptoOperations = (
       return;
     }
 
-    // 防止同一阶段的重复 REVEAL_NOTICE 导致重复提交（30 秒窗口）
+    // 防止同一阶段的重复 REVEAL_NOTICE 导致重复提交（30 秒窗口）。
+    // 竞态修复：REVEAL_NOTICE 与 TABLE_UPDATED fallback 会在同一广播批次内
+    // 并发触发本 handler，若在提交成功后才写 dedup（旧实现），两次调用都会
+    // 通过检查 → 第二次提交被服务器拒为 "already submitted or not pending"。
+    // 这里在进入时立即占坑（先写 ts 再做后续异步工作）。
     const now = Date.now();
     const lastSubmit = revealSubmittedRef.current;
     if (lastSubmit && lastSubmit.phase === phase && now - lastSubmit.ts < 30_000) {
@@ -190,6 +194,7 @@ export const useCryptoOperations = (
     if (lastSubmit) {
       logger.log(`[Reveal] DEDUP PASS: phase=${phase} last_phase=${lastSubmit.phase} elapsed=${now - lastSubmit.ts}ms`);
     }
+    revealSubmittedRef.current = { phase, ts: now };
 
     const assignments = player_assignments || currentTableRef.current?.revealTokenState?.player_assignments;
     if (!assignments) {

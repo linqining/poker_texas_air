@@ -127,3 +127,40 @@ nonce——devnet 交易停留在 pre-confirmed，默认 latest 会拿到过期 
 3. swap 流动性建议 ≥ 目标玩家峰值买入总量（1:1000 全额储备 pSTRK）。
 4. 回填 `strk20.json`、本文档、server/client env；navbar 兑换入口自动出现。
 5. 建议加：swap 合约 owner 转多签、`rate` 紧急可调（当前为固定常量写入 storage）。
+
+## Sepolia E2E 状态（2026-08-31）
+
+| 环节 | 状态 | 证据 |
+| --- | --- | --- |
+| 兑换 STRK→pSTRK | ✅ 浏览器跑通 | tx `0x7e5132dc…`，+1000 pSTRK 精确 |
+| 买入（vault.deposit） | ✅ 浏览器跑通 | 服务端验证 `amount=1000`，tx `0x712c41dc…` |
+| 手牌流程（发牌/reveal/下注/摊牌） | ✅ 浏览器+bot 打完 | showdown 触发 `on_hand_complete` |
+| 链上结算（register_aggregate + settle_hand） | ⛔ 阻断 | mirror 证明层缺浏览器玩家份额（见下） |
+
+### 结算阻断点（遗留）
+
+mirror（poker_l1 证明层）走自治 deck 链，与游戏 deck 不同步（代码注释
+"deck 链无法逐字节同步…生产需客户端协议对齐，见 DUAL_PROOF_PROTOCOL.md
+§5.3"）。浏览器玩家无法产出 mirror 层的 reveal 份额（sk·c1_mirror），
+mirror DealHole 永远等不到人类份额 → `mirror has no provable activity`
+→ settle 跳过。已尝试/已修的相关项：transcript 统一（Merlin→FiatShamir，
+poker_l1 + client.rs + dev_bot）、game_loop 每 tick 驱动 mirror
+deadline + 缺失份额服务端补齐（`mirror_fill_pending_reveals`，利用
+钱包确定性派生 sk）、mirror 下注缓冲重放。完整修复需按
+DUAL_PROOF_PROTOCOL.md §5.3 做客户端协议对齐（独立工作量）。
+
+### 本次修复的其他 bug（影响 e2e 的真实缺陷）
+
+1. client `WEI_PER_CHIP` 1e5 ≠ server 1e14（买入金额差 9 个数量级）
+2. `availableChips` 只用服务端结余，挡死首次链上买入
+3. 钱包登录 `signature/messageHash` bigint 序列化崩溃（"闪退"根因）
+4. LoginModal 在 dev 直签模式下开窗即自关
+5. StrictMode 下 `isUnmountingRef` 永久 true → TABLE_UPDATED 每次广播
+   都触发 STAND_UP（玩家被反复移座）
+6. `broadcast_to_table` / `broadcast_player_reveal_result` 同钱包多
+   socket 时取任意一条（陈旧 socket → 广播丢失）
+7. reveal token 双重提交竞态（REVEAL_NOTICE 与 TABLE_UPDATED fallback
+   并发）→ "already submitted" 报错
+8. dev_bot 循环 mirror 分支 `continue` 饿死游戏层动作
+9. snops 估价系数不可调（低余额 declare 被拒）→
+   `SNOPS_GAS_AMOUNT_MULT` / `SNOPS_GAS_PRICE_MULT`

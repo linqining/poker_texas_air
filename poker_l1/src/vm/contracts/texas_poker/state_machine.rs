@@ -36,7 +36,7 @@ use poker_protocol::zk_shuffle::reconstruction::{
     canonical_base_deck,
 };
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript, MerlinTranscript};
 
 use super::betting::BettingRound;
 #[cfg(test)]
@@ -1652,7 +1652,7 @@ pub fn apply_submit_player_reveal_tokens(
                 &encrypted_card,
                 &token_pt,
                 &expected_pk,
-                &mut MerlinTranscript::new(b"reveal_token_proof_v3"),
+                &mut FiatShamirTranscript::new(b"reveal_token_proof_v3"),
             )
             .map_err(|e| PokerL1Error::Serialization(format!("reveal token proof: {e:?}")))?;
             Ok(true)

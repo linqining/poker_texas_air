@@ -9,10 +9,14 @@ pub(crate) async fn broadcast_to_table(io: &SocketIo, state: &Arc<SocketState>, 
         let Some(table) = gs.tables.get(&table_id) else { return };
         let base_client_table = table.to_client();
         table.players().iter()
-            .filter_map(|(_game_pk, wallet_addr)| {
+            .flat_map(|(_game_pk, wallet_addr)| {
+                // 同一钱包可能残留多条 players 条目（旧会话 socket 未清理），
+                // 只 find 一个会把广播发到僵尸 socket 上造成客户端丢事件；
+                // 对该钱包的所有活跃 socket 各发一份（视图按钱包定制一致）。
+                let view = hide_opponent_cards(&base_client_table, wallet_addr);
                 gs.players.values()
-                    .find(|p| p.wallet_address.0.eq_ignore_ascii_case(&wallet_addr.0))
-                    .map(|p| (p.socket_id.clone(), hide_opponent_cards(&base_client_table, &p.wallet_address)))
+                    .filter(|p| p.wallet_address.0.eq_ignore_ascii_case(&wallet_addr.0))
+                    .map(move |p| (p.socket_id.clone(), view.clone()))
             })
             .collect::<Vec<_>>()
     };
@@ -89,13 +93,17 @@ impl SocketState {
                 None => return,
             };
             let player_cards = table.mental_poker_game.get_player_readable_tokens();
-            let socket_id_map: std::collections::HashMap<String, String> = table.players().iter()
-            .filter_map(|(game_pk, wallet_addr)| {
-                gs.players.values()
-                    .find(|p| p.wallet_address.0.eq_ignore_ascii_case(&wallet_addr.0))
-                    .map(|player| (game_pk.0.clone(), player.socket_id.clone()))
-            })
-            .collect();
+            // 同一钱包可能残留多条 players 条目（重连后的旧 socket），
+            // find 单选会把 HAND_REVEAL_RESULT 发到僵尸 socket 上，
+            // 客户端永远收不到自己的可读牌 → 自己的牌不显示。
+            // 这里改为收集该钱包的全部活跃 socket。
+            let mut socket_id_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            for (game_pk, wallet_addr) in table.players().iter() {
+                for p in gs.players.values()
+                    .filter(|p| p.wallet_address.0.eq_ignore_ascii_case(&wallet_addr.0)) {
+                    socket_id_map.entry(game_pk.0.clone()).or_default().push(p.socket_id.clone());
+                }
+            }
             if socket_id_map.len() < table.players().len() {
                 tracing::warn!(
                     "broadcast_player_reveal_result: table {} socket_id_map missing {} players (wallet_addr mismatch - possible proxy_address issue)",
@@ -111,10 +119,11 @@ impl SocketState {
         };
 
         for (player_pk, cards) in player_cards {
-            let socket_id = match socket_id_map.get(&player_pk) {
-                Some(s) => s,
-                None => continue,
+            let socket_ids = match socket_id_map.get(&player_pk) {
+                Some(s) if !s.is_empty() => s.clone(),
+                _ => continue,
             };
+            for socket_id in socket_ids {
             let readable_cards: Vec<ElGamalCiphertextJson> = cards.iter()
                 .map(|c| ElGamalCiphertextJson::from_ciphertext(c))
                 .collect();
@@ -124,9 +133,10 @@ impl SocketState {
                 readable_cards,
                 deck_plaintext: deck_plaintext.clone(),
             };
-            if let Ok(sid) = socket_id.parse::<socketioxide::socket::Sid>() {
-                if let Some(socket) = io.get_socket(sid) {
-                    let _ = socket.emit(action, &payload);
+                if let Ok(sid) = socket_id.parse::<socketioxide::socket::Sid>() {
+                    if let Some(socket) = io.get_socket(sid) {
+                        let _ = socket.emit(action, &payload);
+                    }
                 }
             }
         }
