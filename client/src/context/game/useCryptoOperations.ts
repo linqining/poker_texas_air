@@ -56,6 +56,15 @@ export interface UseCryptoOperationsReturn {
   resetRevealDedup: () => void;
 }
 
+/** djb2：dedup 指纹用的廉价字符串哈希（非加密用途）。 */
+function djb2Fingerprint(input: string): string {
+  let h = 5381;
+  for (let i = 0; i < input.length; i++) {
+    h = ((h << 5) + h + input.charCodeAt(i)) >>> 0;
+  }
+  return h.toString(16);
+}
+
 export const useCryptoOperations = (
   params: UseCryptoOperationsParams,
 ): UseCryptoOperationsReturn => {
@@ -80,11 +89,14 @@ export const useCryptoOperations = (
     return playerKeys || getPlayerKeys();
   }, [playerKeys, getPlayerKeys]);
 
-  // 防止同一 reveal phase 的重复 REVEAL_NOTICE 导致重复提交。
+  // 防止同一 reveal phase 实例的重复 REVEAL_NOTICE 导致重复提交。
   // revealLoadingRef 仅防并发，emit 后立即重置无法阻止同一阶段的顺序重复提交。
-  // 此 ref 记录已提交的 phase + 时间戳，30 秒窗口内同 phase 的重复通知直接跳过。
-  // 注意：每手牌的 preflop reveal phase 都是 "HandReveal"，跨手牌时需通过 resetRevealDedup 清除。
-  const revealSubmittedRef = useRef<{ phase: string; ts: number } | null>(null);
+  // 此 ref 记录已提交实例的 key + 时间戳，30 秒窗口内同实例的重复通知直接跳过。
+  // key 必须是“phase 实例”指纹（phase 名 + assignment 卡集合）：同一手牌的
+  // Turn 和 River 两个 CommunityReveal 阶段同名，若只按 phase 名去重，
+  // 刷新/重连后补交 Turn token 的客户端会把 30s 内到达的 River 通知也
+  // dedup 掉 → River 永远等不到 token → 全桌超时被踢（2026-09-01 线上复现）。
+  const revealSubmittedRef = useRef<{ key: string; ts: number } | null>(null);
 
   const resetRevealDedup = useCallback(() => {
     if (revealSubmittedRef.current) {
@@ -180,22 +192,6 @@ export const useCryptoOperations = (
       return;
     }
 
-    // 防止同一阶段的重复 REVEAL_NOTICE 导致重复提交（30 秒窗口）。
-    // 竞态修复：REVEAL_NOTICE 与 TABLE_UPDATED fallback 会在同一广播批次内
-    // 并发触发本 handler，若在提交成功后才写 dedup（旧实现），两次调用都会
-    // 通过检查 → 第二次提交被服务器拒为 "already submitted or not pending"。
-    // 这里在进入时立即占坑（先写 ts 再做后续异步工作）。
-    const now = Date.now();
-    const lastSubmit = revealSubmittedRef.current;
-    if (lastSubmit && lastSubmit.phase === phase && now - lastSubmit.ts < 30_000) {
-      logger.warn(`[Reveal] DEDUP SKIP: phase=${phase} last_ts=${lastSubmit.ts} now=${now} elapsed=${now - lastSubmit.ts}ms < 30000ms — if this is a NEW hand, resetRevealDedup should have been called`);
-      return;
-    }
-    if (lastSubmit) {
-      logger.log(`[Reveal] DEDUP PASS: phase=${phase} last_phase=${lastSubmit.phase} elapsed=${now - lastSubmit.ts}ms`);
-    }
-    revealSubmittedRef.current = { phase, ts: now };
-
     const assignments = player_assignments || currentTableRef.current?.revealTokenState?.player_assignments;
     if (!assignments) {
       logger.warn('[Reveal] No player assignments available');
@@ -228,6 +224,25 @@ export const useCryptoOperations = (
       logger.warn('[Reveal] No cards assigned');
       return;
     }
+
+    // 防止同一 phase 实例的重复 REVEAL_NOTICE 导致重复提交（30 秒窗口）。
+    // 竞态修复：REVEAL_NOTICE 与 TABLE_UPDATED fallback 会在同一广播批次内
+    // 并发触发本 handler，若在提交成功后才写 dedup（旧实现），两次调用都会
+    // 通过检查 → 第二次提交被服务器拒为 "already submitted or not pending"。
+    // 这里在进入时立即占坑（先写 key 再做后续异步工作）。
+    // key 用 phase 实例指纹：Turn/River 的 CommunityReveal 同名但卡集合不同，
+    // 只按 phase 名去重会把下一个 street 的通知也 skip 掉（刷新恢复场景）。
+    const now = Date.now();
+    const dedupKey = `${phase}#${cardsForPhase.length}#${djb2Fingerprint(JSON.stringify(cardsForPhase))}`;
+    const lastSubmit = revealSubmittedRef.current;
+    if (lastSubmit && lastSubmit.key === dedupKey && now - lastSubmit.ts < 30_000) {
+      logger.warn(`[Reveal] DEDUP SKIP: key=${dedupKey} last_ts=${lastSubmit.ts} now=${now} elapsed=${now - lastSubmit.ts}ms < 30000ms — if this is a NEW hand, resetRevealDedup should have been called`);
+      return;
+    }
+    if (lastSubmit) {
+      logger.log(`[Reveal] DEDUP PASS: prev_key=${lastSubmit.key} new_key=${dedupKey} elapsed=${now - lastSubmit.ts}ms`);
+    }
+    revealSubmittedRef.current = { key: dedupKey, ts: now };
 
     // P0.1/P0.4 reveal 编排守卫（Plan D）：非 ShowdownReveal 阶段，
     // assignment 中的手牌卡命中自有手牌 marker（HAND_REVEAL_RESULT 建立
@@ -280,7 +295,7 @@ export const useCryptoOperations = (
         pkHex: pkHex!,
         revealTokens: tokens as SubmitRevealToken[],
       });
-      revealSubmittedRef.current = { phase, ts: Date.now() };
+      revealSubmittedRef.current = { key: dedupKey, ts: Date.now() };
       logger.log('[Reveal] Submitted tokens:', { gameId: table_id, pkHex, tokens });
 
       addMessage(`Reveal ${phase}: ${tokens.length} tokens submitted`);

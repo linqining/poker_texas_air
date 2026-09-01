@@ -12,7 +12,14 @@ impl Table {
         if self.round_state() != RoundState::Waiting{
             return;
         }
-        if self.active_players().len() < MIN_START_NUM as usize{
+        // 开局人数按"非 sitting_out 的在座玩家"计（含 is_waiting 的中途买入者）：
+        // active_players() 会过滤 is_waiting，而 waiting 标记要到
+        // start_preflop_shuffle 的 clear_waiting_flags 才清除——用前者判断
+        // 会形成"waiting 玩家永远不算数 → 永不开局 → 标记永不清除"的死锁。
+        let seated_ready = self.seats().values()
+            .filter(|s| s.player.is_some() && !s.sitting_out)
+            .count();
+        if (seated_ready as u32) < MIN_START_NUM {
             return;
         }
 
@@ -307,6 +314,7 @@ impl Table {
             total_cards_per_player: 2,
             total_community_cards: 0,
             timeout_start: Some(std::time::Instant::now()),
+            last_notice_at: Some(std::time::Instant::now()),
             timeout_seconds: 45,
             completed_players: Vec::new(),
             pending_players: player_pks.iter()

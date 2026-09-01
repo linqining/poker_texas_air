@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import type { Socket } from 'socket.io-client';
-import type { Card, CryptoEvent, GameMessage, Table } from '../../types/game';
+import type { Card, CryptoEvent, GameMessage, Table, ShuffleState } from '../../types/game';
 import {
   TABLE_JOINED,
   TABLE_LEFT,
@@ -104,6 +104,12 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
   } = params;
   const { walletAddress } = useContext(authContext)!;
 
+  // TABLE_UPDATED shuffle fallback 去重：同一 shuffle 轮（phase + 已完成人数）
+  // 只补交一次，防止重复广播触发重复洗牌提交。
+  const shuffleFallbackDoneRef = useRef<{ phase: string; completed: number } | null>(null);
+  // TABLE_UPDATED reconstruct fallback 去重：同一 reconstruct 轮（coefficient + pending 数）只补交一次。
+  const reconstructFallbackKeyRef = useRef<string | null>(null);
+
   const endorsedHandIdsRef = useRef<Set<number>>(new Set());
   useEffect(() => {
     // StrictMode dev 双挂载会把 isUnmountingRef 置 true 且无人复位，导致
@@ -172,6 +178,63 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
             pending_players: revealState.pending_players,
             player_assignments: revealState.player_assignments,
           });
+        }
+
+        // Fallback reconstruct trigger for missed RECONSTRUCT_NOTICE：
+        // 快照 reconstructState 与 RECONSTRUCT_NOTICE 字段一致，轮到我时直接补做。
+        const reconstructState = table.reconstructState;
+        if (reconstructState && reconstructState.is_active && pkHex
+            && Array.isArray(reconstructState.pending_players)
+            && reconstructState.pending_players.includes(pkHex)) {
+          const recKey = `${reconstructState.coefficient_hex}#${reconstructState.pending_players.length}`;
+          if (reconstructFallbackKeyRef.current !== recKey) {
+            logger.log('[Reconstruct] TABLE_UPDATED fallback: player in pending, triggering handleReconstructNotice');
+            void (async () => {
+              const result = await handleReconstructNotice({
+                table_id: table.id,
+                completed_players: reconstructState.completed_players,
+                pending_players: reconstructState.pending_players,
+                cards: reconstructState.cards,
+                coefficient_hex: reconstructState.coefficient_hex,
+                player_readable_cards: reconstructState.player_readable_cards,
+              });
+              if (result) {
+                reconstructFallbackKeyRef.current = recKey;
+                socket?.emit(RECONSTRUCT_SUBMIT, result);
+              }
+            })();
+          }
+        }
+
+        // Fallback shuffle trigger for missed SHUFFLE_NOTICE（刷新/重连恢复）：
+        // 快照的 shuffleState 与 SHUFFLE_NOTICE 携带同样的 current_player_pk /
+        // deck_encrypted / aggregate_pk，轮到我洗牌时直接补做。失败（返回 null）
+        // 不记 dedup，下一次 TABLE_UPDATED 会重试。
+        const shuffleState = table.shuffleState as (ShuffleState & { phase?: string }) | null;
+        if (shuffleState && shuffleState.current_player_pk && pkHex
+            && shuffleState.current_player_pk === pkHex) {
+          const completedCount = Array.isArray(shuffleState.completed_players)
+            ? shuffleState.completed_players.length : 0;
+          const done = shuffleFallbackDoneRef.current;
+          if (!done || done.phase !== (shuffleState.phase || '') || done.completed !== completedCount) {
+            logger.log('[Shuffle] TABLE_UPDATED fallback: it is my turn (phase=' + shuffleState.phase + '), triggering handleShuffleNotice');
+            void (async () => {
+              const result = await handleShuffleNotice({
+                tableId: String(table.id),
+                shuffleState: shuffleState as ShuffleState,
+              });
+              if (result) {
+                shuffleFallbackDoneRef.current = { phase: shuffleState.phase || '', completed: completedCount };
+                socket?.emit(SHUFFLE_SUBMIT, {
+                  table_id: result.tableId,
+                  pk_hex: result.pkHex,
+                  output_cards: result.shuffleResult.output_cards,
+                  shuffle_proof: result.shuffleResult.shuffle_proof,
+                });
+                addMessage(`Shuffle submitted (${result.shuffleResult.output_cards.length} cards)`);
+              }
+            })();
+          }
         }
       });
 

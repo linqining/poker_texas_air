@@ -1160,26 +1160,6 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
 
         // 3. Local mode: init seat and shuffle
-        // 牌组稳定窗口门控：手牌进行中/洗牌轮进行中时，客户端的 remask/shuffle
-        // 证明必然基于过期牌组（bots 每 ~20s 一手），直接受理只会撞
-        // "Invalid remask proof"。拒绝并标记 retryable=true，客户端等这一手
-        // 结束的 Waiting 窗口自动重试。
-        {
-            let gs = state.state.read().await;
-            let busy = gs.tables.get(&payload.table_id)
-                .map(|t| t.round_state() != crate::pokergame::table::RoundState::Waiting
-                    || t.shuffle_state.is_active())
-                .unwrap_or(true);
-            if busy {
-                let _ = s.emit("error", &serde_json::json!({
-                    "msg": "桌正在洗牌/牌局进行中，请稍候重试入座",
-                    "action": "sit_down",
-                    "retryable": true,
-                }));
-                return;
-            }
-        }
-
         let player_id = player.id.clone();
         let player_name = truncate_name(&player.name, 12);
         let result = state.join_player_and_shuffle(

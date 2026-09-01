@@ -84,6 +84,18 @@ export interface RevealTokenState {
   >;
 }
 
+/** 服务器快照中的 reconstruct 状态（字段与 RECONSTRUCT_NOTICE 一致，snake_case）。 */
+export interface ReconstructState {
+  is_active: boolean;
+  completed_players: string[];
+  pending_players: string[];
+  cards: string[];
+  coefficient_hex: string;
+  player_readable_cards?: Record<string, {
+    readable_cards: unknown[];
+  }>;
+}
+
 export interface SidePot {
   amount: number;
 }
@@ -98,6 +110,7 @@ export interface Table {
   roundState: RoundStateType;
   shuffleState: ShuffleState | null;
   revealTokenState: RevealTokenState | null;
+  reconstructState?: ReconstructState | null;
   deck?: {
     cards: string[][];
   };

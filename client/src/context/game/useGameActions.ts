@@ -139,64 +139,15 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
   };
 
   const leaveTable = async (shouldNavigate = true, pk?: string, fireAndForget = false) => {
-    const table = currentTableRef.current;
-    const tableId = table?.id;
-    const roundState = table?.roundState;
-    const mySeat = seatId != null && table?.seats ? table.seats[seatId] : null;
-    const isFolded = !!(mySeat && mySeat.folded);
-
-    // fireAndForget: 页面卸载，无法等待异步流程。
-    // 已入座 → emit STAND_UP 标记 sitting_out；观察者 → emit LEAVE_TABLE 让后端清理。
-    if (fireAndForget) {
-      if (tableId != null) {
-        if (isPlayerSeated) {
-          socket?.emit(STAND_UP, { tableId, pkHex: pk || null, leaveRound: null });
-        } else {
-          socket?.emit(LEAVE_TABLE, { tableId, pkHex: pk || '' });
-        }
-      }
-      return;
+    // 简化离桌：直接 emit LEAVE_TABLE——服务器 kick_player 处理手牌中离开
+    // （fold + side pot 保留），不发钱包交易、不做 deck 剥层。
+    // 页面卸载 fireAndForget 同理。
+    const tid = currentTableRef.current?.id;
+    if (tid != null) {
+      socket?.emit(LEAVE_TABLE, { tableId: tid, pkHex: pk || '' });
     }
-
-    // 没有 table 或未入座：直接 emit LEAVE_TABLE + navigate
-    if (!table || !tableId || !isPlayerSeated) {
-      if (tableId != null) {
-        socket?.emit(LEAVE_TABLE, { tableId, pkHex: pk || '' });
-      }
-      setLeaveDeferred(false);
-      if (shouldNavigate) navigate('/');
-      return;
-    }
-
-    // Waiting: 立即离桌
-    if (roundState === RoundState.Waiting) {
-      try {
-        await standUp();
-      } catch (e) {
-        const err = e as Error;
-        logger.error('[leaveTable] standUp failed:', e);
-        addMessage(`Failed to leave table: ${err.message || e}`);
-        return;
-      }
-      socket?.emit(LEAVE_TABLE, { tableId, pkHex: pk || '' });
-      setLeaveDeferred(false);
-      if (shouldNavigate) navigate('/');
-      return;
-    }
-
-    // 已 fold 或 Showdown（手牌即将结束）：进入 deferred leave 流程，
-    // 等待 roundState 回到 Waiting 后再真正离桌。
-    if (isFolded || roundState === RoundState.Showdown) {
-      socket?.emit(STAND_UP, { tableId, pkHex: pk || null, leaveRound: null });
-      enterDeferredLeave(tableId, pk || '', shouldNavigate);
-      return;
-    }
-
-    // 手牌进行中且未 fold：触发确认弹窗（Task 7 渲染弹窗）
-    // 用户确认后调用 confirmFoldLeave -> fold() + deferred 路径
-    pendingLeaveParamsRef.current = { shouldNavigate, pkHex: pk };
-    setShowFoldLeaveConfirm(true);
-    return;
+    setLeaveDeferred(false);
+    if (shouldNavigate) navigate('/');
   };
 
   /**

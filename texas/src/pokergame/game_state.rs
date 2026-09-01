@@ -222,6 +222,10 @@ pub struct RevealTokenState {
     pub total_community_cards: usize,
     #[serde(skip)]
     pub timeout_start: Option<std::time::Instant>,
+    /// 上次 REVEAL_NOTICE 广播时间：phase 存续期间周期性重播，
+    /// 让刷新/重连后错过首播的客户端在超时前补交 reveal token。
+    #[serde(skip)]
+    pub last_notice_at: Option<std::time::Instant>,
     pub timeout_seconds: u64,
     pub completed_players: Vec<GamePkHex>,
     pub pending_players: Vec<GamePkHex>,
@@ -236,6 +240,7 @@ impl RevealTokenState {
             total_cards_per_player: cards_per_player,
             total_community_cards: community_cards,
             timeout_start: None,
+            last_notice_at: None,
             timeout_seconds: 45,
             completed_players: Vec::new(),
             pending_players: Vec::new(),

@@ -161,7 +161,9 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
          shuffle_active, reveal_active, reconstruct_active) = {
         let gs = state.state.read().await;
         if let Some(table) = gs.tables.get(&table_id) {
-            (table.round_state(), table.active_players().len(), table.hand_complete_at(), table.ready_at(), table.showdown_at(),
+            // 开局人数口径与 start_hand 一致：非 sitting_out 的在座玩家
+            // （含 is_waiting 中途买入者），避免 waiting 玩家不算数导致永不开局。
+            (table.round_state(), table.seats().values().filter(|s| s.player.is_some() && !s.sitting_out).count(), table.hand_complete_at(), table.ready_at(), table.showdown_at(),
              table.shuffle_state.is_active(), table.reveal_token_state.is_active(), table.reconstruct_state.is_active)
         } else { return false }
     };
@@ -476,7 +478,25 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
             broadcast_reconstruct_notice_if_active(io, state, table_id).await;
             return true;
         }
-        // reveal 进行中
+        // reveal 进行中：周期性重播 REVEAL_NOTICE（每 10s）。刷新/重连的客户端
+        // 错过 phase 启动时的首播后，靠重播在 45s 超时前补交 reveal token，
+        // 避免无谓的 timeout 踢人（踢人会连锁触发 reconstruct 失败、整手作废）。
+        let should_rebroadcast = {
+            let mut gs = state.state.write().await;
+            gs.tables.get_mut(&table_id)
+                .filter(|t| t.reveal_token_state.is_active() && !t.reveal_token_state.pending_players.is_empty())
+                .filter(|t| t.reveal_token_state.last_notice_at
+                    .map(|t| t.elapsed().as_secs() >= 10)
+                    .unwrap_or(true))
+                .map(|t| {
+                    t.reveal_token_state.last_notice_at = Some(std::time::Instant::now());
+                    true
+                })
+                .unwrap_or(false)
+        };
+        if should_rebroadcast {
+            broadcast_reveal_notice_if_active(io, state, table_id).await;
+        }
         return true;
     }
 
@@ -619,7 +639,10 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                     {
                         let mut gs = state_c.state.write().await;
                         if let Some(table) = gs.tables.get_mut(&table_id) {
-                            if table.active_players().len() >= MIN_START_NUM as usize {
+                            let seated_ready = table.seats().values()
+                                .filter(|s| s.player.is_some() && !s.sitting_out)
+                                .count();
+                            if seated_ready >= MIN_START_NUM as usize {
                                 // 对齐 Move tick → do_start_hand：start_hand 内部会
                                 // move_button + start_preflop_shuffle + advance_shuffle
                                 let _ = table.start_shuffle();

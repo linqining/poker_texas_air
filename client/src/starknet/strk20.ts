@@ -53,8 +53,11 @@ interface Strk20CapableAccount {
  * SNIP-36 证明管线——WalletAccount（starknet-react 连接产物）没有该表面。
  */
 export function getInjectedStarknetWallet(): unknown {
+  // Ready（argentX）注入的 EIP-6963 命名空间是 starknet_argentX /
+  // starknet_ready（starknet-react ensureWallet 同款发现方式），legacy
+  // window.starknet 作为兜底。
   const w = globalThis as unknown as Record<string, unknown>;
-  return w.starknet ?? null;
+  return w.starknet_argentX ?? w.starknet_ready ?? w.starknet ?? null;
 }
 
 /**
