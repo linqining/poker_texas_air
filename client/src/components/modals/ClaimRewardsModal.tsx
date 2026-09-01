@@ -23,6 +23,7 @@ import {
   claimRewardsPublic,
   detectStrk20Support,
   ensurePayoutCommitment,
+  getRegisteredPayoutCommitment,
   getShieldedBalance,
 } from '../../starknet/strk20';
 import { activeAccount } from '../../starknet/devAccount';
@@ -69,7 +70,11 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
           if (!cancelled) setShielded(bal);
         });
       }
-      // 赔付承诺：已注册则标记；未注册时弹窗内提供一键注册
+      // 查询链上 payout commitment 注册状态（真实值，非客户端猜测）
+      getRegisteredPayoutCommitment(account).then((reg) => {
+        if (!cancelled) setCommitRegistered(reg !== null);
+      });
+      // 赔付承诺：打开弹窗时查询注册状态（已注册不发交易；未注册才可一键注册）
       try {
         const res = await ensurePayoutCommitment(account);
         if (!cancelled && res.status === 'registered') setCommitRegistered(true);

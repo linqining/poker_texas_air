@@ -707,7 +707,7 @@ STRK20 官方路线表目前把 Cartridge 归为"**尚未 privacy-enabled**"的�
 | C3.2-M2 | 赔付路由 | settle 后异步队列：延迟抖动 + 批量 shield 补浮存 + 失败重试 | 三方对局 10 手赔付全部私密到账 |
 | C3.2-M3 | 通知与 UX | 加密赔付通知推送赢家客户端 + 领取入口 UX | 赢家无需任何额外操作即可看到 note |
 | C3.2-M4 | 合规加固 | 限额/频控/审计日志 + 演练 | 运营手册成文 |
-| P2-M1 | 电路规格 | 知识证明 (players, deltas)：digest 匹配 ∧ 零-sum ∧ 人数约束；Stwo component 骨架 | 电路单测通过 |
+| P2-M1 | 电路规格 | 知识证明 (players, deltas)：digest 匹配 ∧ 零-sum ∧ 人数约束；Stwo component 骨架。**预留约束**：动作签名 + auto 默认动作合法性 + accepted-seq（见 ACTION_SIGNING_CENSORSHIP_RESISTANCE.md §8.2） | 电路单测通过 |
 
 ### P2-M1 电路规格（已定稿，开发即按此实施）
 
@@ -728,7 +728,7 @@ Poseidon 用 Stwo 内置 component（16 列×8 行/轮，20_000 轮量级远低�
 **集成点**：证明由 server 生成（复用 orchestrator 的 prover 管线）；
 合约 `verify_and_settle_dapv_stark_private_v2` 以 Stwo verifier（官方 Cairo
 verifier 移植或 fact-registry 模式二选一，M3 定）替换明文 digest 断言。
-| P2-M2 | 证明端 | server 从明文生成 trace + proof（复用 orchestrator） | 真实手牌证明生成 < 30s |
+| P2-M2 | 证明端 | server 从明文生成 trace + proof（复用 orchestrator）+ **动作级 SK 签名纳入动作日志**（见 `ACTION_SIGNING_CENSORSHIP_RESISTANCE.md`） | 真实手牌证明生成 < 30s |
 | P2-M3 | 合约验证端 | Stwo Cairo verifier（官方 verifier 移植或 fact-registry）+ `verify_and_settle_dapv_stark_private_v2` 接入 π | calldata 零明文 |
 | P2-M4 | 联调部署 | sepolia 部署 + gas/size 测量 + 文档 | 演示手牌零明文结算 |
 

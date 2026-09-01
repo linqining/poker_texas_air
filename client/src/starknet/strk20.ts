@@ -272,6 +272,34 @@ export async function claimRewardsPublic(
  * 注册后，赢家在该手结算时即可从认领托管私密领取。
  * 返回 'registered'（已有）/ 'tx'（已提交注册交易）。
  */
+/**
+ * 查询玩家是否已在 vault 注册 payout commitment（链上真值）。
+ * 返回 commitment 的 felt 值（0 = 未注册）。
+ */
+export async function getRegisteredPayoutCommitment(
+  account: unknown,
+): Promise<string | null> {
+  const acct = account as { address?: string } | null;
+  if (!acct?.address) return null;
+  const { pokerVaultAddress } = starknetConfig;
+  if (!pokerVaultAddress) return null;
+  try {
+    const s = await import('starknet');
+    const provider = getProvider();
+    const selector = '0x' + s.hash.starknetKeccak('payout_commitment').toString(16);
+    const res = await provider.callContract({
+      contractAddress: pokerVaultAddress,
+      entrypoint: 'payout_commitment',
+      calldata: [acct.address],
+    });
+    const v = BigInt(res[0] ?? 0);
+    return v !== 0n ? '0x' + v.toString(16) : null;
+  } catch (e) {
+    logger.warn('[strk20] payout_commitment read failed:', e);
+    return null;
+  }
+}
+
 export async function ensurePayoutCommitment(account: unknown): Promise<
   { status: 'registered' | 'tx' } | { status: 'error'; error: string }
 > {

@@ -1,7 +1,6 @@
 import { useContext, useEffect, useRef, useState, type MutableRefObject } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import type { Socket } from 'socket.io-client';
-import { compute_aggregate_key } from '@linqining/client-wasm';
 import { extractC1, ownHoleC1Set } from './ownHoleCards';
 import type { WasmClientPlayer } from '@linqining/client-wasm';
 import {
@@ -23,14 +22,13 @@ import { getToken } from '../../helpers/getToken';
 import httpClient from '../../helpers/httpClient';
 import type { Table, Seat } from '../../types/game';
 import { RoundState } from '../../types/game';
-import { JoinAndShuffleResult, TableUpdatedPayload, wrapCryptoOp } from './gameInternal';
+import { TableUpdatedPayload, wrapCryptoOp } from './gameInternal';
 import authContext from '../../context/auth/authContext';
 import { logger } from '../../helpers/logger';
 import { STAND_UP_TIMEOUT_MS } from '../../clientConfig';
 import { useAccount } from '@starknet-react/core';
 import { submitBuyIn } from '../../starknet/starknetGameActions';
 import { activeAccount } from '../../starknet/devAccount';
-import { initGameController } from '../../starknet/cartridge';
 
 export interface UseGameActionsParams {
   socket: Socket | null;
@@ -316,10 +314,6 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     }
     logger.log('[SitDown] PokerVault deposit tx:', depositResult.hash);
 
-    // 买入成功：自动初始化 Cartridge 游戏交互会话（session key，弹一次
-    // 登录后静默）。不阻塞 SIT_DOWN_V2——初始化与入座并行。
-    initGameController().catch(() => undefined);
-
     // ----- 入座（带重试）：bots 无限循环手牌时 deck 每 ~20s 变更一层，
     // 新玩家取牌组→生成证明→提交的间隙可能撞上变更（Invalid remask proof）。
     // 服务器把 join 失败经 error 事件回传，客户端据此自动重取牌组重试。
@@ -340,64 +334,31 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
         addMessage('Cannot sit down: no encrypted deck');
         return;
       }
-      // 按牌桌阶段选择入座模式（对齐 texas_poker_move main 的 join / join_and_shuffle）：
-      // - waiting → join_and_shuffle（完整 mask+shuffle 轮，买入即洗牌）；
-      // - 牌局进行中 → plain join（仅 pk ownership proof，不动牌组——牌局中
-      //   替换牌组会让在场玩家解不出手牌），以 waiting 身份入座，
-      //   reset_for_next_hand 后在下一手参与洗牌。
-      const isWaitingPhase = table.roundState === 'waiting';
-      let maskAndShuffleRound: object | null = null;
+      // 入座统一走 plain join（对齐 texas_poker_move main 的 join 语义）：
+      // 仅提交 pk ownership proof，不动牌组——牌局中替换牌组会让在场玩家
+      // 解不出手牌。玩家以 waiting 身份入座，reset_for_next_hand 后在下一手
+      // 参与 start_preflop_shuffle 洗牌轮（SHUFFLE_NOTICE 流程既有实现）。
+      // deck 竞态与 Invalid remask proof 由此彻底消除。
       let pkProof: unknown;
-      if (isWaitingPhase) {
-        const pkHexes = (Object.values(table.seats) || [])
-          .filter((p: Seat) => p.player && p.player.pkHex && p.player.pkHex !== pkHex)
-          .map((p: Seat) => p.player!.pkHex);
-        const aggPkHex = compute_aggregate_key(JSON.stringify(pkHexes));
-
-        let joinResult: JoinAndShuffleResult;
-        try {
-          const joinResultRaw = wrapCryptoOp(() => {
-            const result = keys.join_game_and_shuffle(JSON.stringify(deckEncrypted), aggPkHex);
-            if (!result) throw new Error('join_game_and_shuffle returned null');
-            return result;
-          }, 'join_game_and_shuffle') as string | object;
-          joinResult = typeof joinResultRaw === 'string' ? JSON.parse(joinResultRaw) : joinResultRaw as JoinAndShuffleResult;
-        } catch (e) {
-          const err = e as Error;
-          logger.error('[SitDown] join_and_shuffle generation failed:', err);
-          addMessage(`Sit down failed: ${err.message || err}`);
-          return;
-        }
-
-        maskAndShuffleRound = {
-          mask_cards: joinResult.mask_and_shuffle_round.mask_cards,
-          output_cards: joinResult.mask_and_shuffle_round.output_cards,
-          remask_proof: joinResult.mask_and_shuffle_round.remask_proof,
-          shuffle_proof: joinResult.mask_and_shuffle_round.shuffle_proof,
-        };
-        pkProof = joinResult.pk_ownership_proof;
-      } else {
-        // plain join：仅 pk ownership proof（wasm 生成，形状同 PkProofJson）
-        try {
-          const proofRaw = wrapCryptoOp(() => keys.generate_pk_proof(), 'generate_pk_proof') as string | object;
-          pkProof = typeof proofRaw === 'string' ? JSON.parse(proofRaw) : proofRaw;
-        } catch (e) {
-          const err = e as Error;
-          logger.error('[SitDown] pk proof generation failed:', err);
-          addMessage(`Sit down failed: ${err.message || err}`);
-          return;
-        }
+      try {
+        const proofRaw = wrapCryptoOp(() => keys.generate_pk_proof(), 'generate_pk_proof') as string | object;
+        pkProof = typeof proofRaw === 'string' ? JSON.parse(proofRaw) : proofRaw;
+      } catch (e) {
+        const err = e as Error;
+        logger.error('[SitDown] pk proof generation failed:', err);
+        addMessage(`Sit down failed: ${err.message || err}`);
+        return;
       }
 
       // 提交并在窗口期内监听服务器回传的入座失败（deck 竞态可重试）。
       // 无错误回执即视为入座已受理（与既往乐观行为一致）。
-      const outcome = await new Promise<{ failed: boolean; msg: string } | null>((resolve) => {
+      const outcome = await new Promise<{ failed: boolean; msg: string; retryable?: boolean } | null>((resolve) => {
         let settled = false;
-        const onErr = (data: { msg?: string; action?: string }) => {
+        const onErr = (data: { msg?: string; action?: string; retryable?: boolean }) => {
           if (data?.action !== 'sit_down' || settled) return;
           settled = true;
           socket?.off('error', onErr);
-          resolve({ failed: true, msg: data.msg ?? 'sit down rejected' });
+          resolve({ failed: true, msg: data.msg ?? 'sit down rejected', retryable: data.retryable });
         };
         socket?.on('error', onErr);
         socket?.emit(SIT_DOWN_V2, {
@@ -407,7 +368,6 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
           amount,
           pkHex,
           pkProof,
-          ...(maskAndShuffleRound ? { maskAndShuffleRound } : {}),
           depositTxHash: depositTxHashUsed,
         });
         setTimeout(() => {
@@ -424,17 +384,15 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
         logger.log('[SitDown] join accepted (no error within window)');
         return;
       }
-      // 失败：deck 竞态类错误且还有重试机会 → 重取牌组重试
-      const retryable = attempt < MAX_ATTEMPTS &&
-        /remask|shuffle|c1|deck|mismatch/i.test(outcome.msg);
-      if (!retryable) {
+      const busyRetry = /洗牌|牌局进行中/.test(outcome.msg);
+      if (!busyRetry && !/remask|shuffle|c1|deck|mismatch/i.test(outcome.msg)) {
         addMessage(`Sit down failed: ${outcome.msg}`);
         logger.error('[SitDown] join rejected:', outcome.msg);
         return;
       }
-      logger.warn(`[SitDown] deck race (attempt ${attempt}/${MAX_ATTEMPTS}): ${outcome.msg} — retrying`);
-      addMessage(`牌组已变更，正在重试入座（${attempt}/${MAX_ATTEMPTS - 1}）…`);
-      await new Promise((r) => setTimeout(r, 2500));
+      logger.warn(`[SitDown] join deferred (attempt ${attempt}/${MAX_ATTEMPTS}): ${outcome.msg} — retrying`);
+      addMessage(`桌面忙，正在自动重试入座（${attempt}/${MAX_ATTEMPTS}）…`);
+      await new Promise((r) => setTimeout(r, 3000));
     }
   };
 

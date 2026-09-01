@@ -132,7 +132,8 @@ export const starknetConfig: StarknetConfig = {
     feeMode: readEnv('VITE_PAYMASTER_FEE_MODE', 'sponsored') === 'default' ? 'default' : 'sponsored',
     gasToken: readEnv('VITE_PAYMASTER_GAS_TOKEN', ''),
     relayUrl: readEnv('VITE_PAYMASTER_RELAY_URL', '/api/starknet/paymaster'),
-    statusUrl: readEnv('VITE_PAYMASTER_STATUS_URL', '/api/starknet/paymaster/status'),
+        // httpClient baseURL 已含 /api；statusUrl 相对该 base，避免 /api/api 双前缀
+    statusUrl: readEnv('VITE_PAYMASTER_STATUS_URL', '/starknet/paymaster/status'),
   },
   privacy: {
     unshieldEnabled: readEnv('VITE_UNSHIELD_ENABLED', '') === 'true',
