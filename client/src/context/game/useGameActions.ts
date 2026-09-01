@@ -283,113 +283,158 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
       addMessage('Cannot sit down: no public key');
       return;
     }
-
-    const localTable = currentTableRef.current;
-    if (!localTable) {
+    if (!currentTableRef.current) {
       logger.error('[SitDown] No current table');
       addMessage('Cannot sit down: no table data');
       return;
     }
+    const token = getToken();
+    if (!token) {
+      logger.error('[SitDown] No auth token available');
+      addMessage('Cannot sit down: please connect your wallet first');
+      return;
+    }
+    if (!walletAddress) {
+      logger.error('[SitDown] No wallet connected');
+      addMessage('Cannot sit down: no wallet connected');
+      return;
+    }
+    if (!account) {
+      logger.error('[SitDown] No Starknet account available');
+      addMessage('Cannot sit down: no Starknet account');
+      return;
+    }
 
-    try {
-      const token = getToken();
-      if (!token) {
-        logger.error('[SitDown] No auth token available');
-        addMessage('Cannot sit down: please connect your wallet first');
-        return;
-      }
-      if (!walletAddress) {
-        logger.error('[SitDown] No wallet connected');
-        addMessage('Cannot sit down: no wallet connected');
-        return;
-      }
-      if (!account) {
-        logger.error('[SitDown] No Starknet account available');
-        addMessage('Cannot sit down: no Starknet account');
-        return;
-      }
+    // ----- Starknet 买入（一次性）：私密路径优先（Plan B），公开路径回退 -----
+    addMessage('Submitting the STRK20 buy-in...');
+    const depositResult = await submitBuyIn(account, amount);
+    if (!depositResult.success) {
+      const failMsg = depositResult.error || 'Buy-in deposit failed';
+      logger.error('[SitDown] vault.deposit failed:', failMsg);
+      addMessage(`Sit down failed: ${failMsg}`);
+      return;
+    }
+    logger.log('[SitDown] PokerVault deposit tx:', depositResult.hash);
 
-      // 从服务器拉取最新的 table 状态，确保 deck_encrypted 与服务器同步
-      // （localTable 可能在其他玩家 shuffle 完成前就已缓存，导致 c1 mismatch）
-      let table = localTable;
+    // 买入成功：自动初始化 Cartridge 游戏交互会话（session key，弹一次
+    // 登录后静默）。不阻塞 SIT_DOWN_V2——初始化与入座并行。
+    initGameController().catch(() => undefined);
+
+    // ----- 入座（带重试）：bots 无限循环手牌时 deck 每 ~20s 变更一层，
+    // 新玩家取牌组→生成证明→提交的间隙可能撞上变更（Invalid remask proof）。
+    // 服务器把 join 失败经 error 事件回传，客户端据此自动重取牌组重试。
+    const MAX_ATTEMPTS = 3;
+    let depositTxHashUsed = depositResult.hash;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      // 每次尝试重新拉取最新 table/deck 状态
+      let table = currentTableRef.current;
       try {
         const resp = await httpClient.get<Table>(`/tables/${tableId}`);
-        if (resp.data) {
-          table = resp.data;
-          logger.log('[SitDown] fetched fresh table state from server, deck cards:',
-            table.deck?.cards?.length ?? 0, 'shuffleState deck:',
-            table.shuffleState?.deck_encrypted?.length ?? 0);
-        }
+        if (resp.data) table = resp.data;
       } catch (e) {
         logger.warn('[SitDown] failed to fetch fresh table state, using local cache:', e);
       }
-
       const deckEncrypted = table.shuffleState?.deck_encrypted || table.deck?.cards;
       if (!deckEncrypted || deckEncrypted.length === 0) {
         logger.error('[SitDown] No deck_encrypted available');
         addMessage('Cannot sit down: no encrypted deck');
         return;
       }
+      // 按牌桌阶段选择入座模式（对齐 texas_poker_move main 的 join / join_and_shuffle）：
+      // - waiting → join_and_shuffle（完整 mask+shuffle 轮，买入即洗牌）；
+      // - 牌局进行中 → plain join（仅 pk ownership proof，不动牌组——牌局中
+      //   替换牌组会让在场玩家解不出手牌），以 waiting 身份入座，
+      //   reset_for_next_hand 后在下一手参与洗牌。
+      const isWaitingPhase = table.roundState === 'waiting';
+      let maskAndShuffleRound: object | null = null;
+      let pkProof: unknown;
+      if (isWaitingPhase) {
+        const pkHexes = (Object.values(table.seats) || [])
+          .filter((p: Seat) => p.player && p.player.pkHex && p.player.pkHex !== pkHex)
+          .map((p: Seat) => p.player!.pkHex);
+        const aggPkHex = compute_aggregate_key(JSON.stringify(pkHexes));
 
-      const pkHexes = (Object.values(table.seats) || [])
-        .filter((p: Seat) => p.player && p.player.pkHex && p.player.pkHex !== pkHex)
-        .map((p: Seat) => p.player!.pkHex);
-      const pkHexesJson = JSON.stringify(pkHexes);
-      const aggPkHex = compute_aggregate_key(pkHexesJson);
+        let joinResult: JoinAndShuffleResult;
+        try {
+          const joinResultRaw = wrapCryptoOp(() => {
+            const result = keys.join_game_and_shuffle(JSON.stringify(deckEncrypted), aggPkHex);
+            if (!result) throw new Error('join_game_and_shuffle returned null');
+            return result;
+          }, 'join_game_and_shuffle') as string | object;
+          joinResult = typeof joinResultRaw === 'string' ? JSON.parse(joinResultRaw) : joinResultRaw as JoinAndShuffleResult;
+        } catch (e) {
+          const err = e as Error;
+          logger.error('[SitDown] join_and_shuffle generation failed:', err);
+          addMessage(`Sit down failed: ${err.message || err}`);
+          return;
+        }
 
-      const deckEncryptedJson = JSON.stringify(deckEncrypted);
-      logger.log('SIT_DOWN_V2', tableId, seatIdNum, amount, pkHex, aggPkHex);
-      const joinResultRaw = wrapCryptoOp(() => {
-        const result = keys.join_game_and_shuffle(deckEncryptedJson, aggPkHex);
-        if (!result) throw new Error('join_game_and_shuffle returned null');
-        return result;
-      }, 'join_game_and_shuffle') as string | object;
-      const joinResult = typeof joinResultRaw === 'string' ? JSON.parse(joinResultRaw) : joinResultRaw as JoinAndShuffleResult;
+        maskAndShuffleRound = {
+          mask_cards: joinResult.mask_and_shuffle_round.mask_cards,
+          output_cards: joinResult.mask_and_shuffle_round.output_cards,
+          remask_proof: joinResult.mask_and_shuffle_round.remask_proof,
+          shuffle_proof: joinResult.mask_and_shuffle_round.shuffle_proof,
+        };
+        pkProof = joinResult.pk_ownership_proof;
+      } else {
+        // plain join：仅 pk ownership proof（wasm 生成，形状同 PkProofJson）
+        try {
+          const proofRaw = wrapCryptoOp(() => keys.generate_pk_proof(), 'generate_pk_proof') as string | object;
+          pkProof = typeof proofRaw === 'string' ? JSON.parse(proofRaw) : proofRaw;
+        } catch (e) {
+          const err = e as Error;
+          logger.error('[SitDown] pk proof generation failed:', err);
+          addMessage(`Sit down failed: ${err.message || err}`);
+          return;
+        }
+      }
 
-      const maskAndShuffleRound = {
-        mask_cards: joinResult.mask_and_shuffle_round.mask_cards,
-        output_cards: joinResult.mask_and_shuffle_round.output_cards,
-        remask_proof: joinResult.mask_and_shuffle_round.remask_proof,
-        shuffle_proof: joinResult.mask_and_shuffle_round.shuffle_proof,
-      };
-      const pkProof = joinResult.pk_ownership_proof;
-      logger.log('SIT_DOWN_V2', tableId, seatIdNum, amount, pkHex, pkProof, maskAndShuffleRound, keys.get_pk_hex(), getToken());
+      // 提交并在窗口期内监听服务器回传的入座失败（deck 竞态可重试）。
+      // 无错误回执即视为入座已受理（与既往乐观行为一致）。
+      const outcome = await new Promise<{ failed: boolean; msg: string } | null>((resolve) => {
+        let settled = false;
+        const onErr = (data: { msg?: string; action?: string }) => {
+          if (data?.action !== 'sit_down' || settled) return;
+          settled = true;
+          socket?.off('error', onErr);
+          resolve({ failed: true, msg: data.msg ?? 'sit down rejected' });
+        };
+        socket?.on('error', onErr);
+        socket?.emit(SIT_DOWN_V2, {
+          token,
+          tableId,
+          seatId: seatIdNum,
+          amount,
+          pkHex,
+          pkProof,
+          ...(maskAndShuffleRound ? { maskAndShuffleRound } : {}),
+          depositTxHash: depositTxHashUsed,
+        });
+        setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            socket?.off('error', onErr);
+            resolve(null);
+          }
+        }, 6000);
+      });
 
-      // ----- Starknet 买入：私密路径优先（Plan B），公开路径回退 -----
-      // 私密：STRK20 隐私池私密交易内由 anonymizer.deposit_for 给玩家记账，
-      // 链上看不到付款人；公开：approve（幂等）+ deposit 经 paymaster 中继
-      // 或 session 直签（Plan C）。depositTxHash 私密买入时可为空 —— 服务端
-      // 以 vault.chip_balance 为权威校验。
-      addMessage('Submitting the STRK20 buy-in...');
-      const depositResult = await submitBuyIn(account, amount);
-      if (!depositResult.success) {
-        const failMsg = depositResult.error || 'Buy-in deposit failed';
-        logger.error('[SitDown] vault.deposit failed:', failMsg);
-        addMessage(`Sit down failed: ${failMsg}`);
+      if (outcome === null) {
+        addMessage('Joined table and shuffled successfully');
+        logger.log('[SitDown] join accepted (no error within window)');
         return;
       }
-      logger.log('[SitDown] PokerVault deposit tx:', depositResult.hash);
-
-      // 买入成功：自动初始化 Cartridge 游戏交互会话（session key，弹一次
-      // 登录后静默）。不阻塞 SIT_DOWN_V2——初始化与入座并行。
-      initGameController().catch(() => undefined);
-
-      // 买入成功后通知 game server：后端校验 remask proof 并让玩家入座。
-      socket?.emit(SIT_DOWN_V2, {
-        token,
-        tableId,
-        seatId: seatIdNum,
-        amount,
-        pkHex,
-        pkProof,
-        maskAndShuffleRound,
-        depositTxHash: depositResult.hash,
-      });
-      addMessage('Joined table and shuffled successfully');
-    } catch (e) {
-      const err = e as Error;
-      logger.error('[SitDown] join_and_shuffle failed:', e);
-      addMessage(`Sit down failed: ${err.message || e}`);
+      // 失败：deck 竞态类错误且还有重试机会 → 重取牌组重试
+      const retryable = attempt < MAX_ATTEMPTS &&
+        /remask|shuffle|c1|deck|mismatch/i.test(outcome.msg);
+      if (!retryable) {
+        addMessage(`Sit down failed: ${outcome.msg}`);
+        logger.error('[SitDown] join rejected:', outcome.msg);
+        return;
+      }
+      logger.warn(`[SitDown] deck race (attempt ${attempt}/${MAX_ATTEMPTS}): ${outcome.msg} — retrying`);
+      addMessage(`牌组已变更，正在重试入座（${attempt}/${MAX_ATTEMPTS - 1}）…`);
+      await new Promise((r) => setTimeout(r, 2500));
     }
   };
 

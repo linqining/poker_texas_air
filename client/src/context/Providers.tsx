@@ -67,6 +67,7 @@ const Providers: React.FC<ProvidersProps> = ({ children }) => (
         provider={provider}
         connectors={connectors}
         explorer={starkscan}
+        autoConnect
       >
         <ThemeProvider theme={theme}>
           <GlobalState>

@@ -203,7 +203,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
               <Button
                 type="button"
                 small
-                disabled={pending !== null || commitRegistered !== false || strk20Ready !== true}
+                disabled={pending !== null || commitRegistered === true}
                 onClick={async () => {
                   setRegPending(true);
                   try {
@@ -217,9 +217,9 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
                     setRegPending(false);
                   }
                 }}
-                title="提交 payout commitment（一次性链上交易）"
+                title="提交 payout commitment（一次性链上交易，任何钱包均可）"
               >
-                {regPending ? '注册中…' : '注册赔付承诺'}
+                {commitRegistered ? '已注册 ✓' : regPending ? '注册中…' : '注册赔付承诺'}
               </Button>
               <Button
                 type="submit"

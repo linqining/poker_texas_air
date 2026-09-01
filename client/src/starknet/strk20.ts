@@ -48,23 +48,55 @@ interface Strk20CapableAccount {
 }
 
 /**
- * 探测连接钱包是否具备 STRK20 私密交易能力。
- * 先看账户对象是否暴露 strk20InvokeTransaction（WalletAccount ≥10.4），
- * 再用 supportedWalletApi 版本查询兜底；两者都以 ≥0.10.3 为准。
+ * 获取注入的 STN-1 钱包对象（Ready 安装时即 window.starknet）。
+ * STRK20 Wallet API 的私密交易必须经钱包对象（wallet.request）走
+ * SNIP-36 证明管线——WalletAccount（starknet-react 连接产物）没有该表面。
+ */
+export function getInjectedStarknetWallet(): unknown {
+  const w = globalThis as unknown as Record<string, unknown>;
+  return w.starknet ?? null;
+}
+
+/**
+ * 探测连接钱包是否具备 STRK20 私密交易能力（Wallet API ≥ 0.10.3）。
+ * 依次探测：注入钱包对象（supportedWalletApi 版本查询，官方推荐方式）→
+ * WalletAccountV6 方法存在性。绝不用数据类调用做探测（会触发授权弹窗）。
  */
 export async function detectStrk20Support(account: unknown): Promise<boolean> {
+  // 探测挂起保护：Ready 等注入代理在扩展锁定时 request 可能不响应
+  const withTimeout = <T>(p: Promise<T>, ms = 5000): Promise<T> =>
+    Promise.race([
+      p,
+      new Promise<T>((_, rej) => setTimeout(() => rej(new Error('probe timeout')), ms)),
+    ]);
+  const wallet = getInjectedStarknetWallet();
+  if (wallet) {
+    try {
+      const { walletV6 } = await import('starknet');
+      const versions = (await withTimeout(
+        walletV6.supportedWalletApi(wallet as never) as Promise<string[]>,
+      )) as string[];
+      if (
+        (versions ?? []).some(
+          (v) => typeof v === 'string' && compareVersions(v, STRK20_WALLET_API_MIN) >= 0,
+        )
+      ) {
+        return true;
+      }
+    } catch (e) {
+      logger.warn('[strk20] wallet supportedWalletApi probe failed:', e);
+    }
+  }
   const acct = account as Strk20CapableAccount | null | undefined;
-  if (!acct) return false;
-  if (typeof acct.strk20InvokeTransaction === 'function') return true;
-  if (typeof acct.supportedWalletApi === 'function') {
+  if (acct && typeof acct.strk20InvokeTransaction === 'function') return true;
+  if (acct && typeof acct.supportedWalletApi === 'function') {
     try {
       const versions = await acct.supportedWalletApi();
-      const ok = (versions ?? []).some(
+      return (versions ?? []).some(
         (v) => typeof v === 'string' && compareVersions(v, STRK20_WALLET_API_MIN) >= 0,
       );
-      if (ok) return true;
     } catch (e) {
-      logger.warn('[strk20] supportedWalletApi probe failed:', e);
+      logger.warn('[strk20] account supportedWalletApi probe failed:', e);
     }
   }
   return false;
@@ -86,12 +118,24 @@ export async function getShieldedBalance(
   account: unknown,
   tokenAddress: string,
 ): Promise<bigint | null> {
+  const wallet = getInjectedStarknetWallet();
   const acct = account as Strk20CapableAccount | null;
-  if (!acct?.strk20Balances) return null;
+  if (!wallet || !acct?.strk20Balances) return null;
   try {
-    const entries = await acct.strk20Balances([tokenAddress]);
+    let entries: Array<{ token: string; balance: string | bigint }>;
+    if (typeof acct.strk20Balances === 'function') {
+      entries = (await acct.strk20Balances([tokenAddress])) as Array<{
+        token: string;
+        balance: string | bigint;
+      }>;
+    } else {
+      const { walletV6 } = await import('starknet');
+      entries = (await walletV6.strk20Balances(wallet as never, [
+        tokenAddress,
+      ])) as Array<{ token: string; balance: string | bigint }>;
+    }
     const norm = tokenAddress.toLowerCase();
-    const hit = entries.find((e) => (e.token ?? '').toLowerCase() === norm);
+    const hit = entries.find((e) => BigInt(e.token ?? 0n) === BigInt(tokenAddress));
     return hit ? BigInt(hit.balance) : 0n;
   } catch (e) {
     logger.warn('[strk20] shielded balance query failed:', e);
@@ -115,10 +159,16 @@ export async function claimRewardsPrivate(
   account: unknown,
   args: ClaimRewardsArgs,
 ): Promise<TxResult> {
+  const wallet = getInjectedStarknetWallet();
   const { anonymizerAddress } = starknetConfig.privacy;
   const acct = account as Strk20CapableAccount | null;
-  if (!acct?.strk20InvokeTransaction || !acct.address) {
+  const hasWalletSurface = !!wallet && typeof (wallet as any).request === 'function';
+  const hasAccountSurface = !!acct?.strk20InvokeTransaction && !!acct.address;
+  if (!hasWalletSurface && !hasAccountSurface) {
     return { hash: '', success: false, error: 'Wallet does not support STRK20 private transactions' };
+  }
+  if (!acct?.address) {
+    return { hash: '', success: false, error: 'Connected account address unavailable' };
   }
   if (!anonymizerAddress) {
     return { hash: '', success: false, error: 'PokerVaultAnonymizer address not configured' };
@@ -147,7 +197,27 @@ export async function claimRewardsPrivate(
     },
   ];
   try {
-    const { transaction_hash: hash } = await acct.strk20InvokeTransaction(actions);
+    // 官方路径：walletV6.strk20InvokeTransaction(wallet, actions) —— SNIP-36
+    // 证明与费用动作都在扩展内生成；回退 features 路径（等价形状）。
+    let hash = '';
+    if (wallet) {
+      const { walletV6 } = await import('starknet');
+      const res = await walletV6.strk20InvokeTransaction(wallet as never, actions as never);
+      hash = res.transaction_hash ?? '';
+    }
+    if (!hash && typeof acct.strk20InvokeTransaction === 'function') {
+      hash = (await acct.strk20InvokeTransaction(actions)).transaction_hash;
+    }
+    if (!hash && wallet) {
+      const features = (wallet as any).features?.['starknet:walletApi'];
+      if (!features?.request) throw new Error('wallet api feature unavailable');
+      const res = (await features.request({
+        type: 'wallet_strk20InvokeTransaction',
+        params: { actions },
+      })) as { transaction_hash?: string };
+      hash = res.transaction_hash ?? '';
+    }
+    if (!hash) return { hash: '', success: false, error: 'wallet returned empty tx hash' };
     logger.log('[strk20] private claim submitted:', hash);
     return { hash, success: true };
   } catch (err) {

@@ -133,12 +133,18 @@ impl Table {
         }
     }
 
+    /// 入座双模式（对齐 texas_poker_move main：join_and_shuffle / join）：
+    /// - `round_json = Some` 且牌桌处于 Waiting/Shuffle 阶段 → 边买入边洗牌
+    ///   （验证 remask + shuffle 证明后应用牌组层）；
+    /// - `round_json = None`，或牌局进行中提交（服务端权威降级）→ 不动牌组，
+    ///   以 waiting 身份入座，`reset_for_next_hand` 后在下一手参与洗牌。
+    /// 牌局中绝不用客户端提交的轮次替换牌组——在场玩家会解不出手牌。
     pub fn join_player_and_shuffle(
         &mut self,
         player: Player,
         player_pk: EcPoint,
         pk_proof_json: PkProofJson,
-        round_json: MaskAndShuffleRoundJson,
+        round_json: Option<MaskAndShuffleRoundJson>,
         seat_id: u32,
         amount: u64,
     ) -> Result<JoinResult, JoinError> {
@@ -184,8 +190,12 @@ impl Table {
             wallet_address: player.wallet_address.clone(),
         };
 
-        if is_join_before_start {
-            let round = round_json.to_mask_and_shuffle_round().map_err(|e| JoinError::Crypto(e))?;
+        let wants_shuffle = is_join_before_start && round_json.is_some();
+        if wants_shuffle {
+            let round = round_json
+                .expect("checked above")
+                .to_mask_and_shuffle_round()
+                .map_err(|e| JoinError::Crypto(e))?;
             // 兼容 Move 合约 remask_proof::verify 与 poker_protocol 生产代码：
             // V2 outer transcript; the old Move V1 path is disabled.
             let mut transcript = FiatShamirTranscript::new(b"zk_mask_shuffle_proof_v2");
@@ -220,6 +230,7 @@ impl Table {
             tracing::info!("[SHUFFLE] Player {} joined and shuffled, sat at seat {}", pk_hex, actual_seat_id);
             Ok(JoinResult::JoinedAndShuffled)
         } else {
+            // waiting 入座：牌局中买入的降级路径，或客户端显式选择不洗牌。
             let player_for_proof = Player {
                 socket_id: player.socket_id.clone(),
                 id: player.wallet_address.0.clone(),

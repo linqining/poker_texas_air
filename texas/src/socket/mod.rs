@@ -128,7 +128,11 @@ pub(crate) struct SitDownV2Payload {
     pub amount: u64,
     pub pk_hex: GamePkHex,
     pub pk_proof: PkProofJson,
-    pub mask_and_shuffle_round: MaskAndShuffleRoundJson,
+    /// 入座模式（服务端权威决定，客户端值仅作参考提示）：
+    /// Some = join_and_shuffle（牌桌 waiting/shuffle 阶段）；None = plain join
+    /// （牌局进行中买入，waiting 身份入座，下一手参与洗牌）。
+    #[serde(default)]
+    pub mask_and_shuffle_round: Option<MaskAndShuffleRoundJson>,
     /// Starknet 买入：PokerVault.deposit 交易哈希（前端钱包执行 approve+deposit 后回传）。
     #[serde(default)]
     pub deposit_tx_hash: Option<String>,
@@ -641,7 +645,7 @@ impl SocketState {
         player: Player,
         player_pk: EcPoint,
         pk_proof_json: PkProofJson,
-        round_json: MaskAndShuffleRoundJson,
+        round_json: Option<MaskAndShuffleRoundJson>,
         seat_id: u32,
         amount: u64,
     ) -> Result<(bool, JoinResult), JoinError> {

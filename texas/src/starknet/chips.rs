@@ -90,17 +90,35 @@ pub async fn verify_deposit(
         "params": {"transaction_hash": format!("{tx_hash:#x}")}
     });
     let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = http
-        .post(&chain.config.rpc_url)
-        .json(&receipt_body)
-        .send()
-        .await
-        .map_err(|e| format!("receipt http: {e}"))?;
-    let text = resp.text().await.map_err(|e| format!("receipt text: {e}"))?;
-    let rj: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("receipt json: {e}"))?;
+    // 公共 RPC 偶发限流/断连：网络层失败重试 3 次（指数间隔），避免单次
+    // 抖动让用户买入直接失败。
+    let mut rj: serde_json::Value = serde_json::Value::Null;
+    let mut last_err = String::new();
+    for attempt in 1..=3 {
+        let res = http.post(&chain.config.rpc_url).json(&receipt_body).send().await;
+        match res {
+            Ok(resp) => match resp.text().await {
+                Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(parsed) => {
+                        rj = parsed;
+                        last_err.clear();
+                        break;
+                    }
+                    Err(e) => last_err = format!("receipt json: {e}"),
+                },
+                Err(e) => last_err = format!("receipt text: {e}"),
+            },
+            Err(e) => last_err = format!("receipt http: {e}"),
+        }
+        eprintln!("[verify_deposit] receipt fetch attempt {attempt} failed: {last_err}");
+        tokio::time::sleep(std::time::Duration::from_millis(1500 * attempt as u64)).await;
+    }
+    if !last_err.is_empty() {
+        return Err(format!("deposit receipt fetch failed after retries: {last_err}"));
+    }
     let status = rj["result"]["execution_status"].as_str().ok_or_else(|| {
         format!("no execution_status in receipt: {rj}")
     })?;

@@ -687,6 +687,18 @@ STRK20 官方路线表目前把 Cartridge 归为"**尚未 privacy-enabled**"的�
 
 ## 实机端到端剩余一步（需人工点击）
 
+## 房间围观者状态同步修复（2026-09-01 ✅ 已验证）
+
+**问题**：中途进桌的围观者看不到公共牌（公共牌仅由 COMMUNITY_REVEAL_RESULT 事件驱动，进桌前错过的不会补）、winMessage 不更新、上一手亮牌不清理。
+
+**修复**（`useGameSocket.ts` TABLE_UPDATED / TABLE_JOINED 处理器）：
+- 公共牌以服务器 board 快照为准同步（错过 reveal 事件的围观者由此补上）；
+- `handOver` 时清空已亮手牌（围观者不再看到上一手残影）；
+- winMessage 保持显示直到新一手开始（waiting 之后的新手牌清空）；
+- TABLE_JOINED 首次快照同样同步公共牌。
+
+**验证**：IAB 围观者中途进桌，flop 阶段即可看到全部 5 张公共牌与消息流（截图确认）。
+
 ## 开发排期（Phase 2 / C3.2）
 
 | 阶段 | 里程碑 | 内容 | 验收 |

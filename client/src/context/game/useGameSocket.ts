@@ -119,6 +119,10 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
         reg: Date.now(),
         sid: (socket as unknown as { id?: string }).id ?? null,
       };
+      // 围观者/重连者的房间状态同步（SETTLEMENT_PRIVACY_PLAN.md 修复项）：
+      // 公共牌、亮牌清理、winMessage 都以服务器 TABLE_UPDATED 为准补齐——
+      // 仅靠事件流（COMMUNITY_REVEAL_RESULT 等）会让中途进桌的围观者看不到。
+      const lastWinMessagesRef = { current: [] as string[] };
       socket.on(TABLE_UPDATED, ({ table, message, from }: TableUpdatedPayload) => {
         (window as unknown as Record<string, unknown>).__sockDebug = {
           ...(window as unknown as Record<string, unknown>).__sockDebug as object,
@@ -129,6 +133,27 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
         if (table.roundState === 'waiting') {
           setDecryptedHandCards([]);
           resetRevealDedup();
+        }
+        // 手结束（结算/弃牌胜）即清理桌上已亮手牌
+        if (table.handOver) {
+          setDecryptedHandCards([]);
+        }
+        // 公共牌以服务器 board 为准同步（错过 reveal 事件的围观者由此补上）
+        if (Array.isArray(table.board)) {
+          setCommunityCards(table.board as Card[]);
+        }
+        // winMessage 保持显示直到新一手开始（waiting 之后的新手牌清空）
+        const winMsgs = (table as { winMessages?: string[] }).winMessages;
+        if (Array.isArray(winMsgs) && winMsgs.length > 0) {
+          lastWinMessagesRef.current = winMsgs;
+        } else if (
+          lastWinMessagesRef.current.length > 0 &&
+          table.roundState !== 'waiting' && table.roundState !== 'showdown'
+        ) {
+          lastWinMessagesRef.current = [];
+        }
+        if (lastWinMessagesRef.current.length > 0 && !(winMsgs?.length)) {
+          (table as { winMessages?: string[] }).winMessages = lastWinMessagesRef.current;
         }
         setCurrentTable(table);
         logger.log("table updated:", table);
@@ -181,6 +206,10 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       socket.on(TABLE_JOINED, ({ table, message, from }: TableJoinedPayload) => {
         logger.log(TABLE_JOINED, table, message, from);
         logger.log("table joined:", table);
+        // 围观者首次进桌：公共牌/上一手结果从初始快照补齐
+        if (Array.isArray(table.board)) {
+          setCommunityCards(table.board as Card[]);
+        }
         setCurrentTable(table);
       });
 

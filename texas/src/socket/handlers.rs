@@ -295,6 +295,7 @@ async fn validate_sit_down_request(
 /// Broadcasts the sit down result (success or failure) and starts game loop if all complete.
 async fn broadcast_sit_down(
     io: &SocketIo,
+    s: &SocketRef,
     state: &Arc<SocketState>,
     table_id: u32,
     seat_id: u32,
@@ -334,6 +335,11 @@ async fn broadcast_sit_down(
             state.start_game_loop(io.clone(), state.clone(), table_id).await;
         }
         Err(e) => {
+            // 入座失败回传发起者（deck 竞态/证明失败），客户端据此提示或重试
+            let _ = s.emit("error", &serde_json::json!({
+                "msg": format!("Sit down failed: {e}. Please try again."),
+                "action": "sit_down",
+            }));
             tracing::warn!("[SIT_DOWN_V2] Failed to join and shuffle: {}", e);
             // ZK 可视化：shuffle 证明验证失败
             state.broadcast_crypto_event(
@@ -1168,7 +1174,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
         // 4. Broadcast result
         broadcast_sit_down(
-            &io, &state, payload.table_id, payload.seat_id, &payload.pk_hex,
+            &io, &s, &state, payload.table_id, payload.seat_id, &payload.pk_hex,
             payload.amount, &player_id, &player_name, result,
         ).await;
     });

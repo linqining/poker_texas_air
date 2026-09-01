@@ -205,7 +205,7 @@ pub async fn start_bot(
             bot_player,
             player.pk.clone(),
             pk_proof_full,
-            mask_and_shuffle,
+            Some(mask_and_shuffle),
             seat_id,
             1000,
         )
@@ -241,13 +241,15 @@ pub async fn start_bot(
     // 驱动循环：轮到 bot 时生成真实证明并提交
     let started = std::time::Instant::now();
     let mut step = 0usize;
-    // 循环时长：默认 600s；BOT_LOOP_SECS 可覆盖（如 3600 = 1 小时，供
-    // 长时联调/私有结算触发观察）。
+    // 循环时长：默认 600s；BOT_LOOP_SECS 可覆盖——0 = 无限循环（联调
+    // 常驻，联调环境 texas/.env 默认 0），避免 bot 过期导致桌面凑不齐
+    // 人数、新用户买入后永远不开局。
     let loop_secs: u64 = std::env::var("BOT_LOOP_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(600);
-    while started.elapsed().as_secs() < loop_secs {
+    let unlimited = loop_secs == 0;
+    while unlimited || started.elapsed().as_secs() < loop_secs {
         tokio::time::sleep(Duration::from_millis(700)).await;
 
         // ---- 方案A：mirror 由游戏层接受点单点驱动，bot 不再平行直驱。----

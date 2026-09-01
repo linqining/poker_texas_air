@@ -303,8 +303,8 @@ const Navbar: React.FC<NavbarProps> = ({
               ⇄ 兑换
             </SwapButton>
           )}
-          {(chipsAmount ?? 0) > 0 && (
-            <SwapButton onClick={() => setShowClaim(true)} title="把奖励筹码私密领取为池内 STRK 票据">
+          {loggedIn && (
+            <SwapButton onClick={() => setShowClaim(true)} title="赔付承诺注册 / 奖励领取（私密或公开）">
               ↓ 领取
             </SwapButton>
           )}
