@@ -30,6 +30,7 @@ import { STAND_UP_TIMEOUT_MS } from '../../clientConfig';
 import { useAccount } from '@starknet-react/core';
 import { submitBuyIn } from '../../starknet/starknetGameActions';
 import { activeAccount } from '../../starknet/devAccount';
+import { initGameController } from '../../starknet/cartridge';
 
 export interface UseGameActionsParams {
   socket: Socket | null;
@@ -368,6 +369,10 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
         return;
       }
       logger.log('[SitDown] PokerVault deposit tx:', depositResult.hash);
+
+      // 买入成功：自动初始化 Cartridge 游戏交互会话（session key，弹一次
+      // 登录后静默）。不阻塞 SIT_DOWN_V2——初始化与入座并行。
+      initGameController().catch(() => undefined);
 
       // 买入成功后通知 game server：后端校验 remask proof 并让玩家入座。
       socket?.emit(SIT_DOWN_V2, {

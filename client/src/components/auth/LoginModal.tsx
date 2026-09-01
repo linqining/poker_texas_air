@@ -1,4 +1,4 @@
-import React, { useContext, useEffect } from 'react';
+import React, { useContext, useEffect, useState } from 'react';
 import ReactDOM from 'react-dom';
 import styled from 'styled-components';
 import { useAccount, useConnect, useDisconnect } from '@starknet-react/core';
@@ -106,10 +106,32 @@ const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
   const isLoggedIn = useContext(authContext)!.isLoggedIn;
   const { getLocalizedString: t } = useContext(contentContext)!;
   const connected = useAccount();
-  // dev 直签账户（VITE_DEV_ACCOUNT_*，testnet 联调）优先于连接的钱包
+  // 连接的钱包（Ready/Cartridge）优先，dev 直签账户仅作无钱包时兜底
   const address = activeAddress(connected.address);
   const { connect, connectors, connectAsync, isPending, error } = useConnect();
   const { disconnect } = useDisconnect();
+
+  // 只渲染已安装的注入钱包（Ready 未安装时两个注入 id 都探不到 → 不显示
+  // 死按钮；Cartridge 为内嵌 connector，恒可用）。
+  // 登录只保留注入钱包（Ready）。Cartridge 不再作为登录选项——它在买入
+  // 成功后由应用自动初始化（游戏交互签名），不承担登录/买入/swap/领取。
+  const [availableConnectors, setAvailableConnectors] = useState(connectors);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(
+      connectors.map(async (connector) => ({
+        connector,
+        available:
+          /argentX|^ready$/i.test(connector.id) &&
+          (await Promise.resolve(connector.available()).catch(() => false)),
+      })),
+    ).then((results) => {
+      if (!cancelled) setAvailableConnectors(results.filter((r) => r.available).map((r) => r.connector));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [connectors]);
 
   useEffect(() => {
     if (isOpen && isLoggedIn) {
@@ -129,6 +151,8 @@ const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
 
   const handleConnect = async (connector: (typeof connectors)[number]) => {
     try {
+      // 显式选择钱包 = 用户登录意图，解除登出压制（否则自动登录被跳过）
+      sessionStorage.removeItem('poker.loggedOut');
       await connectAsync({ connector });
     } catch (e) {
       // eslint-disable-next-line no-console
@@ -151,7 +175,7 @@ const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
         <ModalHeading>{t('login_sign-in')}</ModalHeading>
 
         <LoginSection>
-          {connectors.map((connector) => (
+          {availableConnectors.map((connector) => (
             <WalletButton
               key={connector.id}
               type="button"
@@ -162,7 +186,11 @@ const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
               <span className="login-btn-icon">
                 <StrkLogo src={strkLogoSvg} alt="STRK" />
               </span>
-              <span>{connector.name ?? connector.id}</span>
+              <span>
+                {connector.name ?? connector.id}
+                {/* Ready 是首选钱包（登录/买入/swap/私密领取均扣 Ready 余额） */}
+                {/argentX|^ready$/i.test(connector.id) && '（推荐）'}
+              </span>
             </WalletButton>
           ))}
 

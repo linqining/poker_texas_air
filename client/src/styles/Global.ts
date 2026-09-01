@@ -6,6 +6,18 @@ const GlobalStyles = createGlobalStyle`
     font-size: ${(props) => props.theme.fonts.fontSizeRoot};
   }
 
+  /* Cartridge Controller 的挂载层 #controller 是一个铺满视口的 div
+     （pointer-events:auto），内部只有一个 0x0 的隐藏 keychain iframe——
+     不可见却吞掉全页点击（登出/入座等按钮全部点不动）。让容器不再拦截；
+     iframe 自身恢复 auto：空闲时 0x0 无面积不影响页面，弹窗打开时自身
+     尺寸展开且可正常接收点击。 */
+  #controller {
+    pointer-events: none;
+  }
+  #controller iframe {
+    pointer-events: auto;
+  }
+
   *,
   *::before,
   *::after {

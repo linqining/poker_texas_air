@@ -4,7 +4,7 @@ import init, { WasmClientPlayer } from '@linqining/client-wasm';
 import wasmUrl from '@linqining/client-wasm/client_wasm_bg.wasm?url';
 import authContext from '../auth/authContext';
 import { logger } from '../../helpers/logger';
-import { PlayerStorage } from './playerStorage';
+import { PlayerStorage, type PlayerKeyMode } from './playerStorage';
 
 const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
 
@@ -47,6 +47,7 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
   const [gameId, setGameId] = useState<string | null>(null);
   const [playerName, setPlayerName] = useState<string | null>(null);
   const [wasmReady, setWasmReady] = useState(false);
+  const [keyMode, setKeyMode] = useState<PlayerKeyMode | null>(PlayerStorage.getKeyMode());
   const keysRef = useRef<WasmClientPlayer | null>(null);
   const restoreSessionRef = useRef<(() => boolean) | null>(null);
   const getPlayerKeysRef = useRef<(() => WasmClientPlayer | null) | null>(null);
@@ -102,6 +103,25 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
     logger.log('[PlayerContext] Cleared all player data');
   }, []);
 
+  // 密钥来源分发（SETTLEMENT_PRIVACY_PLAN.md Part B）：
+  // - 默认 new_random()：CSPRNG 随机，与钱包零派生关系（对手不可从钱包
+  //   地址算出 pk）；
+  // - 旧 wasm pkg 无 new_random 导出时回退钱包派生（迁移期兼容）；
+  // - 口令派生走 switchToPassphraseKey（B1.5，面板触发）。
+  const generateRandomKeys = useCallback((): WasmClientPlayer | null => {
+    const wasmAny = WasmClientPlayer as unknown as {
+      new_random?: () => WasmClientPlayer;
+    };
+    if (typeof wasmAny.new_random === 'function') {
+      PlayerStorage.setKeyMode('random');
+      return wasmAny.new_random();
+    }
+    logger.warn('[PlayerContext] wasm lacks new_random — falling back to wallet derivation (legacy)');
+    if (!walletAddress) return null;
+    PlayerStorage.setKeyMode('legacy');
+    return WasmClientPlayer.new_with_wallet_address(walletAddress);
+  }, [walletAddress]);
+
   const getPlayerKeys = useCallback((): WasmClientPlayer | null => {
     if (keysRef.current) {
       return keysRef.current;
@@ -114,12 +134,12 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
 
     const storedSk = PlayerStorage.getSk();
     if (!storedSk) {
-      logger.warn('[PlayerContext] No SK found in storage, generating new keys from wallet address');
-      if (!walletAddress) {
-        logger.error('[PlayerContext] No wallet address available, cannot generate keys');
+      logger.warn('[PlayerContext] No SK found in storage, generating a fresh random key (Part B)');
+      const newKeys = generateRandomKeys();
+      if (!newKeys) {
+        logger.error('[PlayerContext] Cannot generate keys (no wasm random / no wallet fallback)');
         return null;
       }
-      const newKeys = WasmClientPlayer.new_with_wallet_address(walletAddress);
       const sk = newKeys.get_sk_hex();
       const pk = newKeys.get_pk_hex();
       PlayerStorage.setSk(sk);
@@ -143,7 +163,7 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
       logger.error('[PlayerContext] Failed to reconstruct player keys:', e);
       return null;
     }
-  }, [setPlayerKeys]);
+  }, [setPlayerKeys, generateRandomKeys]);
 
   const restoreSession = useCallback((): boolean => {
     const savedGameId = PlayerStorage.getLastGameId();
@@ -189,11 +209,12 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
     const prevWallet = prevWalletRef.current;
     prevWalletRef.current = walletAddress;
 
-    // 非首次切换钱包：清除旧密钥，用新钱包地址生成
+    // 非首次切换钱包：清除旧密钥，生成新的随机身份（Part B：密钥不跟随钱包派生）
     if (prevWallet !== null) {
       logger.log('[PlayerContext] Wallet address changed, regenerating keys');
       clearPlayerKeys();
-      const newKeys = WasmClientPlayer.new_with_wallet_address(walletAddress);
+      const newKeys = generateRandomKeys();
+      if (!newKeys) return;
       const sk = newKeys.get_sk_hex();
       const pk = newKeys.get_pk_hex();
       PlayerStorage.setSk(sk);
@@ -201,7 +222,36 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
       const proof = parsePkProof(newKeys.generate_pk_proof());
       setPlayerKeys(newKeys, proof, "", pk);
     }
-  }, [walletAddress, wasmReady, clearPlayerKeys, setPlayerKeys]);
+  }, [walletAddress, wasmReady, clearPlayerKeys, setPlayerKeys, generateRandomKeys]);
+
+  /** 口令派生切换（B1.5）：同一口令在任何设备恢复同一 pk。 */
+  const switchToPassphraseKey = useCallback((passphrase: string): { ok: boolean; error?: string } => {
+    if (!wasmReady) return { ok: false, error: 'wasm 未就绪' };
+    if (!passphrase || passphrase.length < 8) return { ok: false, error: '口令至少 8 个字符' };
+    const wasmAny = WasmClientPlayer as unknown as {
+      new_with_passphrase?: (p: string) => WasmClientPlayer;
+    };
+    if (typeof wasmAny.new_with_passphrase !== 'function') {
+      return { ok: false, error: '当前 wasm 版本不支持口令派生' };
+    }
+    const keys = wasmAny.new_with_passphrase(passphrase);
+    const proof = parsePkProof(keys.generate_pk_proof());
+    setPlayerKeys(keys, proof, PlayerStorage.getLastGameId() || '', PlayerStorage.getPlayerName() || '');
+    PlayerStorage.setKeyMode('passphrase');
+    setKeyMode('passphrase');
+    logger.log('[PlayerContext] switched to passphrase-derived key, pk:', keys.get_pk_hex().slice(0, 16) + '…');
+    return { ok: true };
+  }, [wasmReady, setPlayerKeys]);
+
+  /** 切回随机密钥（放弃口令可恢复性）。 */
+  const switchToRandomKey = useCallback((): { ok: boolean; error?: string } => {
+    const keys = generateRandomKeys();
+    if (!keys) return { ok: false, error: '无法生成随机密钥（wasm 未就绪）' };
+    const proof = parsePkProof(keys.generate_pk_proof());
+    setPlayerKeys(keys, proof, PlayerStorage.getLastGameId() || '', PlayerStorage.getPlayerName() || '');
+    setKeyMode(PlayerStorage.getKeyMode());
+    return { ok: true };
+  }, [generateRandomKeys, setPlayerKeys]);
 
   useEffect(() => {
     logger.log('[PlayerContext] Context updated:', {
@@ -222,10 +272,13 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
         gameId,
         playerName,
         wasmReady,
+        keyMode,
         setPlayerKeys,
         clearPlayerKeys,
         getPlayerKeys,
         restoreSession,
+        switchToPassphraseKey,
+        switchToRandomKey,
       }}
     >
       {children}

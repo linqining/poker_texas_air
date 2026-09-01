@@ -140,8 +140,18 @@ pub fn take_client_endorsements(
     let guard = registry.lock().expect("client endorsement registry lock");
     let mut out = Vec::with_capacity(wallets.len());
     for w in wallets {
-        let entry = guard.get(&format!("{w:#x}"))?.get(&hand_id)?;
-        out.push(entry.clone());
+        let key = format!("{w:#x}");
+        let entry = match guard.get(&key).map(|m| m.get(&hand_id)) {
+            Some(Some(e)) => e.clone(),
+            _ => {
+                tracing::info!(
+                    "[starknet-settle] take: MISSING endorsement wallet={key} hand={hand_id} (registry has {} wallets)",
+                    guard.len()
+                );
+                return None;
+            }
+        };
+        out.push(entry);
     }
     Some(out)
 }
@@ -1126,9 +1136,49 @@ fn u256_word(v: u64) -> [u8; 32] {
 ///   `register_hand_proved` + `verify_and_settle_dapv_proved`。
 ///
 /// 返回 (register_tx, settle_tx)。
+/// Part A Phase 1：检查所有赢家是否已在 vault 注册 payout commitment。
+/// 任一未注册 → 私有结算入口缺前置，回退 legacy（不卡结算）。
+async fn winners_registered(players_remapped: &[Ff], deltas: &[i128]) -> bool {
+    let Some(chain) = super::chain() else {
+        return false;
+    };
+    let Some(vault_addr) = super::chain::parse_felt(&chain.config.vault_address) else {
+        return false;
+    };
+    let selector = starknet_keccak(b"payout_commitment");
+    for (i, p) in players_remapped.iter().enumerate() {
+        // 只有赢家（delta > 0）需要 payout commitment——输家走公开扣款。
+        let Some(d) = deltas.get(i) else { return false };
+        if *d <= 0 {
+            continue;
+        }
+        match chain
+            .call_contract(vault_addr, selector, vec![ff_to_felt(*p)])
+            .await
+        {
+            Ok(felts) => {
+                let registered = felts.first().map(|f| *f != Felt::ZERO).unwrap_or(false);
+                if !registered {
+                    tracing::info!(
+                        "[starknet-settle] winner {p:#x} has no payout commitment — legacy settle"
+                    );
+                    return false;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("[starknet-settle] payout_commitment query failed: {e}");
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub async fn submit_dual_settlement(
     dual: &DualSettlement,
     dual_address: &str,
+    players_remapped: &[Ff],
+    deltas: &[i128],
 ) -> Result<(String, String), String> {
     let chain = super::chain().ok_or("starknet chain not initialized")?;
     let contract = super::chain::parse_felt(dual_address)
@@ -1158,6 +1208,16 @@ pub async fn submit_dual_settlement(
         SettleMode::Linear
     };
 
+    // Part A Phase 1：STARKNET_SETTLE_PRIVATE=true 时走隐私结算入口
+    // （赢家派奖进认领托管而非公开 chip 余额；输家仍公开扣款）。
+    // 前置条件：所有赢家已在 vault 注册 payout commitment——未齐则自动
+    // 回退 legacy 入口（下一手再试），绝不因缺注册而卡死结算。
+    let settle_private = std::env::var("STARKNET_SETTLE_PRIVATE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let use_private =
+        settle_private && winners_registered(players_remapped, deltas).await;
+
     let (register_selector, register_calldata, settle_selector, settle_calldata) =
         match mode {
             SettleMode::Proved => (
@@ -1169,7 +1229,11 @@ pub async fn submit_dual_settlement(
             SettleMode::Linear => (
                 "register_hand",
                 dual.register_calldata.clone(),
-                "verify_and_settle_dapv_stark",
+                if use_private {
+                    "verify_and_settle_dapv_stark_private"
+                } else {
+                    "verify_and_settle_dapv_stark"
+                },
                 dual.settle_calldata.clone(),
             ),
         };

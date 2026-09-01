@@ -1,0 +1,11 @@
+{
+  "name": "payout-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Part C3.2-M1: settlement payout sidecar — queues winner payouts and delivers them as STRK20 private transfers from the operator float (SETTLEMENT_PRIVACY_PLAN.md Part C3.2).",
+  "scripts": {
+    "start": "node src/server.mjs"
+  },
+  "dependencies": {}
+}

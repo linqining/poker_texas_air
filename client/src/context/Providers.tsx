@@ -18,16 +18,27 @@ import {
   StarknetConfig,
   starkscan,
   jsonRpcProvider,
+  injected,
 } from '@starknet-react/core';
 import { cartridgeConnector } from '../starknet/cartridge';
 import { sepolia, mainnet } from '@starknet-react/chains';
 
 const queryClient = new QueryClient();
 
-// Connector list. 仅保留 Cartridge Controller：passkey smart wallet with
-// session keys — approve/deposit/withdraw run without per-action popups.
-// （ArgentX/Braavos 注入钱包按产品决策下线。）
-const connectors = [cartridgeConnector];
+// Connector list（SETTLEMENT_PRIVACY_PLAN.md Part C：Ready 为首选钱包）：
+// - Ready Wallet（注入钱包，STRK20 Wallet API 的官方测试基线）排最前：
+//   登录验证、swap 兑换、买入扣款、私密领取奖励全部走 Ready——买入必须
+//   扣用户 Ready 钱包里的钱。Ready 的注入 id 历史上是 'argentX'，改版后
+//   可能注册 'ready'——两个都挂，LoginModal 按 available() 过滤并保持
+//   本顺序（Ready 在前）。
+// - Cartridge Controller（passkey smart wallet，session keys 免弹窗）仅作
+//   备选，排在 Ready 之后；starknet-react autoConnect 优先重连上次使用
+//   的连接器，首次连接时 UI 按 connectors 顺序展示 → Ready 优先。
+const connectors = [
+  injected({ id: 'argentX' }),
+  injected({ id: 'ready' }),
+  cartridgeConnector,
+];
 
 // Per-chain RPC endpoints (public Blast endpoints; override by editing here).
 const RPC_URLS: Record<string, string> = {
@@ -56,7 +67,6 @@ const Providers: React.FC<ProvidersProps> = ({ children }) => (
         provider={provider}
         connectors={connectors}
         explorer={starkscan}
-        autoConnect
       >
         <ThemeProvider theme={theme}>
           <GlobalState>

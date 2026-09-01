@@ -296,7 +296,7 @@ async fn run_settle_attempt(table_id: u32) {
                 settlement,
                 &endorsed,
             ) {
-                Ok(dual) => match super::dual_settle::submit_dual_settlement(&dual, &dual_addr).await {
+                Ok(dual) => match super::dual_settle::submit_dual_settlement(&dual, &dual_addr, &settlement.players_remapped, &settlement.deltas).await {
                     Ok((register_hash, settle_hash)) => {
                         let _ = settle_ok_once(table_id, settlement.hand_id);
                         tracing::info!(
@@ -725,6 +725,26 @@ static BOT_ENDORSEMENT_SKS: std::sync::LazyLock<
 pub fn register_bot_endorsement_key(wallet: &str, sk: super::dual_settle::Sc) {
     if let Ok(mut map) = BOT_ENDORSEMENT_SKS.lock() {
         map.insert(wallet.to_string(), sk);
+    }
+}
+
+/// 启动时为 STARKNET_DEV_ENDORSEMENT_WALLETS（逗号分隔）注册服务端托管的
+/// 认可私钥：dev 联调中这些钱包的对局也走 DAPV 结算（与 bot 同机制）。
+/// 生产环境不要配置该变量——真实玩家的认可私钥必须留在客户端。
+pub fn register_dev_endorsement_wallets() {
+    let list = match std::env::var("STARKNET_DEV_ENDORSEMENT_WALLETS") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return,
+    };
+    use poker_protocol::crypto::curve::{Curve, CurveScalar};
+    for wallet in list.split(',') {
+        let wallet = wallet.trim();
+        if wallet.is_empty() {
+            continue;
+        }
+        let sk = <super::dual_settle::Sc as CurveScalar>::random(&mut rand::rngs::OsRng);
+        register_bot_endorsement_key(wallet, sk);
+        tracing::info!("[starknet-settle] dev endorsement wallet registered: {wallet}");
     }
 }
 

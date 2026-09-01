@@ -10,3 +10,7 @@ mod settlement_hash;
 /// verification for the P track + Phase-1 G registration.
 mod dual;
 mod poker_dual_settlement;
+
+/// Part A Phase 1 (SETTLEMENT_PRIVACY_PLAN.md): winners claim escrowed
+/// payouts privately via secp256k1-signed STRK20 pool claims.
+mod settlement_payout_anonymizer;

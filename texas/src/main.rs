@@ -131,6 +131,9 @@ async fn main() -> std::io::Result<()> {
         )
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
+    // Part A Phase 1：dev 联调钱包的认可托管（生产不配置该环境变量）
+    crate::starknet::hooks::register_dev_endorsement_wallets();
+
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     tracing::info!("Secret Poker Server (Rust) starting on port {}", port);
     tracing::info!("Using in-memory user storage (MongoDB removed). 筹码余额由 Starknet STRK20 链上结算决定。");

@@ -116,7 +116,7 @@ pub async fn start_bot(
         .map_err(|e| format!("token: {e}"))?;
 
     eprintln!("[bot] deposit verified OK");
-    let player = ClientPlayer::new_with_wallet_address(&wallet);
+    let player = ClientPlayer::new();
 
     // 进程内 bot 的认可私钥注册（DAPV 结算需要所有参与玩家的认可；
     // 真实客户端的认可私钥在浏览器 localStorage，bot 的托管在服务器）。
@@ -241,7 +241,13 @@ pub async fn start_bot(
     // 驱动循环：轮到 bot 时生成真实证明并提交
     let started = std::time::Instant::now();
     let mut step = 0usize;
-    while started.elapsed().as_secs() < 600 {
+    // 循环时长：默认 600s；BOT_LOOP_SECS 可覆盖（如 3600 = 1 小时，供
+    // 长时联调/私有结算触发观察）。
+    let loop_secs: u64 = std::env::var("BOT_LOOP_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600);
+    while started.elapsed().as_secs() < loop_secs {
         tokio::time::sleep(Duration::from_millis(700)).await;
 
         // ---- 方案A：mirror 由游戏层接受点单点驱动，bot 不再平行直驱。----

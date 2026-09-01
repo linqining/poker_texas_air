@@ -65,6 +65,47 @@ pub trait IPokerDualSettlement<TContractState> {
     fn hand_binding(self: @TContractState, binding: felt252) -> (felt252, felt252, felt252);
     fn hand_settled(self: @TContractState, binding: felt252) -> bool;
     fn vault(self: @TContractState) -> ContractAddress;
+
+    /// Part A Phase 1（SETTLEMENT_PRIVACY_PLAN.md §4）：隐私结算入口。
+    /// 与 `verify_and_settle_dapv_stark` 相同的 DAPV 校验与 digest 断言，
+    /// 但派奖方式不同：
+    /// - 输家（delta < 0）仍经 vault.apply_settlement 公开扣款
+    ///   （Phase 1 已知残余，Phase 2 由 ZK 消除）；
+    /// - 赢家（delta > 0）不再记入公开 chip 余额，改为按座位写入认领
+    ///   承诺 `cm = poseidon(commitment, hand_binding, amount_lo,
+    ///   amount_hi)`（commitment 为玩家在 vault 注册的 payout 承诺
+    ///   `poseidon(secret)`），并把赢家总额经 `vault.settlement_fund_escrow`
+    ///   划入认领托管；
+    /// - 赢家凭 secret 原像经 STRK20 池私密认领（见
+    ///   SettlementPayoutAnonymizer）。
+    /// `settlement_digest` 仍约束同一 (players, deltas) 明文——Phase 2 用
+    /// Stwo 把"开根"搬进证明后，明文才真正离开 calldata。
+    fn verify_and_settle_dapv_stark_private(
+        ref self: TContractState,
+        hand_binding: felt252,
+        hand_id_bytes: Span<u8>,
+        hand_id: u64,
+        players: Span<ContractAddress>,
+        deltas: Span<i128>,
+        p_batch: Span<felt252>,
+    );
+
+    /// Owner-gated: set the claim escrow helper that receives the winners'
+    /// pot via `vault.settlement_fund_escrow`.
+    fn set_claim_helper(ref self: TContractState, helper: ContractAddress);
+    /// View: the stored claim commitment for (hand_binding, seat_index).
+    fn claim_cm(self: @TContractState, hand_binding: felt252, seat_index: u32) -> felt252;
+    /// View: the claimable amount for (hand_binding, seat_index).
+    fn claim_amount(self: @TContractState, hand_binding: felt252, seat_index: u32) -> u256;
+    /// Claim-helper gated: consume a claim (idempotence + amount assert).
+    fn consume_claim(
+        ref self: TContractState,
+        hand_binding: felt252,
+        seat_index: u32,
+        amount: u256,
+    );
+    /// View: the configured claim helper.
+    fn claim_helper(self: @TContractState) -> ContractAddress;
 }
 
 #[starknet::contract]
@@ -262,6 +303,15 @@ fn dapv_prelude(
         expected_packed: Map<felt252, felt252>,
         /// Settled bindings (replay protection).
         settled_bindings: Map<felt252, bool>,
+        /// Part A Phase 1: claim escrow helper receiving winners' pots.
+        claim_helper: ContractAddress,
+        /// (hand_binding, seat_index) → claim commitment
+        /// `poseidon(pk_lo, pk_hi, hand_binding, amount_lo, amount_hi)`.
+        claim_cms: Map<(felt252, u32), felt252>,
+        /// (hand_binding, seat_index) → claimable amount.
+        claim_amounts: Map<(felt252, u32), u256>,
+        /// (hand_binding, seat_index) → consumed flag (anti double-claim).
+        claims_consumed: Map<(felt252, u32), bool>,
         #[substorage(v0)]
         ownable: OwnableComponent::Storage,
     }
@@ -274,6 +324,29 @@ fn dapv_prelude(
         HandRegistered: HandRegistered,
         DualProofSettled: DualProofSettled,
         ProverSet: ProverSet,
+        ClaimHelperSet: ClaimHelperSet,
+        DualProofSettledPrivate: DualProofSettledPrivate,
+        ClaimConsumed: ClaimConsumed,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct ClaimHelperSet {
+        helper: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct DualProofSettledPrivate {
+        hand_binding: felt252,
+        settlement_digest: felt252,
+        participant_count: u32,
+        total_winnings: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct ClaimConsumed {
+        hand_binding: felt252,
+        seat_index: u32,
+        amount: u256,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -454,6 +527,126 @@ fn dapv_prelude(
         fn vault(self: @ContractState) -> ContractAddress {
             self.vault_address.read()
         }
+
+        fn set_claim_helper(ref self: ContractState, helper: ContractAddress) {
+            self.ownable.assert_only_owner();
+            self.claim_helper.write(helper);
+            self.emit(ClaimHelperSet { helper });
+        }
+
+        /// Part A Phase 1 隐私结算（见接口文档）。DAPV 校验逐字复用
+        /// `verify_and_settle_dapv_stark` 的路径；派奖按赢家/输家分流。
+        fn verify_and_settle_dapv_stark_private(
+            ref self: ContractState,
+            hand_binding: felt252,
+            hand_id_bytes: Span<u8>,
+            hand_id: u64,
+            players: Span<ContractAddress>,
+            deltas: Span<i128>,
+            p_batch: Span<felt252>,
+        ) {
+            let registered_digest =
+                dapv_prelude(@self, hand_binding, hand_id_bytes, hand_id, players, deltas);
+
+            assert!(p_batch.len() >= 1_u32, "Empty batch");
+            let n_own: u32 = (*p_batch.at(0)).try_into().expect('n_own fits u32');
+            assert!(
+                n_own == players.len(),
+                "Every participant needs an endorsement"
+            );
+            assert!(
+                verify_hand_batch_stark(hand_binding, p_batch),
+                "DAPV STARK batch rejected"
+            );
+
+            assert_zero_sum(deltas);
+
+            // 派奖分流：输家公开扣款（Phase 1 残余）；赢家进认领托管。
+            let vault_addr = self.vault_address.read();
+            let helper = self.claim_helper.read();
+            assert!(!helper.is_zero(), "Claim helper not set");
+            let mut total_winnings: u256 = 0;
+            let mut i: u32 = 0;
+            while i < players.len() {
+                let player = *players.at(i);
+                let delta = *deltas.at(i);
+                if delta > 0_i128 {
+                    // 赢家：公开 chip 余额不动，改为写认领承诺并 funding 托管。
+                    let delta_u64: u64 = delta.try_into().expect('win fits u64');
+                    let amount: u256 = delta_u64.into();
+                    let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
+                    let commitment = vault.payout_commitment(player);
+                    assert!(commitment != 0, "Payout commitment not registered");
+                    // cm = poseidon(commitment, hand_binding, amount_lo, amount_hi)：
+                    // 认领方须揭示 commitment 的原像 secret（capability 模型）。
+                    let cm = poseidon_hash_span(
+                        array![
+                            commitment,
+                            hand_binding,
+                            amount.low.into(),
+                            amount.high.into()
+                        ]
+                        .span(),
+                    );
+                    self.claim_cms.write((hand_binding, i), cm);
+                    self.claim_amounts.write((hand_binding, i), amount);
+                    self.claims_consumed.write((hand_binding, i), false);
+                    total_winnings += amount;
+                } else if delta < 0_i128 {
+                    // 输家：公开扣款（Phase 1 已知残余，Phase 2 ZK 消除）。
+                    let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
+                    vault.apply_settlement(player, delta);
+                }
+                i += 1;
+            }
+            assert!(total_winnings > 0_u256, "No winnings to escrow");
+            let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
+            vault.settlement_fund_escrow(helper, hand_binding, total_winnings);
+
+            self.settled_bindings.write(hand_binding, true);
+            self.emit(
+                DualProofSettledPrivate {
+                    hand_binding,
+                    settlement_digest: registered_digest,
+                    participant_count: players.len(),
+                    total_winnings,
+                },
+            );
+        }
+
+        fn claim_cm(self: @ContractState, hand_binding: felt252, seat_index: u32) -> felt252 {
+            self.claim_cms.read((hand_binding, seat_index))
+        }
+
+        fn claim_amount(
+            self: @ContractState,
+            hand_binding: felt252,
+            seat_index: u32,
+        ) -> u256 {
+            self.claim_amounts.read((hand_binding, seat_index))
+        }
+
+        fn consume_claim(
+            ref self: ContractState,
+            hand_binding: felt252,
+            seat_index: u32,
+            amount: u256,
+        ) {
+            let caller = starknet::get_caller_address();
+            assert!(caller == self.claim_helper.read(), "Only claim helper");
+            let expected = self.claim_amounts.read((hand_binding, seat_index));
+            assert!(expected == amount, "Claim amount mismatch");
+            assert!(
+                !self.claims_consumed.read((hand_binding, seat_index)),
+                "Claim already consumed"
+            );
+            self.claims_consumed.write((hand_binding, seat_index), true);
+            self.emit(ClaimConsumed { hand_binding, seat_index, amount });
+        }
+
+        fn claim_helper(self: @ContractState) -> ContractAddress {
+            self.claim_helper.read()
+        }
     }
 }
 
@@ -461,6 +654,15 @@ fn dapv_prelude(
 #[starknet::interface]
 pub trait IVaultDispatcher<TContractState> {
     fn apply_settlement(ref self: TContractState, player: ContractAddress, delta: i128);
+    /// Part A Phase 1: read the player's registered payout commitment.
+    fn payout_commitment(self: @TContractState, player: ContractAddress) -> felt252;
+    /// Part A Phase 1: fund the claim escrow with the winners' pot.
+    fn settlement_fund_escrow(
+        ref self: TContractState,
+        escrow: ContractAddress,
+        hand_binding: felt252,
+        amount: u256,
+    );
 }
 
 // ============================================================

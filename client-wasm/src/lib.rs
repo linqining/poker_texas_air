@@ -231,6 +231,23 @@ impl WasmClientPlayer {
         }
     }
 
+    /// 随机会话密钥（Part B 默认模式）：CSPRNG 生成，与钱包零派生关系。
+    /// sk 经 get_sk_hex 存 localStorage，重载用 from_sk 恢复。
+    pub fn new_random() -> WasmClientPlayer {
+        WasmClientPlayer {
+            inner: ClientPlayer::new(),
+        }
+    }
+
+    /// 口令派生身份（Part B1.5，用户可选的可恢复模式）：同一口令在任何
+    /// 设备派生出同一 (sk, pk)。KDF 参数冻结在 "zgame:player-key:v1"。
+    /// 注意：不要用钱包助记词/恢复短语作为口令。
+    pub fn new_with_passphrase(passphrase: &str) -> WasmClientPlayer {
+        WasmClientPlayer {
+            inner: ClientPlayer::new_with_passphrase(passphrase),
+        }
+    }
+
     pub fn from_sk(sk_hex: &str) -> Result<WasmClientPlayer, JsValue> {
         let sk = match hex_to_scalar(sk_hex) {
             Ok(s) => s,

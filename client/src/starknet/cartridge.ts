@@ -272,3 +272,34 @@ export class CartridgeConnector extends Connector {
 }
 
 export const cartridgeConnector = new CartridgeConnector();
+
+// ---------------------------------------------------------------------------
+// 游戏交互会话（SETTLEMENT_PRIVACY_PLAN.md Part C：钱包角色分工）
+//
+// Ready 承担登录验证、买入扣款、swap、私密领取；Cartridge 只在买入成功后
+// 由应用自动初始化，作为游戏交互的签名会话（session key 免弹窗）。
+// 每个 page 会话只初始化一次：首次弹出 controller 登录/创建（用户完成一次
+// passkey），之后 keychain 会话静默复用。用户关闭弹窗则跳过，下笔买入再试。
+// ---------------------------------------------------------------------------
+
+let gameControllerInit = false;
+
+export function isGameControllerReady(): boolean {
+  return gameControllerInit;
+}
+
+export async function initGameController(): Promise<boolean> {
+  if (gameControllerInit) return true;
+  gameControllerInit = true;
+  try {
+    // ControllerConnector.connect：keychain 已有会话时静默返回；否则弹出
+    // controller 登录/创建 UI（用户完成一次即可）。
+    await controller.connect();
+    return true;
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn('[cartridge] game controller init skipped:', e);
+    gameControllerInit = false;
+    return false;
+  }
+}

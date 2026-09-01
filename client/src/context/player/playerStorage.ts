@@ -7,7 +7,14 @@ const STORAGE_KEYS = {
   PK: 'pk',
   PLAYER_NAME: 'player_name',
   LAST_GAME_ID: 'last_game_id',
+  KEY_MODE: 'poker.keyMode',
 } as const;
+
+/** 牌桌身份密钥模式（SETTLEMENT_PRIVACY_PLAN.md Part B）。
+ * - random：CSPRNG 随机（默认），与钱包零派生关系，丢 localStorage 即丢身份；
+ * - passphrase：口令派生（B1.5），凭口令跨设备恢复同一 pk；
+ * - legacy：旧版钱包地址派生（存量用户，只读兼容）。 */
+export type PlayerKeyMode = 'random' | 'passphrase' | 'legacy';
 
 export const PlayerStorage = {
   getSk(): string | null {
@@ -15,6 +22,14 @@ export const PlayerStorage = {
   },
   setSk(sk: string): void {
     localStorage.setItem(STORAGE_KEYS.SK, sk);
+  },
+
+  getKeyMode(): PlayerKeyMode | null {
+    const v = localStorage.getItem(STORAGE_KEYS.KEY_MODE);
+    return v === 'random' || v === 'passphrase' || v === 'legacy' ? v : null;
+  },
+  setKeyMode(mode: PlayerKeyMode): void {
+    localStorage.setItem(STORAGE_KEYS.KEY_MODE, mode);
   },
 
   getPk(): string | null {

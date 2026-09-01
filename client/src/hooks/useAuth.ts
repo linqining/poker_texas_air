@@ -1,9 +1,9 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import httpClient from '../helpers/httpClient';
 import setAuthToken from '../helpers/setAuthToken';
 import { getToken } from '../helpers/getToken';
 import { useGlobalContext } from '../context/global/globalContext';
-import { useAccount, useDisconnect } from '@starknet-react/core';
+import { useAccount, useConnect, useDisconnect } from '@starknet-react/core';
 import { getStrkBalance } from '../starknet/starknetGameActions';
 import { starknetConfig } from '../starknet/config';
 import { activeAccount, activeAddress } from '../starknet/devAccount';
@@ -52,15 +52,32 @@ const useAuth = (): UseAuthReturn => {
   // Cartridge 文档模型：登出必须 disconnect Controller（断开 keychain 会话），
   // 否则连接仍在、自动重登立即登回同一账号，永远换不了用户。
   const { disconnect: disconnectConnector } = useDisconnect();
-  // dev 直签账户（VITE_DEV_ACCOUNT_*，testnet 联调）优先于连接的钱包：
-  // 登录签名、余额读取、游戏身份都用它，无需钱包弹窗。
+  // 连接的钱包（Ready/Cartridge）优先，dev 直签仅作无钱包时的兜底。
   const address = activeAddress(connectedAddress);
   const account = activeAccount(connectedAccount);
+  const { connectAsync, connectors } = useConnect();
+  // 登出过渡守卫：disconnect 是异步的，期间 address 尚未清空，自动重登
+  // effect 会立刻登回原账号（表现为"退出登录无效"）。用 ref + sessionStorage
+  // 标记压制，直到用户在 Sign In 里显式选择钱包（或连接成功）才解除。
+  const loggingOutRef = useRef(false);
+  const LOGGED_OUT_FLAG = 'poker.loggedOut';
 
   useEffect(() => {
     let cancelled = false;
     const init = async () => {
       setIsLoading(true);
+      // 静默重连：autoConnect 已禁用（防止 Cartridge 被旧记录静默重连），
+      // 这里只重连注入类钱包（Ready）。Cartridge 由买入成功后的
+      // initGameController 负责初始化，不走这里。
+      const last = localStorage.getItem('lastUsedConnector');
+      if (last === 'argentX' || last === 'ready') {
+        const connector = connectors.find((c) => c.id === last);
+        if (connector && (await Promise.resolve(connector.available()).catch(() => false))) {
+          connectAsync({ connector }).catch((e) =>
+            logger.warn('[Auth] injected wallet silent reconnect failed:', e)
+          );
+        }
+      }
       const storedToken = getToken();
       if (!storedToken) {
         localStorage.removeItem('walletAddress');
@@ -123,8 +140,12 @@ const useAuth = (): UseAuthReturn => {
     return () => window.removeEventListener('zgame:session-expired', onSessionExpired);
   }, [setId, setUserName, setEmail, setChipsAmount, setStrkBalance]);
 
-  // Auto-authenticate with the backend after wallet connection
+  // Auto-authenticate with the backend after wallet connection。
+  // 显式登出后（sessionStorage 标记在位）不再自动登录——用户必须通过
+  // Sign In 显式选择钱包（如 Ready），否则永远换不了账号。
   useEffect(() => {
+    if (loggingOutRef.current) return;
+    if (sessionStorage.getItem(LOGGED_OUT_FLAG) === '1') return;
     if (address && !isLoggedIn && account) {
       const storedToken = getToken();
       if (!storedToken) {
@@ -136,10 +157,18 @@ const useAuth = (): UseAuthReturn => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address, isLoggedIn, account]);
 
+  /** 显式登录动作（Sign In 弹窗连接钱包时调用）：解除登出标记。 */
+  const clearLoggedOutFlag = useCallback((): void => {
+    sessionStorage.removeItem(LOGGED_OUT_FLAG);
+    loggingOutRef.current = false;
+  }, []);
+
   const authenticateWithWallet = async (
     addr: string,
     acct: NonNullable<typeof account>,
   ): Promise<void> => {
+    // 走到钱包认证 = 用户显式登录，解除登出压制
+    clearLoggedOutFlag();
     setIsLoading(true);
     try {
       // SNIP-12 rev1 typed message: 服务端需要 messageHash 做 isValidSignature 验证。
@@ -259,16 +288,55 @@ const useAuth = (): UseAuthReturn => {
         logger.error('wallet_logout backend call failed:', err);
       });
     }
-    // 先断开 Cartridge Controller 连接（passkey 会话失效），再清应用态。
-    // 否则连接的 address 仍存在，自动重登 effect 会立刻登回同一账号。
-    try {
-      disconnectConnector();
-    } catch (err) {
-      logger.warn('connector disconnect failed:', err);
-    }
-    setWalletAddress(null);
+    // 登出三步，顺序关键：
+    // 1) 先立"登出中"标记 + 清本地登录态——自动重登 effect 立即失效；
+    // 2) 再异步断开钱包连接（disconnectConnector 是 Promise，不 await 会
+    //    留下 address，自动重登 effect 看到旧 address 立刻登回原账号）；
+    // 3) 断开完成后写入"已登出"标记（sessionStorage），此后即使 dev 兜底
+    //    账户存在也不再自动登录——用户必须经 Sign In 显式选择钱包。
+    loggingOutRef.current = true;
+    sessionStorage.setItem(LOGGED_OUT_FLAG, '1');
     logout();
+    setWalletAddress(null);
+    Promise.resolve()
+      .then(() => disconnectConnector())
+      .catch((err) => logger.warn('connector disconnect failed:', err))
+      .finally(() => {
+        // disconnect 完成后再统一清一次，覆盖断开过程中残留的地址状态
+        logout();
+        setWalletAddress(null);
+      });
   }, [logout, disconnectConnector]);
+
+  // 已登录状态下连接了新钱包（如从 Cartridge 切到 Ready）：自动以新钱包
+  // 重新认证，身份随之切换——无需先手动登出。
+  const prevAuthedAddressRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (loggingOutRef.current) return;
+    if (!address || !account) {
+      prevAuthedAddressRef.current = null;
+      return;
+    }
+    if (!isLoggedIn) {
+      prevAuthedAddressRef.current = address;
+      return;
+    }
+    if (prevAuthedAddressRef.current === null) {
+      prevAuthedAddressRef.current = address;
+      return;
+    }
+    if (prevAuthedAddressRef.current !== address) {
+      logger.log('[Auth] wallet switched:', prevAuthedAddressRef.current, '→', address, '— re-authenticating');
+      prevAuthedAddressRef.current = address;
+      localStorage.removeItem('token');
+      setAuthToken(null);
+      setIsLoggedIn(false);
+      authenticateWithWallet(address, account).catch((e) =>
+        logger.error('[Auth] re-auth after wallet switch failed:', e)
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [address, isLoggedIn, account]);
 
   return {
     isLoggedIn,

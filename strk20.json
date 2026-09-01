@@ -16,14 +16,15 @@
       ]
     },
     "poker_vault": {
-      "address": "0x6c8ac4202222a9bcf1f69cc213a2570a393bb83ca64666c7a5cd4a5894c1321",
+      "address": "0x3e73e675e5738e64f3fa54a921426eeb48aa72dec56745198f7a869ee0de25f",
       "class_name": "PokerVault",
-      "class_hash": "0x2bf5d0dc6d58cf64eedad5a5747e3d8a7e426028ecf73263a7558162fdf46c9",
+      "class_hash": "0x49329b14ddb42aa3f68477bef30f2abd4fad30644d8ff2b2655d52346fd77df",
       "constructor": [
         "owner",
         "token_address",
         "settlement_contract"
-      ]
+      ],
+      "note": "2026-09-01 v2 redeploy (Part A Phase 1): + register_payout_key/payout_key + settlement_fund_escrow (settlement_contract gated). settlement_contract=dual_v2."
     },
     "poker_settlement": {
       "address": "0x76a0b49a40c706d438c5f8675165d462de5a0a7d5183183e8b4746b955b5194",
@@ -36,15 +37,15 @@
       ]
     },
     "poker_dual_settlement": {
-      "address": "0x4d8e1f155aec13d43d3e7b1bce739412ddb8d3a85a51d3378db22f62bd88308",
+      "address": "0x283008305b515ead456b621d41f232d1c650c882c550d465b3fc5c83eee98e4",
       "class_name": "PokerDualSettlement",
-      "class_hash": "0x44c425ff6d28fb7d4d1350ea3f63153b0debc4195eb39db6edc8d4243373256",
+      "class_hash": "0x8cd910853b8e2dee83506bda76fe6e1df5f59e0c21b7cc09d9032a963e8ff3",
       "constructor": [
         "owner",
         "vault_address",
         "initial_prover"
       ],
-      "note": "2026-09-01 deployed on Sepolia (trimmed: legacy verify_and_settle/verify_and_settle_dapv/proved paths removed for the 80k casm limit; keeps register_hand + verify_and_settle_dapv_stark). Vault settlement_contract rebound to this address."
+      "note": "2026-09-01 v2 redeploy (Part A Phase 1): + verify_and_settle_dapv_stark_private (claim commitments + escrow funding + public loser debits), set_claim_helper, consume_claim. Claim helper=0x4642cca8...c1d5."
     },
     "poker_swap": {
       "address": "0x45a5d045fad8ba092e7919e26b34fa9e901b3ebc93b42120262dbade6cbcee9",
@@ -55,6 +56,27 @@
         "pstrk_address"
       ],
       "note": "Bidirectional fixed-rate STRK<->pSTRK swap (1:1000). Declared+deployed on Sepolia 2026-08-31 via deploy_sepolia_full.sh; reserves: 100,000 pSTRK + 15 STRK."
+    },
+    "poker_vault_anonymizer": {
+      "address": "0x600dd19f284e0bcff46f466e701ed8a389d1f601d7f6441fe32b6d022c51db1",
+      "class_name": "PokerVaultAnonymizer",
+      "class_hash": "0x5ec1eef0681aca7ff0f4c0f64a2eab2ad7b2d3c461832e99f90850a80315c94",
+      "constructor": [
+        "vault",
+        "pool"
+      ],
+      "note": "2026-09-01 v2 redeploy bound to vault v2. authorized_helper set (tx 0x4bfa87c2...59af3)."
+    },
+    "settlement_payout_anonymizer": {
+      "address": "0x4642cca837f0fb1f9b903516bcd6f99101bad27cbb458fba79875b5056cc1d5",
+      "class_name": "SettlementPayoutAnonymizer",
+      "class_hash": "0x6ac2db9dccf8ee55be70ae3208783506c402b523fd2b76d2b23dd9baea8021f",
+      "constructor": [
+        "vault",
+        "pool",
+        "settlement"
+      ],
+      "note": "2026-09-01 deployed (Part A Phase 1): STRK20 pool calls privacy_claim(player, hand_binding, seat, amount, note_id, secret); verifies payout-commitment preimage, single-use consume, credits open note."
     }
   },
   "token": {

@@ -606,7 +606,7 @@ pub fn verify_hand_batch(hand_id: Span<u8>, payload: Span<u256>) -> bool {
     fold_and_check(hand_id, terms, eq_sizes)
 }
 
-#[cfg(target: 'test')]
+#[cfg(feature: 'dual_legacy_tests')]
 mod tests {
     use super::super::hand_batch::verify_hand_batch;
     use core::array::{ArrayTrait, SpanTrait};

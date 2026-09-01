@@ -12,6 +12,7 @@ import userIcon from '../../assets/icons/user-icon.svg';
 import contentContext from '../../context/content/contentContext';
 import globalContext from '../../context/global/globalContext';
 import LanguageSwitcher from './LanguageSwitcher';
+import PlayerKeyPanel from './PlayerKeyPanel';
 
 const NavMenuWrapper = styled.div`
   position: fixed;
@@ -280,6 +281,7 @@ const NavMenu: React.FC<NavMenuProps> = ({
           </MenuItem>
 
         </MenuBody>
+        <PlayerKeyPanel />
         <MenuFooter>
           <LanguageSwitcher />
         </MenuFooter>

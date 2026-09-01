@@ -30,6 +30,7 @@ import {
   type SwapDirection,
 } from '../../starknet/starknetGameActions';
 import { getProvider } from '../../starknet/contracts';
+import ClaimRewardsModal from '../modals/ClaimRewardsModal';
 import { Contract, type Abi, uint256 } from 'starknet';
 
 interface NavbarProps {
@@ -201,6 +202,7 @@ const Navbar: React.FC<NavbarProps> = ({
   const account = activeAccount(connected.account);
   const navigate = useNavigate();
   const [showSwap, setShowSwap] = useState(false);
+  const [showClaim, setShowClaim] = useState(false);
   const [swapPending, setSwapPending] = useState(false);
   const [swapDone, setSwapDone] = useState<{ hash: string } | null>(null);
   const [swapError, setSwapError] = useState('');
@@ -299,6 +301,11 @@ const Navbar: React.FC<NavbarProps> = ({
           {isSwapConfigured() && (
             <SwapButton onClick={() => setShowSwap(true)} title="固定 1 STRK = 1000 pSTRK">
               ⇄ 兑换
+            </SwapButton>
+          )}
+          {(chipsAmount ?? 0) > 0 && (
+            <SwapButton onClick={() => setShowClaim(true)} title="把奖励筹码私密领取为池内 STRK 票据">
+              ↓ 领取
             </SwapButton>
           )}
           <LogoutButton onClick={onLogout} title={walletAddress || ''}>
@@ -413,6 +420,13 @@ const Navbar: React.FC<NavbarProps> = ({
           </ModalShell>,
           document.getElementById('modal') as HTMLElement,
         )}
+      {showClaim && (
+        <ClaimRewardsModal
+          isOpen={showClaim}
+          chipsAmount={chipsAmount}
+          onClose={() => setShowClaim(false)}
+        />
+      )}
     </StyledNav>
   );
 };

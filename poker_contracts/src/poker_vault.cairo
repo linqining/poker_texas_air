@@ -60,6 +60,25 @@ pub trait IPokerVault<TContractState> {
     fn unpause(ref self: TContractState);
     /// Whether the vault is paused.
     fn paused(self: @TContractState) -> bool;
+    /// Register a payout claim commitment for the caller
+    /// (SETTLEMENT_PRIVACY_PLAN.md Part A Phase 1): `commitment =
+    /// poseidon(secret)` where `secret` is a client-side capability. Winners'
+    /// settlements become claimable from the settlement escrow only by
+    /// revealing `secret` with `hand_binding` and `amount` — the secret
+    /// never leaves the client until the claim itself.
+    fn register_payout_commitment(ref self: TContractState, commitment: felt252);
+    /// Read the registered payout commitment of `player` (0 = unregistered).
+    fn payout_commitment(self: @TContractState, player: ContractAddress) -> felt252;
+    /// Settlement-contract gated: transfer `amount` tokens from the vault to
+    /// `escrow` (the claim helper), funding a hand's private-payout pot.
+    /// Phase 1 pays winners from escrow claims instead of crediting public
+    /// chip balances.
+    fn settlement_fund_escrow(
+        ref self: TContractState,
+        escrow: ContractAddress,
+        hand_binding: felt252,
+        amount: u256,
+    );
 }
 
 #[starknet::contract]
@@ -97,6 +116,8 @@ pub mod PokerVault {
         settlement_contract: ContractAddress,
         /// Helper contract authorized to call burn_chips (PokerVaultAnonymizer).
         authorized_helper: ContractAddress,
+        /// Per-player payout claim commitments (0 = unregistered).
+        payout_commitments: Map<ContractAddress, felt252>,
         #[substorage(v0)]
         ownable: OwnableComponent::Storage,
         #[substorage(v0)]
@@ -116,6 +137,21 @@ pub mod PokerVault {
         ChipDebited: ChipDebited,
         SettlementContractSet: SettlementContractSet,
         AuthorizedHelperSet: AuthorizedHelperSet,
+        PayoutCommitmentRegistered: PayoutCommitmentRegistered,
+        EscrowFunded: EscrowFunded,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct PayoutCommitmentRegistered {
+        player: ContractAddress,
+        commitment: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct EscrowFunded {
+        hand_binding: felt252,
+        escrow: ContractAddress,
+        amount: u256,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -222,6 +258,36 @@ pub mod PokerVault {
             self.emit(AuthorizedHelperSet { helper });
         }
 
+        fn register_payout_commitment(ref self: ContractState, commitment: felt252) {
+            let caller = starknet::get_caller_address();
+            assert!(commitment != 0, "Payout commitment required");
+            self.payout_commitments.write(caller, commitment);
+            self.emit(PayoutCommitmentRegistered { player: caller, commitment });
+        }
+
+        fn payout_commitment(self: @ContractState, player: ContractAddress) -> felt252 {
+            self.payout_commitments.read(player)
+        }
+
+        fn settlement_fund_escrow(
+            ref self: ContractState,
+            escrow: ContractAddress,
+            hand_binding: felt252,
+            amount: u256,
+        ) {
+            let caller = starknet::get_caller_address();
+            assert!(
+                caller == self.settlement_contract.read(), "Only settlement contract",
+            );
+            assert!(amount > 0_u256, "Amount must be > 0");
+            assert!(!escrow.is_zero(), "Escrow required");
+            let token = self.token_address.read();
+            let dispatcher = IERC20Dispatcher { contract_address: token };
+            let ok = dispatcher.transfer(escrow, amount);
+            assert!(ok, "Token transfer failed");
+            self.emit(EscrowFunded { hand_binding, escrow, amount });
+        }
+
         fn chip_balance(self: @ContractState, player: ContractAddress) -> u256 {
             self.chip_balances.read(player)
         }
@@ -306,3 +372,7 @@ pub mod PokerVault {
         }
     }
 }
+// ============================================================
+// Tests (snforge): Part A Phase 1 payout-commitment registry +
+// settlement-gated escrow funding.
+// ============================================================

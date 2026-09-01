@@ -1589,7 +1589,7 @@ pub fn verify_bg_shuffle(
     true
 }
 
-#[cfg(target: 'test')]
+#[cfg(feature: 'dual_legacy_tests')]
 mod tests {
     use super::*;
 

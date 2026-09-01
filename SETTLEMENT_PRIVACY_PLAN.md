@@ -653,3 +653,78 @@ STRK20 官方路线表目前把 Cartridge 归为"**尚未 privacy-enabled**"的�
       支持，路径 S 用户可迁移到 W（note 所有权 = viewing key，路径
       S→W 迁移 = 把 vpk 导入钱包？**不可行——SK 不该离开生成处**；
       正确迁移 = 花掉旧 note 到新 viewing key，写明"迁移即花费"）。
+
+---
+
+# 实现状态（2026-09-01 更新）
+
+## ✅ 已落地（本轮）
+
+| 项 | 位置 | 说明 |
+| --- | --- | --- |
+| Ready 钱包接入（首选） | `client/src/context/Providers.tsx` + `LoginModal.tsx` | Ready（argentX/ready 两个注入 id）排在 Cartridge **之前**：登录验证、买入扣款、swap、私密领取全部优先扣 Ready 钱包余额；LoginModal 按 `available()` 过滤并给 Ready 标「推荐」。autoConnect 重连 `lastUsedConnector`——首次在 Sign In 弹窗点一次 Ready，之后每次自动连 Ready |
+| starknet.js ≥10.4 | `client/package.json` → 10.6.8 | STRK20 Wallet API（`strk20InvokeTransaction`/`STRK20_ACTION`/`WalletAccountV6`）就位 |
+| 登录验证走连接钱包 | `client/src/hooks/useAuth.ts` | 连接的 Ready/Cartridge 账户签名 typed data；dev 直签仅兜底 |
+| swap 兑换走连接钱包 | `client/src/starknet/starknetGameActions.ts` | `account ?? devSigner`，Ready 连接时用 Ready 签名 |
+| 私密领取（领取奖励） | `client/src/starknet/strk20.ts` + `components/modals/ClaimRewardsModal.tsx` + Navbar「↓ 领取」 | 能力探测（版本查询 ≥0.10.3，绝不用数据调用探测）+ 两动作私密领取（transfer OPEN + privacy_withdraw，`${openNoteIds[0]}` 占位）+ 公开出金回退 + 池内余额展示 |
+| Part B 随机密钥 | `poker_protocol/.../client.rs` + `client-wasm` `new_random` + `PlayerContext.generateRandomKeys` + dev_bot | 默认 CSPRNG，与钱包零派生关系；旧 pkg 自动回退 legacy |
+| Part B1.5 口令派生 | `ClientPlayer::new_with_passphrase`（KDF v1 域名 + 20_000 迭代，4 个确定性单测）+ wasm `new_with_passphrase` + `PlayerKeyPanel`（NavMenu） | 一句口令跨设备恢复同一 pk；keyMode 存 `poker.keyMode` |
+| wasm pkg 重建 | `client-wasm/pkg`（wasm32 release，CC=brew llvm） | 新导出进入客户端 bundle（vite build 绿） |
+| PokerVaultAnonymizer 部署 | Sepolia `0x0462b57b...022e`（class 0x5ec1eef...，tx 0x44d04bae...） | 构造 (vault=0x6c8ac4...1321, pool=STRK20 Sepolia 池 0x254a6b...d91)；vault()/pool() 视图已验证；`vault.set_authorized_helper` 已授权（storage 读回确认）；`privacy_withdraw` 守卫（caller is not the pool）实测生效 |
+| 客户端配置 | `client/.env.development` | `VITE_POKER_VAULT_ANONYMIZER_ADDRESS` + `VITE_STRK20_POOL_ADDRESS` 已配置，vite 已重启生效；`strk20.json` 已记录部署 |
+| 端到端环境 | server（新二进制）+ vite:5174 + bot（0xba7f00d1，1000 筹码已入座） | 浏览器验证至：登录（Cartridge 账户 0x0621...）→ 进桌 → 买入弹窗（vault 筹码/汇率正确）→ Cartridge 会话授权弹窗 |
+
+## ⏳ 待办（按计划分阶段）
+
+- Part A Phase 1 合约 ✅ 已完成并部署 Sepolia（2026-09-01）：vault v2 `0x3e73e6...e25f`（register_payout_commitment / settlement_fund_escrow，settlement 门控）；dual v2 `0x283008...98e4`（verify_and_settle_dapv_stark_private：认领承诺 cm=poseidon(commitment,hand_binding,amount) + escrow 划转 + 输家公开扣款残余 + consume_claim 单次门控）；SettlementPayoutAnonymizer（新，`0x4642cc...c1d5`）：privacy_claim 承诺原像验证 + escrow 支付 + Span<OpenNoteDeposit>。snforge 新增 10 测试全过（68/68），既有 dual 编译器崩溃模块已门控 dual_legacy_tests。配置同步：texas/.env（vault/dual v2 + STARKNET_SETTLE_PRIVATE=true + CLAIM_HELPER）与 client env（vault v2 + anonymizer v2 `0x600dd1...1db1`）完成；服务端赢家承诺齐备自动走私有入口、缺注册回退 legacy 不卡结算；客户端 ensurePayoutCommitment + 领取弹窗一键注册已接入。
+  **实机对局验证（2026-09-01）**：三方对局（双 bot + operator），register/settle 连续上链全部 SUCCEEDED；`STARKNET_SETTLE_PRIVATE=true` 下未注册 payout commitment 的对局由 winners_registered 预检自动回退 legacy 入口，不卡结算；dev 联调钱包认可托管（`STARKNET_DEV_ENDORSEMENT_WALLETS`）补齐三方对局认可（生产不配置）。
+  **私有结算入口已真实触发 ✅**：operator（已注册 payout commitment）赢手后，settle tx `0x13f9f319...196` 使用 `verify_and_settle_dapv_stark_private` 选择器，SUCCEEDED；回执含 `DualProofSettledPrivate` 事件 + vault EscrowFunded + ERC20 转账——赢家派奖进认领托管、输家公开扣款，全部按 Phase 1 设计执行。
+- Part A Phase 2：Stwo 电路消 `(players, deltas)` 明文；
+- Part C3.2 服务端：STRK20 Privacy SDK 运营浮存 + 赔付私密转账（需 SDK 依赖 + 服务器 KMS）；
+- C5 清单：Ready 实机端到端（登录→买入→对局→私密领取）、starknet-react/starknetkit 与 10.6.8 的兼容矩阵、池费 `get_fee_amount` 运行时读取。
+
+> 迁移期语义：存量 localStorage 密钥照旧可用（legacy 模式）；新密钥一律随机或口令派生。
+
+## 实机端到端剩余一步（需人工点击）
+
+## 开发排期（Phase 2 / C3.2）
+
+| 阶段 | 里程碑 | 内容 | 验收 |
+| --- | --- | --- | --- |
+| C3.2-M1 | 认领 sidecar | Node sidecar 封装 STRK20 私密转账（operator 浮存 → 赢家 vpk note），Rust 服务端 HTTP 调用 | sidecar 单测 + sepolia 转账成功 |
+| C3.2-M2 | 赔付路由 | settle 后异步队列：延迟抖动 + 批量 shield 补浮存 + 失败重试 | 三方对局 10 手赔付全部私密到账 |
+| C3.2-M3 | 通知与 UX | 加密赔付通知推送赢家客户端 + 领取入口 UX | 赢家无需任何额外操作即可看到 note |
+| C3.2-M4 | 合规加固 | 限额/频控/审计日志 + 演练 | 运营手册成文 |
+| P2-M1 | 电路规格 | 知识证明 (players, deltas)：digest 匹配 ∧ 零-sum ∧ 人数约束；Stwo component 骨架 | 电路单测通过 |
+
+### P2-M1 电路规格（已定稿，开发即按此实施）
+
+**语句（公开输入）**：`hand_binding, hand_id, registered_digest, n_participants`
+** witness（私密）**：`players[8], deltas[8]`（i128 → (sign, |delta| u64) 对）
+
+**约束（全为 Poseidon/算术，无 EC 运算）**：
+1. `poseidon_hash_span([hand_id] ++ Σ(player, sign, |delta|)) == registered_digest`
+   ——与合约 `compute_settlement_digest` 及 Rust `submit.rs` 逐字段一致；
+2. `Σ sign·|delta| == 0`（零和）；
+3. `n_participants == registered_count`（expected buckets 沿用现约定）；
+4. 每赢家派生认领承诺：`cm_i = poseidon(commitment_i, hand_binding, amount_i)`
+   ——输出列表即 Phase 1 的 `claim_cms`（电路保证托管与承诺同源）。
+
+** trace 布局**：每参与者一行 ×3 列（player_felt, sign, |delta|）+ 常数行；
+Poseidon 用 Stwo 内置 component（16 列×8 行/轮，20_000 轮量级远低于池电路）。
+
+**集成点**：证明由 server 生成（复用 orchestrator 的 prover 管线）；
+合约 `verify_and_settle_dapv_stark_private_v2` 以 Stwo verifier（官方 Cairo
+verifier 移植或 fact-registry 模式二选一，M3 定）替换明文 digest 断言。
+| P2-M2 | 证明端 | server 从明文生成 trace + proof（复用 orchestrator） | 真实手牌证明生成 < 30s |
+| P2-M3 | 合约验证端 | Stwo Cairo verifier（官方 verifier 移植或 fact-registry）+ `verify_and_settle_dapv_stark_private_v2` 接入 π | calldata 零明文 |
+| P2-M4 | 联调部署 | sepolia 部署 + gas/size 测量 + 文档 | 演示手牌零明文结算 |
+
+
+自动化已验证到 Cartridge 会话授权弹窗；该弹窗是跨域 iframe，脚本合成点击无法穿透（安全设计使然）。人工完成（约 2 分钟）：
+
+1. 打开 http://localhost:5174 （已有 0x0621... Cartridge 会话，10 pSTRK）；
+2. Join a Table → JOIN TABLE → 空位 Sit Down → 买入弹窗确认（默认 1000 筹码）；
+3. Cartridge「Update Session」弹窗：勾选同意框 → UPDATE SESSION（此后 approve/deposit 全程免弹窗）；
+4. 打完一手（bot-2 已在座自动跟注/过牌）；
+5. Navbar「↓ 领取」→ 私密领取（Ready 安装时走 STRK20 两动作；Cartridge 当前不支持 STRK20 时按钮按设计禁用，可用公开出金回退）。

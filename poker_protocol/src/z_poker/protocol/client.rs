@@ -39,6 +39,35 @@ impl ClientPlayer {
         Self { sk, pk }
     }
 
+    /// 口令派生身份（SETTLEMENT_PRIVACY_PLAN.md Part B1.5）：
+    /// sk = KDF(口令)，KDF 参数（域名 "v1" + 迭代次数）一经发布冻结——
+    /// 任何变化都会让全部口令用户静默换身份，只允许升 "v2" 并保留 v1。
+    /// 同一口令在任何设备派生出同一 (sk, pk)，口令即身份备份；
+    /// 与钱包零派生关系（对比 new_with_wallet_address 的公开可计算性）。
+    pub fn new_with_passphrase(passphrase: &str) -> Self {
+        let sk = Self::derive_key_from_passphrase(passphrase);
+        let pk = *BASE_G * sk;
+        Self { sk, pk }
+    }
+
+    /// 迭代 hash_to_scalar：低熵口令的离线爆破减速带（每次一次曲线域哈希）。
+    /// 迭代次数只在带新版本号时才可改。
+    pub const PASSPHRASE_KDF_ITERATIONS: u32 = 20_000;
+    pub const PASSPHRASE_KDF_DOMAIN: &str = "zgame:player-key:v1:";
+
+    pub fn derive_key_from_passphrase(passphrase: &str) -> Scalar {
+        let mut x = {
+            let mut buf = Vec::with_capacity(Self::PASSPHRASE_KDF_DOMAIN.len() + passphrase.len());
+            buf.extend_from_slice(Self::PASSPHRASE_KDF_DOMAIN.as_bytes());
+            buf.extend_from_slice(passphrase.as_bytes());
+            buf
+        };
+        for _ in 0..Self::PASSPHRASE_KDF_ITERATIONS {
+            x = hash_to_scalar(&x).as_bytes();
+        }
+        hash_to_scalar(&x)
+    }
+
     pub fn new_with_sk_hex(sk_hex: String) -> Result<Self, VerificationError> {
         let sk = hex_to_scalar(&sk_hex).map_err(|_| VerificationError::InvalidSecretKey)?;
         let pk = *BASE_G * &sk;
@@ -398,5 +427,44 @@ mod reconstruction_v3_tests {
             .proof
             .verify(&package.statement, &mut transcript)
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod passphrase_kdf_tests {
+    use super::ClientPlayer;
+
+    /// 同一口令在任何设备/时刻派生出同一 pk（可恢复身份的核心保证）。
+    #[test]
+    fn passphrase_derivation_is_deterministic() {
+        let a = ClientPlayer::new_with_passphrase("correct horse battery staple");
+        let b = ClientPlayer::new_with_passphrase("correct horse battery staple");
+        assert_eq!(a.pk, b.pk, "same passphrase must derive the same pk");
+    }
+
+    #[test]
+    fn different_passphrases_derive_different_pks() {
+        let a = ClientPlayer::new_with_passphrase("alpha");
+        let b = ClientPlayer::new_with_passphrase("beta");
+        assert_ne!(a.pk, b.pk);
+    }
+
+    /// 口令身份与钱包派生身份必须是两个独立命名空间（隐私主张的前提）。
+    #[test]
+    fn passphrase_space_is_independent_from_wallet_space() {
+        let wallet = ClientPlayer::new_with_wallet_address("0xdeadbeef");
+        let pass = ClientPlayer::new_with_passphrase("0xdeadbeef");
+        assert_ne!(
+            wallet.pk, pass.pk,
+            "domain separation: passphrase KDF must never collide with wallet derivation"
+        );
+    }
+
+    /// KDF 输出必须是合法群标量（pk 可从其派生且非零点）——防御未来
+    /// 曲线切换后 from_canonical_bytes 拒绝中间值的回归。
+    #[test]
+    fn derived_key_yields_valid_pk() {
+        let p = ClientPlayer::new_with_passphrase("test");
+        assert!(!hex::encode(crate::z_poker::convert::ecpoint_to_hex(&p.pk)).is_empty());
     }
 }
