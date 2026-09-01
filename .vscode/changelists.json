@@ -3,9 +3,9 @@
     {
       "name": "Default",
       "files": [
-        "client/src/hooks/useAuth.ts",
-        "texas/src/handlers.rs",
-        "mint.txt",
+        "src/main.rs",
+        "sui-serialization/Cargo.toml",
+        "sui-serialization/src/lib.rs",
         ".vscode/changelists.json"
       ]
     }
