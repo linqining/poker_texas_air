@@ -25,8 +25,12 @@ import {
   ensurePayoutCommitment,
   getRegisteredPayoutCommitment,
   getShieldedBalance,
+  getWalletApiVersions,
+  STRK20_WALLET_API_MIN,
+  compareVersions,
 } from '../../starknet/strk20';
 import { activeAccount } from '../../starknet/devAccount';
+import { CANONICAL_STRK_ADDRESS } from '../../starknet/starknetGameActions';
 import { logger } from '../../helpers/logger';
 
 interface ClaimRewardsModalProps {
@@ -52,6 +56,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   const account = activeAccount(connected.account);
 
   const [strk20Ready, setStrk20Ready] = useState<boolean | null>(null);
+  const [walletApiVersions, setWalletApiVersions] = useState<string[] | null>(null);
   const [commitRegistered, setCommitRegistered] = useState<boolean | null>(null);
   const [regPending, setRegPending] = useState(false);
   const [shielded, setShielded] = useState<bigint | null>(null);
@@ -62,11 +67,21 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   useEffect(() => {
     if (!isOpen || !account) return;
     let cancelled = false;
+    // 版本先行：0.10.3 在列表里就点亮按钮（detectStrk20Support 的 V6 探测
+    // 可能因 discovery 未就绪而慢一步，版本线是更快的权威信号）
+    getWalletApiVersions().then((versions) => {
+      if (cancelled) return;
+      setWalletApiVersions(versions);
+      if (versions.some((v) => compareVersions(v, STRK20_WALLET_API_MIN) >= 0)) {
+        setStrk20Ready(true);
+      }
+    });
     detectStrk20Support(account).then(async (ok) => {
       if (cancelled) return;
-      setStrk20Ready(ok);
-      if (ok && starknetConfig.strk20Address) {
-        getShieldedBalance(account, starknetConfig.strk20Address).then((bal) => {
+      setStrk20Ready((prev) => prev || ok);
+      if (ok) {
+        // 池内屏蔽余额按原生 STRK 查询（pSTRK 已弃用）
+        getShieldedBalance(account, CANONICAL_STRK_ADDRESS).then((bal) => {
           if (!cancelled) setShielded(bal);
         });
       }
@@ -123,6 +138,13 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
 
   const privateBlockedReason = (() => {
     if (strk20Ready === false) return '当前钱包不支持 STRK20 私密交易（需 Wallet API ≥ 0.10.3，如 Ready）';
+    if (walletApiVersions !== null && walletApiVersions.length > 0
+        && !walletApiVersions.some((v) => compareVersions(v, STRK20_WALLET_API_MIN) >= 0)) {
+      return `钱包 Wallet API 版本（${walletApiVersions.join(', ')}）低于 0.10.3，不支持 STRK20 私密交易——请更新 Ready`;
+    }
+    if (shielded !== null && shielded < amountWei) {
+      return '池内屏蔽余额不足：请先在钱包内将 STRK shield 入隐私池（私密领取要求池内余额 ≥ 领取额，执行后等额退回）';
+    }
     return null;
   })();
 
@@ -163,6 +185,16 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
         <InfoRow>
           <span>私密路径（STRK20）</span>
           <strong>{strk20Ready === null ? '检测中…' : strk20Ready ? '可用 ✓' : '不可用'}</strong>
+        </InfoRow>
+        <InfoRow>
+          <span>钱包 Wallet API 版本（需 ≥ {STRK20_WALLET_API_MIN}）</span>
+          <strong>
+            {walletApiVersions === null
+              ? '检测中…'
+              : walletApiVersions.length
+                ? walletApiVersions.join(', ')
+                : '未报告（钱包不支持或版本过旧）'}
+          </strong>
         </InfoRow>
         <InfoRow>
           <span>赔付承诺（注册后结算奖励可私密领取）</span>
@@ -218,6 +250,9 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
                     } else {
                       setCommitRegistered(true);
                     }
+                  } catch (e) {
+                    // 注册交易被拒/钱包锁定等：不再作为 uncaught rejection 逃逸
+                    setError(String((e as Error)?.message || e));
                   } finally {
                     setRegPending(false);
                   }

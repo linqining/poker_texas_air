@@ -107,7 +107,7 @@ pub async fn start_bot(
 
     eprintln!("[bot] verifying deposit on-chain…");
     // 真实链上买入校验（fetch 回执 + vault chip_balance）
-    crate::starknet::chips::verify_deposit(&deposit_tx, &wallet, 1000)
+    crate::starknet::chips::verify_deposit(&deposit_tx, &wallet, 100)
         .await
         .map_err(|e| format!("deposit verify: {e}"))?;
 
@@ -207,7 +207,7 @@ pub async fn start_bot(
             pk_proof_full,
             Some(mask_and_shuffle),
             seat_id,
-            1000,
+            100,
         )
         .await;
 
@@ -324,7 +324,7 @@ pub async fn start_bot(
                             name: format!("bot-{seat_id}"),
                             bankroll: 0,
                             wallet_address: WalletAddress(wallet.clone()),
-                        }, out_json, parse_proof_json(&proof_value)?, Some(MaskAndShuffleRoundJson {
+                        }, out_json, Some(parse_proof_json(&proof_value)?), Some(MaskAndShuffleRoundJson {
                             mask_cards: ms.mask_cards.iter()
                                 .map(|ct| ElGamalCiphertextJson::from_ciphertext(ct)).collect(),
                             output_cards: ms.output_cards.iter()
@@ -345,7 +345,7 @@ pub async fn start_bot(
                             name: format!("bot-{seat_id}"),
                             bankroll: 0,
                             wallet_address: WalletAddress(wallet.clone()),
-                        }, out_json, parse_proof_json(&proof_value)?, None)
+                        }, out_json, Some(parse_proof_json(&proof_value)?), None)
                         .await
                 };
                 if let Err(e) = submit {

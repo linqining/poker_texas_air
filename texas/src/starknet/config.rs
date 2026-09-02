@@ -3,8 +3,9 @@
 //! 所有地址留空时进入 dev 模式（跳过链上校验/提交，仅记账 + 生成 calldata），
 //! 保证本地无 RPC 也能跑完整牌局流程。
 
-/// 1 STRK = 10^18 wei，1 STRK = 10000 chips → 1 chip = 10^14 wei。
-pub const WEI_PER_CHIP: u128 = 100_000_000_000_000;
+/// 1 STRK = 10^18 wei，1 STRK = 1000 chips → 1 chip = 10^15 wei。
+/// pSTRK/swap 已下线，筹码直接锚定原生 STRK。
+pub const WEI_PER_CHIP: u128 = 1_000_000_000_000_000;
 
 /// Hand-batch（DAPV）上链形态（`STARKNET_SETTLE_MODE`）：
 ///

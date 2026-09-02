@@ -20,6 +20,12 @@ importers:
       '@linqining/client-wasm':
         specifier: link:../client-wasm/pkg
         version: link:../client-wasm/pkg
+      '@starknet-io/get-starknet-discovery':
+        specifier: 6.0.4
+        version: 6.0.4(typescript@5.9.3)
+      '@starknet-io/get-starknet-wallet-standard':
+        specifier: 6.0.3
+        version: 6.0.3(typescript@5.9.3)(zod@3.25.76)
       '@starknet-react/chains':
         specifier: ^5.0.3
         version: 5.0.3
@@ -645,6 +651,14 @@ packages:
     resolution: {integrity: sha512-2I0gnIVPtfnMw9ee9h1dJG7tp81+8Ob3OJb3Mv37rx5L40/b0i7djjCVvGOVqc9AEIQyvyu1i6ypKdFw8R8gQw==}
     engines: {node: ^14.21.3 || >=16}
 
+  '@noble/ciphers@2.2.0':
+    resolution: {integrity: sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/ciphers@2.4.0':
+    resolution: {integrity: sha512-AnjFn0Jv92laAkvMrghlFZq4qQCIN/4DxFV/eooqtC2YTjB7kBeLMS2T9KJX4Dn+ZVXLOwK0lSgqDtx9gvxtiw==}
+    engines: {node: '>= 20.19.0'}
+
   '@noble/curves@1.2.0':
     resolution: {integrity: sha512-oYclrNgRaM9SsBUBVbb8M6DTV7ZHRTKugureoYEncY5c65HOmRzvSiTE3y5CYaPYJA/GVkrhXEoF0M3Ya9PMnw==}
 
@@ -666,6 +680,14 @@ packages:
   '@noble/curves@1.9.7':
     resolution: {integrity: sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw==}
     engines: {node: ^14.21.3 || >=16}
+
+  '@noble/curves@2.2.0':
+    resolution: {integrity: sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/curves@2.4.0':
+    resolution: {integrity: sha512-P4/62zrgfH33CneE3Dn4WhJVA22YUU0eR51wKIan4NVRvwsA0YnPTwWGpNbpuacSujmSFLvyzpyuR30+fbq2Ew==}
+    engines: {node: '>= 20.19.0'}
 
   '@noble/hashes@1.3.2':
     resolution: {integrity: sha512-MVC8EAQp7MvEcm30KWENFjgR+Mkmf+D189XJTkFIlwohU5hcBbn1ZkKq7KVTi2Hme3PMGF390DaL52beVrIihQ==}
@@ -693,6 +715,14 @@ packages:
 
   '@noble/hashes@2.2.0':
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/hashes@2.4.0':
+    resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/post-quantum@0.6.1':
+    resolution: {integrity: sha512-+pormrDZwjRw05U8ADK4JpHejo87+gBd+muRBB/ozztH5yhDLMDF4jHQWN3NQQAsu1zBNPWTG0ZwVI0CR29H0A==}
     engines: {node: '>= 20.19.0'}
 
   '@nodelib/fs.scandir@2.1.5':
@@ -1053,8 +1083,14 @@ packages:
   '@scure/base@2.2.0':
     resolution: {integrity: sha512-b8XEupJibegiXV+tDUseI8oLQc8ei3d/4Jkb2RpbHh3MfE054ov3uIz2dhFkB3FI8iwYkEh0gGCApkrYggkPNg==}
 
+  '@scure/base@2.4.0':
+    resolution: {integrity: sha512-thZ1TuJwFwBblOhgsjDKvvGirBxNp+wSvY/DR6tJBJOTDhdAAcHJ8Vbr2eFnqaxeca4+t0i9KBf+uHYGWwZORg==}
+
   '@scure/bip32@1.7.0':
     resolution: {integrity: sha512-E4FFX/N3f4B80AKWp5dP6ow+flD1LQZo/w8UnLGYZO674jS6YnYeepycOOksv+vLPSpgN35wgKgy+ybfTb2SMw==}
+
+  '@scure/bip32@2.4.0':
+    resolution: {integrity: sha512-i3DS0CptAocyvqE4n3SUkpzeQK4vJMFwWLofTwRiiKo2aWojBOfyMCgfKw9HVpO6fSY5AK86sHS/Uzn8kK9Few==}
 
   '@scure/bip39@1.6.0':
     resolution: {integrity: sha512-+lF0BbLiJNwVlev4eKelw1WWLaiKXw7sSl8T6FvBlWkdX+94aGJ4o8XjUdlyhTCjd8c+B3KT3JfS8P0bLRNU6A==}
@@ -1448,14 +1484,23 @@ packages:
   '@starknet-io/get-starknet-discovery@5.0.0':
     resolution: {integrity: sha512-b40ZfhbisiEonxWLe/naOraZvNc1hfhy4TEs0TP/cYppfECDhBKncvvFTGu++/rm+xV3SjmSzwNQGQmIn5DMLQ==}
 
+  '@starknet-io/get-starknet-discovery@6.0.4':
+    resolution: {integrity: sha512-lKmO/osLLPQKcTtkvu7dcE6/6Man//EH9mvMANPieLRTgJX5F7RKU4Kt+YdXhI4wCHnmZpctbXig5ANRzr+jag==}
+
   '@starknet-io/get-starknet-virtual-wallet@5.0.0':
     resolution: {integrity: sha512-ne9Svr0tHj7a5OJOvC82ewth/GJTa78Gal/iiiRzQmvIDpZcu+nzrPAi350RKEtErxjG5rZSPv2DLz7VBClN0Q==}
+
+  '@starknet-io/get-starknet-virtual-wallet@6.0.5':
+    resolution: {integrity: sha512-pxLPYuysrCOy32UYu1jQHCJtQbwAdeXE0hpE5TCCi8TSAi7id2zTQjHoP4bkvKq8nLB7iqI70rLr3QuG0seBog==}
 
   '@starknet-io/get-starknet-wallet-standard@5.0.0':
     resolution: {integrity: sha512-isDNGDlp16W24HE4IuweYXLDRZN0JbsDnazAieeKXE87Mn+jqhsjgTsMxcwWTjX7v906Bjz39FiDjGUddnr36g==}
 
   '@starknet-io/get-starknet-wallet-standard@6.0.3':
     resolution: {integrity: sha512-Vb7bnTQHNJGoFfIaaI2kqMKdLlHTForFAR/4rEVPQ4r8Hq2SezjhbEh3ZiDSmm+FGptsYm84pbJJCsQU4/wDsQ==}
+
+  '@starknet-io/get-starknet-wallet-standard@6.0.5':
+    resolution: {integrity: sha512-lmoC2A/CyvZEMNtpRwXzRn3ugNkqGxTk+OCuLSFACBZ1joe/ixaAfO8749UV+1WxPK7Uzpngno8FaM+KHVnN0g==}
 
   '@starknet-io/get-starknet-wallets@5.0.0':
     resolution: {integrity: sha512-fuywFgoal4Al2KdFQCNTYgioK0ubu3cP+mM6OxE8ti78Nmd9ySlh78LwdKNXIp2Alq4kaQ5XMf6HMgkStCWhkw==}
@@ -1471,6 +1516,9 @@ packages:
 
   '@starknet-io/types-js@0.10.4-beta.1':
     resolution: {integrity: sha512-5OU+PEX+/0/8iqOyO3/7fErQUXfRbgA5gEdvoSLmgNxUkJ5wbKDqtNwA0guyZfI60J0rKcBbmVcnP3aXKqOr2w==}
+
+  '@starknet-io/types-js@0.10.4-beta.2':
+    resolution: {integrity: sha512-DHfzg/d6s1NYeQpbBpLwXxYBVgCMhMIW2RjbSS2ukwz8XbPZQCLwj8ArAH4Tx4dmkJpn4J6YVRhZGFgjO26TVQ==}
 
   '@starknet-io/types-js@0.7.10':
     resolution: {integrity: sha512-1VtCqX4AHWJlRRSYGSn+4X1mqolI1Tdq62IwzoU2vUuEE72S1OlEeGhpvd6XsdqXcfHmVzYfj8k1XtKBQqwo9w==}
@@ -3278,6 +3326,14 @@ packages:
       typescript:
         optional: true
 
+  ox@1.7.4:
+    resolution: {integrity: sha512-bpi/fBiftKb8aO4vHbvTq+pMRRTbzAML52ZRa+fH1gdwtLDCNE2VxpyASLeukltrDpXhzXQy69iNX3O0PtBWEw==}
+    peerDependencies:
+      typescript: '>=5.4.0'
+    peerDependenciesMeta:
+      typescript:
+        optional: true
+
   p-limit@2.3.0:
     resolution: {integrity: sha512-//88mFWSJx8lxCzwdAABTJL2MyWB12+eIY7MDL2SqLmAkeKU9qxRvWuSyTjm3FUmpBEMuFfckAIqEaVGUDxb6w==}
     engines: {node: '>=6'}
@@ -4418,6 +4474,9 @@ packages:
   zod@3.25.76:
     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
+  zod@4.5.4:
+    resolution: {integrity: sha512-sC95tT5iHHH9gtpj6A81kh+NEaRAUFN+qlUPDUbRfOMvNf5QCBqsb3WgvnpVtK5Y+4UfA6KqufotuTvMGiTlsA==}
+
   zustand@5.0.15:
     resolution: {integrity: sha512-MpSEjRiBkA9crSYeOUH32rJC7SVqAbm0Fqcqge/bUi2PPoLcBWKOsG+C8mevmpr8TwXHBVkChbbJiyvkE+i/3A==}
     engines: {node: '>=12.20.0'}
@@ -5098,6 +5157,10 @@ snapshots:
 
   '@noble/ciphers@1.3.0': {}
 
+  '@noble/ciphers@2.2.0': {}
+
+  '@noble/ciphers@2.4.0': {}
+
   '@noble/curves@1.2.0':
     dependencies:
       '@noble/hashes': 1.3.2
@@ -5122,6 +5185,14 @@ snapshots:
     dependencies:
       '@noble/hashes': 1.8.0
 
+  '@noble/curves@2.2.0':
+    dependencies:
+      '@noble/hashes': 2.2.0
+
+  '@noble/curves@2.4.0':
+    dependencies:
+      '@noble/hashes': 2.4.0
+
   '@noble/hashes@1.3.2': {}
 
   '@noble/hashes@1.4.0': {}
@@ -5135,6 +5206,14 @@ snapshots:
   '@noble/hashes@1.8.0': {}
 
   '@noble/hashes@2.2.0': {}
+
+  '@noble/hashes@2.4.0': {}
+
+  '@noble/post-quantum@0.6.1':
+    dependencies:
+      '@noble/ciphers': 2.2.0
+      '@noble/curves': 2.2.0
+      '@noble/hashes': 2.2.0
 
   '@nodelib/fs.scandir@2.1.5':
     dependencies:
@@ -5752,11 +5831,19 @@ snapshots:
 
   '@scure/base@2.2.0': {}
 
+  '@scure/base@2.4.0': {}
+
   '@scure/bip32@1.7.0':
     dependencies:
       '@noble/curves': 1.9.7
       '@noble/hashes': 1.8.0
       '@scure/base': 1.2.6
+
+  '@scure/bip32@2.4.0':
+    dependencies:
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.4.0
+      '@scure/base': 2.4.0
 
   '@scure/bip39@1.6.0':
     dependencies:
@@ -6282,6 +6369,15 @@ snapshots:
       - utf-8-validate
       - zod
 
+  '@starknet-io/get-starknet-discovery@6.0.4(typescript@5.9.3)':
+    dependencies:
+      '@starknet-io/get-starknet-virtual-wallet': 6.0.5(typescript@5.9.3)
+      '@starknet-io/get-starknet-wallet-standard': 6.0.5(typescript@5.9.3)
+      '@starknet-io/types-js': 0.10.4-beta.2
+      '@wallet-standard/base': 1.1.1
+    transitivePeerDependencies:
+      - typescript
+
   '@starknet-io/get-starknet-virtual-wallet@5.0.0(typescript@5.9.3)(zod@3.25.76)':
     dependencies:
       '@module-federation/runtime': 0.12.0
@@ -6296,6 +6392,17 @@ snapshots:
       - typescript
       - utf-8-validate
       - zod
+
+  '@starknet-io/get-starknet-virtual-wallet@6.0.5(typescript@5.9.3)':
+    dependencies:
+      '@module-federation/runtime': 0.12.0
+      '@starknet-io/get-starknet-wallet-standard': 6.0.5(typescript@5.9.3)
+      '@starknet-io/types-js': 0.10.4-beta.2
+      '@wallet-standard/base': 1.1.1
+      '@wallet-standard/features': 1.1.1
+      async-mutex: 0.5.0
+    transitivePeerDependencies:
+      - typescript
 
   '@starknet-io/get-starknet-wallet-standard@5.0.0(typescript@5.9.3)(zod@3.25.76)':
     dependencies:
@@ -6317,6 +6424,15 @@ snapshots:
       - typescript
       - zod
 
+  '@starknet-io/get-starknet-wallet-standard@6.0.5(typescript@5.9.3)':
+    dependencies:
+      '@starknet-io/types-js': 0.10.4-beta.2
+      '@wallet-standard/base': 1.1.1
+      '@wallet-standard/features': 1.1.1
+      ox: 1.7.4(typescript@5.9.3)
+    transitivePeerDependencies:
+      - typescript
+
   '@starknet-io/get-starknet-wallets@5.0.0': {}
 
   '@starknet-io/get-starknet@4.0.8':
@@ -6329,6 +6445,8 @@ snapshots:
   '@starknet-io/types-js@0.10.3': {}
 
   '@starknet-io/types-js@0.10.4-beta.1': {}
+
+  '@starknet-io/types-js@0.10.4-beta.2': {}
 
   '@starknet-io/types-js@0.7.10': {}
 
@@ -7229,6 +7347,11 @@ snapshots:
     optionalDependencies:
       typescript: 5.9.3
       zod: 3.25.76
+
+  abitype@1.3.0(typescript@5.9.3)(zod@4.5.4):
+    optionalDependencies:
+      typescript: 5.9.3
+      zod: 4.5.4
 
   accepts@2.0.0:
     dependencies:
@@ -8905,6 +9028,21 @@ snapshots:
     transitivePeerDependencies:
       - zod
 
+  ox@1.7.4(typescript@5.9.3):
+    dependencies:
+      '@adraffy/ens-normalize': 1.11.1
+      '@noble/ciphers': 2.4.0
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.2.0
+      '@noble/post-quantum': 0.6.1
+      '@scure/bip32': 2.4.0
+      '@scure/bip39': 2.2.0
+      abitype: 1.3.0(typescript@5.9.3)(zod@4.5.4)
+      eventemitter3: 5.0.1
+      zod: 4.5.4
+    optionalDependencies:
+      typescript: 5.9.3
+
   p-limit@2.3.0:
     dependencies:
       p-try: 2.2.0
@@ -10148,6 +10286,8 @@ snapshots:
   zod@3.22.4: {}
 
   zod@3.25.76: {}
+
+  zod@4.5.4: {}
 
   zustand@5.0.15(@types/react@18.3.31)(react@18.3.1)(use-sync-external-store@1.6.0(react@18.3.1)):
     optionalDependencies:

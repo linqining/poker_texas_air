@@ -19,8 +19,9 @@ const config: Config = {
 export default config;
 
 // ========== 游戏相关命名常量 ==========
-// 1 chip = 100_000 wei of STRK (1 STRK = 10^18 wei, 1 STRK = 10_000 chips → 1 chip = 10^14 wei)
-export const WEI_PER_CHIP = 100_000n;
+// 1 chip = 1e15 wei of STRK (1 STRK = 1_000 chips)。与 starknet/config.ts 的
+// WEI_PER_CHIP 一致；pSTRK/swap 已下线。
+export const WEI_PER_CHIP = 1_000_000_000_000_000n;
 // StandUp（离开牌桌）等待服务器响应的超时时间
 export const STAND_UP_TIMEOUT_MS = 60_000;
 // 进入 /play 后若 currentTable 一直为空，重试 join 的最大次数

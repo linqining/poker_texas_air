@@ -22,13 +22,7 @@ import { FormGroup } from '../forms/FormGroup';
 import { Input } from '../forms/Input';
 import { ButtonGroup } from '../forms/ButtonGroup';
 import Text from '../typography/Text';
-import {
-  getNativeStrkBalance,
-  getPstrkBalance,
-  isSwapConfigured,
-  swapTokens,
-  type SwapDirection,
-} from '../../starknet/starknetGameActions';
+import { getNativeStrkBalance } from '../../starknet/starknetGameActions';
 import { getProvider } from '../../starknet/contracts';
 import ClaimRewardsModal from '../modals/ClaimRewardsModal';
 import { Contract, type Abi, uint256 } from 'starknet';
@@ -119,60 +113,21 @@ const LogoutAddrDot = styled.span`
   flex-shrink: 0;
 `;
 
-/** 兑换弹窗信息行样式（与 Seat 买入弹窗一致）。 */
-const SwapInfo = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
-`;
-const SwapInfoRow = styled.div`
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.9rem;
-  color: ${({ theme }) => theme.colors.mutedText};
-  strong {
-    color: ${({ theme }) => theme.colors.fontColorDark};
-    font-family: 'JetBrains Mono', monospace;
-  }
-`;
-const SwapRate = styled.div`
-  text-align: center;
-  font-size: 0.8rem;
-  color: #16a34a;
-  font-family: 'JetBrains Mono', monospace;
-  margin-bottom: 0.5rem;
-`;
-
-/** 兑换方向切换 tab。 */
-const DirectionTab = styled.button<{ $active?: boolean }>`
-  flex: 1;
-  padding: 0.45rem 0.5rem;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.82rem;
-  border-radius: 8px;
-  border: 1px solid ${({ $active }) => ($active ? 'rgba(77, 162, 255, 0.6)' : 'rgba(226, 232, 240, 0.9)')};
-  background: ${({ $active }) => ($active ? 'rgba(77, 162, 255, 0.14)' : 'rgba(241, 245, 249, 0.8)')};
-  color: ${({ $active }) => ($active ? '#1d4ed8' : '#64748b')};
-  cursor: pointer;
-  &:disabled {
-    opacity: 0.6;
-  }
-`;
-
-/** 1 STRK = 1000 pSTRK 固定汇率兑换入口（PokerSwap）。 */
-const SwapButton = styled(Button)`
-  background: rgba(34, 197, 94, 0.1);
+/** 领取入口（赔付承诺注册 / 奖励私密领取）。 */
+const ClaimButton = styled(Button)`
+  font-weight: 600;
   color: #16a34a;
   border: 1px solid rgba(34, 197, 94, 0.35);
-  box-shadow: none;
+  background: rgba(34, 197, 94, 0.12);
+  border-radius: 8px;
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.95rem;
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.85rem;
-  min-width: auto;
+  gap: 0.4rem;
 
   &:hover {
     transform: translateY(-2px);
@@ -201,13 +156,8 @@ const Navbar: React.FC<NavbarProps> = ({
   // dev 直签账户（VITE_DEV_ACCOUNT_*，testnet 联调）优先于连接的钱包
   const account = activeAccount(connected.account);
   const navigate = useNavigate();
-  const [showSwap, setShowSwap] = useState(false);
   const [showClaim, setShowClaim] = useState(false);
-  const [swapPending, setSwapPending] = useState(false);
-  const [swapDone, setSwapDone] = useState<{ hash: string } | null>(null);
-  const [swapError, setSwapError] = useState('');
   const [nativeStrk, setNativeStrk] = useState<bigint | null>(null);
-  const [direction, setDirection] = useState<SwapDirection>('strk-to-pstrk');
 
   const shortAddress = walletAddress
     ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
@@ -229,41 +179,15 @@ const Navbar: React.FC<NavbarProps> = ({
     }
   };
 
-  // 打开兑换弹窗时拉取两侧余额
+  // 余额显示用原生 STRK（pSTRK/swap 已下线）
   useEffect(() => {
-    if (showSwap && walletAddress) {
-      getNativeStrkBalance(walletAddress).then(setNativeStrk);
-      getPstrkBalance(walletAddress).then(setStrkBalance);
+    if (walletAddress) {
+      getNativeStrkBalance(walletAddress).then((bal) => {
+        setNativeStrk(bal);
+        setStrkBalance(bal);
+      });
     }
-  }, [showSwap, walletAddress]);
-
-  const closeSwapModal = () => {
-    setShowSwap(false);
-    setSwapPending(false);
-    setSwapDone(null);
-    setSwapError('');
-  };
-
-  const handleSwapSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!account || swapPending) return;
-    const amount = parseFloat((document.getElementById('swap-amount') as HTMLInputElement)?.value ?? '');
-    if (!Number.isFinite(amount) || amount <= 0) return;
-    const wei = BigInt(Math.round(amount * 1e18));
-    setSwapPending(true);
-    setSwapError('');
-    const res = await swapTokens(account, direction, wei);
-    setSwapPending(false);
-    if (res.success) {
-      setSwapDone({ hash: res.hash });
-      if (walletAddress) {
-        setStrkBalance(await getPstrkBalance(walletAddress));
-        setNativeStrk(await getNativeStrkBalance(walletAddress));
-      }
-    } else {
-      setSwapError(res.error || 'swap failed');
-    }
-  };
+  }, [walletAddress, setStrkBalance]);
 
   if (!loggedIn) {
     return (
@@ -296,17 +220,12 @@ const Navbar: React.FC<NavbarProps> = ({
         <Spacer>
           <ChipAmount title={`${getLocalizedString('seat_strk-balance-label')}: ${strkBalance?.toString() ?? '0'} wei`}>
             <img src="/strk-logo.svg" alt={getLocalizedString('seat_strk-logo-alt')} />
-            {strkDisplay} pSTRK
+            {strkDisplay} STRK
           </ChipAmount>
-          {isSwapConfigured() && (
-            <SwapButton onClick={() => setShowSwap(true)} title="固定 1 STRK = 1000 pSTRK">
-              ⇄ 兑换
-            </SwapButton>
-          )}
           {loggedIn && (
-            <SwapButton onClick={() => setShowClaim(true)} title="赔付承诺注册 / 奖励领取（私密或公开）">
+            <ClaimButton onClick={() => setShowClaim(true)} title="赔付承诺注册 / 奖励领取（私密或公开）">
               ↓ 领取
-            </SwapButton>
+            </ClaimButton>
           )}
           <LogoutButton onClick={onLogout} title={walletAddress || ''}>
             <LogoutAddrDot />
@@ -315,111 +234,6 @@ const Navbar: React.FC<NavbarProps> = ({
           <StyledHamburgerButton clickHandler={openNavMenu} />
         </Spacer>
       </Container>
-      {showSwap &&
-        ReactDOM.createPortal(
-          <ModalShell
-            width="sm"
-            role="dialog"
-            ariaLabel="兑换 STRK 为 pSTRK"
-            onBackdropClick={swapPending ? undefined : closeSwapModal}
-          >
-            <h2
-              style={{
-                margin: 0,
-                fontFamily: theme.fonts.fontFamilySansSerif,
-                fontSize: '1.4rem',
-                fontWeight: 700,
-                color: theme.colors.fontColorDark,
-                textAlign: 'center',
-              }}
-            >
-              兑换 {direction === 'strk-to-pstrk' ? 'STRK → pSTRK' : 'pSTRK → STRK'}
-            </h2>
-            <SwapInfo>
-              <SwapInfoRow>
-                <span>钱包</span>
-                <strong>{shortAddress || '-'}</strong>
-              </SwapInfoRow>
-              <SwapInfoRow>
-                <span>STRK 余额</span>
-                <strong>{nativeStrk === null ? '…' : `${(Number(nativeStrk) / 1e18).toFixed(4)}`}</strong>
-              </SwapInfoRow>
-              <SwapInfoRow>
-                <span>pSTRK 余额</span>
-                <strong>{strkDisplay}</strong>
-              </SwapInfoRow>
-            </SwapInfo>
-            <SwapInfo>
-              <ButtonGroup>
-                <DirectionTab
-                  type="button"
-                  $active={direction === 'strk-to-pstrk'}
-                  onClick={() => !swapPending && setDirection('strk-to-pstrk')}
-                >
-                  STRK → pSTRK
-                </DirectionTab>
-                <DirectionTab
-                  type="button"
-                  $active={direction === 'pstrk-to-strk'}
-                  onClick={() => !swapPending && setDirection('pstrk-to-strk')}
-                >
-                  pSTRK → STRK
-                </DirectionTab>
-              </ButtonGroup>
-            </SwapInfo>
-            <SwapRate>固定汇率 1 STRK = 1000 pSTRK</SwapRate>
-            {swapDone ? (
-              <>
-                <Text textAlign="center" style={{ color: '#16a34a' }}>
-                  兑换成功 ✓
-                </Text>
-                <Text
-                  textAlign="center"
-                  style={{ fontSize: '0.75rem', wordBreak: 'break-all', color: theme.colors.mutedText }}
-                >
-                  tx: {swapDone.hash}
-                </Text>
-                <ButtonGroup>
-                  <Button variant="secondary" small onClick={closeSwapModal} fullWidth>
-                    关闭
-                  </Button>
-                </ButtonGroup>
-              </>
-            ) : (
-              <Form onSubmit={handleSwapSubmit}>
-                <FormGroup>
-                  <Input
-                    id="swap-amount"
-                    type="number"
-                    inputMode="decimal"
-                    min={0}
-                    step={direction === 'pstrk-to-strk' ? '0.001' : 'any'}
-                    placeholder={direction === 'strk-to-pstrk' ? '输入 STRK 数量' : '输入 pSTRK 数量（0.001 整数倍）'}
-                    disabled={swapPending}
-                    autoFocus
-                  />
-                </FormGroup>
-                {swapError && (
-                  <Text
-                    textAlign="center"
-                    style={{ fontSize: '0.8rem', color: '#ef4444', wordBreak: 'break-all' }}
-                  >
-                    {swapError}
-                  </Text>
-                )}
-                <ButtonGroup>
-                  <Button variant="secondary" small type="button" onClick={closeSwapModal} disabled={swapPending}>
-                    取消
-                  </Button>
-                  <Button primary small type="submit" disabled={swapPending}>
-                    {swapPending ? '兑换中…' : `确认兑换 ${direction === 'strk-to-pstrk' ? 'pSTRK' : 'STRK'}`}
-                  </Button>
-                </ButtonGroup>
-              </Form>
-            )}
-          </ModalShell>,
-          document.getElementById('modal') as HTMLElement,
-        )}
       {showClaim && (
         <ClaimRewardsModal
           isOpen={showClaim}

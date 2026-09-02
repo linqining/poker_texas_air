@@ -226,10 +226,10 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
               if (result) {
                 shuffleFallbackDoneRef.current = { phase: shuffleState.phase || '', completed: completedCount };
                 socket?.emit(SHUFFLE_SUBMIT, {
-                  table_id: result.tableId,
+                  table_id: Number(result.tableId),
                   pk_hex: result.pkHex,
                   output_cards: result.shuffleResult.output_cards,
-                  shuffle_proof: result.shuffleResult.shuffle_proof,
+                  shuffle_proof: result.shuffleResult.shuffle_proof ?? undefined,
                   mask_and_shuffle_round: result.maskAndShuffleRound ?? undefined,
                 });
                 addMessage(`Shuffle submitted (${result.shuffleResult.output_cards.length} cards)`);
@@ -302,10 +302,10 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
         if (result) {
           logger.log('SHUFFLE_NOTICE shuffle proof', result.shuffleResult.shuffle_proof);
           socket.emit(SHUFFLE_SUBMIT, {
-            table_id: result.tableId,
+            table_id: Number(result.tableId),
             pk_hex: result.pkHex,
             output_cards: result.shuffleResult.output_cards,
-            shuffle_proof: result.shuffleResult.shuffle_proof,
+            shuffle_proof: result.shuffleResult.shuffle_proof ?? undefined,
             mask_and_shuffle_round: result.maskAndShuffleRound ?? undefined,
           });
           logger.log(SHUFFLE_SUBMIT, result);

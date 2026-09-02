@@ -4,15 +4,11 @@
 #
 # 用法：URL=https://starknet-sepolia-rpc.publicnode.com ./scripts/deploy_sepolia_full.sh
 # 可选环境变量：
-#   SWAP_STRK_FUND=15000000000000000000    # swap 反向 STRK 储备（wei）
-#   SWAP_PSTRK_FUND=100000000000000000000000  # swap 正向 pSTRK 储备（100_000 pSTRK）
 set -euo pipefail
 SNOPS=/Users/mac/projects/zgame/target/debug/snops
 URL="${URL:-https://starknet-sepolia-rpc.publicnode.com}"
 ART=/Users/mac/projects/poker_texas_air/poker_contracts/target/dev
 ENV_ROOT=/Users/mac/projects/poker_texas_air
-SWAP_STRK_FUND="${SWAP_STRK_FUND:-15000000000000000000}"
-SWAP_PSTRK_FUND="${SWAP_PSTRK_FUND:-100000000000000000000000}"
 
 # shellcheck disable=SC1091
 . "$ENV_ROOT/.env.dev"
@@ -85,11 +81,10 @@ echo "== declare:"
 T_CLASS=$(declare_one PokerToken); echo "TOKEN_CLASS=$T_CLASS"
 V_CLASS=$(declare_one PokerVault); echo "VAULT_CLASS=$V_CLASS"
 S_CLASS=$(declare_one PokerSettlement); echo "SETTLEMENT_CLASS=$S_CLASS"
-W_CLASS=$(declare_one PokerSwap); echo "SWAP_CLASS=$W_CLASS"
 # PokerDualSettlement 的 casm 字节码（81,175 felts）超过 Sepolia/Mainnet 链上
 # 80,000 上限，声明会被节点拒绝——Phase 2 需先瘦身合约。此处可选。
 D_CLASS=$(declare_one PokerDualSettlement); echo "DUAL_CLASS=$D_CLASS"
-for c in "$T_CLASS" "$V_CLASS" "$S_CLASS" "$W_CLASS"; do
+for c in "$T_CLASS" "$V_CLASS" "$S_CLASS"; do
   [ -n "$c" ] || { echo "empty class hash — abort"; exit 1; }
 done
 if [ -z "$D_CLASS" ]; then
@@ -128,12 +123,12 @@ deploy_wait() {
 echo "== deploy:"
 TOKEN=$(deploy_wait "$T_CLASS" "$OWNER,@str:PokerSTRK,@str:pSTRK,0,0" PokerToken) || exit 1
 echo "TOKEN=$TOKEN"
-VAULT=$(deploy_wait "$V_CLASS" "$OWNER,$TOKEN,0" PokerVault) || exit 1
+# pSTRK/PokerSwap 已下线：vault 直接绑定原生 STRK（1 STRK = 1000 chips）
+CANONICAL_STRK=0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d
+VAULT=$(deploy_wait "$V_CLASS" "$OWNER,$CANONICAL_STRK,0" PokerVault) || exit 1
 echo "VAULT=$VAULT"
 SETTLEMENT=$(deploy_wait "$S_CLASS" "$OWNER,$VAULT,$OWNER" PokerSettlement) || exit 1
 echo "SETTLEMENT=$SETTLEMENT"
-SWAP=$(deploy_wait "$W_CLASS" "$OWNER,$TOKEN" PokerSwap) || exit 1
-echo "SWAP=$SWAP"
 DUAL=""
 if [ -n "$D_CLASS" ]; then
   DUAL=$(deploy_wait "$D_CLASS" "$OWNER,$VAULT,$OWNER" PokerDualSettlement) || exit 1
@@ -145,12 +140,6 @@ echo "== bindings + mint + funding:"
 # 否则指向 legacy PokerSettlement（Sepolia 当前形态：dual 超字节码上限）。
 BIND_TARGET="${DUAL:-$SETTLEMENT}"
 submit_wait vault.set_settlement_contract $SNOPS --url "$URL" --pk "$PK" --addr "$OWNER" invoke --contract "$VAULT" --fn set_settlement_contract --calldata "$BIND_TARGET" >/dev/null
-submit_wait token.mint $SNOPS --url "$URL" --pk "$PK" --addr "$OWNER" invoke --contract "$TOKEN" --fn mint --calldata "$OWNER,$SWAP_PSTRK_FUND,0" >/dev/null
-submit_wait token.approve $SNOPS --url "$URL" --pk "$PK" --addr "$OWNER" invoke --contract "$TOKEN" --fn approve --calldata "$SWAP,$SWAP_PSTRK_FUND,0" >/dev/null
-submit_wait swap.fund_pstrk $SNOPS --url "$URL" --pk "$PK" --addr "$OWNER" invoke --contract "$SWAP" --fn fund_pstrk --calldata "$SWAP_PSTRK_FUND,0" >/dev/null
-# 反向储备：owner 用原生 STRK 注资（approve 规范 STRK → swap.fund_strk）
-submit_wait strk.approve $SNOPS --url "$URL" --pk "$PK" --addr "$OWNER" invoke --contract 0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d --fn approve --calldata "$SWAP,$SWAP_STRK_FUND,0" >/dev/null
-submit_wait swap.fund_strk $SNOPS --url "$URL" --pk "$PK" --addr "$OWNER" invoke --contract "$SWAP" --fn fund_strk --calldata "$SWAP_STRK_FUND,0" >/dev/null
 echo "bindings+mint+fund done"
 
 cat > /tmp/starknet_sepolia_env << EOF
@@ -158,7 +147,6 @@ STARKNET_RPC_URL=$URL
 STARKNET_STRK_ADDRESS=$TOKEN
 STARKNET_VAULT_ADDRESS=$VAULT
 STARKNET_SETTLEMENT_ADDRESS=$SETTLEMENT
-STARKNET_SWAP_ADDRESS=$SWAP
 STARKNET_DUAL_SETTLEMENT_ADDRESS=$DUAL
 STARKNET_OPERATOR_ADDRESS=$OWNER
 STARKNET_OPERATOR_PRIVATE_KEY=$PK
@@ -169,8 +157,5 @@ echo "== verify:"
 echo -n "  vault.token:   "; $SNOPS --url "$URL" call --contract "$VAULT" --fn token | head -1
 echo -n "  vault.chips:   "; $SNOPS --url "$URL" call --contract "$VAULT" --fn total_chips | head -1
 echo -n "  settle.vault:  "; $SNOPS --url "$URL" call --contract "$SETTLEMENT" --fn vault | head -1
-echo -n "  swap.rate:     "; $SNOPS --url "$URL" call --contract "$SWAP" --fn rate | head -1
-echo -n "  swap.pstrk_liq:"; $SNOPS --url "$URL" call --contract "$SWAP" --fn pstrk_liquidity | head -1
-echo -n "  swap.strk:     "; $SNOPS --url "$URL" call --contract "$SWAP" --fn strk_balance | head -1
 echo -n "  pstrk owner:   "; $SNOPS --url "$URL" call --contract "$TOKEN" --fn balance_of --calldata "$OWNER" | head -1
 echo "=== Sepolia full deployment complete ==="

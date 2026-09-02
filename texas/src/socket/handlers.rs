@@ -1357,7 +1357,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         {
             let out: Result<Vec<poker_protocol::crypto::ElGamalCiphertext>, String> =
                 payload.output_cards.iter().map(|c| c.to_ciphertext()).collect();
-            if let (Ok(out), Ok(proof)) = (out, payload.shuffle_proof.to_proof()) {
+            if let (Ok(out), Some(Ok(proof))) = (out, payload.shuffle_proof.as_ref().map(|p| p.to_proof())) {
                 let gs = state.state.read().await;
                 if let Some(table) = gs.tables.get(&payload.table_id) {
                     // 方案A：SHUFFLE_SUBMIT 不再转发 mirror（deck 终局注入）。

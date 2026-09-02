@@ -27,7 +27,7 @@ import styled from 'styled-components';
 import { Table } from '../../types/game';
 import authContext from '../../context/auth/authContext';
 import { EmptySeat } from './seatStyles';
-import { getStrkBalance } from '../../starknet/starknetGameActions';
+import { getStrkBalance } from '../../starknet/starknetGameActions';  // getStrkBalance 已改读原生 STRK
 import { CHIPS_PER_STRK, STRK_DECIMALS, WEI_PER_CHIP } from '../../starknet/config';
 import { logger } from '../../helpers/logger';
 
@@ -175,7 +175,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
   const minBuyIn = Math.max(currentTable.minBet * 2 * 10, 1000);
   const BUYIN_STEP = 1000;
 
-  // 1 STRK = 10_000 chips → 1 chip = 0.0001 STRK
+  // 1 STRK = 1_000 chips → 1 chip = 0.001 STRK
   const strkBalanceInStrk =
     Number(strkBalanceWei / BigInt(10) ** BigInt(STRK_DECIMALS)) +
     Number(strkBalanceWei % BigInt(10) ** BigInt(STRK_DECIMALS)) /

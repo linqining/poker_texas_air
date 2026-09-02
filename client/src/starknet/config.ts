@@ -15,13 +15,13 @@ import { STRK20_SEPOLIA_ADDRESS } from './abis';
 
 export const STRK_DECIMALS = 18;
 
-/** 1 chip = 1e14 wei of STRK（0.0001 STRK）。与 texas 服务端
- *  starknet::config::WEI_PER_CHIP 及买入弹窗 "1 STRK = 10,000 chips" 一致。
- *  旧值 1e5 与服务端相差 9 个数量级，会导致服务端判定筹码不足。 */
-export const WEI_PER_CHIP = 100_000_000_000_000n;
+/** 1 chip = 1e15 wei of STRK（0.001 STRK）。与 texas 服务端
+ *  starknet::config::WEI_PER_CHIP 及买入弹窗 "1 STRK = 1,000 chips" 一致
+ *  （pSTRK/swap 已下线，筹码直接锚定原生 STRK）。 */
+export const WEI_PER_CHIP = 1_000_000_000_000_000n;
 
-/** 1 STRK = 10_000 chips. */
-export const CHIPS_PER_STRK = 10_000;
+/** 1 STRK = 1_000 chips. */
+export const CHIPS_PER_STRK = 1_000;
 
 const DEFAULT_SEPOLIA_RPCS = [
   'https://starknet-sepolia-rpc.publicnode.com',
@@ -76,6 +76,7 @@ export interface StarknetConfig {
   rpcUrls: string[];
   strk20Address: string;
   /** PokerSwap 合约（固定 1 STRK = 1000 pSTRK）。未配置时兑换入口隐藏。 */
+  /** @deprecated pSTRK/swap 已下线，仅为旧 env 兼容保留读取。 */
   swapAddress: string;
   pokerVaultAddress: string;
   pokerSettlementAddress: string;

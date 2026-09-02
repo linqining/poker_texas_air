@@ -172,8 +172,11 @@ pub(crate) struct SittingPayload {
 pub(crate) struct ShuffleSubmitPayload {
     pub table_id: u32,
     pub pk_hex: GamePkHex,
+    #[serde(default)]
     pub output_cards: Vec<ElGamalCiphertextJson>,
-    pub shuffle_proof: ShuffleProofJson,
+    /// 纯 re_encrypt 路径必填；join 语义路径（携带 mask_and_shuffle_round）可省。
+    #[serde(default)]
+    pub shuffle_proof: Option<ShuffleProofJson>,
     /// join 语义洗牌（waiting 入座玩家补层）：remask 自身层 + shuffle。
     /// 与 needs_join_layer=true 的 SHUFFLE_NOTICE/快照配套；缺省走纯 re_encrypt 路径。
     #[serde(default)]
@@ -736,7 +739,7 @@ impl SocketState {
         pk_hex: &GamePkHex,
         _player: Player,
         output_cards: Vec<ElGamalCiphertextJson>,
-        shuffle_proof: ShuffleProofJson,
+        shuffle_proof: Option<ShuffleProofJson>,
         join_round: Option<MaskAndShuffleRoundJson>,
     ) -> Result<bool, String> {
         let mut gs = self.state.write().await;
@@ -744,7 +747,12 @@ impl SocketState {
                     let verified = match &join_round {
                         // join 语义：waiting 入座玩家补自身层（remask+shuffle）
                         Some(round) => table.submit_join_shuffle(pk_hex, round.clone()),
-                        None => table.submit_verified_shuffle(pk_hex, output_cards.clone(), shuffle_proof.clone()),
+                        None => match shuffle_proof {
+                            Some(proof) => {
+                                table.submit_verified_shuffle(pk_hex, output_cards.clone(), proof)
+                            }
+                            None => Err("missing shuffle_proof (plain path)".to_string()),
+                        },
                     };
                     match verified {
                         Ok(()) => {
