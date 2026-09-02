@@ -483,7 +483,7 @@ async fn live_flow_assignments_match_mirror_targets() {
             wallet_address: WalletAddress(wallet.to_string()),
         };
         let res = state
-            .join_player_and_shuffle(1, p, player.pk.clone(), pk_proof, round, seat_ids[i], 1000)
+            .join_player_and_shuffle(1, p, player.pk.clone(), pk_proof, Some(round), seat_ids[i], 1000)
             .await;
         assert!(res.is_ok(), "join {i} failed: {res:?}");
         pks.push((pk_hex, player));
@@ -594,4 +594,150 @@ fn rejoin_after_kick_materializes() {
             game.players.len(), game.key_manager.player_count());
     }
     assert_eq!(revealed.len(), 3, "all 3 flop cards must materialize after rejoin");
+}
+
+/// 复现 2026-09-01 线上"手牌解密失败"组合：
+/// - bot 走 join_and_shuffle（即席层，入座即 remask+shuffle）
+/// - 人类走 waiting 入座（仅 register，不洗牌）
+/// - 开手时 start_preflop_shuffle 的 pending 只含 waiting 玩家，
+///   其用 ClientPlayer::shuffle（全量 agg re_encrypt）补层
+/// 断言：发牌后每张牌都能被"其余玩家 token + 本人 token"物化
+/// （即客户端 decrypt_readable_card 成功）。若失败，leftover 诊断
+/// 会显示残余层等于谁的公钥。
+#[test]
+fn e2e_mixed_join_paths_materializes() {
+    let c1 = ClientPlayer::new_with_wallet_address("0xbot");
+    let c2 = ClientPlayer::new_with_wallet_address("0xhuman");
+    let mut game = MentalPokerGame::new(poker_protocol::z_poker::GameConfig {
+        num_players: 2,
+        cards_per_player: 2,
+        community_cards: 5,
+    });
+
+    // bot 即席 join（与 join_player_and_shuffle 的 shuffle 路径一致）
+    game_layer_join(&mut game, &c1);
+
+    // human waiting 入座：仅注册（register_waiting_players 语义）
+    let pk1h = hex_pk(&c1.pk);
+    let pk2h = hex_pk(&c2.pk);
+    game.register_player(pk2h.clone(), c2.pk, c2.generate_pk_proof());
+
+    // 开手洗牌（修复后语义）：pending={human} 且未贡献过层 → 必须走
+    // join_game_and_shuffle（remask 自身层 + shuffle），与
+    // Table::submit_join_shuffle 的服务器校验完全一致。
+    // 对照：用纯 ClientPlayer::shuffle（re_encrypt）会让份额失衡 →
+    // 全部卡 materialize 失败（本测试修复前的失败形态）。
+    let agg = game.key_manager.get_aggregated_pk();
+    let curr_share_pk = agg - c2.pk;
+    let join_round = c2.join_game_and_shuffle(&game.deck_encrypted, &curr_share_pk);
+    let ms = &join_round.mask_and_shuffle_round;
+    {
+        let input_cards: Vec<ZgCt> = game.deck_encrypted.clone();
+        // remask + shuffle 共享 transcript（挑战链顺序敏感）
+        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript::new(
+            b"zk_mask_shuffle_proof_v2",
+        );
+        assert!(
+            ms.remask_proof.verify(&input_cards, &ms.mask_cards, &c2.pk, &mut transcript),
+            "hand-start remask proof must verify"
+        );
+        assert!(
+            ms.proof
+                .verify(&ms.mask_cards, &ms.output_cards, &agg, &mut transcript)
+                .is_ok(),
+            "hand-start shuffle proof must verify"
+        );
+    }
+    game.deck_encrypted = ms.output_cards.clone();
+
+    // 发牌：底牌 2+2 + 公共牌 3（对齐真实手牌）
+    for _ in 0..2 {
+        game.deal_to_player(&pk1h, 1).expect("deal p1");
+        game.deal_to_player(&pk2h, 1).expect("deal p2");
+    }
+    game.deal_community_cards_encrypted(3);
+
+    // 全员对全部密文提交 token（底牌×2人 + 公共牌×2人）
+    let mut all_cts: Vec<ZgCt> = Vec::new();
+    for pk in [&pk1h, &pk2h] {
+        for card in &game.players.get(pk.as_str()).expect("player").hand_encrypted {
+            all_cts.push(card.encrypted_card.clone());
+        }
+    }
+    for ct in &game.community_cards_encrypted {
+        all_cts.push(ct.encrypted_card.clone());
+    }
+    for client in [&c1, &c2] {
+        let pk = if client.pk == c1.pk { &pk1h } else { &pk2h };
+        for ct in &all_cts {
+            game.submit_reveal_token(client.generate_reveal_token(ct), pk)
+                .expect("reveal token accepted");
+        }
+    }
+
+    // 物化断言：所有底牌+公共牌必须全部解出
+    let mut failed = 0;
+    for (pk, _) in game.players.iter() {
+        for card in &game.players.get(pk.as_str()).unwrap().hand_encrypted {
+            if card.playing_card.is_none() {
+                failed += 1;
+            }
+        }
+    }
+    for ct in &game.community_cards_encrypted {
+        if ct.playing_card.is_none() {
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        let card = &game.community_cards_encrypted[0];
+        let sum_tok: poker_protocol::crypto::EcPoint = card
+            .reveal_state
+            .reveal_tokens
+            .iter()
+            .map(|t| t.reveal_token)
+            .sum();
+        let leftover = card.encrypted_card.c2 - sum_tok - game.deck_plaintext[4];
+        let lo = poker_protocol::z_poker::convert::ecpoint_to_hex(&leftover);
+        let p1 = poker_protocol::z_poker::convert::ecpoint_to_hex(&c1.pk);
+        let p2 = poker_protocol::z_poker::convert::ecpoint_to_hex(&c2.pk);
+        let p1s = poker_protocol::z_poker::convert::ecpoint_to_hex(&(c1.pk + c1.pk));
+        let p2s = poker_protocol::z_poker::convert::ecpoint_to_hex(&(c2.pk + c2.pk));
+        let agg = poker_protocol::z_poker::convert::ecpoint_to_hex(&game.key_manager.get_aggregated_pk());
+        panic!(
+            "{} cards failed to materialize: leftover={} || pk1={} pk2={} 2pk1={} 2pk2={} agg={} players={} keyentries={}",
+            failed,
+            &lo[..20],
+            &p1[..20],
+            &p2[..20],
+            &p1s[..20],
+            &p2s[..20],
+            &agg[..20],
+            game.players.len(),
+            game.key_manager.player_count()
+        );
+    }
+
+    // 客户端侧解密断言（decrypt_readable_card 与前端 wasm 同路径）：
+    // 真实流程中 HAND_REVEAL_RESULT 携带的 readable card 已被服务端用
+    // 其他玩家的 token 剥层，客户端只减自己的 token —— 这里先模拟剥层。
+    for client in [&c1, &c2] {
+        let pk = if client.pk == c1.pk { &pk1h } else { &pk2h };
+        for card in &game.players.get(pk.as_str()).unwrap().hand_encrypted {
+            let mut readable = card.encrypted_card.clone();
+            for other in [&c1, &c2] {
+                if other.pk == client.pk {
+                    continue;
+                }
+                let token = other.generate_reveal_token(&card.encrypted_card);
+                readable.c2 = readable.c2 - token.reveal_token;
+            }
+            assert!(
+                client
+                    .decrypt_readable_card(&readable, game.deck_plaintext.clone())
+                    .is_some(),
+                "client decrypt_readable_card must succeed"
+            );
+        }
+    }
 }

@@ -16,6 +16,14 @@ export interface ShuffleHandleResult {
   gameId: string;
   pkHex: string | null;
   shuffleResult: ShuffleResult;
+  /** join 语义洗牌（waiting 入座玩家补层）：needs_join_layer=true 时携带，
+   *  SHUFFLE_SUBMIT 需附带 mask_and_shuffle_round 供服务端验证 remask 层。 */
+  maskAndShuffleRound?: {
+    mask_cards: unknown[];
+    output_cards: unknown[];
+    remask_proof: unknown;
+    shuffle_proof: unknown;
+  };
 }
 
 export interface RevealNoticeData {

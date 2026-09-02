@@ -174,6 +174,10 @@ pub(crate) struct ShuffleSubmitPayload {
     pub pk_hex: GamePkHex,
     pub output_cards: Vec<ElGamalCiphertextJson>,
     pub shuffle_proof: ShuffleProofJson,
+    /// join 语义洗牌（waiting 入座玩家补层）：remask 自身层 + shuffle。
+    /// 与 needs_join_layer=true 的 SHUFFLE_NOTICE/快照配套；缺省走纯 re_encrypt 路径。
+    #[serde(default)]
+    pub mask_and_shuffle_round: Option<MaskAndShuffleRoundJson>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -733,10 +737,16 @@ impl SocketState {
         _player: Player,
         output_cards: Vec<ElGamalCiphertextJson>,
         shuffle_proof: ShuffleProofJson,
+        join_round: Option<MaskAndShuffleRoundJson>,
     ) -> Result<bool, String> {
         let mut gs = self.state.write().await;
         if let Some(table) = gs.tables.get_mut(&table_id) {
-                    match table.submit_verified_shuffle(pk_hex, output_cards.clone(), shuffle_proof.clone()) {
+                    let verified = match &join_round {
+                        // join 语义：waiting 入座玩家补自身层（remask+shuffle）
+                        Some(round) => table.submit_join_shuffle(pk_hex, round.clone()),
+                        None => table.submit_verified_shuffle(pk_hex, output_cards.clone(), shuffle_proof.clone()),
+                    };
+                    match verified {
                         Ok(()) => {
                             // 方案A：洗牌不再转发 mirror（deck 由游戏层验证后
                             // 在 advance_shuffle 终局点整体注入）。

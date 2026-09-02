@@ -142,24 +142,63 @@ export const useCryptoOperations = (
 
     try {
       const deckJson = JSON.stringify(deckEncrypted);
-      const shuffleResult = wrapCryptoOp(() => {
-        const result = keys.shuffle(deckJson, aggregatePk);
-        if (!result) throw new Error('Shuffle returned null');
-        return parseWasmResult<ShuffleResult>(result);
-      }, 'shuffle');
 
-      if (!shuffleResult.output_cards || !Array.isArray(shuffleResult.output_cards)) {
-        throw new Error('Invalid shuffle result: missing output_cards');
+      // needs_join_layer=true（waiting 入座、从未 remask 过的玩家补层）时
+      // 必须走 join_game_and_shuffle（remask 自身层 + shuffle）：纯 re_encrypt
+      // 会让牌组密文份额与公钥和对不上 → 全桌 decrypt_readable_card 失败、
+      // 手牌无法显示（2026-09-01 线上复现）。
+      const needsJoinLayer = !!(shuffleState as { needs_join_layer?: boolean }).needs_join_layer;
+      const sharePk = (shuffleState as { share_pk?: string }).share_pk;
+      if (needsJoinLayer && !sharePk) {
+        logger.error('[Shuffle] needs_join_layer=true but no share_pk in notice');
+        addMessage('Shuffle failed: missing share_pk for join layer');
+        return null;
+      }
+
+      let outputCards: unknown[];
+      let maskAndShuffleRound: unknown;
+      if (needsJoinLayer && sharePk) {
+        const joinRaw = wrapCryptoOp(() => {
+          const raw = (keys as unknown as {
+            join_game_and_shuffle: (deck: string, sharePk: string) => string;
+          }).join_game_and_shuffle(deckJson, sharePk);
+          if (!raw) throw new Error('join_game_and_shuffle returned null');
+          return parseWasmResult<{
+            pk_hex: string;
+            pk_ownership_proof: unknown;
+            mask_and_shuffle_round: {
+              mask_cards: unknown[];
+              output_cards: unknown[];
+              remask_proof: unknown;
+              shuffle_proof: unknown;
+            };
+          }>(raw);
+        }, 'joinGameAndShuffle');
+        outputCards = joinRaw.mask_and_shuffle_round.output_cards;
+        maskAndShuffleRound = joinRaw.mask_and_shuffle_round;
+        logger.log('[Shuffle] join-layer round built (remask+shuffle)');
+      } else {
+        const shuffleResult = wrapCryptoOp(() => {
+          const result = keys.shuffle(deckJson, aggregatePk);
+          if (!result) throw new Error('Shuffle returned null');
+          return parseWasmResult<ShuffleResult>(result);
+        }, 'shuffle');
+
+        if (!shuffleResult.output_cards || !Array.isArray(shuffleResult.output_cards)) {
+          throw new Error('Invalid shuffle result: missing output_cards');
+        }
+        outputCards = shuffleResult.output_cards;
       }
 
       const gameId = String(tableId);
-      logger.log(SHUFFLE_SUBMIT, { gameId, pkHex, cardCount: shuffleResult.output_cards.length });
+      logger.log(SHUFFLE_SUBMIT, { gameId, pkHex, cardCount: outputCards.length });
 
       return {
         tableId,
         gameId,
         pkHex,
-        shuffleResult,
+        shuffleResult: { output_cards: outputCards as ShuffleResult['output_cards'], shuffle_proof: undefined },
+        maskAndShuffleRound: maskAndShuffleRound as ShuffleHandleResult['maskAndShuffleRound'],
       };
     } catch (e) {
       const err = e as Error;

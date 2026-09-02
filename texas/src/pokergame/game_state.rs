@@ -421,6 +421,14 @@ pub struct ShufflePublicState {
     pub pending_players: Vec<GamePkHex>,
     pub deck_encrypted: Vec<ElGamalCiphertextJson>,
     pub aggregate_pk: String,
+    /// 当前洗牌者是否需要补自己的密钥层（waiting 入座、从未 remask 过）。
+    /// true 时客户端必须用 join_game_and_shuffle（remask+shuffle）出轮，
+    /// 纯 re_encrypt 会让牌组份额与公钥和失衡 → 全桌解密失败。
+    #[serde(default)]
+    pub needs_join_layer: bool,
+    /// 聚合公钥减去当前洗牌者公钥（join_game_and_shuffle 需要的 curr_share_pk）。
+    #[serde(default)]
+    pub share_pk: Option<String>,
 }
 
 

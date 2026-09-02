@@ -278,6 +278,9 @@ pub async fn start_bot(
             let mine = shuffle_state.current_player_pk.as_ref() == Some(&GamePkHex(pk_hex.clone()))
                 && !shuffle_state.completed_players.contains(&GamePkHex(pk_hex.clone()));
             if mine {
+                // 在 drop(gs) 前捕获（table 借用 gs）
+                let needs_join_layer = table.shuffle_state.phase
+                    != crate::pokergame::game_state::ShufflePhase::Reconstruct;
                 drop(gs);
                 let deck: Vec<ElGamalCiphertextJson> = {
                     let gs = state.state.read().await;
@@ -295,20 +298,57 @@ pub async fn start_bot(
                         .map(|t| poker_protocol::crypto::EcPoint::from(t.mental_poker_game.key_manager.get_aggregated_pk()))
                 };
                 let Some(agg) = agg else { continue };
-                let round = player.shuffle(&deck_cts, &agg);
-                let out_json: Vec<ElGamalCiphertextJson> = round.output_cards.iter()
-                    .map(|ct| ElGamalCiphertextJson::from_ciphertext(ct)).collect();
-                let proof_value = shuffle_proof_json(&round.proof);
-                if let Err(e) = state
-                    .submit_verified_shuffle_for_pk(1, &GamePkHex(pk_hex.clone()), Player {
-                        socket_id: format!("bot-{seat_id}-r"),
-                        id: user_id.clone(),
-                        name: format!("bot-{seat_id}"),
-                        bankroll: 0,
-                        wallet_address: WalletAddress(wallet.clone()),
-                    }, out_json, parse_proof_json(&proof_value)?)
-                    .await
-                {
+                // 与 SHUFFLE_NOTICE 的 needs_join_layer 语义保持一致：
+                // 非 Reconstruct 阶段且未贡献过层的玩家必须走 join 语义
+                // （remask 自身层 + shuffle），纯 re_encrypt 会让牌组份额失衡。
+                let submit = if needs_join_layer {
+                    let own_pk = player.pk;
+                    let curr_share_pk = agg - own_pk;
+                    let join_round = player.join_game_and_shuffle(&deck_cts, &curr_share_pk);
+                    let ms = &join_round.mask_and_shuffle_round;
+                    let remask_json = serde_json::json!({
+                        "per_card_commitments_hex": ms.remask_proof.per_card_commitments.iter()
+                            .map(poker_protocol::z_poker::convert::ecpoint_to_hex)
+                            .collect::<Vec<_>>(),
+                        "commitment_pk_hex": poker_protocol::z_poker::convert::ecpoint_to_hex(&ms.remask_proof.commitment_pk),
+                        "response_hex": poker_protocol::z_poker::convert::scalar_to_hex(&ms.remask_proof.response),
+                        "nonce_hex": poker_protocol::z_poker::convert::scalar_to_hex(&ms.remask_proof.nonce),
+                    });
+                    let out_json: Vec<ElGamalCiphertextJson> = ms.output_cards.iter()
+                        .map(|ct| ElGamalCiphertextJson::from_ciphertext(ct)).collect();
+                    let proof_value = shuffle_proof_json(&ms.proof);
+                    state
+                        .submit_verified_shuffle_for_pk(1, &GamePkHex(pk_hex.clone()), Player {
+                            socket_id: format!("bot-{seat_id}-r"),
+                            id: user_id.clone(),
+                            name: format!("bot-{seat_id}"),
+                            bankroll: 0,
+                            wallet_address: WalletAddress(wallet.clone()),
+                        }, out_json, parse_proof_json(&proof_value)?, Some(MaskAndShuffleRoundJson {
+                            mask_cards: ms.mask_cards.iter()
+                                .map(|ct| ElGamalCiphertextJson::from_ciphertext(ct)).collect(),
+                            output_cards: ms.output_cards.iter()
+                                .map(|ct| ElGamalCiphertextJson::from_ciphertext(ct)).collect(),
+                            remask_proof: serde_json::from_value(remask_json).map_err(|e| e.to_string())?,
+                            shuffle_proof: parse_proof_json(&proof_value)?,
+                        }))
+                        .await
+                } else {
+                    let round = player.shuffle(&deck_cts, &agg);
+                    let out_json: Vec<ElGamalCiphertextJson> = round.output_cards.iter()
+                        .map(|ct| ElGamalCiphertextJson::from_ciphertext(ct)).collect();
+                    let proof_value = shuffle_proof_json(&round.proof);
+                    state
+                        .submit_verified_shuffle_for_pk(1, &GamePkHex(pk_hex.clone()), Player {
+                            socket_id: format!("bot-{seat_id}-r"),
+                            id: user_id.clone(),
+                            name: format!("bot-{seat_id}"),
+                            bankroll: 0,
+                            wallet_address: WalletAddress(wallet.clone()),
+                        }, out_json, parse_proof_json(&proof_value)?, None)
+                        .await
+                };
+                if let Err(e) = submit {
                     println!("[bot {seat_id}] shuffle submit failed: {e}");
                 } else {
                     println!("[bot {seat_id}] shuffle submitted");

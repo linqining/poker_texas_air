@@ -290,6 +290,68 @@ impl Table {
         Ok(())
     }
 
+    /// 开手洗牌的 join 语义提交（waiting 入座玩家补层专用）。
+    ///
+    /// 背景：waiting 入座（plain join）的玩家从未把自己的密钥层加进牌组链，
+    /// 开手时若只用 ClientPlayer::shuffle（纯 re_encrypt）补洗，牌组密文的
+    /// 份额与全员公钥和对不上 → 全桌 decrypt_readable_card 失败、手牌无法
+    /// 显示（2026-09-01 线上复现，texas e2e_mixed_join_paths_materializes）。
+    /// 本方法要求提交 MaskAndShuffleRound（remask 自身层 + shuffle），
+    /// remask 证明对 (当前牌组, player_pk) 验证，shuffle 证明对全量聚合公钥
+    /// 验证（此时玩家已注册，agg 已含自身，等价于 join 的 agg_prev + pk）。
+    pub fn submit_join_shuffle(
+        &mut self,
+        player_pk_hex: &GamePkHex,
+        round: crate::pokergame::game_state::MaskAndShuffleRoundJson,
+    ) -> Result<(), String> {
+        if !self.shuffle_state.is_active() {
+            return Err("Shuffle not active".to_string());
+        }
+        if self.shuffle_state.current_player_pk != Some(player_pk_hex.clone()) {
+            return Err("Not current player".to_string());
+        }
+
+        let player_pk = self.mental_poker_game.players.get(&**player_pk_hex)
+            .map(|p| p.pk)
+            .ok_or("Player not found in mental poker game")?;
+
+        let ms = round.to_mask_and_shuffle_round()?;
+        let input_cards = self.mental_poker_game.deck_encrypted.clone();
+
+        // remask 证明 + shuffle 证明共享同一条 transcript（挑战链顺序敏感，
+        // 与 MaskAndShuffleRound::execute 的证明生成一一对应）
+        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript::new(
+            b"zk_mask_shuffle_proof_v2",
+        );
+        if !ms.remask_proof.verify(
+            &input_cards,
+            &ms.mask_cards,
+            &player_pk,
+            &mut transcript,
+        ) {
+            return Err("Invalid remask proof".to_string());
+        }
+
+        // shuffle 证明：mask_cards → output_cards 在全量聚合公钥下重加密
+        let current_agg_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
+        if ms.proof
+            .verify(
+                &ms.mask_cards,
+                &ms.output_cards,
+                &current_agg_pk,
+                &mut transcript,
+            )
+            .is_err()
+        {
+            return Err("Invalid shuffle proof".to_string());
+        }
+
+        self.mental_poker_game.deck_encrypted = ms.output_cards;
+        self.shuffle_state.completed_players.push(player_pk_hex.clone());
+        self.shuffle_state.pending_players.retain(|p| p != player_pk_hex);
+        Ok(())
+    }
+
     #[deprecated(note = "use advance_shuffle instead")]
     pub fn complete_or_continue_next_shuffler(&mut self) {
         if self.shuffle_state.pending_players.is_empty() && self.complete_shuffle_player_count() >= MIN_START_NUM as usize {
@@ -302,6 +364,25 @@ impl Table {
 
     pub fn get_shuffle_public_state(&self) -> Option<ShufflePublicState> {
         if self.shuffle_state.is_active() {
+            let current_pk = self.shuffle_state.current_player_pk.clone();
+            // waiting 入座（从未 remask 过）的玩家补层时必须走 join 语义。
+            // Reconstruct 阶段牌组 c1 为 identity，remask 无法工作，强制 false。
+            let is_reconstruct = self.shuffle_state.phase == ShufflePhase::Reconstruct;
+            let needs_join_layer = !is_reconstruct
+                && current_pk.as_ref()
+                    .map(|pk| !self.shuffle_state.completed_players.contains(pk))
+                    .unwrap_or(false);
+            // share_pk = 聚合公钥 - 当前洗牌者公钥（join_game_and_shuffle 的 curr_share_pk）
+            let share_pk = if needs_join_layer {
+                current_pk.as_ref().and_then(|pk| {
+                    self.mental_poker_game.players.get(&**pk)
+                        .map(|p| ecpoint_to_hex(
+                            &(self.mental_poker_game.key_manager.get_aggregated_pk() - p.pk)
+                        ))
+                })
+            } else {
+                None
+            };
             Some(ShufflePublicState {
                 phase: self.shuffle_state.phase,
                 current_player_pk: self.shuffle_state.current_player_pk.clone(),
@@ -312,6 +393,8 @@ impl Table {
                     .map(ElGamalCiphertextJson::from_ciphertext)
                     .collect(),
                 aggregate_pk: ecpoint_to_hex(&self.mental_poker_game.key_manager.get_aggregated_pk()),
+                needs_join_layer,
+                share_pk,
             })
         } else {
             None

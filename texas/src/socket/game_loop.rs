@@ -157,18 +157,25 @@ async fn cleanup_player_sockets(
 pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) -> bool {
     // 读取状态快照
     // 对齐 Move：时间戳使用 u64 ms（summary.state.*_at），0 表示未设置
-    let (round_state, active_count, hand_complete_at, ready_at, showdown_at,
+    let (round_state, active_count, seated_count, hand_complete_at, ready_at, showdown_at,
          shuffle_active, reveal_active, reconstruct_active) = {
         let gs = state.state.read().await;
         if let Some(table) = gs.tables.get(&table_id) {
             // 开局人数口径与 start_hand 一致：非 sitting_out 的在座玩家
             // （含 is_waiting 中途买入者），避免 waiting 玩家不算数导致永不开局。
-            (table.round_state(), table.seats().values().filter(|s| s.player.is_some() && !s.sitting_out).count(), table.hand_complete_at(), table.ready_at(), table.showdown_at(),
+            (table.round_state(),
+             table.seats().values().filter(|s| s.player.is_some() && !s.sitting_out).count(),
+             table.seats().values().filter(|s| s.player.is_some()).count(),
+             table.hand_complete_at(), table.ready_at(), table.showdown_at(),
              table.shuffle_state.is_active(), table.reveal_token_state.is_active(), table.reconstruct_state.is_active)
         } else { return false }
     };
 
-    if active_count == 0 {
+    // 循环停止规则：仅当桌上一个玩家都不剩时才停。
+    // active_count 排除 sitting_out，会因刷新/短暂断线（DISCONNECT 标记
+    // sitting_out）瞬时走低甚至归零——旧实现在此停掉循环且无人重启，
+    // 玩家重连回来后牌桌永久冻结（2026-09-01 线上复现）。
+    if seated_count == 0 {
         return false;
     }
 
@@ -615,7 +622,8 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                     tracing::info!("[TICK] Table {} Waiting: cleanup after hand_complete, {} active, {} players removed", table_id, active, removed_players.len());
                     if active < MIN_START_NUM as usize {
                         broadcast::broadcast_to_table(io, state, table_id, Some("Waiting for more players")).await;
-                        return false;
+                        // 人不够不停循环：保持 tick，等玩家回来后自动重新起手。
+                        return true;
                     }
                     // hand_complete_at already cleared by reset_for_next_hand; proceed to auto-start
                 } else {
@@ -662,8 +670,16 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                     broadcast::broadcast_to_table(io, state, table_id, Some("---New hand starting in 5 seconds---")).await;
                 }
             } else {
-                // tracing::info!("[TICK] Table {} Waiting: only {} active, stopping game loop", table_id, active_count);
-                return false;
+                // 活跃玩家不足（含刷新断线被标记 sitting_out 的瞬态）：保持循环存活。
+                // 旧实现 return false 永久停掉循环且无人重启，玩家重连后牌桌冻结。
+                // 同时清掉过期的 ready 倒计时，等人齐后重新走完整 5s 起手流程。
+                if ready_at != 0 {
+                    let mut gs = state.state.write().await;
+                    if let Some(table) = gs.tables.get_mut(&table_id) {
+                        table.set_ready_at(0);
+                    }
+                }
+                return true;
             }
         }
         RoundState::PreFlop | RoundState::Flop | RoundState::Turn | RoundState::River => {
