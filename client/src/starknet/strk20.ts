@@ -423,20 +423,31 @@ export async function claimRewardsPrivate(
   // 隐私池内流转的资产是原生 STRK（pSTRK/PokerToken 已弃用——官方 Sepolia
   // 隐私池面向 STRK，钱包侧对未入池 token 直接拒绝 INVALID_REQUEST_PAYLOAD）
   const { CANONICAL_STRK_ADDRESS } = await import('./starknetGameActions');
+  const amountHex = '0x' + amount.toString(16);
   const actions = [
+    // 阶段 5：开输出 open note（helper 的产出在执行期填入）
     {
       type: 'transfer',
       token: CANONICAL_STRK_ADDRESS,
       amount: 'OPEN',
       recipient: player,
     },
+    // 阶段 6：公开提款 X STRK 池 → helper（privacy_invoke 的注资前提；
+    // InvokeInput 无自动注资机制——池 ABI 的 ServerAction 只有显式
+    // TransferTo/TransferFrom，缺这一步 helper 余额为 0 → op=1 必 revert
+    // "no unshield funds in helper"，2026-09-03 双真人线上复现）。
+    {
+      type: 'withdraw',
+      token: CANONICAL_STRK_ADDRESS,
+      amount: amountHex,
+      recipient: anonymizerAddress,
+    },
+    // 阶段 7：烧筹码 1:1 + helper 全额余额记回上面的 open note。
+    // calldata 与 helper privacy_invoke(operation, player, amount:u256,
+    // note_id) 对齐；operation=1 = OP_WITHDRAW。所有 felt 必须 0x 十六进制。
     {
       type: 'invoke',
       contract: anonymizerAddress,
-      // calldata 与 helper 的 privacy_invoke(operation, player, amount:u256,
-      // note_id) 对齐；${openNoteIds[0]} 由钱包解析为上面 OPEN transfer 创建
-      // 的 note。operation=1（OP_WITHDRAW）烧筹码并回 1:1 STRK 开票；
-      // operation=0 是买入（privacyBuyIn.ts 用）。所有 felt 必须 0x 十六进制。
       calldata: ['0x1', player, lo, hi, '${openNoteIds[0]}'],
     },
   ];
