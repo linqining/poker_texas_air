@@ -112,7 +112,7 @@ pub fn register_client_endorsement(
     let registry = CLIENT_ENDORSEMENTS.get_or_init(|| std::sync::Mutex::new(Default::default()));
     registry
         .lock()
-        .expect("client endorsement registry lock")
+        .unwrap_or_else(|e| e.into_inner()) // 锁污染不连锁 panic（audit M1）
         .entry(wallet.to_string())
         .or_default()
         .insert(hand_id, ClientEndorsement { pk, r, s });
@@ -125,7 +125,7 @@ pub fn register_client_endorsement_raw(wallet: &str, hand_id: u32, e: Endorsemen
     let registry = CLIENT_ENDORSEMENTS.get_or_init(|| std::sync::Mutex::new(Default::default()));
     registry
         .lock()
-        .expect("client endorsement registry lock")
+        .unwrap_or_else(|e| e.into_inner()) // 锁污染不连锁 panic（audit M1）
         .entry(wallet.to_string())
         .or_default()
         .insert(hand_id, ClientEndorsement { pk: e.pk, r: e.r, s: e.s });
@@ -137,7 +137,7 @@ pub fn take_client_endorsements(
     hand_id: u32,
 ) -> Option<Vec<ClientEndorsement>> {
     let registry = CLIENT_ENDORSEMENTS.get()?;
-    let guard = registry.lock().expect("client endorsement registry lock");
+    let guard = registry.lock().unwrap_or_else(|e| e.into_inner()); // 锁污染不连锁 panic（audit M1）
     let mut out = Vec::with_capacity(wallets.len());
     for w in wallets {
         let key = format!("{w:#x}");
@@ -219,10 +219,16 @@ pub fn mint_endorsement(
 /// 仿射 (x, y) 各 32 字节大端（payload 字布局）。STARK 曲线坐标即
 /// felt252，字直通 Cairo 合约，无 u256↔felt 换算。
 pub fn point_xy(p: &Pt) -> ([u8; 32], [u8; 32]) {
-    let (x, y) = p
-        .to_affine_parts()
-        .expect("endorsement points are non-identity");
-    (x.to_bytes_be(), y.to_bytes_be())
+    // audit M2：恒等点不再 panic（panic 会杀死 game_loop task 冻结牌桌），
+    // 改为全零坐标——下游 Cairo EC 验证会自然拒绝该批认可（交易 revert，
+    // 走既有有界重试/放弃路径），服务端日志可观测。
+    match p.to_affine_parts() {
+        Some((x, y)) => (x.to_bytes_be(), y.to_bytes_be()),
+        None => {
+            tracing::error!("point_xy: identity point encoded as zero words (will be rejected downstream)");
+            ([0u8; 32], [0u8; 32])
+        }
+    }
 }
 
 fn scalar_be(s: &Sc) -> [u8; 32] {

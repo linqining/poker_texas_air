@@ -146,6 +146,24 @@ impl Table {
         let phase = self.reveal_token_state.phase;
         self.reveal_token_state.reset();
 
+        // 缺口 B fail-fast：本阶段存在物化失败的牌（份额齐但明文不合法）时，
+        // 中止该手并全额退款——绝不让空牌面静默打完。走与 reveal 超时相同
+        // 的 refund + reset 路径（牌局可继续开下一手，deck 基线重建）。
+        if self.materialization_broken() {
+            tracing::error!(
+                "[on_reveal_complete] materialization FAILED after phase {:?}; aborting hand with full refund (fail-fast)",
+                phase
+            );
+            self.refund_all_bets();
+            self.reset_for_next_hand();
+            self.emit_event(crate::pokergame::table::events::TableEvent::TableUpdated {
+                message: Some(
+                    "牌局已中止：存在无法解密的牌，本手下注已全额退还".to_string(),
+                ),
+            });
+            return;
+        }
+
         // 方案A 单点广播：reveal 结果事件从游戏层完成点统一发出（此前只挂在
         // WS REVEAL_SUBMIT handler，bot 等进程内路径完成时会绕过广播，导致
         // 前端收不到 HAND_REVEAL_RESULT / COMMUNITY_REVEAL_RESULT 而不显示牌）。
@@ -369,8 +387,33 @@ impl Table {
     /// 提交错误是否为良性幂等场景（`ERR_ALREADY_SUBMITTED`）。调用方据此
     /// 跳过"证明验证失败"广播与 error 回传——首次提交已推进状态机，
     /// 结果广播由 on_reveal_complete 单点下发，无需重复告警。
+    /// "phase not active" 同为幂等：窗口已完成/重置后的迟到重复提交
+    /// （缺口 C），客户端应静默而非弹错。
     pub fn is_benign_reveal_error(e: &str) -> bool {
         e.contains(Self::ERR_ALREADY_SUBMITTED)
+            || e.contains("Reveal token phase not active")
+    }
+
+    /// 缺口 B（fail-fast）：检测"物化已尝试但失败"的牌——reveal 份额已齐
+    /// （pending 清空、tokens 非空）但解密明文不在规范域（playing_card 为
+    /// None）。这类手牌继续推进只会以空牌面收场（NOT_REGISTERED 会话线上
+    /// 复现），必须在阶段推进前中止。
+    fn materialization_broken(&self) -> bool {
+        let hole_bad = self.mental_poker_game.players.values().any(|p| {
+            p.hand_encrypted.iter().any(|c| {
+                c.reveal_state.pending_players.is_empty()
+                    && !c.reveal_state.reveal_tokens.is_empty()
+                    && c.playing_card.is_none()
+            })
+        });
+        if hole_bad {
+            return true;
+        }
+        self.mental_poker_game.community_cards_encrypted.iter().any(|c| {
+            c.reveal_state.pending_players.is_empty()
+                && !c.reveal_state.reveal_tokens.is_empty()
+                && c.playing_card.is_none()
+        })
     }
 }
 

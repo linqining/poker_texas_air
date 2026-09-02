@@ -78,14 +78,16 @@ impl Seat {
     }
 
     pub fn raise(&mut self, amount: u64) {
-        let re_raise_amount = amount - self.bet;
+        // saturating（audit H4）：amount 来自用户输入，正常路径保证 amount ≥ bet
+        // （handle_raise 校验），异常输入下回绕会污染 total_bet/stack 记账。
+        let re_raise_amount = amount.saturating_sub(self.bet);
         if re_raise_amount > self.stack {
             // all-in: put all remaining chips in
             self.bet += self.stack;
             self.total_bet += self.stack;
             self.stack = 0;
         } else {
-            self.bet = amount;
+            self.bet = self.bet.max(amount);
             self.total_bet += re_raise_amount;
             self.stack -= re_raise_amount;
         }
@@ -103,7 +105,8 @@ impl Seat {
     }
 
     pub fn call_raise(&mut self, amount: u64) {
-        let mut amount_called = amount - self.bet;
+        // saturating（audit H4）：同 raise，异常输入（amount < bet）下不得回绕
+        let mut amount_called = amount.saturating_sub(self.bet);
         if amount_called >= self.stack {
             amount_called = self.stack;
         }

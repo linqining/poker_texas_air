@@ -29,12 +29,18 @@ impl Table {
         let seat_id = seat.id;
         let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
         let call_amount = self.summary.call_amount?;
-        let added_to_pot = if call_amount > seat.stack + seat.bet { seat.stack } else { call_amount - seat.bet };
+        // 校验先于金额计算（audit H5）：原实现先算 `call_amount - seat.bet`
+        // 再 validate，call_amount < seat.bet 时 debug panic / release 回绕污染底池
         if let Some(ref betting) = self.betting_round {
             if betting.validate_call(&seat).is_err() {
                 return None;
             }
         }
+        let added_to_pot = if call_amount > seat.stack + seat.bet {
+            seat.stack
+        } else {
+            call_amount.saturating_sub(seat.bet)
+        };
         if let Some(seat) = self.local_seats.get_mut(&seat_id) {
             seat.call_raise(call_amount);
         }
@@ -75,6 +81,12 @@ impl Table {
         let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
         let seat_bet = seat.bet;
         let seat_stack = seat.stack;
+
+        // audit H4：加注目标低于本座已下注额属异常输入（正常由 UI 约束），
+        // 直接拒绝，避免下游 `amount - seat.bet` 语义失真。
+        if amount <= seat_bet {
+            return None;
+        }
 
         // 对齐 Move process_raise：校验筹码充足，all-in 允许低于 min_raise
         let (raise_amount, is_all_in, qualifies_full_raise) = if let Some(ref betting) = self.betting_round {

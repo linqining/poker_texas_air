@@ -437,6 +437,10 @@ fn dapv_prelude(
             // deliberately not invented here). Cursors advance by 5 (one
             // own-entry stride) instead of recomputing 5+5*i per compare.
             let own_end: u32 = 5 + 5 * n_own;
+            // audit C1：ownership 去重循环读取 [5, own_end) 前先钉住长度，
+            // 否则构造端 batch_words 缺词时 Span::at 越界 panic → 结算交易
+            // 持续 revert（该手链上结算丢失）。
+            assert!(p_batch.len() >= own_end, "batch too short for ownership");
             let mut a_off: u32 = 5;
             while a_off < own_end {
                 let mut b_off: u32 = a_off + 5;

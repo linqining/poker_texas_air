@@ -133,17 +133,27 @@ impl MentalPokerGame {
         pk: EcPoint,
         proof: crate::z_poker::key_manager::PKOwnershipProof,
     ) -> &PlayerState {
-        self.key_manager
-            .register_player(pk, proof)
-            .expect("register should succeed");
+        // 幂等化（audit H3）：重复注册不再 panic——座位移除与 key_manager
+        // 注册移除可能因超时踢出/重连并发的竞态而不同步，此时玩家重新入座
+        // 会再次走到这里。proof 非法等其它错误记日志后照常建立 players 条目
+        // （上游 SIT_DOWN 已验过 proof；panic 会杀死 handler/game_loop task
+        // 冻结牌桌，比可观测的告警更糟）。
+        if let Err(e) = self.key_manager.register_player(pk, proof) {
+            match e {
+                crate::z_poker::key_manager::KeyManagerError::PlayerAlreadyRegistered => {}
+                other => {
+                    tracing::error!("register_player: key registration failed: {other} (pk_hex={pk_hex})");
+                }
+            }
+        }
         let state = PlayerState {
             pk_hex: pk_hex.clone(),
             pk,
             hand_encrypted: vec![],
         };
-        let pk_hex_ref = pk_hex.clone();
-        self.players.insert(pk_hex, state);
-        self.players.get(&pk_hex_ref).unwrap()
+        self.players.insert(pk_hex.clone(), state);
+        // insert 后取回必然存在
+        self.players.get(&pk_hex).expect("player just inserted")
     }
 
     pub fn list_unreveal_community_cards_encrypted(&self) -> Vec<PlayerEncryptedCard> {
