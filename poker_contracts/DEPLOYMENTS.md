@@ -104,7 +104,7 @@ chain id `SN_SEPOLIA`。地址随 devnet 重启 + 重新部署而变化（当前
 
 ## devnet 浏览器端到端兑换
 
-浏览器钱包（Cartridge）签的是 Sepolia，无法给 devnet 合约签交易。为让兑换在
+浏览器钱包（Ready 等注入钱包）签的是 Sepolia，无法给 devnet 合约签交易。为让兑换在
 浏览器里真实跑通，`client/.env.development` 配置了 dev 直签账户（devnet
 预充值账户 #1）：
 

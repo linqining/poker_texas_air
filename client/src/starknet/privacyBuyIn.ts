@@ -121,10 +121,63 @@ function loadSdk(): Promise<SDKModule | null> {
 // 后端实现
 // ------------------------------------------------------------
 
-/** u256 → [low, high] 两个 felt 字符串（anonymizer calldata 用）。 */
+/** u256 → [low, high] 两个 0x 十六进制 felt（Ready 的 payload schema 只认
+ * 0x hex，十进制字符串会被 INVALID_REQUEST_PAYLOAD 拒绝；SDK CallData 两者
+ * 皆收）。 */
 function splitU256(wei: bigint): [string, string] {
   const mask = (1n << 128n) - 1n;
-  return [(wei & mask).toString(), (wei >> 128n).toString()];
+  return ['0x' + (wei & mask).toString(16), '0x' + (wei >> 128n).toString(16)];
+}
+
+/** helper 的 privacy_invoke operation：0 = 买入（STRK → 筹码）。 */
+const OP_BUY_IN = '0x0';
+
+/** 读 vault.chip_balance(player)（u256 wei）；RPC 抖动返回 -1n 由调用方重试。 */
+async function readChipBalance(player: string): Promise<bigint> {
+  const vault = starknetConfig.pokerVaultAddress;
+  if (!vault) return -1n;
+  try {
+    const res = await getProvider().callContract({
+      contractAddress: vault,
+      entrypoint: 'chip_balance',
+      calldata: [player],
+    });
+    const arr = Array.isArray(res) ? res : ((res as { result?: string[] }).result ?? []);
+    return BigInt(arr[0] ?? 0) + (BigInt(arr[1] ?? 0) << 128n);
+  } catch {
+    return -1n;
+  }
+}
+
+/**
+ * 链上对账：轮询 vault.chip_balance(player) 直到余额 ≥ before + deltaWei。
+ * 买入是否入账以链上为准、以玩家地址记账——后端确认失败（回执拉取失败等）
+ * 只影响上桌记账，不影响资金安全；玩家随时可 vault.withdraw 自助取回。
+ */
+async function waitForChipsOnChain(
+  player: string,
+  deltaWei: bigint,
+  before: bigint,
+  timeoutMs = 120_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last = before;
+  while (Date.now() < deadline) {
+    const bal = await readChipBalance(player);
+    if (bal >= 0n) {
+      last = bal;
+      if (bal >= before + deltaWei) {
+        logger.log('[starknet-privacy] chips confirmed on-chain:', bal.toString());
+        return;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 6000));
+  }
+  logger.warn(
+    '[starknet-privacy] chip_balance poll timed out (last:',
+    last.toString(),
+    ') — funds remain on-chain under the player; backend reconcile or vault.withdraw will recover.',
+  );
 }
 
 /**
@@ -139,16 +192,23 @@ async function walletApiBackend(account: AccountInterface, wei: bigint): Promise
     throw new Error('wallet does not expose strk20InvokeTransaction');
   }
 
+  const before = await readChipBalance(account.address);
   const [low, high] = splitU256(wei);
   const actions = [
     {
       type: 'invoke',
       contract: starknetConfig.privacy.anonymizerAddress,
-      calldata: [account.address, low, high, OPEN_NOTE_PLACEHOLDER],
+      // privacy_invoke(operation=0 买入, player, amount:u256, change_note_id)
+      calldata: [OP_BUY_IN, account.address, low, high, OPEN_NOTE_PLACEHOLDER],
     },
   ];
   const res = await acct.strk20InvokeTransaction(actions);
   await getProvider().waitForTransaction(res.transaction_hash);
+  // 链上对账：买入的筹码以 vault.chip_balance 为权威，不依赖后端确认
+  //（后端拉回执失败 ≠ 资金丢失；此处直接向链上要结论）。
+  if (before >= 0n) {
+    await waitForChipsOnChain(account.address, wei, before);
+  }
   return { attempted: true, backend: 'wallet-api', hash: res.transaction_hash, success: true };
 }
 
@@ -240,7 +300,8 @@ function tryComposeInvoke(
 ): unknown {
   const invokeOptions = {
     contract: starknetConfig.privacy.anonymizerAddress,
-    calldata: [player, low, high, OPEN_NOTE_PLACEHOLDER],
+    // privacy_invoke(operation=0 买入, player, amount:u256, change_note_id)
+    calldata: [OP_BUY_IN, player, low, high, OPEN_NOTE_PLACEHOLDER],
   };
   if (typeof t.invoke === 'function') {
     return t.invoke(invokeOptions);

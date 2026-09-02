@@ -18,7 +18,7 @@
 ```
 ├── src/                    # poker_texas_air：德州 AIR + Stwo（circle-STARK）证明栈
 ├── texas/                  # 游戏服务器：axum + socket.io 对局循环 + Starknet 结算
-├── client/                 # React 18 + Vite 网页客户端（Cartridge Controller 会话密钥）
+├── client/                 # React 18 + Vite 网页客户端（Ready 钱包：登录、买入、STRK20 操作）
 ├── client-wasm/            # wasm-bindgen 桥：浏览器端密码学与证明 bundle
 ├── poker_protocol/         # 心灵扑克协议（ElGamal、洗牌/翻牌/重构）
 ├── poker-protocol-core/    # 曲线泛型密码学后端（secp256k1 / STARK / BN254 / BLS12-381）
@@ -48,6 +48,24 @@
 **本次提交不部署独立 prover 服务。** 运营方（host）使用 `proving-tool` 在本地生成 G 层证明（整手牌约 29 秒，证明约 1.5 MB）并对其有效性作出 attestation。这**不是**正确性上的信任要求：任何玩家都可以下载证明 bundle 在浏览器中验证（client-wasm），或用 Rust 验证器本地验证。host 只是*可用性*依赖，而非*正确性*依赖。这一阶段性姿态是 RFP-03 明文允许的——RFP 仅要求链上 STARK 验证器 "eventually"（最终）到位。
 
 路线图：**Phase 2** —— G-STARK 验证器合约上 Starknet（`cairo_verifier` 方向）；**Phase 3** —— 独立 prover 服务，届时完全移除 host attestation。设计细节见 [DUAL_PROOF_PROTOCOL.md](DUAL_PROOF_PROTOCOL.md)、[DAPV_SOUNDNESS.md](DAPV_SOUNDNESS.md)。
+
+### 「对公开程序的已证执行」与「信任闭源合约」
+
+任何基于证明的系统，其信任都由两半构成：**执行完整性**（计算确实按规定程序发生）与**规范透明性**（该程序确实做着利益相关方以为它做的事）。把本项目与不开源的 Starknet 合约对比，区别恰好落在同一根轴上——后者：
+
+| | 不开源的 Starknet 合约 | 本项目 |
+|---|---|---|
+| 计算在哪里跑 | 链下 —— SHARP 证明，L1 verifier 检查 | 链下 —— Stwo 证明；G 层今日主机/浏览器验证，Phase 2 上链 |
+| 执行完整性 | ✓ Starknet 共识 + STARK | ✓ STARK —— **同一类**密码学假设，没有更强 |
+| 规范透明性 | ✗ 无可审语义 | ✓ 公开 AIR + 文档 + Lean 定理 + fail-closed 覆盖矩阵 |
+| 剩余信任根 | 部署者（声誉；无法复核的审计） | 数学，加上对公开语句的一次性审查——公共品，全用户摊销 |
+| 「人」如何被移除 | 无法移除 | 由架构移除 —— Phase 2 彻底删除 host attestation |
+
+对闭源合约而言，「不开源」意味着不存在哈希绑定、可审的语义规范：声明的字节码公开但不可读，部署者若不公布源码，连「审计覆盖了部署代码」都无法验证。链仍然证明 `output = F(input)`——但 `F` 未知，用户无法评估这个保证：最昂贵的密码学机器花在了一个不可评估的命题上，剩下的只有对部署者的制度性信任，且永久存在。
+
+本项目中，被证明的语句就是仓库里的公开 AIR（未覆盖部分一律 fail-closed，mutation tests 直接攻击 AIR 本身），prover 在构造上不被信任，host 仅为*可用性*依赖。注意一个结构性同构：这正是 Starknet 自己对 Ethereum L1 展示的信任结构——链下 STARK 证明、链上验证、开源 OS/verifier。本项目在应用层复刻了同一结构（Phase 2 G 验证器落地后完全同构），而一个闭源的应用合约，破坏的恰是 Starknet 自身赖以成立的「开源语义」那条腿。
+
+诚实的边界，明说而非隐藏：(1) 链上 G 强制今日是注册（`g_attestation`）加 digest 绑定，不是直接验证——有界、有文档、浏览器可验、Phase 2 移除；(2) 开源不等于正确——所以有 fail-closed 纪律与 mutation tests；(3) 浏览器验证依赖分发的 wasm bundle——终局答案是链上验证器，届时 vk 与约束成为链上事实。
 
 ## 快速开始
 

@@ -16,7 +16,7 @@ sequenceDiagram
     autonumber
     actor U as 玩家浏览器 UI
     participant P as paymaster.ts<br/>(提交通道,客户端)
-    participant C as Cartridge Controller<br/>(session key 钱包)
+    participant C as 连接钱包<br/>(Ready，注入式)
     participant R as game server 中继<br/>/api/starknet/paymaster
     participant A as 上游 paymaster<br/>(AVNU 等)
     participant N as 多 RPC failover<br/>(publicnode → blast → …)
@@ -48,7 +48,7 @@ sequenceDiagram
     rect rgb(255, 244, 235)
         note over P,S: 回退路径：任一环节失败 / 服务端未配置中继
         P->>C: account.execute(calls)
-        note over C: session policy 命中 approve/deposit → 静默放行<br/>（经 Cartridge 自有通道提交）
+        note over C: 钱包弹窗确认 approve/deposit<br/>（用户自付 gas 直签）
         C->>S: invoke
         P->>N: waitForTransaction(hash)
         P-->>U: TxResult{ path: "direct" }
@@ -77,8 +77,8 @@ sequenceDiagram
                                                 │
                                                 ▼
    回退(失败/未配置):                        Starknet
-   session key 直签 ─────────────────────▶ sequencer
-   (approve/deposit policy 内,静默)
+   连接钱包(Ready)直签 ───────────────────▶ sequencer
+   (钱包弹窗确认,用户自付 gas)
                                                 ▲
    回执等待 / 读请求:                           │
    FailoverProvider(publicnode → blast → …) ────┘   单端点失败熔断 30s 自动轮转
@@ -93,7 +93,7 @@ sequenceDiagram
 | `client/src/starknet/rpc.ts` | 多 RPC failover provider：异步调用失败熔断 30s 并轮转下一端点 |
 | `client/src/starknet/config.ts` | `VITE_STARKNET_RPC_URLS` / paymaster 前端配置 |
 | `client/src/starknet/starknetGameActions.ts` | deposit / withdraw / approve 全部改走 `submitCalls()`；approve+deposit 合并为单笔提交 |
-| `client/src/starknet/cartridge.ts` | （未改动）session policy 已是最小白名单：STRK20.approve、vault deposit/withdraw、settlement 只读 |
+| `client/src/starknet/cartridge.ts` | Cartridge 已整体移除：现为无引用死代码（待删除），approve/deposit 调用面白名单由 paymaster 中继策略承担 |
 
 服务端路由（`texas/src/main.rs`）：
 
@@ -124,7 +124,7 @@ sequenceDiagram
 
 | 观察者 | 主路径（paymaster）可见 | 回退路径（直签）可见 |
 |---|---|---|
-| mempool / sequencer 入口 | 提交者为 paymaster 账户；无法按用户地址过滤提交 | 提交经 Cartridge 通道，用户账户为 sender |
+| mempool / sequencer 入口 | 提交者为 paymaster 账户；无法按用户地址过滤提交 | 用户钱包（Ready）直签，用户账户为 sender |
 | 链上观察者 / 浏览器 | tx sender 是 paymaster；但 outside execution 的 trace 里仍能看到用户账户执行了 calls —— **用户地址与金额并未隐藏**（那是方案 A/B 的职责） | 用户地址即 sender |
 | game server | calls 内容、用户地址、上游响应；**无 API key 之外的敏感物、无私钥** | 同左 |
 | 上游 paymaster | 用户地址 + calls + 签名（协议必需） | 不参与 |

@@ -129,7 +129,7 @@ poker_texas_air/
 - 验证：`cargo check/test -p texas` 通过；本地起服 + smoke 一手牌。
 
 **P3 client + client-wasm（0.5 天）**
-- 复制 `client/`（排除 node_modules/dist/env 密钥），`.env.example` 模板化（server URL、Cartridge Controller 配置）。
+- 复制 `client/`（排除 node_modules/dist/env 密钥），`.env.example` 模板化（server URL、钱包与 RPC 配置）。
 - `client-wasm/` 去独立 workspace 声明、纳入主 workspace；`sui-serialization` 若仅剩序列化工具用途则评估内联删除，否则按 deprecated 保留。
 - 验证：`wasm-pack build` + `pnpm install && pnpm build`；浏览器连本地 server 完整打一手牌。
 

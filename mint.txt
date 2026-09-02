@@ -6,8 +6,6 @@ $S --url http://127.0.0.1:5051 --pk 0x71d7bb07b9a64f6f78ac4c816aff4da9 \
 
 
 todo：
-1. Buy-in verification failed: deposit receipt fetch failed after retries: receipt http: error sending request for url (https://starknet-sepolia-rpc.publicnode.com/)
 2. 牌局中抽水显示
 3. 牌局记录
-4. 筹码兑换比例也隐私化
 5. 抗审查

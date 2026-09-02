@@ -21,7 +21,7 @@ mental poker）**，底牌从发牌到摊牌前对包括运营方在内的任何
 | STARK proofs of correct dealing | STWO 管线就绪（结算 G 层 canonical STARK 聚合摘要已注册上链）；洗牌语句的 STARK 化成本模型已实测（见 docs/plan-d-p3-metrics.md），曲线已迁移到 Cairo 原生 STARK 曲线，EC_OP builtin 让全残差链上验证可负担 |
 | Cards as encrypted notes, only holder decrypts | 手牌 = 阈值 ElGamal 密文（channel key 语义），资金 = STRK20 note（shield 入池 / open note 找零 / viewing key）；摊牌公开与 note 开封同构 |
 | Betting settles through the privacy pool | 买入：privacy pool → privacy_invoke → vault 记账（观察者无法关联出资人）；提现 unshield 方向为下一步合约工作（规范已交付） |
-| Paymaster submits all tx | 已实现：paymaster 中继 + 多 RPC failover + session keys；诚实边界（回退路径直签会暴露 sender）有文档 |
+| Paymaster submits all tx | 已实现：paymaster 中继 + 多 RPC failover；钱包（Ready）签名，诚实边界（回退路径直签会暴露 sender）有文档 |
 | Viewing keys | 客户端本地生成，池原生支持；审计/合规走"授权查看 + 争议驱动 STARK 复核"，不牺牲默认隐私 |
 
 ## 与 RFP V1/V2 的关系（显式优势声明）

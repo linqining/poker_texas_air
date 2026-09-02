@@ -36,7 +36,7 @@ by construction, not by trusting a host.
 ```
 ├── src/                    # poker_texas_air: Texas AIR + Stwo (circle-STARK) proving stack
 ├── texas/                  # Game server: axum + socket.io game loop + Starknet settlement
-├── client/                 # React 18 + Vite web client (Cartridge Controller session keys)
+├── client/                 # React 18 + Vite web client (Ready Wallet: login, buy-in, STRK20 actions)
 ├── client-wasm/            # wasm-bindgen bridge: browser-side crypto & proof bundles
 ├── poker_protocol/         # Mental-poker protocol (ElGamal, shuffle/reveal/reconstruct)
 ├── poker-protocol-core/    # Curve-generic crypto backends (secp256k1 / STARK / BN254 / BLS12-381)
@@ -81,6 +81,50 @@ Roadmap: **Phase 2** — G-STARK verifier contract on Starknet
 which host attestation is removed entirely. Design details:
 [DUAL_PROOF_PROTOCOL.md](DUAL_PROOF_PROTOCOL.md),
 [DAPV_SOUNDNESS.md](DAPV_SOUNDNESS.md).
+
+### Proven execution of an open program vs. trusting a closed contract
+
+Any proof-based system's trust decomposes into two halves: **execution
+integrity** (the computation really ran according to some program) and
+**specification transparency** (that program really does what stakeholders
+believe it does). Comparing this project with a closed-source Starknet
+contract, the difference lies on exactly one axis — the second half:
+
+| | Closed-source Starknet contract | This project |
+|---|---|---|
+| Where compute runs | Off-chain — SHARP proves, the L1 verifier checks | Off-chain — Stwo proves; G verified host/browser today, on-chain in Phase 2 |
+| Execution integrity | ✓ Starknet consensus + STARK | ✓ STARK — the *same class* of assumptions, none stronger |
+| Specification transparency | ✗ no reviewable semantics | ✓ open AIR + docs + Lean theorems + a fail-closed coverage matrix |
+| Residual trust root | The deployer (reputation; audits you cannot re-check) | Mathematics, plus one review of the open statement — a public good, amortized across all users |
+| How the human is removed | It cannot be | By architecture — Phase 2 deletes host attestation entirely |
+
+For a closed contract, "not open source" means there is no hash-bound,
+reviewable specification. The declared bytecode is public but not
+human-auditable, and if the deployer never publishes source, no one can
+even verify that an audit covered the deployed code. The chain still
+proves `output = F(input)` — but `F` is unknown, so the guarantee is one
+the user cannot evaluate: the most expensive cryptographic machinery
+available is spent proving an opaque statement. What remains is
+institutional trust in the deployer, permanently.
+
+Here, the statement being proven is the open AIR in this repo (with
+fail-closed treatment of anything not yet covered, and mutation tests that
+attack the AIR directly), the prover is untrusted by construction, and the
+host is an *availability* dependency only. Note the structural isomorphism:
+this is the same trust structure Starknet itself presents to Ethereum L1 —
+off-chain STARK proving, on-chain verification, open-source OS/verifier.
+This project replicates that pattern at the application layer (fully
+isomorphic once the Phase 2 G-verifier lands), whereas a closed-source app
+contract breaks the open-semantics leg of the very pattern Starknet relies
+on.
+
+Honest boundaries, stated rather than hidden: (1) on-chain G enforcement
+today is registration (`g_attestation`) plus digest binding, not direct
+verification — bounded, documented, browser-verifiable, and removed in
+Phase 2; (2) open source is not correctness — hence the fail-closed
+discipline and mutation tests; (3) browser verification depends on the
+served wasm bundle, which is why the endgame is the on-chain verifier,
+where the verification key and constraints become chain facts.
 
 ## Quick start
 

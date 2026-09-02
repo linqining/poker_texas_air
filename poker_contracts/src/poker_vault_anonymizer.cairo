@@ -1,33 +1,48 @@
-/// STRK20 privacy-pool anonymizer for poker buy-ins (Plan B).
+/// STRK20 privacy-pool anonymizer for poker chips.
+/// Plan B buy-in (STRK → vault chips) and Plan D P2.2 unshield/claim
+/// (vault chips → STRK), dispatched by `operation` in one entry point.
 ///
 /// The STRK20 privacy pool calls `privacy_invoke` on this contract from
 /// inside a private transaction (InvokeExternal phase, at most once per tx,
-/// entrypoint selected by the protocol's INVOKE_SELECTOR). Before the call
-/// the pool has already transferred the user's shielded input tokens to this
-/// helper via a plain public transfer — so the helper's balance at call time
-/// includes the buy-in funds plus any surplus the user chose to route.
+/// entrypoint selected by the protocol's INVOKE_SELECTOR). The pool
+/// deserializes the dapp's calldata into this function's parameters per the
+/// contract ABI, and before the call it has already transferred the user's
+/// spent input-note tokens to this helper — `amount` of them — via a plain
+/// public transfer.
 ///
-/// Flow inside `privacy_invoke(player, amount, change_note_id)`:
-///   1. Approve the PokerVault and call `deposit_for(player, amount)` — the
-///      vault pulls `amount` STRK from the helper and credits the player's
-///      chip balance 1:1. On-chain payer = helper; chip recipient = player.
-///   2. Whatever STRK remains in the helper is "change": approve the pool to
-///      pull it back and return it as a single `OpenNoteDeposit` (open note,
-///      salt = 1, credited to `change_note_id`).
-///   3. Return exactly `Span<OpenNoteDeposit>` — empty when there is no
-///      change. The pool measures the output by balance delta, so the
-///      returned total must equal the helper's remaining balance.
+/// `calldata[0]` (operation) selects the flow:
+///
+/// - `0` BuyIn:  approve the vault to pull `amount` STRK from the helper and
+///   credit the player's chips 1:1 (`deposit_for`). Whatever STRK remains in
+///   the helper is "change": approve the pool to pull it back and return it
+///   as a single `OpenNoteDeposit` credited to `note_id` (empty span when
+///   there is no change, so `note_id` may be 0 on an exact buy-in).
+/// - `1` Withdraw: burn `amount` of the player's chips 1:1 (`burn_chips`;
+///   this helper must be the vault's authorized helper) and return the
+///   helper's whole STRK balance as one `OpenNoteDeposit` credited to
+///   `note_id` (`note_id` must be non-zero). A zero balance means the pool
+///   sent no input — revert rather than credit an empty note.
+///
+/// Client calldata (STRK20 invoke action, 5 items):
+///   `[operation, player, amount_lo, amount_hi, "${openNoteIds[N]}"]`
 ///
 /// ## STRK20 integration rules honored
 ///
-/// - Approve (never transfer) the pool to pull outputs.
-/// - `ZERO_OUT_AMOUNT`: no zero-amount deposit entries (empty span instead).
-/// - u256 → u128 guard on the change amount (pool note amounts are u128).
+/// - Approve (never transfer) the pool to pull outputs; the pool executes
+///   the pull when applying the deposits.
+/// - Return exactly `Span<OpenNoteDeposit>`; no zero-amount entries.
+/// - u256 → u128 guard on note amounts (pool note amounts are u128).
 /// - Per-token temp balance must end exactly zero after the pool pulls.
+/// - Only the pool may call `privacy_invoke`.
 ///
 /// Deployment: constructor takes the PokerVault and the STRK20 privacy pool
-/// addresses. Only the pool may call `privacy_invoke`.
+/// addresses.
 use starknet::ContractAddress;
+
+/// `privacy_invoke` operation: convert pool-supplied STRK into chips.
+pub const OP_BUY_IN: felt252 = 0;
+/// `privacy_invoke` operation: burn chips, return STRK as an open note.
+pub const OP_WITHDRAW: felt252 = 1;
 
 /// Open-note deposit entry returned by `privacy_invoke` to the STRK20 pool
 /// (shape mandated by the privacy-pool protocol).
@@ -50,27 +65,17 @@ pub trait IVaultLike<TContractState> {
 #[starknet::interface]
 pub trait IPokerVaultAnonymizer<TContractState> {
     /// Called by the STRK20 privacy pool inside a private transaction.
-    /// Converts `amount` of pool-supplied STRK into chips for `player` and
-    /// returns the remaining change as one open-note deposit.
+    /// `operation` selects BuyIn (0: STRK → chips for `player`, surplus
+    /// returns as the open note `note_id`) or Withdraw (1: burn `amount` of
+    /// `player`'s chips, the helper's whole STRK balance returns as the open
+    /// note `note_id`). Returns exactly the open-note deposits for the pool
+    /// to apply.
     fn privacy_invoke(
         ref self: TContractState,
+        operation: felt252,
         player: ContractAddress,
         amount: u256,
-        change_note_id: felt252,
-    ) -> Span<OpenNoteDeposit>;
-
-    /// Plan D P2.2 (unshield): called by the STRK20 privacy pool inside a
-    /// private transaction. The pool has already moved the user's burned
-    /// input-note STRK to this helper; the helper burns `player`'s chips
-    /// 1:1 and returns the helper's whole balance as the recipient's
-    /// output note (`recipient_note_id`) for the pool to pull. STRK
-    /// conservation stays inside the pool; the link between the chip
-    /// account and the payout address is cut by the pool.
-    fn privacy_withdraw(
-        ref self: TContractState,
-        player: ContractAddress,
-        amount: u256,
-        recipient_note_id: felt252,
+        note_id: felt252,
     ) -> Span<OpenNoteDeposit>;
 }
 
@@ -92,12 +97,13 @@ pub mod PokerVaultAnonymizer {
 
     use super::{
         IAnonymizerInfo, IPokerVaultAnonymizer, IVaultLikeDispatcher, IVaultLikeDispatcherTrait,
-        OpenNoteDeposit,
+        OpenNoteDeposit, OP_BUY_IN, OP_WITHDRAW,
     };
 
     #[storage]
     struct Storage {
-        /// PokerVault that converts STRK to chips via deposit_for.
+        /// PokerVault that converts STRK to chips via deposit_for and burns
+        /// them via burn_chips.
         vault: ContractAddress,
         /// STRK20 privacy pool — the only authorized caller.
         pool: ContractAddress,
@@ -112,6 +118,10 @@ pub mod PokerVaultAnonymizer {
 
     #[derive(Drop, starknet::Event)]
     struct BuyInExecuted {
+        /// Indexed: lets the backend reconcile a buy-in whose deposit
+        /// receipt confirmation failed (RPC blip) by scanning events for
+        /// the player instead of relying on one tx receipt fetch.
+        #[key]
         player: ContractAddress,
         amount: u256,
         change: u128,
@@ -119,6 +129,8 @@ pub mod PokerVaultAnonymizer {
 
     #[derive(Drop, starknet::Event)]
     struct UnshieldExecuted {
+        /// Indexed: same reconciliation guarantee as BuyInExecuted.
+        #[key]
         player: ContractAddress,
         amount: u256,
         recipient_note_id: felt252,
@@ -137,9 +149,10 @@ pub mod PokerVaultAnonymizer {
     impl AnonymizerImpl of super::IPokerVaultAnonymizer<ContractState> {
         fn privacy_invoke(
             ref self: ContractState,
+            operation: felt252,
             player: ContractAddress,
             amount: u256,
-            change_note_id: felt252,
+            note_id: felt252,
         ) -> Span<OpenNoteDeposit> {
             let pool = self.pool.read();
             assert!(get_caller_address() == pool, "caller is not the pool");
@@ -152,77 +165,57 @@ pub mod PokerVaultAnonymizer {
             let token_dispatcher = IERC20Dispatcher { contract_address: token };
             let self_address = get_contract_address();
 
-            // 1. Buy in: approve the vault, then let it pull `amount` and
-            // credit the player's chips 1:1.
-            let ok = token_dispatcher.approve(vault, amount);
-            assert!(ok, "vault approve failed");
-            vault_dispatcher.deposit_for(player, amount);
+            if operation == OP_WITHDRAW {
+                // Unshield: burn the player's chips 1:1 (no token movement
+                // here — the pool already moved the user's burned input-note
+                // STRK into the helper), then return the helper's whole
+                // balance as the recipient's output note.
+                assert!(note_id != 0, "recipient note id required");
+                vault_dispatcher.burn_chips(player, amount);
+                let remaining = token_dispatcher.balance_of(self_address);
+                assert!(!remaining.is_zero(), "no unshield funds in helper");
+                assert!(remaining.high == 0_u128, "unshield overflows u128");
+                let out: u128 = remaining.low;
+                let ok = token_dispatcher.approve(pool, remaining);
+                assert!(ok, "pool approve failed");
 
-            // 2. Change = remaining helper balance (pool-funded surplus). The
-            // pool pulls it via the approval below and credits the user's
-            // `change_note_id`. Pool note amounts are u128, so the change
-            // must fit — reject rather than silently truncate.
-            let remaining = token_dispatcher.balance_of(self_address);
-            if remaining.is_zero() {
-                self.emit(BuyInExecuted { player, amount, change: 0 });
-                let empty = core::array::ArrayTrait::new();
-                return empty.span();
+                self.emit(UnshieldExecuted { player, amount, recipient_note_id: note_id, out });
+
+                let mut deposits = core::array::ArrayTrait::new();
+                deposits.append(OpenNoteDeposit { note_id, token, amount: out });
+                deposits.span()
+            } else if operation == OP_BUY_IN {
+                // Buy in: approve the vault, then let it pull `amount` and
+                // credit the player's chips 1:1.
+                let ok = token_dispatcher.approve(vault, amount);
+                assert!(ok, "vault approve failed");
+                vault_dispatcher.deposit_for(player, amount);
+
+                // Change = remaining helper balance (pool-funded surplus). The
+                // pool pulls it via the approval below and credits the user's
+                // `note_id`. Pool note amounts are u128, so the change must
+                // fit — reject rather than silently truncate.
+                let remaining = token_dispatcher.balance_of(self_address);
+                if remaining.is_zero() {
+                    self.emit(BuyInExecuted { player, amount, change: 0 });
+                    let empty = core::array::ArrayTrait::new();
+                    return empty.span();
+                }
+                assert!(remaining.high == 0_u128, "change overflows u128");
+                let change: u128 = remaining.low;
+                assert!(note_id != 0, "change note id required");
+                let ok = token_dispatcher.approve(pool, remaining);
+                assert!(ok, "pool approve failed");
+
+                self.emit(BuyInExecuted { player, amount, change });
+
+                let mut deposits = core::array::ArrayTrait::new();
+                deposits.append(OpenNoteDeposit { note_id, token, amount: change });
+                deposits.span()
+            } else {
+                assert!(false, "unknown operation");
+                core::array::ArrayTrait::new().span()
             }
-            assert!(remaining.high == 0_u128, "change overflows u128");
-            let change: u128 = remaining.low;
-            assert!(change_note_id != 0, "change note id required");
-            let ok = token_dispatcher.approve(pool, remaining);
-            assert!(ok, "pool approve failed");
-
-            self.emit(BuyInExecuted { player, amount, change });
-
-            let mut deposits = core::array::ArrayTrait::new();
-            deposits.append(OpenNoteDeposit { note_id: change_note_id, token, amount: change });
-            deposits.span()
-        }
-
-        fn privacy_withdraw(
-            ref self: ContractState,
-            player: ContractAddress,
-            amount: u256,
-            recipient_note_id: felt252,
-        ) -> Span<OpenNoteDeposit> {
-            let pool = self.pool.read();
-            assert!(get_caller_address() == pool, "caller is not the pool");
-            assert!(!player.is_zero(), "player required");
-            assert!(amount > 0_u256, "amount must be > 0");
-            assert!(recipient_note_id != 0, "recipient note id required");
-
-            let vault = self.vault.read();
-            let vault_dispatcher = IVaultLikeDispatcher { contract_address: vault };
-            let token = vault_dispatcher.token();
-            let token_dispatcher = IERC20Dispatcher { contract_address: token };
-            let self_address = get_contract_address();
-
-            // 1. Burn the player's chips 1:1 (no token movement here — the
-            // STRK the user burned as the pool input note is already in the
-            // helper, transferred by the pool before the call).
-            vault_dispatcher.burn_chips(player, amount);
-
-            // 2. Return the helper's whole balance as the recipient's output
-            // note: approve the pool to pull it. Surplus (if any) rides
-            // along; u128 guard because pool note amounts are u128.
-            let remaining = token_dispatcher.balance_of(self_address);
-            assert!(!remaining.is_zero(), "no unshield funds in helper");
-            assert!(remaining.high == 0_u128, "unshield overflows u128");
-            let out: u128 = remaining.low;
-            let ok = token_dispatcher.approve(pool, remaining);
-            assert!(ok, "pool approve failed");
-
-            self.emit(UnshieldExecuted { player, amount, recipient_note_id, out });
-
-            let mut deposits = core::array::ArrayTrait::new();
-            deposits.append(OpenNoteDeposit {
-                note_id: recipient_note_id,
-                token,
-                amount: out,
-            });
-            deposits.span()
         }
     }
 
@@ -380,8 +373,10 @@ mod tests {
         assert!(vault.total_chips() == 400, "total chips");
     }
 
+    // ---- operation 0: buy-in ----
+
     #[test]
-    fn privacy_invoke_deposits_and_returns_change() {
+    fn privacy_invoke_buy_in_deposits_and_returns_change() {
         let test_addr = get_contract_address();
         let s = setup(test_addr); // pool == test contract
         let tok = IMockTokenDispatcher { contract_address: s.token };
@@ -392,7 +387,7 @@ mod tests {
         tok.transfer(s.anonymizer, 1000);
 
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
-        let deposits = anon.privacy_invoke(s.player, 400, 7);
+        let deposits = anon.privacy_invoke(0, s.player, 400, 7);
 
         assert!(deposits.len() == 1, "one change note");
         let change = *deposits.at(0);
@@ -410,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn privacy_invoke_exact_amount_empty_change() {
+    fn privacy_invoke_buy_in_exact_amount_empty_change() {
         let test_addr = get_contract_address();
         let s = setup(test_addr);
         let tok = IMockTokenDispatcher { contract_address: s.token };
@@ -419,7 +414,7 @@ mod tests {
         tok.transfer(s.anonymizer, 400);
 
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
-        let deposits = anon.privacy_invoke(s.player, 400, 0);
+        let deposits = anon.privacy_invoke(0, s.player, 400, 0);
 
         assert!(deposits.len() == 0, "no change expected");
         let vault = IPokerVaultDispatcher { contract_address: s.vault };
@@ -429,7 +424,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected: "change overflows u128")]
-    fn privacy_invoke_rejects_change_over_u128() {
+    fn privacy_invoke_buy_in_rejects_change_over_u128() {
         let test_addr = get_contract_address();
         let s = setup(test_addr);
         let tok = IMockTokenDispatcher { contract_address: s.token };
@@ -440,7 +435,7 @@ mod tests {
         tok.transfer(s.anonymizer, huge);
 
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
-        anon.privacy_invoke(s.player, 1, 7);
+        anon.privacy_invoke(0, s.player, 1, 7);
     }
 
     #[test]
@@ -449,13 +444,13 @@ mod tests {
         let stranger: ContractAddress = 987654.try_into().unwrap();
         let s = setup(stranger); // pool != test contract
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
-        anon.privacy_invoke(s.player, 100, 1);
+        anon.privacy_invoke(0, s.player, 100, 1);
     }
 
-    // ---- Plan D P2.2: privacy_withdraw (unshield) ----
+    // ---- operation 1: withdraw / claim (Plan D P2.2) ----
 
     #[test]
-    fn privacy_withdraw_burns_chips_and_returns_output_note() {
+    fn privacy_invoke_withdraw_burns_chips_and_returns_output_note() {
         let test_addr = get_contract_address();
         let s = setup(test_addr); // pool == test contract
         let tok = IMockTokenDispatcher { contract_address: s.token };
@@ -469,12 +464,12 @@ mod tests {
         assert!(vault.chip_balance(s.player) == 400, "chips credited");
 
         // The pool moves the user's burned input-note STRK to the helper
-        // before privacy_withdraw runs.
+        // before the withdraw leg runs.
         tok.mint(test_addr, 300);
         tok.transfer(s.anonymizer, 300);
 
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
-        let deposits = anon.privacy_withdraw(s.player, 300, 42);
+        let deposits = anon.privacy_invoke(1, s.player, 300, 42);
 
         assert!(deposits.len() == 1, "one output note");
         let note = *deposits.at(0);
@@ -495,7 +490,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected: "Only the authorized helper")]
-    fn privacy_withdraw_fails_without_helper_authorization() {
+    fn privacy_invoke_withdraw_fails_without_helper_authorization() {
         let test_addr = get_contract_address();
         let s = setup(test_addr);
         let tok = IMockTokenDispatcher { contract_address: s.token };
@@ -503,21 +498,21 @@ mod tests {
         tok.transfer(s.anonymizer, 300);
         // set_authorized_helper NOT called — burn_chips must refuse.
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
-        anon.privacy_withdraw(s.player, 300, 42);
+        anon.privacy_invoke(1, s.player, 300, 42);
     }
 
     #[test]
     #[should_panic(expected: "caller is not the pool")]
-    fn privacy_withdraw_rejects_non_pool_caller() {
+    fn privacy_invoke_withdraw_rejects_non_pool_caller() {
         let stranger: ContractAddress = 987654.try_into().unwrap();
         let s = setup(stranger);
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
-        anon.privacy_withdraw(s.player, 100, 1);
+        anon.privacy_invoke(1, s.player, 100, 1);
     }
 
     #[test]
     #[should_panic(expected: "Insufficient chip balance")]
-    fn privacy_withdraw_rejects_overdraw() {
+    fn privacy_invoke_withdraw_rejects_overdraw() {
         let test_addr = get_contract_address();
         let s = setup(test_addr);
         let tok = IMockTokenDispatcher { contract_address: s.token };
@@ -527,6 +522,31 @@ mod tests {
         tok.mint(test_addr, 300);
         tok.transfer(s.anonymizer, 300);
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
-        anon.privacy_withdraw(s.player, 300, 42);
+        anon.privacy_invoke(1, s.player, 300, 42);
+    }
+
+    #[test]
+    #[should_panic(expected: "recipient note id required")]
+    fn privacy_invoke_withdraw_rejects_zero_note_id() {
+        let test_addr = get_contract_address();
+        let s = setup(test_addr);
+        let tok = IMockTokenDispatcher { contract_address: s.token };
+        let vault = IPokerVaultDispatcher { contract_address: s.vault };
+        vault.set_authorized_helper(s.anonymizer);
+        tok.mint(test_addr, 300);
+        tok.transfer(s.anonymizer, 300);
+        let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
+        anon.privacy_invoke(1, s.player, 300, 0);
+    }
+
+    // ---- dispatch ----
+
+    #[test]
+    #[should_panic(expected: "unknown operation")]
+    fn privacy_invoke_rejects_unknown_operation() {
+        let test_addr = get_contract_address();
+        let s = setup(test_addr);
+        let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
+        anon.privacy_invoke(2, s.player, 100, 1);
     }
 }

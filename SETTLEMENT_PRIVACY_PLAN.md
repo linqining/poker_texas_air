@@ -102,7 +102,7 @@ pot 托管），"盯余额猜输赢"这条链路被整体消除。
 
 | 角色 | 持有 | 可见 | 不可见 |
 | --- | --- | --- | --- |
-| 玩家（隐私钱包/Controller） | `pay_sk`（赔付私钥）、池 viewing key | 自己的 seat、delta、自己的 note | 他人的认领与 note 归属 |
+| 玩家（隐私钱包/Ready） | `pay_sk`（赔付私钥）、池 viewing key | 自己的 seat、delta、自己的 note | 他人的认领与 note 归属 |
 | 游戏服务器（operator） | 牌局全量（本就中心化发牌/验证）、seat→钱包映射 | 结算根、claim_cms、pot | `pay_sk`（客户本地生成，**从不上报**——服务器无法替领） |
 | STRK20 池合约 | 加密 note、nullifier 集 | 承诺、边缘（deposit/withdraw）、认领交易 envelope | note 明文归属、玩家身份 |
 | Relayer | 提交账户私钥 | 交易 envelope（时间、gas） | 任何明文归属 |
@@ -334,7 +334,7 @@ pk(W)。这条派生被三处使用：客户端首次生成
   fold）无法履行 → 走**已有的**服务器超时/踢出/reconstruct 路径（无
   挂死，降级干净）。这等价于"换设备且无备份"的今天行为。
 - 缓解：sk 已在 localStorage；**B1.5 的口令派生模式把"可恢复"变成
-  用户可选**；后续可加 Cartridge passkey / STRK20 viewing-key 体系做
+  用户可选**；后续可加钱包级恢复体系（STRK20 viewing-key 等）做
   备份（列为 future work，不阻塞 v1）。
 
 ## B1.5 口令派生密钥（用户可选的"可恢复身份"）
@@ -401,7 +401,7 @@ sk = KDF(passphrase):
 1. **设置恢复口令**（random/passphrase → 新 passphrase 身份）：
    输入 + 确认两次 + 强度提示（<12 字符弱提醒）。**警告文案**：
    "口令即你的牌桌身份。忘记口令 = 该身份永久丢失，无法找回。
-   ⚠️ 不要使用钱包助记词/Cartridge 恢复短语作为口令（避免把钱包种子
+   ⚠️ 不要使用钱包助记词/Ready 恢复短语作为口令（避免把钱包种子
    引入新的暴露面）。" 确认后：`new_with_passphrase` 派生 → 写
    sk/pk/keyMode → 提示"身份已切换，pk 已更新"。
 2. **通过口令恢复身份**（新设备 / 清存储后）：输入口令 → 派生 →
@@ -455,7 +455,7 @@ sk = KDF(passphrase):
 - [ ] **丢钥降级**：牌局中清 localStorage → 新 pk → 旧座位超时/踢出/
       reconstruct 正常走完，无挂死（这是新语义的验收点）；
 - [ ] 钱包切换：再生效仍触发、生成走 new_random；
-- [ ] 双浏览器双账号整手对局（配合前述 Cartridge 账号修复）；
+- [ ] 双浏览器双账号整手对局（配合前述钱包账号切换修复）；
 - [ ] **口令模式（B1.5）确定性**：同一口令在两个浏览器/设备派生出相同
       pk hex（`get_pk_hex` 逐字节一致）；
 - [ ] **口令恢复流**：设备 A 设口令打牌 → 设备 B（全新 profile）通过
@@ -488,40 +488,40 @@ invisible — commitments on-chain, payouts as STRK20 notes.*
 
 ---
 
-# Part C — 钱包架构与 Cartridge 角色分工（gas / 买入 / 领取）
+# Part C — 钱包架构与 Ready Wallet 角色分工（gas / 买入 / 领取）
 
-> 结论先行：
+> 结论先行（2026-09 更新：Cartridge 已整体移除，Ready 为唯一钱包）：
 > 1. **免 gas**：免的是"用户的 gas"，实际付费方按策略路由——买入关键
 >    路径由**项目方 paymaster 赞助**（白名单+限额+频控），不做用户账户
 >    无差别免 gas；
-> 2. **买入**：是，用连接钱包（Cartridge Controller）做资金源，session
->    policy 已预授权 approve/deposit，免弹窗；
+> 2. **买入**：是，用连接钱包（Ready）做资金源；approve/deposit 由
+>    钱包逐笔弹窗确认（Cartridge 时代的 session-key 预授权免弹窗随其
+>    移除而取消），paymaster 主路径下签名仍留在客户端；
 > 3. **领取**：用户判断正确——game session key 领取不合理，改为
->    **钱包原生的 STRK20 note 领取**（viewing key 由钱包托管、passkey
->    可恢复，密钥丢失在钱包层解决）；但有一个现实门槛（C3.3 双路径）。
+>    **钱包原生的 STRK20 note 领取**（viewing key 由钱包托管、钱包
+>    自带恢复，密钥丢失在钱包层解决）；Ready 本就是 Wallet API 的
+>    官方测试基线（C3.3 双路径仍保留能力探测）。
 >
-> 文档依据：docs.cartridge.gg/controller（web Configuration / native
-> react-native）+ STRK20 Wallet API（strk20-by-example.org，快照
+> 文档依据：STRK20 Wallet API（strk20-by-example.org，快照
 > 2026-08，上线前复核版本）。
 
 ## C0. 现状盘点（代码事实）
 
-- `client/src/starknet/cartridge.ts`：项目**唯一 connector** 即 Cartridge
-  Controller；session policy 预授权 token `approve`、vault
-  `deposit`/`withdraw`；`feeSource: FeeSource.CREDITS` —— **Controller
-  账户的 gas 本来就不从用户自持 STRK 扣**（Cartridge credits 或 AVNU
-  paymaster，代码注释已说明）。
+- `client/src/context/Providers.tsx`：connector **只挂注入钱包**
+  （`argentX`/`ready` 两个注入 id，覆盖 Ready 改版前后）；登录验证、
+  买入扣款、swap、私密领取全部走连接的 Ready 账户，dev 直签账户仅作
+  无钱包时兜底。
+- **Cartridge 已整体移除**（历史：曾以 Controller 为唯一 connector，
+  session policy 预授权 approve/deposit、feeSource=CREDITS；因
+  #controller 覆盖层拦截全页点击、买入后强制弹初始化窗、与登录账户
+  混淆而移除，见 `Providers.tsx` 注释）。`client/src/starknet/cartridge.ts`
+  现为无引用的死代码（待删除），`@cartridge/*` 依赖待从 package.json
+  清理。
 - `client/src/starknet/paymaster.ts`（Plan C）：服务端
   `/api/starknet/paymaster` 中继（x-api-key 留服务端），OutsideExecution
-  把"交易发送者"与用户解耦，失败回退 session key 直签。
+  把"交易发送者"与用户解耦，失败回退连接钱包直签。
 - 买入私密路径（Plan B）：shield（公开边）→ 池内 `privacy_invoke` →
   vault 记账（`poker_vault_anonymizer.cairo` 已实现并有测试）。
-- Cartridge 文档（含 react-native 页）：web 用
-  ControllerConnector/SessionProvider（内嵌 iframe keychain，无需插件）；
-  native 是"本地随机 32B 会话密钥 + keychain 网页授权 +
-  executeFromOutside"的等价物，密钥托管变成 AsyncStorage（app 托管）。
-  本项目是 web，结论以 web 为准；将来做 App 时 C3 的 SDK 路径就是
-  native 的自然形态（app 托管 viewing key）。
 
 ## C1. 免 gas 的账户语义（用户账户 vs 项目方账户）
 
@@ -530,7 +530,7 @@ invisible — commitments on-chain, payouts as STRK20 notes.*
 
 | 交易类 | 提交/付费方 | 依据 |
 | --- | --- | --- |
-| 买入路径（token approve、vault deposit/withdraw、swap） | **项目方 paymaster 赞助**（现 paymaster.ts 中继 + feeMode=sponsored），策略白名单 + maxFee 上限 + 频控 | 获客关键路径、entrypoint 可枚举、成本可预算；FeeSource.CREDITS 作为回退（用户 credits 付） |
+| 买入路径（token approve、vault deposit/withdraw、swap） | **项目方 paymaster 赞助**（现 paymaster.ts 中继 + feeMode=sponsored），策略白名单 + maxFee 上限 + 频控 | 获客关键路径、entrypoint 可枚举、成本可预算；回退 = 连接钱包（Ready）自付 gas 直签 |
 | 用户自发的其它钱包交易 | 用户（credits / 自持 gas token） | 无差别赞助 = 滥用面（griefing），不提供 |
 | 池内私密交易（shield/claim/transfer/unshield） | **relayer 提交**（链上 sender=relayer，所有用户同一发送者）；gas 由钱包流程赞助 | STRK20 文档：wallet 流程赞助 gas 但**不赞助 flat 池费** |
 | 池费（flat，读 `get_fee_amount`，勿硬编码） | 被屏蔽余额内扣除 | 赞助方赔付发放的池费由运营方浮存承担（C3.2）；用户自己后续花费的池费由用户 note 余额承担，UI 需提示 |
@@ -542,10 +542,11 @@ invisible — commitments on-chain, payouts as STRK20 notes.*
 
 ## C2. 买入 = 用连接钱包（是）
 
-资金源必须是用户的 Controller 账户（钱是他的）；游戏密钥（Part B 的
+资金源必须是用户的钱包账户（Ready；钱是他的）；游戏密钥（Part B 的
 ElGamal）**永远不碰资金**——它只是牌桌身份。两条买入路径都以钱包为源：
 
-- 公开路径：钱包 → approve + deposit（session policy 已预授权 → 免弹窗）。
+- 公开路径：钱包 → approve + deposit（钱包逐笔弹窗确认；paymaster
+  主路径下 typed-data 签名留在客户端，交易由 paymaster 账户提交）。
 - 私密路径（Plan B）：钱包 → shield（公开边，FPI 筛查）→ 池内
   `privacy_invoke` → vault 记账；钱包只需 approve 池的入口，后续在池内
   证明交易中完成，弹窗次数不增加（shield 本身是 approve+deposit 两步，
@@ -591,15 +592,15 @@ viewing key 与 note 由钱包托管，relayer 提交，链上不见赢家
 
 ### C3.3 现实门槛与双路径（必须做能力检测）
 
-STRK20 官方路线表目前把 Cartridge 归为"**尚未 privacy-enabled**"的嵌
-入式钱包（Wallet API 0.10.3 的测试基线是 Ready，Xverse 进行中）。因此
-"用插件钱包领取"分两条路径，运行时用
+当前唯一钱包 **Ready 就是 Wallet API 0.10.3 的官方测试基线**
+（privacy-enabled；Xverse 等进行中）——路径 W 对 Ready 用户是默认形态。
+能力探测仍保留（其它注入钱包/旧版本存在），运行时用
 `supportedWalletApi(wallet) >= 0.10.3` 探测（版本查询，**不要**用
 `strk20Balances` 之类数据调用做探测——会触发钱包授权弹窗）：
 
-- **路径 W（钱包原生，首选/未来）**：连接钱包支持 Wallet API → viewing
-  key、note 发现、证明、提交全部由钱包托管（Cartridge keychain，
-  passkey 恢复）——**密钥丢失问题在钱包层消失**。
+- **路径 W（钱包原生，首选）**：连接钱包支持 Wallet API → viewing
+  key、note 发现、证明、提交全部由钱包托管（Ready 钱包，钱包自带
+  恢复）——**密钥丢失问题在钱包层消失**。
 - **路径 S（App 内嵌 SDK，当下可用）**：钱包不支持 → App 用 STRK20
   Privacy SDK 自管 viewing key。托管回到 localStorage，因此 **viewing
   key 的生成并入 B1.5 口令派生**（域名
@@ -624,14 +625,14 @@ STRK20 官方路线表目前把 Cartridge 归为"**尚未 privacy-enabled**"的�
 
 | 职责 | 密钥/账户 | 托管 | 丢失恢复 |
 | --- | --- | --- | --- |
-| 登录身份 + 买入资金 + gas 计费（credits） | Cartridge Controller 账户 | Cartridge keychain（iframe，无插件） | passkey（钱包层） |
-| 池内 note 与赔付（路径 W） | STRK20 viewing key | 钱包（Cartridge keychain） | passkey ✓ |
+| 登录身份 + 买入资金 + gas | Ready 钱包账户（连接钱包） | 浏览器插件钱包 | 钱包恢复机制（助记等） |
+| 池内 note 与赔付（路径 W） | STRK20 viewing key | 钱包（Ready） | 钱包恢复 ✓ |
 | 池内 note 与赔付（路径 S） | STRK20 viewing key | App（SDK）+ localStorage | B1.5 口令（`strk20-viewing:v1` 域） |
 | 牌桌身份（ElGamal） | 随机 / 口令派生（Part B） | localStorage | B1.5 口令（`player-key:v1` 域） |
 | DAPV endorsement | 随机（现状）→ 并入口令域 | localStorage（现状） | `endorsement:v1` 域（升级项） |
 | 运营方 payout 批量 | 运营方池密钥（SDK） | 服务器 KMS/密钥管理 | 运营方流程（备份+轮换，单独文档） |
 
-原则：**资金身份跟钱包（passkey 恢复），牌桌身份跟口令（B1.5），
+原则：**资金身份跟钱包（钱包自带恢复），牌桌身份跟口令（B1.5），
 二者永远解耦**——钱包不知道牌桌 pk，牌局观察者不知道钱包。
 
 ## C5. 落地与验证清单
@@ -649,10 +650,11 @@ STRK20 官方路线表目前把 Cartridge 归为"**尚未 privacy-enabled**"的�
 - [ ] B1.5 口令域扩展两个新域（viewing/endorsement），UI 帮助文案
       更新为"一句口令恢复全部游戏身份"；
 - [ ] 时间关联缓解：运营浮存批量 shield + 赔付随机延迟（写进运营手册）；
-- [ ] Cartridge STRK20 支持状态跟踪（当前未 privacy-enabled），一旦
-      支持，路径 S 用户可迁移到 W（note 所有权 = viewing key，路径
-      S→W 迁移 = 把 vpk 导入钱包？**不可行——SK 不该离开生成处**；
-      正确迁移 = 花掉旧 note 到新 viewing key，写明"迁移即花费"）。
+- [ ] 钱包 STRK20 支持状态跟踪（Ready 为 0.10.3 官方基线已支持；
+      Xverse 等进行中），新隐私钱包一旦可用即可加入路径 W 选项（note
+      所有权 = viewing key，路径 S→W 迁移 = 把 vpk 导入钱包？
+      **不可行——SK 不该离开生成处**；正确迁移 = 花掉旧 note 到新
+      viewing key，写明"迁移即花费"）。
 
 ---
 
@@ -662,9 +664,9 @@ STRK20 官方路线表目前把 Cartridge 归为"**尚未 privacy-enabled**"的�
 
 | 项 | 位置 | 说明 |
 | --- | --- | --- |
-| Ready 钱包接入（首选） | `client/src/context/Providers.tsx` + `LoginModal.tsx` | Ready（argentX/ready 两个注入 id）排在 Cartridge **之前**：登录验证、买入扣款、swap、私密领取全部优先扣 Ready 钱包余额；LoginModal 按 `available()` 过滤并给 Ready 标「推荐」。autoConnect 重连 `lastUsedConnector`——首次在 Sign In 弹窗点一次 Ready，之后每次自动连 Ready |
+| Ready 钱包接入（唯一） | `client/src/context/Providers.tsx` + `LoginModal.tsx` | Ready（argentX/ready 两个注入 id）为唯一钱包：登录验证、买入扣款、swap、私密领取全部走 Ready；LoginModal 按 `available()` 过滤。**Cartridge 已整体移除**（覆盖层拦截点击/买入后强制弹窗/账户混淆，见 Providers.tsx 注释；cartridge.ts 成死代码待删）。重连 `lastUsedConnector`——首次在 Sign In 弹窗点一次 Ready，之后自动连 Ready |
 | starknet.js ≥10.4 | `client/package.json` → 10.6.8 | STRK20 Wallet API（`strk20InvokeTransaction`/`STRK20_ACTION`/`WalletAccountV6`）就位 |
-| 登录验证走连接钱包 | `client/src/hooks/useAuth.ts` | 连接的 Ready/Cartridge 账户签名 typed data；dev 直签仅兜底 |
+| 登录验证走连接钱包 | `client/src/hooks/useAuth.ts` | 连接的 Ready 账户签名 typed data；dev 直签仅兜底 |
 | swap 兑换走连接钱包 | `client/src/starknet/starknetGameActions.ts` | `account ?? devSigner`，Ready 连接时用 Ready 签名 |
 | 私密领取（领取奖励） | `client/src/starknet/strk20.ts` + `components/modals/ClaimRewardsModal.tsx` + Navbar「↓ 领取」 | 能力探测（版本查询 ≥0.10.3，绝不用数据调用探测）+ 两动作私密领取（transfer OPEN + privacy_withdraw，`${openNoteIds[0]}` 占位）+ 公开出金回退 + 池内余额展示 |
 | Part B 随机密钥 | `poker_protocol/.../client.rs` + `client-wasm` `new_random` + `PlayerContext.generateRandomKeys` + dev_bot | 默认 CSPRNG，与钱包零派生关系；旧 pkg 自动回退 legacy |
@@ -672,7 +674,7 @@ STRK20 官方路线表目前把 Cartridge 归为"**尚未 privacy-enabled**"的�
 | wasm pkg 重建 | `client-wasm/pkg`（wasm32 release，CC=brew llvm） | 新导出进入客户端 bundle（vite build 绿） |
 | PokerVaultAnonymizer 部署 | Sepolia `0x0462b57b...022e`（class 0x5ec1eef...，tx 0x44d04bae...） | 构造 (vault=0x6c8ac4...1321, pool=STRK20 Sepolia 池 0x254a6b...d91)；vault()/pool() 视图已验证；`vault.set_authorized_helper` 已授权（storage 读回确认）；`privacy_withdraw` 守卫（caller is not the pool）实测生效 |
 | 客户端配置 | `client/.env.development` | `VITE_POKER_VAULT_ANONYMIZER_ADDRESS` + `VITE_STRK20_POOL_ADDRESS` 已配置，vite 已重启生效；`strk20.json` 已记录部署 |
-| 端到端环境 | server（新二进制）+ vite:5174 + bot（0xba7f00d1，1000 筹码已入座） | 浏览器验证至：登录（Cartridge 账户 0x0621...）→ 进桌 → 买入弹窗（vault 筹码/汇率正确）→ Cartridge 会话授权弹窗 |
+| 端到端环境 | server（新二进制）+ vite:5174 + bot（0xba7f00d1，1000 筹码已入座） | 浏览器验证（Cartridge 移除前记录，时用 Cartridge 账户 0x0621...）：登录 → 进桌 → 买入弹窗（vault 筹码/汇率正确）；Ready 实机端到端见 C5 待办 |
 
 ## ⏳ 待办（按计划分阶段）
 
@@ -686,6 +688,14 @@ STRK20 官方路线表目前把 Cartridge 归为"**尚未 privacy-enabled**"的�
 > 迁移期语义：存量 localStorage 密钥照旧可用（legacy 模式）；新密钥一律随机或口令派生。
 
 ## 实机端到端剩余一步（需人工点击）
+
+钱包内的交易确认弹窗无法由脚本合成点击（安全设计使然）。人工完成（约 2 分钟）：
+
+1. 打开 http://localhost:5174 → Sign In 选择 Ready 钱包；
+2. Join a Table → JOIN TABLE → 空位 Sit Down → 买入弹窗确认（默认 1000 筹码）；
+3. Ready 钱包对 approve/deposit 逐笔确认（Cartridge 时代的 session-key 免弹窗已随其移除取消）；
+4. 打完一手（bot-2 已在座自动跟注/过牌）；
+5. Navbar「↓ 领取」→ 私密领取（Ready 支持 STRK20 Wallet API ≥0.10.3，走两动作私密领取；旧钱包不支持时按钮按设计禁用，可用公开出金回退）。
 
 ## 房间围观者状态同步修复（2026-09-01 ✅ 已验证）
 
@@ -732,11 +742,3 @@ verifier 移植或 fact-registry 模式二选一，M3 定）替换明文 digest 
 | P2-M3 | 合约验证端 | Stwo Cairo verifier（官方 verifier 移植或 fact-registry）+ `verify_and_settle_dapv_stark_private_v2` 接入 π | calldata 零明文 |
 | P2-M4 | 联调部署 | sepolia 部署 + gas/size 测量 + 文档 | 演示手牌零明文结算 |
 
-
-自动化已验证到 Cartridge 会话授权弹窗；该弹窗是跨域 iframe，脚本合成点击无法穿透（安全设计使然）。人工完成（约 2 分钟）：
-
-1. 打开 http://localhost:5174 （已有 0x0621... Cartridge 会话，10 pSTRK）；
-2. Join a Table → JOIN TABLE → 空位 Sit Down → 买入弹窗确认（默认 1000 筹码）；
-3. Cartridge「Update Session」弹窗：勾选同意框 → UPDATE SESSION（此后 approve/deposit 全程免弹窗）；
-4. 打完一手（bot-2 已在座自动跟注/过牌）；
-5. Navbar「↓ 领取」→ 私密领取（Ready 安装时走 STRK20 两动作；Cartridge 当前不支持 STRK20 时按钮按设计禁用，可用公开出金回退）。

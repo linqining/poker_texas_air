@@ -139,5 +139,5 @@ VITE_PRIVACY_DISCOVERY_URL=…          # discovery service
 ## 已知 seam 与后续工作
 
 1. **SDK invoke 组合（SDK_SEAM）**：官方 SDK 的 builder `invoke` 方法名/签名未在可获取的公开示例中确认（SDK 未上 npm）。`privacyBuyIn.ts` 运行时探测 `t.invoke(...)`，缺失即自动回退公开路径 —— 安装 SDK 后如接口不符只需改 `tryComposeInvoke` 一处。
-2. **wallet-api 路径**依赖 STRK20-capable 钱包（Ready X / Xverse，Starknet Phase-1 官方隐私钱包）；Cartridge Controller 暂不支持，buy-in 走该后端时用户会看到钱包弹窗（session key 不覆盖 typed-data 签名）。
+2. **wallet-api 路径**依赖 STRK20-capable 钱包（Ready / Xverse，Starknet Phase-1 官方隐私钱包）。当前唯一连接钱包即 Ready（Cartridge 已整体移除），approve/deposit 等动作由钱包弹窗逐笔确认。
 3. 提现（cash-out）目前是公开 `vault.withdraw`；若要求全链路私密，下一步给 vault 加 `withdraw_to` + 第二个 anonymizer（unshield 方向），复用同一套模式。

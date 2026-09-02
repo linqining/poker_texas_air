@@ -22,7 +22,7 @@
 | 7 | DAPV 是**项目内部术语**，文献无此方案；`DUAL_PROOF_PROTOCOL.md`/`DAPV_SOUNDNESS.md` 从未入库（git 全历史无） | commit e744c6b 仅含代码 |
 | 8 | cash-out 仍为公开 `vault.withdraw` | plan-b 文档"已知 seam"第 3 条 |
 | 9 | blst（BLS12-381 C 依赖）无法编译 wasm32（Apple clang）——client-wasm **open blocker** | 迁移会话 sess_ef8bf73c 记录 |
-| 10 | 钱包（Cartridge Controller）密钥非 secp256k1（owner/session = STARK 曲线；passkey = P-256）；钱包公钥**不可**复用为 ElGamal 公钥（API 取不到 `sk·c1`、无联合安全证明、隐私关联、无法 per-table 轮换） | 本计划 §5 |
+| 10 | 钱包（Ready 等注入钱包）密钥非 secp256k1（STARK 曲线）；钱包公钥**不可**复用为 ElGamal 公钥（API 取不到 `sk·c1`、无联合安全证明、隐私关联、无法 per-table 轮换） | 本计划 §5 |
 
 ## 1. 曲线选型：为什么是 STARK 曲线
 

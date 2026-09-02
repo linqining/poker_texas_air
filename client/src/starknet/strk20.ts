@@ -433,10 +433,11 @@ export async function claimRewardsPrivate(
     {
       type: 'invoke',
       contract: anonymizerAddress,
-      // calldata 顺序必须与 privacy_withdraw(player, amount:u256,
-      // recipient_note_id) 完全一致；${openNoteIds[0]} 由钱包解析为
-      // 上面 OPEN transfer 创建的 note。
-      calldata: [player, lo, hi, '${openNoteIds[0]}'],
+      // calldata 与 helper 的 privacy_invoke(operation, player, amount:u256,
+      // note_id) 对齐；${openNoteIds[0]} 由钱包解析为上面 OPEN transfer 创建
+      // 的 note。operation=1（OP_WITHDRAW）烧筹码并回 1:1 STRK 开票；
+      // operation=0 是买入（privacyBuyIn.ts 用）。所有 felt 必须 0x 十六进制。
+      calldata: ['0x1', player, lo, hi, '${openNoteIds[0]}'],
     },
   ];
   try {
