@@ -295,6 +295,34 @@ class ApiClient {
       body: JSON.stringify(req),
     });
   }
+
+  /** 牌局记录看板：最近手牌列表（新→旧，服务器每桌保留 ≤100 条） */
+  async getHandHistory(tableId: number | string): Promise<HandHistoryRecord[]> {
+    return this.request(`/tables/${tableId}/history`);
+  }
+
+  /** 牌局记录看板：单手详情 */
+  async getHandRecord(tableId: number | string, handSeq: number): Promise<HandHistoryRecord> {
+    return this.request(`/tables/${tableId}/history/${handSeq}`);
+  }
+}
+
+/** 单手牌终局记录（服务器 HandHistoryRecord，camelCase） */
+export interface HandHistoryRecord {
+  handSeq: number;
+  handOverAt: number;
+  wentToShowdown: boolean;
+  grossPot: number;
+  rakeCollected: number;
+  sidePots: { amount: number }[];
+  board: { suit: string; rank: string }[];
+  winMessages: string[];
+  seats: Record<string, {
+    player: { id: string | null; username: string | null };
+    bet: number;
+    stack: number;
+  }>;
+  streets: unknown[];
 }
 
 export const api = new ApiClient();

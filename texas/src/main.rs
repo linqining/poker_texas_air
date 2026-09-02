@@ -3,6 +3,7 @@ mod models;
 mod auth;
 mod handlers;
 mod pokergame;
+mod ratelimit;
 mod socket;
 mod relayer;
 mod starknet;
@@ -86,15 +87,23 @@ async fn main() -> std::io::Result<()> {
         processed_actions: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
     });
 
-    let api_routes = Router::new()
+    let mut api_routes = Router::new()
         .route("/auth",routing::get(handlers::get_current_user))
         .route("/auth/wallet", routing::post(handlers::wallet_login))
         .route("/auth/wallet/logout", routing::post(handlers::wallet_logout))
         .route("/tables/:table_id", routing::get(handlers::get_table))
+        // P0-2 牌局记录看板：最近手牌列表 + 单手详情
+        .route("/tables/:table_id/history", routing::get(handlers::get_table_history))
+        .route("/tables/:table_id/history/:hand_seq", routing::get(handlers::get_table_hand))
         .route("/games/:game_id/join", routing::post(handlers::join_game))
         .route("/games/:game_id/action", routing::post(handlers::player_action))
-        .route("/games/:game_id/reveal-token", routing::post(handlers::submit_reveal_token))
-        .route("/dev/bot", routing::post(dev_bot_start))
+        .route("/games/:game_id/reveal-token", routing::post(handlers::submit_reveal_token));
+    // audit #9：dev bot 是联调工具，release 构建默认不暴露匿名路由；
+    // debug 构建（本地 cargo run）或显式 TEXAS_DEV_BOT_ENABLED=1 才注册。
+    if cfg!(debug_assertions) || std::env::var("TEXAS_DEV_BOT_ENABLED").as_deref() == Ok("1") {
+        api_routes = api_routes.route("/dev/bot", routing::post(dev_bot_start));
+    }
+    let api_routes = api_routes
         // Plan C：paymaster 中继通道（提交者与用户解耦；API key 只在服务端）。
         .route("/starknet/paymaster", routing::post(starknet::paymaster::relay))
         .route(
@@ -105,14 +114,13 @@ async fn main() -> std::io::Result<()> {
         .route(
             "/starknet/endorsement",
             routing::post(starknet::paymaster::register_endorsement),
-        );
+        )
+        // G17：/api 限流（10s 窗口 200 次/IP，超限 429）
+        .layer(axum::middleware::from_fn(ratelimit::limit));
 
     let app = Router::new()
         .nest("/api", api_routes)
         .route("/", routing::get(|| async { "Welcome to Secret Poker (Rust)!" }))
-        // G17 TODO: 当前未实现 API 速率限制（rate limiting）。生产环境应引入
-        // tower_governor 或类似中间件对 /api/* 路由（尤其是 /auth/*、/chips/free、
-        // /sponsor/* 等敏感端点）添加 per-IP / per-user 限流，防止暴力破解与滥用。
         .layer(
             ServiceBuilder::new()
                 .map_request(move |mut req: axum::http::Request<axum::body::Body>| {
@@ -138,7 +146,12 @@ async fn main() -> std::io::Result<()> {
     tracing::info!("Secret Poker Server (Rust) starting on port {}", port);
     tracing::info!("Using in-memory user storage (MongoDB removed). 筹码余额由 Starknet STRK20 链上结算决定。");
 
-    axum::serve(listener, app).await
+    axum::serve(
+        listener,
+        // with_connect_info：给限流中间件提供对端 IP（ratelimit::limit）
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
 }
 
 /// dev: 启动进程内机器人玩家（本地联调用）

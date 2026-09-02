@@ -73,7 +73,9 @@ pub fn get_token_from_headers(headers: &HeaderMap) -> Option<String> {
 
 /// 把用户转换为 API 响应。筹码余额来自 PokerVault 链上筹码（Starknet STRK20）。
 fn user_to_response(user: &crate::models::User, vault_chips: i64) -> serde_json::Value {
-    let chips_amount = vault_chips - user.locked_chips;
+    // 链上余额可能因玩家直接 withdraw 而低于 locked_chips（permissionless 出金），
+    // saturating 防下溢（audit H2），可用余额最低钳到 0。
+    let chips_amount = vault_chips.saturating_sub(user.locked_chips).max(0);
     let resp = UserResponse {
         id: user.id.clone(),
         name: user.name.clone(),
@@ -196,6 +198,37 @@ pub async fn get_table(
             tracing::warn!("[get_table] table not found, table_id={}", table_id);
             err_resp(StatusCode::NOT_FOUND, "Table not found")
         }
+    }
+}
+
+/// 牌局记录看板：按桌查询最近手牌记录（新→旧，默认全量 ≤100 条）。
+pub async fn get_table_history(
+    Extension(_state): Extension<Arc<AppState>>,
+    Path(table_id): Path<String>,
+) -> Response {
+    let table_id = match parse_id(&table_id) {
+        Some(id) => id,
+        None => return err_resp(StatusCode::BAD_REQUEST, "Invalid table_id"),
+    };
+    let records = crate::pokergame::history_store::global_store().list_by_table(
+        table_id,
+        crate::pokergame::history_store::DEFAULT_CAPACITY,
+    );
+    (StatusCode::OK, Json(records)).into_response()
+}
+
+/// 牌局记录看板：按手数查单手记录。
+pub async fn get_table_hand(
+    Extension(_state): Extension<Arc<AppState>>,
+    Path((table_id, hand_seq)): Path<(String, String)>,
+) -> Response {
+    let (table_id, hand_seq) = match (parse_id(&table_id), hand_seq.parse::<u64>()) {
+        (Some(t), Ok(s)) => (t, s),
+        _ => return err_resp(StatusCode::BAD_REQUEST, "Invalid table_id or hand_seq"),
+    };
+    match crate::pokergame::history_store::global_store().get(table_id, hand_seq) {
+        Some(record) => (StatusCode::OK, Json(record)).into_response(),
+        None => err_resp(StatusCode::NOT_FOUND, "Hand record not found"),
     }
 }
 
