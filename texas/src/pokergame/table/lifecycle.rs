@@ -33,6 +33,8 @@ impl Table {
             self.summary.win_messages.push(format!("{} wins ${:.2}", player_name, total_win));
         }
         self.end_hand();
+        // 终局记录入看板存储（P0-2；fold-win 无台费）
+        self.record_hand_history();
 
         // fold-win 手牌同样上链结算（showdown 路径由 finish_showdown 触发）。
         // 绝大多数手牌以弃牌告终——不接入这里，链上结算合约只会出现极少数
@@ -56,6 +58,8 @@ impl Table {
     pub fn reset_board_and_pot(&mut self) {
         self.set_pot(0);
         self.summary.side_pots = vec![];
+        // 新一手发牌重置台费显示（win_messages 同语义：结算展示保留到下一手开局）
+        self.summary.rake_collected = 0;
     }
 
     pub fn clear_seats(&mut self) {

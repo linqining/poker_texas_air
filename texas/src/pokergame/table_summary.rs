@@ -137,6 +137,8 @@ pub struct TableSummaryV2 {
     pub went_to_showdown: bool,
     /// 边池列表（meta.side_pots_count 仅存数量，此处存完整结构）
     pub side_pots: Vec<SidePot>,
+    /// 本手已收台费（链下口径与链上 settle 一致；新一手发牌时清零）
+    pub rake_collected: u64,
     /// 历史操作记录
     pub history: Vec<serde_json::Value>,
 }

@@ -27,6 +27,7 @@ import { logger } from '../helpers/logger';
 import { useTableJoin } from '../hooks/useTableJoin';
 import { CryptoPanel } from '../components/game/CryptoPanel';
 import { KickNotification } from '../components/game/KickNotification';
+import HandHistoryPanel from '../components/game/HandHistoryPanel';
 import { ActionLoadingOverlay, LeavingOverlay, LeaveDeferredBanner } from './Play.styles';
 
 
@@ -85,6 +86,8 @@ const Play: React.FC = () => {
   const [isLeaving, setIsLeaving] = useState(false);
   // ZK 密码学事件面板开关（默认收起，避免遮挡牌桌核心区域）
   const [showCryptoPanel, setShowCryptoPanel] = useState(false);
+  // 牌局记录看板开关（P0-2）
+  const [showHistoryPanel, setShowHistoryPanel] = useState(false);
 
   /**
    * Portrait detection: supplements the CSS-only <RotateDevicePrompt /> with
@@ -271,6 +274,15 @@ const Play: React.FC = () => {
         showCryptoPanel={showCryptoPanel}
         onToggle={() => setShowCryptoPanel((v) => !v)}
       />
+      {currentTable &&
+        ReactDOM.createPortal(
+          <HandHistoryPanel
+            tableId={Number(currentTable.id)}
+            visible={showHistoryPanel}
+            onClose={() => setShowHistoryPanel(false)}
+          />,
+          document.getElementById('modal') as HTMLElement,
+        )}
       <RotateDevicePrompt />
       <Container fullHeight>
         {leaveDeferred && (
@@ -296,7 +308,7 @@ const Play: React.FC = () => {
               bottom="2vh"
               left="1.5rem"
               scale="0.65"
-              style={{ zIndex: '50' }}
+              style={{ zIndex: '50', display: 'flex', gap: '0.5rem' }}
             >
               <Button small secondary onClick={async () => {
                 if (isLeaving) return;
@@ -309,6 +321,14 @@ const Play: React.FC = () => {
                 }
               }} disabled={isLeaving}>
                 {isLeaving ? getLocalizedString('play_leaving') || '离开中...' : getLocalizedString('game_leave-table-btn')}
+              </Button>
+              <Button
+                small
+                secondary
+                onClick={() => setShowHistoryPanel(true)}
+                aria-label={getLocalizedString('game_history-open-btn')}
+              >
+                {getLocalizedString('game_history-open-btn')}
               </Button>
             </PositionedUISlot>
             {!isPlayerSeated && (
@@ -396,6 +416,11 @@ const Play: React.FC = () => {
                     {currentTable.winMessages && currentTable.winMessages.length > 0 && (
                       <InfoPill>
                         {currentTable.winMessages[currentTable.winMessages.length - 1]}
+                      </InfoPill>
+                    )}
+                    {!!currentTable.rakeCollected && (
+                      <InfoPill>
+                        {`${getLocalizedString('game_rake-collected_lbl')}: $${Number(currentTable.rakeCollected).toFixed(2)}`}
                       </InfoPill>
                     )}
                   </>

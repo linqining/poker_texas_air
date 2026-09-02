@@ -137,6 +137,8 @@ export interface Table {
   board: Card[];
   wentToShowdown: boolean;
   winMessages: string[];
+  /** 本手已收台费（摊牌结算时按链上口径收取，0 = 未抽水） */
+  rakeCollected: number;
 }
 
 export interface GameMessage {

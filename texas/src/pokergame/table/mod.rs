@@ -122,6 +122,8 @@ pub struct ClientTable {
     pub win_messages: Vec<String>,
     pub went_to_showdown: bool,
     pub side_pots: Vec<SidePot>,
+    /// 本手已收台费（摊牌结算时按链上口径收取）
+    pub rake_collected: u64,
     pub history: Vec<serde_json::Value>,
     pub round_state: RoundState,
     pub shuffle_state: Option<ShufflePublicState>,
@@ -312,6 +314,7 @@ impl Table {
             win_messages: self.summary.win_messages.clone(),
             went_to_showdown: self.summary.went_to_showdown,
             side_pots: self.summary.side_pots.clone(),
+            rake_collected: self.summary.rake_collected,
             history: self.summary.history.clone(),
             round_state: self.round_state(),
             shuffle_state: self.get_shuffle_public_state(),
@@ -347,10 +350,16 @@ impl Table {
                 (RoundState::Showdown, RoundState::PreFlop | RoundState::Flop | RoundState::Turn | RoundState::River)
             );
             if severe {
-                panic!("[transition_to] severe illegal state transition: {:?} -> {:?}", from, new_state);
+                // 历史上此处 panic：会杀死 game_loop task 且跳过 registry 清理，
+                // start_game_loop 的 contains() 判真后拒绝重启 → 该牌桌永久冻结。
+                // 降级为告警 + 强制落地（状态机漂移可观测、可恢复）。
+                tracing::error!(
+                    "severe illegal state transition {:?} -> {:?}; forcing (was panic, see audit H1)",
+                    from, new_state
+                );
+            } else {
+                tracing::warn!("Invalid state transition: {:?} -> {:?}", from, new_state);
             }
-            tracing::warn!("Invalid state transition: {:?} -> {:?}", from, new_state);
-            // debug_assert!(valid, "Invalid state transition: {:?} -> {:?}", from, new_state);
         }
         self.summary.meta.round_state = new_state.to_u8();
     }
@@ -566,12 +575,33 @@ impl Table {
             "pot": self.pot(),
             "mainPot": self.main_pot(),
             "sidePots": self.summary.side_pots,
+            "rakeCollected": self.summary.rake_collected,
             "board":board,
             "seats": self.clean_seats_for_history(),
             "button": self.button(),
             "turn": self.turn(),
             "winMessages": self.summary.win_messages,
         }));
+    }
+
+    /// 终局记录快照 → 全局牌局记录存储（看板数据源，见 `history_store` 模块）。
+    /// 在两条终局路径（finish_showdown / end_without_showdown）各调用一次。
+    /// gross_pot = 当前 pot + 台费（摊牌路径 pot 已扣台费；fold-win 台费为 0）。
+    pub fn record_hand_history(&self) {
+        let board = self.mental_poker_game.list_revealed_community_cards().iter().map(|c| Card::from_playing_card(c)).collect::<Vec<_>>();
+        let record = crate::pokergame::history_store::HandHistoryRecord {
+            hand_seq: 0, // 由 store 按桌分配单调 seq
+            hand_over_at: now_ms(),
+            went_to_showdown: self.summary.went_to_showdown,
+            gross_pot: self.pot().saturating_add(self.summary.rake_collected),
+            rake_collected: self.summary.rake_collected,
+            side_pots: self.summary.side_pots.clone(),
+            board,
+            win_messages: self.summary.win_messages.clone(),
+            seats: self.clean_seats_for_history(),
+            streets: self.summary.history.clone(),
+        };
+        crate::pokergame::history_store::global_store().append(self.summary.id, record);
     }
 
     pub fn clean_seats_for_history(&self) -> serde_json::Value {

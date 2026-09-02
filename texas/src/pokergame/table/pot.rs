@@ -146,6 +146,8 @@ impl Table {
         self.transition_to(RoundState::Waiting);
         self.set_hand_complete_at(now_ms());
         self.sit_out_felted_players();
+        // 终局记录入看板存储（P0-2）
+        self.record_hand_history();
 
         // Starknet 结算：镜像手牌 prove → outer aggregate → register/settle 上链
         // （dev 模式只生成 calldata 并记日志）。失败不影响链下记账。
@@ -153,12 +155,49 @@ impl Table {
     }
 
     /// 镜像 Move settle_hand：Showdown 展示超时后分配底池并重置牌桌。
-    /// 先 calculate_side_pots(total_bet) 再分配 side pot 和 main pot 给赢家，最后 finish_showdown。
+    /// 先 calculate_side_pots(total_bet)，再按链上口径收取台费，
+    /// 然后分配 side pot 和 main pot 给赢家，最后 finish_showdown。
     pub fn settle_hand(&mut self) {
         self.calculate_side_pots();
+        self.collect_rake_for_settlement();
         self.determine_side_pot_winners();
         self.determine_main_pot_winner();
         self.finish_showdown();
+    }
+
+    /// 摊牌抽水（链上口径，见 `pokergame::rake` 模块注释）：
+    /// `rake = min(gross_pot * bps / 10_000, cap)`，仅从争夺层按比例分摊。
+    /// 扣减直接作用于 pot 与边池金额——`main_pot() = pot − Σside_pots`
+    /// 自动净额化，赢家到手金额与链上结算一致。fold-win 路径
+    /// （`end_without_showdown`）不调用本函数，与链上
+    /// "uncontested pot must not be raked" 不变量一致。
+    pub fn collect_rake_for_settlement(&mut self) {
+        let params = crate::pokergame::rake::rake_params();
+        let gross_pot = self.pot();
+        let total_rake = crate::pokergame::rake::compute_rake(gross_pot, params);
+        if total_rake == 0 {
+            return;
+        }
+        let main_amount = self.main_pot();
+        let main_eligible = self.unfolded_players().len();
+        let side_layers: Vec<(u64, usize)> = self.summary.side_pots.iter()
+            .map(|sp| {
+                let eligible = sp.players.iter()
+                    .filter(|id| self.seats().get(id).map_or(false, |s| !s.folded))
+                    .count();
+                (sp.amount, eligible)
+            })
+            .collect();
+        let mut layers = Vec::with_capacity(1 + side_layers.len());
+        layers.push((main_amount, main_eligible));
+        layers.extend(side_layers);
+        let allocations = crate::pokergame::rake::allocate_rake(&layers, total_rake, gross_pot);
+        self.summary.rake_collected = total_rake;
+        // compute_rake 已 min(pot) 封顶；saturating 作第二道防线（audit M4）
+        self.set_pot(gross_pot.saturating_sub(total_rake));
+        for (i, sp) in self.summary.side_pots.iter_mut().enumerate() {
+            sp.amount = sp.amount.saturating_sub(allocations.get(i + 1).copied().unwrap_or(0));
+        }
     }
 
     pub fn evaluate_player_hands(&self) -> Vec<(u32, HandRank)> {
