@@ -2,7 +2,8 @@
 
 > 盘点日期：2026-09-03。来源：`SETTLEMENT_PRIVACY_PLAN.md`、
 > `ACTION_SIGNING_CENSORSHIP_RESISTANCE.md`、`docs/EXECUTION_PLAN.md`、
-> `poker_contracts/DEPLOYMENTS.md`、`PERFORMANCE_FOLLOWUPS.md` 及代码内 TODO 标记。
+> `poker_contracts/DEPLOYMENTS.md`、`PERFORMANCE_FOLLOWUPS.md`、
+> "Fix strk20 shielded balance NOT_REGISTERED" 会话遗留清单及代码内 TODO 标记。
 > 排序原则：功能开发优先，主网相关放最后。
 
 ---
@@ -11,42 +12,77 @@
 
 ### P0 — 尽快
 
-- [ ] **1. 牌局抽水显示**
-  - 现状：抽水只存在于链上结算（`compute_rake`，默认 5% / 上限 1000，翻后争夺底池才抽，
-    见 `poker_l1/src/vm/contracts/settle.rs:106`、`texas/src/starknet/mirror.rs:49`）；
-    **链下分池与前端完全没有抽水概念**——`determine_winner_by_ids` 把整池分给赢家，
-    前端 winMessage 显示全池金额，与链上实际到账不一致。
-  - 改法：服务器在 `end_without_showdown` / `determine_winner_by_ids` 分池时按
-    `STARKNET_RAKE_BPS`（与 mirror 口径一致：翻后争夺底池才抽）先扣 rake 再分配，
-    结算消息带上 rake 字段；前端渲染"到手金额 / 抽水"。
-  - 位置：`texas/src/pokergame/table/pot.rs:203`、`lifecycle.rs:21`；
-    前端 `client/src/context/game/useGameSocket.ts`、`pages/Play.tsx`。
+- [x] **1. 牌局抽水显示**（2026-09-03 完成）
+  - 实现：新增 `texas/src/pokergame/rake.rs`（公式与分层分摊逐字对齐链上
+    `settle.rs`/`settlement.rs`，带单测）；摊牌路径 `collect_rake_for_settlement`
+    在分池前抽水（争夺层按比例分摊、uncontested 层豁免）；fold-win 不抽水；
+    `summary.rake_collected` 随 TABLE_UPDATED 下发，前端 winMessage 为净额并
+    显示"本手台费"胶囊。参数读 `STARKNET_RAKE_BPS`/`STARKNET_RAKE_CAP`
+    （缺省 500/1000，与链上同源）。
 
-- [ ] **2. 牌局记录看板**
-  - 现状：只有"当前这一手"的快照数组 `summary.history`（新手牌开始即清空），
-    无跨手历史、无查询 API、无 UI。
-  - 改法：定义抽象存储接口（trait `HandHistoryStore`），内存实现保留最近 100 条；
-    服务器新增历史查询端点（现有 HTTP API 无 history 路由）；
-    前端看板组件（按桌/按手浏览，含底池、公共牌、赢家）。
-  - 位置：`texas/src/pokergame/table/mod.rs:563`、`texas/src/main.rs:89-112`。
+- [x] **2. 牌局记录看板**（2026-09-03 完成）
+  - 实现：`texas/src/pokergame/history_store.rs`——`HandHistoryStore` 抽象接口 +
+    `MemoryHistoryStore` 内存实现（每桌 FIFO 保留 100 条，换持久化只改
+    `global_store()` 装配点）；两条终局路径（`finish_showdown` /
+    `end_without_showdown`）统一记录；HTTP 端点 `GET /api/tables/:id/history`
+    与 `/history/:hand_seq`；前端 `HandHistoryPanel`（Play 页"记录"按钮，
+    行内展开公共牌/座位明细，i18n zh/en/de）。
 
 ### P1 — 短期
 
-- [ ] **3. 领取奖励 UI 重设计**
-  - 现状：`ClaimRewardsModal` 功能完整（能力探测/池内余额/赔付承诺注册/私密+公开双路径），
-    但样式朴素（InfoRow 列表 + 少量内联 style）。
-  - 改法：按现有主题体系重新设计视觉（层级、留白、状态徽标），可用 ui-toolkit MCP
-    生成/审计组件。
-  - 位置：`client/src/components/modals/ClaimRewardsModal.tsx`。
+- [x] **3. 领取奖励 UI 重设计**（2026-09-03 完成）
+  - 重写 `ClaimRewardsModal`：金额主卡（渐变焦点）+ 私密路径/赔付承诺状态卡
+    （状态点 + 次级行降级技术细节）+ 单一主行动按钮 + 警告/错误/成功态卡片化；
+    全部探测、注册、双路径领取逻辑逐字保留。
 
-- [ ] **4. time_bank 跨手不恢复（缺陷）**
-  - 代码注释明示：补充逻辑未实现，time_bank 仅单调下降，无法跨手恢复。
-  - 位置：`poker_l1/src/vm/contracts/texas_poker/state_machine.rs:3413`。
+- [x] **4. time_bank 跨手不恢复（已核实：已修复，无需再动）**
+  - 2026-09-03 复核：VM 的 `reset_for_next_hand` 已实现每手补充
+    （`TIME_BANK_REFILL_PER_HAND_MS`，上限 `DEFAULT_TIME_BANK_MS`）并带单测
+    （`test_consume_time_bank_*`）。原清单条目误读了 P2-11 修复注释的
+    过去时描述。游戏层（texas/src/pokergame）无 time_bank 概念。
+  - 位置：`poker_l1/src/vm/contracts/texas_poker/state_machine.rs:3411`。
+
+- [ ] **5. NOT_REGISTERED 私密领取修复的遗留清单**
+  > 修复本体已完成并链上验证通过（私密领取三动作上链、烧毁生效）。
+  > 来源：Fix strk20 shielded balance NOT_REGISTERED 会话（2026-09）遗留清单。
+
+  - [x] 缺口 B（fail-fast）：materialize 失败静默推进牌局 → 已修
+        （2026-09-03，`on_reveal_complete` 前置 `materialization_broken()` 检查，
+        失败即全额退款中止该手，走既有 refund+reset 路径）。
+  - [x] 缺口 C（报错语义）：迟到重复提交静默 → 已补全
+        （`is_benign_reveal_error` 扩展覆盖 "phase not active"——窗口关闭后的
+        迟到重复按幂等成功处理；同窗口重复原已静默）。
+  - [ ] **提交 git**：按主题拆分 commit（合约/anonymizer 重部署、协议三动作、
+        开局基线重建、本轮 TODO 功能开发）。
+  - [ ] `set_authorized_helper` owner 单点问题：建议冷存储 / 时间锁（运维动作）。
+  - [ ] （可选）对账：链上筹码 5000 → 0 但领取为 4000，差额 1000 来自后续手牌
+        `apply_settlement` 结算变动，可核对结算流水确认。
 
 ### P2 — 上线前
 
-- [ ] **5. API 速率限制**（G17 TODO）：服务器 HTTP/socket 无 rate limiting。
-  位置：`texas/src/main.rs:113`。
+- [x] **6. API 速率限制**（2026-09-03 完成，G17）
+  - 新增 `texas/src/ratelimit.rs`：/api 固定窗口限流（10s / 200 次 per-IP，
+    超限 429），键取 ConnectInfo 对端 IP（serve 侧已改
+    `into_make_service_with_connect_info`），不可得时退化全局桶；
+    带窗口重置与桶 GC 单测。socket.io 通道不在该层（说明见模块注释）。
+
+- [x] **7. 全局代码审核：消除潜在 panic**（2026-09-03 完成 Top-10，遗留低风险项见下）
+  - 审计（Explore 全扫 texas/poker_protocol/client-wasm/poker_contracts）定位
+    5 高 / 4 中 / 1 治理项，全部修复：
+    H1 `transition_to` severe 迁移 panic → 降级 error 日志+强制落地（原会冻结牌桌）；
+    H2 链上余额-locked_chips 下溢/截断 → saturating + i64::try_from（handlers
+    与 socket/handlers 两处）；H3 `register_player` 重复注册 expect → 幂等化；
+    H4 raise/call 金额裸减法 → saturating + `amount <= seat.bet` 拒绝；
+    H5 `handle_call` 金额计算先于校验 → 校验前置 + saturating；
+    M1 endorsement 注册表锁污染连锁 expect → into_inner；
+    M2 `point_xy` 恒等点 expect → 全零编码+error 日志（下游 EC 自然拒绝）；
+    C1 `poker_dual_settlement.cairo` ownership 循环缺 `p_batch.len()` 守卫 → 补断言；
+    #9 `/api/dev/bot` 匿名路由 → release 默认关闭（debug 或 TEXAS_DEV_BOT_ENABLED=1）；
+    #10 删除无调用者死代码 `verify_reveal_proofs_core` 等 3 函数（含裸索引）。
+  - 遗留低风险（记录在案，暂不动）：dev_bot 路径 `rounds.rs` 的 expect（仅 dev）；
+    workspace release 开 `overflow-checks` 的权衡；SITTING_OUT/IN 补
+    `verify_socket_sender_seat`（越权写，非 panic）；宏 `parse_payload!` 等
+    已确认安全的 unwrap/索引保持现状。
 
 ---
 
@@ -54,19 +90,19 @@
 
 > 排期表见 `SETTLEMENT_PRIVACY_PLAN.md` §开发排期；P2-M1 电路规格已定稿，按此实施。
 
-- [ ] **6. P2-M1 电路**：Stwo 电路证明 `(players, deltas)` 匹配已登记 digest ∧ 零和 ∧
+- [ ] **8. P2-M1 电路**：Stwo 电路证明 `(players, deltas)` 匹配已登记 digest ∧ 零和 ∧
   人数一致，输出 claim_cms。**预留约束（硬约束）**：动作签名 + auto 默认动作合法性 +
   accepted-seq（见第三节 §8.2）。验收：电路单测通过。
-- [ ] **7. P2-M2 证明端**：server 从明文生成 trace + proof（复用 orchestrator）+
+- [ ] **9. P2-M2 证明端**：server 从明文生成 trace + proof（复用 orchestrator）+
   动作级 SK 签名纳入动作日志。验收：真实手牌证明 < 30s。
-- [ ] **8. P2-M3 合约验证端**：Stwo Cairo verifier（官方移植或 fact-registry，M3 定）+
+- [ ] **10. P2-M3 合约验证端**：Stwo Cairo verifier（官方移植或 fact-registry，M3 定）+
   `verify_and_settle_dapv_stark_private_v2` 接入 π。验收：calldata 零明文。
-- [ ] **9. P2-M4 联调部署**：sepolia 部署 + gas/size 测量 + 文档。
-- [ ] **10. C3.2-M1 认领 sidecar**：Node sidecar 封装 STRK20 私密转账
+- [ ] **11. P2-M4 联调部署**：sepolia 部署 + gas/size 测量 + 文档。
+- [ ] **12. C3.2-M1 认领 sidecar**：Node sidecar 封装 STRK20 私密转账
   （运营浮存 → 赢家 viewing key note），Rust 服务端 HTTP 调用；需 SDK 依赖 + 服务器 KMS。
-- [ ] **11. C3.2-M2 赔付路由**：settle 后异步队列：延迟抖动 + 批量 shield 补浮存 + 失败重试。
-- [ ] **12. C3.2-M3 通知与 UX**：加密赔付通知推送 + 领取入口 UX；赢家零操作看到 note。
-- [ ] **13. C3.2-M4 合规加固**：限额/频控/审计日志 + 运营手册。
+- [ ] **13. C3.2-M2 赔付路由**：settle 后异步队列：延迟抖动 + 批量 shield 补浮存 + 失败重试。
+- [ ] **14. C3.2-M3 通知与 UX**：加密赔付通知推送 + 领取入口 UX；赢家零操作看到 note。
+- [ ] **15. C3.2-M4 合规加固**：限额/频控/审计日志 + 运营手册。
 
 **C5 验证清单（未勾完项）**：
 
@@ -83,52 +119,52 @@
 > 设计全文：`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md`。
 > ⚠️ §8 硬约束：消息格式、事件字段、电路约束**现在就要预留**
 > （动作签名+seq、服务器收据、accepted-seq、auto 标记、债券合约位），
-> 否则后补会破坏签名域或触发电路重写——与第 6 项 P2-M1 的预留约束是同一件事。
+> 否则后补会破坏签名域或触发电路重写——与第 8 项 P2-M1 的预留约束是同一件事。
 
-- [ ] **14. 动作签名落地**：client-wasm `sign_action` 导出（~20 行）；客户端动作附
+- [ ] **16. 动作签名落地**：client-wasm `sign_action` 导出（~20 行）；客户端动作附
   `(seq, sig)` + seq 持久化；服务器验签（seat pk）+ seq 单调检查 + 动作日志入 ProveTask。
-- [ ] **15. 签名回执 + accepted-seq**：服务器每动作回签收据
+- [ ] **17. 签名回执 + accepted-seq**：服务器每动作回签收据
   `Sig_operator(player, hand_id, seq, 决定)`；settle 事件追加每玩家 accepted-seq 向量。
-- [ ] **16. auto 默认动作签名化**：服务器代打标 `(auto, server_sig)`；
+- [ ] **18. auto 默认动作签名化**：服务器代打标 `(auto, server_sig)`；
   **电路必须校验"合法默认"（零下注才可 auto-check，面对下注只能 auto-fold）后才可上线**
   ——否则服务器可借代打折叠任意玩家。
-- [ ] **17. 实施前确认 4 个开放问题**：seq 持久化粒度（per-table / per-hand）；
+- [ ] **19. 实施前确认 4 个开放问题**：seq 持久化粒度（per-table / per-hand）；
   电路内验签 vs 链下预验签；replayer 最小数据集；双通道备用端点选型。
 
 ---
 
 ## 四、协议 / 证明层长期项
 
-- [ ] **18. mirror 证明层与游戏 deck 客户端协议对齐**：浏览器玩家 mirror 份额缺失曾致
+- [ ] **20. mirror 证明层与游戏 deck 客户端协议对齐**：浏览器玩家 mirror 份额缺失曾致
   settle 阻断（09-01 已通过回退路径跑通结算，证明层对齐仍是遗留）。
   按 `DUAL_PROOF_PROTOCOL.md` §5.3，独立工作量。见 `poker_contracts/DEPLOYMENTS.md:140`。
-- [ ] **19. Phase 3：独立 prover 服务**：`STARKNET_PROVER_URL` 从 stub 变真实端点，
+- [ ] **21. Phase 3：独立 prover 服务**：`STARKNET_PROVER_URL` 从 stub 变真实端点，
   移除 host attestation。见 README Roadmap。
-- [ ] **20. canonical AIR 缺口**：reveal/reconstruction 密码学、final shuffle/reveal
+- [ ] **22. canonical AIR 缺口**：reveal/reconstruction 密码学、final shuffle/reveal
   阶段切换、完整 timeout/terminal 级联、settlement、state-root 重算仍在 AIR 之外。
   见 `docs/STATUS.md`。
-- [ ] **21. Layer 3 递归协议**：Texas 自有递归协议尚未实现（生产验证入口保持关闭）；
+- [ ] **23. Layer 3 递归协议**：Texas 自有递归协议尚未实现（生产验证入口保持关闭）；
   无 sound 递归/简洁聚合证明，验证成本仍 O(N)。见 `src/lib.rs:12`、`docs/PO5_PO6_DESIGN_NOTES.md`。
-- [ ] **22. 性能 followups**（需 release 基准 + soundness 矩阵后实施）：
+- [ ] **24. 性能 followups**（需 release 基准 + soundness 矩阵后实施）：
   专用标量乘 AIR、MSM 平衡树、limb backend 选型、outer_aggregate 流式编码、
   错误分类、`/metrics` 路由。见 `PERFORMANCE_FOLLOWUPS.md`。
-- [ ] **23. 全链路私密提现**：vault `withdraw_to` + 第二个 anonymizer（unshield 方向）。
+- [ ] **25. 全链路私密提现**：vault `withdraw_to` + 第二个 anonymizer（unshield 方向）。
   见 `docs/starknet-plan-b-anonymizer.md` §已知 seam。
-- [ ] **24. STRK20 官方 SDK 跟踪**：SDK 上 npm 后核对 `tryComposeInvoke` 接口
+- [ ] **26. STRK20 官方 SDK 跟踪**：SDK 上 npm 后核对 `tryComposeInvoke` 接口
   （当前运行时探测 + 公开路径回退）。
-- [ ] **25. 杂项**：`texas/src/starknet/hooks.rs:168` 滞后 TODO 注释清理。
+- [ ] **27. 杂项**：`texas/src/starknet/hooks.rs:168` 滞后 TODO 注释清理。
 
 ---
 
 ## 五、主网相关（最后）
 
-- [ ] **26. 主网 ≥1 笔 STRK20 交易**（黑客松硬性要求）：在 PokerVault 主网最小部署与
+- [ ] **28. 主网 ≥1 笔 STRK20 交易**（黑客松硬性要求）：在 PokerVault 主网最小部署与
   直接 STRK20 转账两案中选最简者；交易哈希写入 strk20.json。
   现状：`strk20.json` 的 `token.mainnet_address` 为空，未记录任何主网交易。
-- [ ] **27. strk20.json 收尾**：`token.mainnet_address` / `sepolia_address` 回填；
+- [ ] **29. strk20.json 收尾**：`token.mainnet_address` / `sepolia_address` 回填；
   demo_video / demo_url / transactions 补全。
-- [ ] **28. paymaster 生产加固**：中继请求附钱包签名（session key / typed-data）鉴权。
+- [ ] **30. paymaster 生产加固**：中继请求附钱包签名（session key / typed-data）鉴权。
   位置：`texas/src/starknet/paymaster.rs:145`。主网开放前必须完成。
-- [ ] **29. 债券 / 罚没合约（Phase 3）**：operator 链上质押债券；被证明的审查
+- [ ] **31. 债券 / 罚没合约（Phase 3）**：operator 链上质押债券；被证明的审查
   （签名动作 + accepted-seq 缺口）触发罚没赔付；债券 > 最大可窃取价值。主网化前提。
-- [ ] **30. Demo 视频**：录"浏览器验证 G 证明"录屏（配合主网交易展示）。
+- [ ] **32. Demo 视频**：录"浏览器验证 G 证明"录屏（配合主网交易展示）。
