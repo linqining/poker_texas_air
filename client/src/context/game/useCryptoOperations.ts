@@ -156,6 +156,7 @@ export const useCryptoOperations = (
       }
 
       let outputCards: unknown[];
+      let shuffleProof: unknown;
       let maskAndShuffleRound: unknown;
       if (needsJoinLayer && sharePk) {
         const joinRaw = wrapCryptoOp(() => {
@@ -188,6 +189,13 @@ export const useCryptoOperations = (
           throw new Error('Invalid shuffle result: missing output_cards');
         }
         outputCards = shuffleResult.output_cards;
+        // WASM shuffle 返回完整 BG V2 证明，必须透传给服务端
+        // （submit_verified_shuffle 验证必需；此前被丢弃为 undefined，
+        // 纯洗牌提交必然被服务端拒绝）。
+        shuffleProof = (shuffleResult as unknown as { shuffle_proof?: unknown }).shuffle_proof;
+        if (!shuffleProof) {
+          throw new Error('Invalid shuffle result: missing shuffle_proof');
+        }
       }
 
       const gameId = String(tableId);
@@ -197,7 +205,10 @@ export const useCryptoOperations = (
         tableId,
         gameId,
         pkHex,
-        shuffleResult: { output_cards: outputCards as ShuffleResult['output_cards'], shuffle_proof: undefined },
+        shuffleResult: {
+          output_cards: outputCards as ShuffleResult['output_cards'],
+          shuffle_proof: shuffleProof as ShuffleResult['shuffle_proof'],
+        },
         maskAndShuffleRound: maskAndShuffleRound as ShuffleHandleResult['maskAndShuffleRound'],
       };
     } catch (e) {

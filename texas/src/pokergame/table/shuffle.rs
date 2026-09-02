@@ -27,7 +27,10 @@ impl Table {
         Ok(())
     }
 
-    pub fn remove_inactive_players(&mut self) {
+    /// 清理不在活跃座位的 mental poker 注册（断线/离开玩家）。
+    /// 返回本次实际移除的 pk —— 调用方（start_preflop_shuffle）据此检测
+    /// 孤儿密钥层：被移除者若已贡献洗牌层，牌组必须重建基线全员重洗。
+    pub fn remove_inactive_players(&mut self) -> Vec<GamePkHex> {
         let active_pks: std::collections::HashSet<String> = self.active_players()
             .iter()
             .filter_map(|p| p.player.as_ref())
@@ -39,9 +42,10 @@ impl Table {
             .map(|(_, player_state)| GamePkHex::new(player_state.pk_hex.clone()))
             .collect();
 
-        for pk in remove_pks {
+        for pk in &remove_pks {
             let _ = self.mental_poker_game.leave_player(&pk);
         }
+        remove_pks
     }
 
     pub fn register_waiting_players(&mut self) {
@@ -304,52 +308,19 @@ impl Table {
         player_pk_hex: &GamePkHex,
         round: crate::pokergame::game_state::MaskAndShuffleRoundJson,
     ) -> Result<(), String> {
-        if !self.shuffle_state.is_active() {
-            return Err("Shuffle not active".to_string());
-        }
-        if self.shuffle_state.current_player_pk != Some(player_pk_hex.clone()) {
-            return Err("Not current player".to_string());
-        }
-
-        let player_pk = self.mental_poker_game.players.get(&**player_pk_hex)
-            .map(|p| p.pk)
-            .ok_or("Player not found in mental poker game")?;
-
-        let ms = round.to_mask_and_shuffle_round()?;
-        let input_cards = self.mental_poker_game.deck_encrypted.clone();
-
-        // remask 证明 + shuffle 证明共享同一条 transcript（挑战链顺序敏感，
-        // 与 MaskAndShuffleRound::execute 的证明生成一一对应）
-        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript::new(
-            b"zk_mask_shuffle_proof_v2",
-        );
-        if !ms.remask_proof.verify(
-            &input_cards,
-            &ms.mask_cards,
-            &player_pk,
-            &mut transcript,
-        ) {
-            return Err("Invalid remask proof".to_string());
-        }
-
-        // shuffle 证明：mask_cards → output_cards 在全量聚合公钥下重加密
-        let current_agg_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
-        if ms.proof
-            .verify(
-                &ms.mask_cards,
-                &ms.output_cards,
-                &current_agg_pk,
-                &mut transcript,
-            )
-            .is_err()
-        {
-            return Err("Invalid shuffle proof".to_string());
-        }
-
-        self.mental_poker_game.deck_encrypted = ms.output_cards;
-        self.shuffle_state.completed_players.push(player_pk_hex.clone());
-        self.shuffle_state.pending_players.retain(|p| p != player_pk_hex);
-        Ok(())
+        // 2026-09-03 废弃开局补层（remask）语义：已注册玩家的密钥层由每手
+        // start_preflop_shuffle 的 (G, m+agg) 基线预置包含，remask 是重复
+        // 加层 → 牌组公钥超出 Σsk → 全桌 materialize 失败（双真人线上复现，
+        // 诊断日志 tokens=registeredPlayers 且全牌组物化失败）。
+        // 开局洗牌请走 submit_verified_shuffle（纯 shuffle 对 agg）。
+        // 入座场景（未注册玩家）仍走 join_player_and_shuffle，不经此入口。
+        // 保留函数与错误返回：旧客户端开局提交 join 轮时给出可诊断的错误
+        // 而非静默污染牌组。
+        let _ = (&self.mental_poker_game.deck_encrypted, player_pk_hex, &round);
+        Err(
+            "join layer not needed at hand start: registered players' layers are pre-seeded in the deck baseline; submit a pure shuffle (shuffle_proof only)"
+                .to_string(),
+        )
     }
 
     #[deprecated(note = "use advance_shuffle instead")]
@@ -365,24 +336,14 @@ impl Table {
     pub fn get_shuffle_public_state(&self) -> Option<ShufflePublicState> {
         if self.shuffle_state.is_active() {
             let current_pk = self.shuffle_state.current_player_pk.clone();
-            // waiting 入座（从未 remask 过）的玩家补层时必须走 join 语义。
-            // Reconstruct 阶段牌组 c1 为 identity，remask 无法工作，强制 false。
-            let is_reconstruct = self.shuffle_state.phase == ShufflePhase::Reconstruct;
-            let needs_join_layer = !is_reconstruct
-                && current_pk.as_ref()
-                    .map(|pk| !self.shuffle_state.completed_players.contains(pk))
-                    .unwrap_or(false);
-            // share_pk = 聚合公钥 - 当前洗牌者公钥（join_game_and_shuffle 的 curr_share_pk）
-            let share_pk = if needs_join_layer {
-                current_pk.as_ref().and_then(|pk| {
-                    self.mental_poker_game.players.get(&**pk)
-                        .map(|p| ecpoint_to_hex(
-                            &(self.mental_poker_game.key_manager.get_aggregated_pk() - p.pk)
-                        ))
-                })
-            } else {
-                None
-            };
+            // 开局洗牌统一纯 shuffle：已注册玩家的密钥层由每手
+            // start_preflop_shuffle 的 (G, m+agg) 基线预置包含；remask 补层
+            // （旧 submit_join_shuffle 语义）对已注册玩家是重复加层，会让
+            // 牌组公钥超出 Σsk → 全桌 materialize 失败（2026-09-03 线上复现）。
+            // needs_join_layer 字段保留（serde 兼容旧客户端），恒 false；
+            // 客户端纯 shuffle 需要的 agg 由 aggregate_pk 字段提供。
+            let needs_join_layer = false;
+            let share_pk: Option<String> = None;
             Some(ShufflePublicState {
                 phase: self.shuffle_state.phase,
                 current_player_pk: self.shuffle_state.current_player_pk.clone(),
@@ -542,7 +503,8 @@ impl Table {
 
     /// 重新初始化牌组为 (identity, plaintext_i)，
     /// 等价于 Move 的 rebuild_deck_and_shuffle_on_timeout。
-    fn rebuild_deck_and_shuffle(&mut self) {
+    /// 洗牌超时与开局孤儿层检测（start_preflop_shuffle）共用。
+    pub(crate) fn rebuild_deck_and_shuffle(&mut self) {
         let plaintext = self.mental_poker_game.deck_plaintext.clone();
         let new_deck: Vec<ElGamalCiphertext> = plaintext
             .iter()

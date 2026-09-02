@@ -371,11 +371,17 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
 async fn live_flow_assignments_match_mirror_targets() {
     use crate::config::Config;
     use crate::models::Database;
-    use crate::pokergame::game_state::{MaskAndShuffleRoundJson, PkProofJson};
+    use crate::pokergame::game_state::{
+        ElGamalCiphertextJson, MaskAndShuffleRoundJson, PkProofJson, ShuffleProofJson,
+    };
     use crate::pokergame::player::{GamePkHex, Player, WalletAddress};
     use crate::pokergame::table::Table;
     use crate::socket::SocketState;
     use crate::starknet::hooks;
+
+    fn parse_proof_json(v: &serde_json::Value) -> Result<ShuffleProofJson, String> {
+        serde_json::from_value(v.clone()).map_err(|e| e.to_string())
+    }
 
     fn ec_hex(p: &poker_protocol::crypto::EcPoint) -> String {
         poker_protocol::z_poker::convert::ecpoint_to_hex(p)
@@ -494,6 +500,40 @@ async fn live_flow_assignments_match_mirror_targets() {
         let mut gs = state.state.write().await;
         let table = gs.tables.get_mut(&1).unwrap();
         table.start_shuffle();
+    }
+
+    // 新开局语义（2026-09-03）：start_shuffle 无条件重建 (G, m+agg) 基线、
+    // 清空 completed、全员 pending —— 每人再提交一次纯 shuffle（对 agg，
+    // 明文保持）后洗牌完成、进入发牌 + HandReveal。
+    {
+        let mut gs = state.state.write().await;
+        let table = gs.tables.get_mut(&1).unwrap();
+        while table.shuffle_state.is_active() && !table.shuffle_state.pending_players.is_empty() {
+            let current = table
+                .shuffle_state
+                .current_player_pk
+                .clone()
+                .expect("current shuffler set");
+            let (_pk_hex, player) = pks
+                .iter()
+                .find(|(pk, _)| *pk == current.0)
+                .expect("current shuffler seated");
+            let deck = table.mental_poker_game.deck_encrypted.clone();
+            let agg = poker_protocol::crypto::EcPoint::from(
+                table.mental_poker_game.key_manager.get_aggregated_pk(),
+            );
+            let round = player.shuffle(&deck, &agg);
+            let out_json: Vec<ElGamalCiphertextJson> = round
+                .output_cards
+                .iter()
+                .map(ElGamalCiphertextJson::from_ciphertext)
+                .collect();
+            let proof_json = shuffle_proof_json(&round.proof);
+            table
+                .submit_verified_shuffle(&current, out_json, parse_proof_json(&proof_json).unwrap())
+                .expect("pure shuffle must verify against agg baseline");
+        }
+        table.advance_shuffle();
     }
 
     hooks::mirror_registry();

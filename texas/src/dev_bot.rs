@@ -279,8 +279,11 @@ pub async fn start_bot(
                 && !shuffle_state.completed_players.contains(&GamePkHex(pk_hex.clone()));
             if mine {
                 // 在 drop(gs) 前捕获（table 借用 gs）
-                let needs_join_layer = table.shuffle_state.phase
-                    != crate::pokergame::game_state::ShufflePhase::Reconstruct;
+                // 2026-09-03：开局洗牌统一纯 shuffle —— 已注册玩家的层由每手
+                // 基线 (G, m+agg) 预置包含，remask（join 轮）是重复加层 →
+                // 牌组公钥超出 Σsk → 物化污染（双真人线上复现）。
+                // join 轮仅保留给入座场景（join_player_and_shuffle）。
+                let needs_join_layer = false;
                 drop(gs);
                 let deck: Vec<ElGamalCiphertextJson> = {
                     let gs = state.state.read().await;

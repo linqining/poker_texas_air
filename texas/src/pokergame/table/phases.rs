@@ -57,14 +57,26 @@ impl Table {
     /// 这些在 Move 中由 join/leave 时维护，Rust 在此统一处理。
     pub fn start_preflop_shuffle(&mut self) {
         // Rust 特有：清理不活跃玩家、登记 waiting 玩家、清除 waiting 标记
-        let already_completed: std::collections::HashSet<GamePkHex> =
-            self.shuffle_state.completed_players.iter().cloned().collect();
-        self.remove_inactive_players();
+        let removed = self.remove_inactive_players();
+        if !removed.is_empty() {
+            tracing::info!("[SHUFFLE] hand start removed inactive players: {:?}", removed);
+        }
         self.register_waiting_players();
         self.clear_waiting_flags();
 
-        // 对齐 Move start_preflop_shuffle：pending_players = 未完成洗牌的活跃玩家
-        self.init_pending_players(&already_completed);
+        // 开局统一重建牌组基线 (G, m + agg)：
+        // 1) register_waiting_players 之后 agg 才含全部本手玩家，必须用当前
+        //    agg 重算基线（reset_for_next_hand 预置的是上一手的 agg）；
+        // 2) 已注册玩家的密钥层由 +agg 预置包含 → 开局洗牌统一走纯 shuffle
+        //    （re_encrypt 对 agg，明文保持、公钥恒 agg，物化 c2 − Σsk·c1 = m
+        //    闭环）。禁止 remask 补层：对已注册玩家是重复加层，牌组公钥会
+        //    超出 Σsk → 全桌 materialize 失败（2026-09-03 双真人线上复现）。
+        // 3) 上一手残留层 / Waiting 期入座轮 / 孤儿密钥层（洗牌期买入者
+        //    掉线，其份额永久缺失）全部归零 —— 每手重来，无需单独的孤儿
+        //    重建分支。
+        self.mental_poker_game.reset();
+        self.shuffle_state.completed_players.clear();
+        self.init_pending_players(&std::collections::HashSet::new());
 
         // 对齐 Move：phase = BeforePreflop
         self.shuffle_state.phase = ShufflePhase::BeforePreflop;

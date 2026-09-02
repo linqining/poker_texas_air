@@ -395,6 +395,23 @@ impl MentalPokerGame {
                             &self.deck_plaintext,
                             &plain_text,
                         );
+                        if playing_card.is_none() {
+                            // 诊断（与社区牌同款）：手牌物化失败此前静默，导致
+                            // "手牌可解/社区牌不可解"无法从日志分辨。token_pks
+                            // 应与注册玩家一一对应，错位即定位到份额来源。
+                            tracing::error!(
+                                "[submit_reveal_token] HOLE card {} (owner {}) materialize FAILED: plain={:?} tokens={} token_pks={:?}",
+                                card.card_index,
+                                _pk,
+                                hex::encode(plain_text.compress().as_ref()).get(..24).unwrap_or(""),
+                                card.reveal_state.reveal_tokens.len(),
+                                card.reveal_state
+                                    .reveal_tokens
+                                    .iter()
+                                    .map(|t| hex::encode(t.user_public_key.compress().as_ref()).get(..12).unwrap_or("").to_string())
+                                    .collect::<Vec<_>>()
+                            );
+                        }
                         card.playing_card = playing_card;
                     }
                 }
@@ -413,27 +430,42 @@ impl MentalPokerGame {
                     user_public_key: token.proof.user_public_key,
                 });
                 card.reveal_state.pending_players.retain(|p| *p != pk_point);
-                if card.reveal_state.pending_players.is_empty() {
-                    let plain_text = card.encrypted_card.c2
-                        - card
-                            .reveal_state
-                            .reveal_tokens
-                            .iter()
-                            .map(|t| t.reveal_token)
-                            .sum::<EcPoint>();
-                    let playing_card =
-                        Self::plaintext_to_playingcard_static(&self.deck_plaintext, &plain_text);
-                    if playing_card.is_none() {
-                        // 诊断：物化失败 = 解密明文不在规范域（deck 不变量破坏）
-                        tracing::error!(
-                            "[submit_reveal_token] card {} materialize FAILED: plain={:?} c1={:?}",
-                            card.card_index,
-                            hex::encode(plain_text.compress().as_ref()).get(..24).unwrap_or(""),
-                            hex::encode(card.encrypted_card.c1.compress().as_ref()).get(..24).unwrap_or("")
-                        );
+                    if card.reveal_state.pending_players.is_empty() {
+                        let plain_text = card.encrypted_card.c2
+                            - card
+                                .reveal_state
+                                .reveal_tokens
+                                .iter()
+                                .map(|t| t.reveal_token)
+                                .sum::<EcPoint>();
+                        let playing_card =
+                            Self::plaintext_to_playingcard_static(&self.deck_plaintext, &plain_text);
+                        if playing_card.is_none() {
+                            // 诊断：物化失败 = 解密明文不在规范域（deck 不变量破坏）
+                            tracing::error!(
+                                "[submit_reveal_token] card {} materialize FAILED: plain={:?} c1={:?}",
+                                card.card_index,
+                                hex::encode(plain_text.compress().as_ref()).get(..24).unwrap_or(""),
+                                hex::encode(card.encrypted_card.c1.compress().as_ref()).get(..24).unwrap_or("")
+                            );
+                            // 诊断增强：区分"token 集合错误"与"牌组公钥错配"。
+                            // tokens 数应等于注册玩家数；逐 token 打印提交者 pk
+                            // 前缀，配合服务端 [REVEAL-TOKEN] 提交日志定位谁的
+                            // 份额与注册 pk 不符。
+                            tracing::error!(
+                                "[submit_reveal_token] card {} tokens={} registered_players={} token_pks={:?}",
+                                card.card_index,
+                                card.reveal_state.reveal_tokens.len(),
+                                self.players.len(),
+                                card.reveal_state
+                                    .reveal_tokens
+                                    .iter()
+                                    .map(|t| hex::encode(t.user_public_key.compress().as_ref()).get(..12).unwrap_or("").to_string())
+                                    .collect::<Vec<_>>()
+                            );
+                        }
+                        card.playing_card = playing_card;
                     }
-                    card.playing_card = playing_card;
-                }
             }
         }
         Ok(())

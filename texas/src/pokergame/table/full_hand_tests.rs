@@ -567,3 +567,89 @@ mod full_hand_vector_gen {
         out
     }
 }
+
+// ============================================================
+// 开局统一基线重建回归（2026-09-03 双真人物化失败修复）：
+// start_preflop_shuffle 必须无条件把牌组重建为 (G, m + 当前 agg) 基线、
+// 清空 completed、全员 pending —— 已注册玩家的密钥层由 +agg 预置包含，
+// 开局洗牌统一纯 shuffle（明文保持、公钥恒 agg，物化闭环）。
+// 该语义同时天然清除孤儿密钥层（洗牌期买入者掉线，份额永久缺失）与
+// 上一手残留层，无需单独的孤儿检测分支。
+// ============================================================
+#[cfg(test)]
+mod hand_start_baseline_tests {
+    use super::*;
+    use crate::pokergame::game_state::ShufflePhase;
+
+    fn agg_baseline_deck(table: &Table) -> Vec<ElGamalCiphertext> {
+        let agg = table.mental_poker_game.key_manager.get_aggregated_pk();
+        table
+            .mental_poker_game
+            .deck_plaintext
+            .iter()
+            .map(|p| ElGamalCiphertext { c1: *poker_protocol::crypto::BASE_G, c2: *p + agg })
+            .collect()
+    }
+
+    fn deck_is_baseline(table: &Table) -> bool {
+        let d = &table.mental_poker_game.deck_encrypted;
+        d.len() == table.mental_poker_game.deck_plaintext.len()
+            && d.iter().zip(agg_baseline_deck(table).iter()).all(|(a, b)| a == b)
+    }
+
+    /// 开局（无论上一手留下什么牌组/洗牌状态）必须重建基线 + 全员 pending。
+    #[test]
+    fn hand_start_rebuilds_baseline_and_repends_everyone() {
+        let mut table = Table::new(9, "baseline".to_string(), 10000, 9, String::new());
+        let players = seat_players(&mut table, 2);
+        // 上一手遗留：牌组带真实洗牌层、completed 非空
+        table.start_preflop_shuffle();
+        for p in &players {
+            table.set_current_shuffler(p.pk_hex.clone());
+            submit_real_shuffle(&mut table, p);
+        }
+        assert!(!deck_is_baseline(&table), "deck must carry contributed layers pre-reset");
+        assert_eq!(table.shuffle_state.completed_players.len(), 2);
+
+        table.shuffle_state.phase = ShufflePhase::None; // 模拟上一手结束
+        table.start_preflop_shuffle(); // 新一手开局
+
+        assert!(deck_is_baseline(&table), "deck must reset to (G, m+agg)");
+        assert!(table.shuffle_state.completed_players.is_empty(),
+            "completed layers are void with the deck");
+        let mut pending: Vec<String> = table
+            .shuffle_state
+            .pending_players
+            .iter()
+            .map(|p| p.0.clone())
+            .collect();
+        pending.sort();
+        let mut expected: Vec<String> = players.iter().map(|p| p.pk_hex.0.clone()).collect();
+        expected.sort();
+        assert_eq!(pending, expected, "every player re-shuffles");
+        assert_eq!(table.shuffle_state.phase, ShufflePhase::BeforePreflop);
+    }
+
+    /// 洗牌期买入者掉线（孤儿层）：开局重置后其注册被移除、基线只含剩余
+    /// 玩家的 agg —— 孤儿份额问题随基线重建消失。
+    #[test]
+    fn hand_start_orphan_layer_dissolves_into_baseline() {
+        let mut table = Table::new(9, "orphan".to_string(), 10000, 9, String::new());
+        let players = seat_players(&mut table, 2);
+        table.start_preflop_shuffle();
+        for p in &players {
+            table.set_current_shuffler(p.pk_hex.clone());
+            submit_real_shuffle(&mut table, p);
+        }
+        let orphan = players[0].pk_hex.clone();
+        let survivor = players[1].pk_hex.clone();
+        table.stand_player_by_pk(&orphan);
+        table.shuffle_state.phase = ShufflePhase::None;
+        table.start_preflop_shuffle();
+
+        assert!(deck_is_baseline(&table), "baseline rebuilt without the orphan's layer");
+        assert_eq!(table.shuffle_state.pending_players, vec![survivor],
+            "only the remaining player re-shuffles");
+        assert!(!table.mental_poker_game.players.contains_key(orphan.to_string().as_str()));
+    }
+}
