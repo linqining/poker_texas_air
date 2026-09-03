@@ -173,10 +173,21 @@
 > （动作签名+seq、服务器收据、accepted-seq、auto 标记、债券合约位），
 > 否则后补会破坏签名域或触发电路重写——与第 8 项 P2-M1 的预留约束是同一件事。
 
-- [ ] **16. 动作签名落地**：client-wasm `sign_action` 导出（~20 行）；客户端动作附
-  `(seq, sig)` + seq 持久化；服务器验签（seat pk）+ seq 单调检查 + 动作日志入 ProveTask。
-- [ ] **17. 签名回执 + accepted-seq**：服务器每动作回签收据
-  `Sig_operator(player, hand_id, seq, 决定)`；settle 事件追加每玩家 accepted-seq 向量。
+- [x] **16. 动作签名落地**（2026-09-03 完成，三层回归绿）：
+  - poker_protocol `game_action.rs`：StarkCurve 签名（msg = `zgame.action-sig.v1`
+    || table_id || seq || action || amount，挑战绑定 r），sign/verify + 篡改/
+    换桌/换 pk 负例 4 单测；
+  - client-wasm `sign_action` 导出（pkg 已重建）；客户端 useGameActions 四动作
+    附 `(seq, rHex, sHex)`，seq 按桌 localStorage 单调（`actionSigning.ts`，
+    wasm 缺失时回退未签名）；
+  - 服务端 `process_action` 单一派发点验签（seat pk）+ seq 严格单调检查 +
+    `action_log`/`accepted_seq` 记账；`acceptedSeqs` 随 ClientTable 广播。
+    迁移期：未签名动作默认放行（enforcement 开关后续接 env）。
+- [x] **17. accepted-seq 承诺 + auto 代打标记**（2026-09-03 完成游戏层部分）：
+  超时代打（fold/check/call 三路径）入日志并标 `auto`（seq 服务器分配 =
+  accepted+1）；`acceptedSeqs` 向量随 ClientTable 广播（settle 前玩家可见）。
+  ⬜ 剩余（可后置）：operator 对回执的服务端签名（`Sig_operator`）——需
+  服务器游戏域密钥管理，当前以日志 + 广播向量作为可举证形态。
 - [ ] **18. auto 默认动作签名化**：服务器代打标 `(auto, server_sig)`；
   **电路必须校验"合法默认"（零下注才可 auto-check，面对下注只能 auto-fold）后才可上线**
   ——否则服务器可借代打折叠任意玩家。
