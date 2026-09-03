@@ -86,7 +86,7 @@ echo "== [1/5] declare PokerDualSettlement（自动处理 compiled-hash 方案�
 CLS=""
 for attempt in 1 2 3; do
   n=$(get_nonce)
-  out=$("$SN" declare \
+  out=$($SN declare \
     --class "$ART/poker_contracts_PokerDualSettlement.contract_class.json" \
     --compiled "$ART/poker_contracts_PokerDualSettlement.compiled_contract_class.json" 2>&1 || true)
   tx=$(printf '%s' "$out" | grep -oE 'TX=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
@@ -96,7 +96,7 @@ for attempt in 1 2 3; do
   if [ -n "$actual" ]; then
     echo "   compiled-hash scheme mismatch → retry with --compiled-hash $actual" >&2
     n=$(get_nonce)
-    out=$("$SN" declare \
+    out=$($SN declare \
       --class "$ART/poker_contracts_PokerDualSettlement.contract_class.json" \
       --compiled "$ART/poker_contracts_PokerDualSettlement.compiled_contract_class.json" \
       --compiled-hash "$actual" 2>&1 || true)
@@ -126,7 +126,7 @@ if [ "${DEPLOY_VAULT_V3:-0}" = "1" ]; then
     VCLS=""
     for attempt in 1 2 3; do
       n=$(get_nonce)
-      out=$("$SN" declare \
+      out=$($SN declare \
         --class "$ART/poker_contracts_PokerVault.contract_class.json" \
         --compiled "$ART/poker_contracts_PokerVault.compiled_contract_class.json" 2>&1 || true)
       tx=$(printf '%s' "$out" | grep -oE 'TX=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
@@ -134,7 +134,7 @@ if [ "${DEPLOY_VAULT_V3:-0}" = "1" ]; then
       actual=$(printf '%s' "$out" | grep -oE 'Actual: 0x[0-9a-fA-F]+' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
       if [ -n "$actual" ]; then
         n=$(get_nonce)
-        out=$("$SN" declare \
+        out=$($SN declare \
           --class "$ART/poker_contracts_PokerVault.contract_class.json" \
           --compiled "$ART/poker_contracts_PokerVault.compiled_contract_class.json" \
           --compiled-hash "$actual" 2>&1 || true)
@@ -148,7 +148,7 @@ if [ "${DEPLOY_VAULT_V3:-0}" = "1" ]; then
     VAULT_NEW=""
     for attempt in 1 2 3 4 5; do
       n=$(get_nonce)
-      out=$("$SN" deploy --class-hash "$VCLS" --calldata "$OWNER,$TOKEN,$ZERO" 2>&1 || true)
+      out=$($SN deploy --class-hash "$VCLS" --calldata "$OWNER,$TOKEN,$ZERO" 2>&1 || true)
       addr=$(printf '%s' "$out" | grep -oE 'CONTRACT_ADDRESS=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
       if [ -n "$addr" ]; then wait_nonce_gt "$n"; VAULT_NEW="$addr"; break; fi
       sleep 5
@@ -156,8 +156,8 @@ if [ "${DEPLOY_VAULT_V3:-0}" = "1" ]; then
     [ -n "$VAULT_NEW" ] || { echo "vault deploy FAILED" >&2; exit 1; }
     echo "VAULT_V3_ADDR=$VAULT_NEW"
     # 新 vault 上的授权与结算指向（旧 vault 筹码迁移走既有 withdraw 路径）
-    submit_wait set_unshield_helper "$SN" invoke --contract "$VAULT_NEW" --fn set_unshield_helper --calldata "$CASHOUT_HELPER" >/dev/null
-    submit_wait set_settlement_contract "$SN" invoke --contract "$VAULT_NEW" --fn set_settlement_contract --calldata "$DUAL_OLD" >/dev/null
+    submit_wait set_unshield_helper $SN invoke --contract "$VAULT_NEW" --fn set_unshield_helper --calldata "$CASHOUT_HELPER" >/dev/null
+    submit_wait set_settlement_contract $SN invoke --contract "$VAULT_NEW" --fn set_settlement_contract --calldata "$DUAL_OLD" >/dev/null
 
     # #25：部署 CashoutUnshieldHelper 绑定新 vault（pool=token 占位，池集成
     # 属 SDK_SEAM），并把 vault 的 unshield 信任门指到它
@@ -165,7 +165,7 @@ if [ "${DEPLOY_VAULT_V3:-0}" = "1" ]; then
         HCLS=""
         for attempt in 1 2 3; do
           n=$(get_nonce)
-          out=$("$SN" declare \
+          out=$($SN declare \
             --class "$ART/poker_contracts_CashoutUnshieldHelper.contract_class.json" \
             --compiled "$ART/poker_contracts_CashoutUnshieldHelper.compiled_contract_class.json" 2>&1 || true)
           tx=$(printf '%s' "$out" | grep -oE 'TX=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
@@ -173,7 +173,7 @@ if [ "${DEPLOY_VAULT_V3:-0}" = "1" ]; then
           actual=$(printf '%s' "$out" | grep -oE 'Actual: 0x[0-9a-fA-F]+' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
           if [ -n "$actual" ]; then
             n=$(get_nonce)
-            out=$("$SN" declare \
+            out=$($SN declare \
               --class "$ART/poker_contracts_CashoutUnshieldHelper.contract_class.json" \
               --compiled "$ART/poker_contracts_CashoutUnshieldHelper.compiled_contract_class.json" \
               --compiled-hash "$actual" 2>&1 || true)
@@ -187,7 +187,7 @@ if [ "${DEPLOY_VAULT_V3:-0}" = "1" ]; then
         CASHOUT_HELPER=""
         for attempt in 1 2 3 4 5; do
           n=$(get_nonce)
-          out=$("$SN" deploy --class-hash "$HCLS" --calldata "$VAULT_NEW,$POOL" 2>&1 || true)
+          out=$($SN deploy --class-hash "$HCLS" --calldata "$VAULT_NEW,$POOL" 2>&1 || true)
           addr=$(printf '%s' "$out" | grep -oE 'CONTRACT_ADDRESS=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
           if [ -n "$addr" ]; then wait_nonce_gt "$n"; CASHOUT_HELPER="$addr"; break; fi
           sleep 5
@@ -195,7 +195,7 @@ if [ "${DEPLOY_VAULT_V3:-0}" = "1" ]; then
         [ -n "$CASHOUT_HELPER" ] || { echo "cashout helper deploy FAILED" >&2; exit 1; }
         echo "CASHOUT_HELPER=$CASHOUT_HELPER"
     fi
-    submit_wait set_unshield_helper "$SN" invoke --contract "$VAULT_NEW" --fn set_unshield_helper --calldata "${CASHOUT_HELPER:?}" >/dev/null
+    submit_wait set_unshield_helper $SN invoke --contract "$VAULT_NEW" --fn set_unshield_helper --calldata "${CASHOUT_HELPER:?}" >/dev/null
 
     VAULT="$VAULT_NEW"
 else
@@ -206,7 +206,7 @@ echo "== [2/5] deploy dual v3（owner=$OWNER vault=$VAULT prover=$OWNER）"
 DUAL=""
 for attempt in 1 2 3 4 5; do
   n=$(get_nonce)
-  out=$("$SN" deploy --class-hash "$CLS" --calldata "$OWNER,$VAULT,$OWNER" 2>&1 || true)
+  out=$($SN deploy --class-hash "$CLS" --calldata "$OWNER,$VAULT,$OWNER" 2>&1 || true)
   addr=$(printf '%s' "$out" | grep -oE 'CONTRACT_ADDRESS=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
   if [ -n "$addr" ]; then wait_nonce_gt "$n"; DUAL="$addr"; break; fi
   existing=$(printf '%s' "$out" | grep -oE 'already deployed at address 0x[0-9a-fA-F]+' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
@@ -218,10 +218,10 @@ done
 echo "DUAL_ADDR=$DUAL"
 
 echo "== [3/5] set_claim_helper($HELPER)"
-submit_wait set_claim_helper "$SN" invoke --contract "$DUAL" --fn set_claim_helper --calldata "$HELPER" >/dev/null
+submit_wait set_claim_helper $SN invoke --contract "$DUAL" --fn set_claim_helper --calldata "$HELPER" >/dev/null
 
 echo "== [4/5] set_circuit_program_hash($PROGRAM_HASH)"
-submit_wait set_program_hash "$SN" invoke --contract "$DUAL" --fn set_circuit_program_hash --calldata "$PROGRAM_HASH" >/dev/null
+submit_wait set_program_hash $SN invoke --contract "$DUAL" --fn set_circuit_program_hash --calldata "$PROGRAM_HASH" >/dev/null
 
 echo "== [5/5] 回填 texas/.env 的 STARKNET_DUAL_SETTLEMENT_ADDRESS"
 sed -i.bak "s|^STARKNET_DUAL_SETTLEMENT_ADDRESS=.*|STARKNET_DUAL_SETTLEMENT_ADDRESS=$DUAL|" "$ROOT/texas/.env"
