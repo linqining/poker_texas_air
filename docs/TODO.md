@@ -225,7 +225,9 @@
 - [ ] 池费 `get_fee_amount` 运行时读取（不硬编码）；赔付额 ≥ 池费的边界处理。
   （2026-09-03 核查：客户端/服务端现状**无**池费硬编码——该项是 #12 C3.2 sidecar
   构建时的前置要求，非独立任务，随 sidecar 一并交付。）
-- [ ] 清理死代码 `client/src/starknet/cartridge.ts` + 移除 `@cartridge/*` 依赖。
+- [x] 清理死代码 `client/src/starknet/cartridge.ts` + 移除 `@cartridge/*` 依赖
+  （2026-09-04 完成；顺带移除同样零引用的 `starknetkit`——它是 @cartridge/*
+  传递依赖的来源，锁文件 @cartridge 清零，构建/类型检查通过）。
 
 ---
 
