@@ -416,13 +416,13 @@ pub async fn start_bot(
         }
         if do_call {
             if let Some(io) = crate::socket::get_socket_io() {
-                let req = crate::pokergame::table::ActionRequest { pk_hex: GamePkHex(pk_hex.clone()), action: "call".into(), amount: None };
+                let req = crate::pokergame::table::ActionRequest { pk_hex: GamePkHex(pk_hex.clone()), action: "call".into(), amount: None, seq: None, sig: None };
                 crate::socket::game_loop::process_action(&io, &state, 1, req).await;
                 println!("[bot {seat_id}] call sent");
             }
         } else if do_check {
             if let Some(io) = crate::socket::get_socket_io() {
-                let req = crate::pokergame::table::ActionRequest { pk_hex: GamePkHex(pk_hex.clone()), action: "check".into(), amount: None };
+                let req = crate::pokergame::table::ActionRequest { pk_hex: GamePkHex(pk_hex.clone()), action: "check".into(), amount: None, seq: None, sig: None };
                 crate::socket::game_loop::process_action(&io, &state, 1, req).await;
                 println!("[bot {seat_id}] check sent");
             }

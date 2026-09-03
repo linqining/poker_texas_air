@@ -101,6 +101,30 @@ pub(crate) struct TableUpdatePayload {
 pub(crate) struct RaisePayload {
     pub table_id: u32,
     pub amount: u64,
+    /// #16 动作签名（迁移期可选：None = 未签名）
+    #[serde(default)]
+    pub seq: Option<u64>,
+    #[serde(default)]
+    pub sig: Option<ActionSigPayload>,
+}
+
+/// #16 动作签名的传输形状（r/s 为 StarkCurve 压缩/标量 hex）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ActionSigPayload {
+    pub r_hex: String,
+    pub s_hex: String,
+}
+
+/// FOLD/CHECK/CALL 的载荷（迁移期 sig/seq 可选）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SimpleActionPayload {
+    pub table_id: u32,
+    #[serde(default)]
+    pub seq: Option<u64>,
+    #[serde(default)]
+    pub sig: Option<ActionSigPayload>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -844,6 +868,18 @@ pub(crate) fn hide_opponent_cards(base: &ClientTable, wallet_address: &WalletAdd
 }
 
 pub(crate) async fn send_simple_action(socket: &SocketRef, state: &Arc<SocketState>, table_id: u32, action: &str) {
+    send_simple_action_signed(socket, state, table_id, action, None, None).await
+}
+
+/// #16：带（可选）动作签名的简单动作发送。
+pub(crate) async fn send_simple_action_signed(
+    socket: &SocketRef,
+    state: &Arc<SocketState>,
+    table_id: u32,
+    action: &str,
+    seq: Option<u64>,
+    sig: Option<ActionSigPayload>,
+) {
     let socket_id = socket.id.to_string();
     let pk_hex = {
         let gs = state.state.read().await;
@@ -851,6 +887,14 @@ pub(crate) async fn send_simple_action(socket: &SocketRef, state: &Arc<SocketSta
             .and_then(|p| gs.tables.get(&table_id).and_then(|t| t.get_pk_hex_by_wallet_address(&p.wallet_address.0)))
     };
     if let (Some(pk_hex), Some(sender)) = (pk_hex, state.get_action_sender(table_id).await) {
-        let _ = sender.send(ActionRequest { pk_hex, action: action.to_string(), amount: None }).await;
+        let _ = sender
+            .send(ActionRequest {
+                pk_hex,
+                action: action.to_string(),
+                amount: None,
+                seq,
+                sig: sig.map(|s| crate::pokergame::actions::ActionSig { r_hex: s.r_hex, s_hex: s.s_hex }),
+            })
+            .await;
     }
 }

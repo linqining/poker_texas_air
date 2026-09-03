@@ -2,6 +2,7 @@ import { useContext, useEffect, useRef, useState, type MutableRefObject } from '
 import type { NavigateFunction } from 'react-router-dom';
 import type { Socket } from 'socket.io-client';
 import { extractC1, ownHoleC1Set } from './ownHoleCards';
+import { signTableAction, sigToPayloadFields } from './actionSigning';
 import type { WasmClientPlayer } from '@linqining/client-wasm';
 import {
   CALL,
@@ -462,27 +463,40 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
   };
 
   const fold = () => {
-    currentTableRef &&
-      currentTableRef.current &&
-      socket?.emit(FOLD, currentTableRef.current.id);
+    const t = currentTableRef?.current;
+    if (!t || !socket) return;
+    void (async () => {
+      const sig = await signTableAction(playerKeys?.get_sk_hex?.() ?? null, t.id, 'fold');
+      socket?.emit(FOLD, { tableId: t.id, ...sigToPayloadFields(sig) });
+    })();
   };
 
+  // #16 抗审查：动作以牌局 SK 签名后发出（wasm 不可用时回退未签名）
   const check = () => {
-    currentTableRef &&
-      currentTableRef.current &&
-      socket?.emit(CHECK, currentTableRef.current.id);
+    const t = currentTableRef?.current;
+    if (!t || !socket) return;
+    void (async () => {
+      const sig = await signTableAction(playerKeys?.get_sk_hex?.() ?? null, t.id, 'check');
+      socket?.emit(CHECK, { tableId: t.id, ...sigToPayloadFields(sig) });
+    })();
   };
 
   const call = () => {
-    currentTableRef &&
-      currentTableRef.current &&
-      socket?.emit(CALL, currentTableRef.current.id);
+    const t = currentTableRef?.current;
+    if (!t || !socket) return;
+    void (async () => {
+      const sig = await signTableAction(playerKeys?.get_sk_hex?.() ?? null, t.id, 'call');
+      socket?.emit(CALL, { tableId: t.id, ...sigToPayloadFields(sig) });
+    })();
   };
 
   const raise = (amount: number) => {
-    currentTableRef &&
-      currentTableRef.current &&
-      socket?.emit(RAISE, { tableId: currentTableRef.current.id, amount });
+    const t = currentTableRef?.current;
+    if (!t || !socket) return;
+    void (async () => {
+      const sig = await signTableAction(playerKeys?.get_sk_hex?.() ?? null, t.id, 'raise', amount);
+      socket?.emit(RAISE, { tableId: t.id, amount, ...sigToPayloadFields(sig) });
+    })();
   };
 
   const sittingOut = () => {

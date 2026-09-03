@@ -834,3 +834,29 @@ pub fn endorsement_mint(sk_hex: &str, hand_binding_hex: &str) -> Result<JsValue,
             .map(|v| serde_wasm_bindgen::to_value(&v).unwrap_or(JsValue::NULL));
     }
 }
+
+/// #16 抗审查动作签名：以牌局身份 SK 对 (table_id, seq, action, amount) 签名
+/// （Starknet-Poseidon 域分离同族：`zgame.action-sig.v1`，与 texas 服务端
+/// `game_action.rs` 验签口径逐字节一致）。返回 `{ r_hex, s_hex }`——客户端把
+/// `(seq, r_hex, s_hex)` 附在动作消息上；服务端按座位 pk 验签。
+///
+/// `sk_hex` 为 ClientPlayer 的 sk（32 字节大端 hex，localStorage `sk` 同源）。
+#[wasm_bindgen]
+pub fn sign_action(
+    sk_hex: &str,
+    table_id: u32,
+    seq: u64,
+    action: &str,
+    amount: u64,
+) -> Result<JsValue, JsValue> {
+    // #16：游戏身份 SK 在 Stark curve 上（与座位 pk / 认可同域）
+    let sk_bytes = hex::decode(sk_hex).map_err(|e| JsValue::from_str(&format!("sk hex: {e}")))?;
+    let sk = <poker_protocol::crypto::curve::StarkCurve as poker_protocol::crypto::curve::Curve>::Scalar::from_canonical_bytes(&sk_bytes)
+        .ok_or_else(|| JsValue::from_str("sk out of range"))?;
+    let (r_hex, s_hex) = poker_protocol::z_poker::protocol::sign_game_action(
+        &sk, table_id, seq, action, amount, &mut rand_core::OsRng,
+    );
+    serde_json::to_value(serde_json::json!({ "r_hex": r_hex, "s_hex": s_hex }))
+        .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
+        .map(|v| serde_wasm_bindgen::to_value(&v).unwrap_or(JsValue::NULL))
+}

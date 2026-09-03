@@ -39,3 +39,24 @@ pub const REDEAL_RESULT: &str = "REDEAL_RESULT";
 pub const REDEAL_REQUEST: &str = "REDEAL_REQUEST";
 pub const CRYPTO_EVENT: &str = "crypto_event";
 pub const PLAYER_UPDATE: &str = "player_update";
+
+
+/// #16 动作签名（抗审查）：客户端以牌局身份 SK 对动作签名后随消息附上。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActionSig {
+    pub r_hex: String,
+    pub s_hex: String,
+}
+
+/// #16/#17 动作日志条目：本手每条被接受（或超时代打）的动作。
+/// `auto = true` 表示服务器按合法默认动作代打（超时路径），
+/// `seq` 为服务器分配（accepted_seq + 1）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActionLogEntry {
+    pub seat: u32,
+    pub seq: u64,
+    pub action: String,
+    pub amount: u64,
+    pub auto: bool,
+    pub sig_ok: bool,
+}

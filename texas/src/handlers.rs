@@ -411,6 +411,8 @@ pub async fn player_action(
         pk_hex: crate::pokergame::player::GamePkHex::new(body.pk_hex.clone()),
         action: body.action.clone(),
         amount: body.amount,
+        seq: None,
+        sig: None,
     };
 
     match sender.send(action_request).await {

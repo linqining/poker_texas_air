@@ -91,11 +91,20 @@ impl RoundState {
     }
 }
 
-#[derive(Debug, Clone)]
+/// #17 accepted-seq 向量条目（settle 广播中的抗审查承诺）。
+#[derive(Debug, Serialize, Clone, Deserialize)]
+pub struct AcceptedSeqEntry {
+    pub seat: u32,
+    pub seq: u64,
+}
+
 pub struct ActionRequest {
     pub pk_hex: GamePkHex,
     pub action: String,
     pub amount: Option<u64>,
+    /// #16 动作签名（客户端牌局 SK）；None = 未签名（迁移期兼容）。
+    pub seq: Option<u64>,
+    pub sig: Option<crate::pokergame::actions::ActionSig>,
 }
 
 #[derive(Debug, Serialize,Clone,Deserialize)]
@@ -124,6 +133,8 @@ pub struct ClientTable {
     pub side_pots: Vec<SidePot>,
     /// 本手已收台费（摊牌结算时按链上口径收取）
     pub rake_collected: u64,
+    /// #17 抗审查承诺向量：座位 → 已接受最大动作 seq（含 auto 代打）
+    pub accepted_seqs: Vec<AcceptedSeqEntry>,
     pub history: Vec<serde_json::Value>,
     pub round_state: RoundState,
     pub shuffle_state: Option<ShufflePublicState>,
@@ -177,6 +188,12 @@ pub struct Table {
     /// 以及 tick 循环跳过冗余 fetch（阈值 3000ms）。
     #[serde(skip)]
     pub last_synced_at: Option<std::time::Instant>,
+    /// #16/#17：座位 → 已接受的最大动作 seq（跨手单调，抗审查承诺向量）。
+    #[serde(skip)]
+    pub accepted_seq: HashMap<u32, u64>,
+    /// #16/#17：本手动作日志（含超时 auto 代打标记），新手牌开始清空。
+    #[serde(skip)]
+    pub action_log: Vec<crate::pokergame::actions::ActionLogEntry>,
 }
 
 impl Table {
@@ -282,6 +299,53 @@ impl Table {
         self.mental_poker_game.key_manager.get_aggregated_pk()
     }
 
+    /// #16 动作签名验证（服务端口径）：pk/seq/action/amount 全部进签名域。
+    pub fn verify_action_sig(
+        &self,
+        pk_hex: &GamePkHex,
+        seq: u64,
+        action: &str,
+        amount: u64,
+        sig: &crate::pokergame::actions::ActionSig,
+    ) -> bool {
+        poker_protocol::z_poker::protocol::verify_game_action_hex(
+            &pk_hex.0,
+            self.summary.id,
+            seq,
+            action,
+            amount,
+            &sig.r_hex,
+            &sig.s_hex,
+        )
+    }
+
+    /// #16/#17 记账：seq 单调推进 + 本手动作日志。auto = 服务器超时代打
+    ///（seq 服务器分配 = accepted + 1）。
+    pub fn record_action(
+        &mut self,
+        seat: u32,
+        seq: u64,
+        action: &str,
+        amount: u64,
+        auto: bool,
+        sig_ok: bool,
+    ) {
+        self.accepted_seq.insert(seat, seq);
+        self.action_log.push(crate::pokergame::actions::ActionLogEntry {
+            seat,
+            seq,
+            action: action.to_string(),
+            amount,
+            auto,
+            sig_ok,
+        });
+    }
+
+    /// 座位当前 accepted seq（无记录为 0）。
+    pub fn accepted_seq_of(&self, seat: u32) -> u64 {
+        self.accepted_seq.get(&seat).copied().unwrap_or(0)
+    }
+
     pub fn to_client(&self) -> ClientTable {
         let mut client_seats = HashMap::new();
         for (seat_id, seat) in self.seats().iter() {
@@ -315,6 +379,15 @@ impl Table {
             went_to_showdown: self.summary.went_to_showdown,
             side_pots: self.summary.side_pots.clone(),
             rake_collected: self.summary.rake_collected,
+            accepted_seqs: {
+                let mut v: Vec<AcceptedSeqEntry> = self
+                    .accepted_seq
+                    .iter()
+                    .map(|(seat, seq)| AcceptedSeqEntry { seat: *seat, seq: *seq })
+                    .collect();
+                v.sort_by_key(|e| e.seat);
+                v
+            },
             history: self.summary.history.clone(),
             round_state: self.round_state(),
             shuffle_state: self.get_shuffle_public_state(),
@@ -417,6 +490,8 @@ impl Table {
             event_tx: None,
             already_synced: false,
             last_synced_at: None,
+            accepted_seq: HashMap::new(),
+            action_log: Vec::new(),
         }
     }
 
@@ -682,6 +757,52 @@ mod tests {
             table.mental_poker_game.deck_encrypted.len(), 52,
             "mental_poker_game.deck_encrypted should be rebuilt by reset (52 trivial ciphertexts)"
         );
+    }
+
+    /// #16/#17：动作签名验证 + accepted-seq 单调 + 动作日志/公开段。
+    #[test]
+    fn action_sig_verify_and_accepted_seq() {
+        use poker_protocol::crypto::curve::{Curve, CurveScalar};
+        use poker_protocol::crypto::curve::StarkCurve;
+
+        let mut table = make_test_table();
+        let sk = StarkCurve::hash_to_scalar(b"seat-sk");
+        let pk = StarkCurve::base_g() * sk;
+        let pk_hex = hex::encode(pk.compress().as_ref());
+
+        // 把 pk_hex 绑到一个座位（直接构造 ActionSig 前的座位解析依赖 seats）
+        let sig_r_hex;
+        let sig_s_hex;
+        {
+            let (r_hex, s_hex) = poker_protocol::z_poker::protocol::sign_game_action(
+                &sk, table.summary.id, 1, "raise", 320, &mut rand::rngs::OsRng,
+            );
+            sig_r_hex = r_hex;
+            sig_s_hex = s_hex;
+        }
+        let sig = crate::pokergame::actions::ActionSig {
+            r_hex: sig_r_hex.clone(),
+            s_hex: sig_s_hex.clone(),
+        };
+        // 验签只依赖 pk 与消息域，不要求座位已入座
+        assert!(table.verify_action_sig(
+            &crate::pokergame::player::GamePkHex(pk_hex.clone()), 1, "raise", 320, &sig
+        ));
+        // 篡改 seq → 失败
+        assert!(!table.verify_action_sig(
+            &crate::pokergame::player::GamePkHex(pk_hex.clone()), 2, "raise", 320, &sig
+        ));
+
+        // 记账：seq 单调推进 + 日志 + 公开段
+        table.record_action(0, 1, "raise", 320, false, true);
+        table.record_action(0, 2, "call", 0, false, true);
+        assert_eq!(table.accepted_seq_of(0), 2);
+        assert_eq!(table.action_log.len(), 2);
+        let client = table.to_client();
+        assert_eq!(client.accepted_seqs.len(), 1);
+        assert_eq!(client.accepted_seqs[0].seq, 2);
+        let _ = pk;
+        let _ = sig_s_hex;
     }
 
     /// 测试 `deck_plaintext()` 始终从 `mental_poker_game` 读取，不再 fallback 到 `summary.state`。

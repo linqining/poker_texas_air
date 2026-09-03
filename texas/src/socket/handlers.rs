@@ -778,23 +778,27 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
     });
 
     socket.on(actions::FOLD, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, State(state): State<Arc<SocketState>>| {
-        let table_id = parse_payload!(actions::FOLD, payload_raw, u32);
+        // #16：兼容两种载荷（裸 tableId / 带 seq+sig 的对象）
+        let simple = parse_payload!(actions::FOLD, payload_raw, SimpleActionPayload);
+        let table_id = simple.table_id;
         if !try_on_chain_action(&s, &state, table_id, "fold", None).await {
-            send_simple_action(&s, &state, table_id, "fold").await;
+            send_simple_action_signed(&s, &state, table_id, "fold", simple.seq, simple.sig).await;
         }
     });
 
     socket.on(actions::CHECK, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, State(state): State<Arc<SocketState>>| {
-        let table_id = parse_payload!(actions::CHECK, payload_raw, u32);
+        let simple = parse_payload!(actions::CHECK, payload_raw, SimpleActionPayload);
+        let table_id = simple.table_id;
         if !try_on_chain_action(&s, &state, table_id, "check", None).await {
-            send_simple_action(&s, &state, table_id, "check").await;
+            send_simple_action_signed(&s, &state, table_id, "check", simple.seq, simple.sig).await;
         }
     });
 
     socket.on(actions::CALL, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, State(state): State<Arc<SocketState>>| {
-        let table_id = parse_payload!(actions::CALL, payload_raw, u32);
+        let simple = parse_payload!(actions::CALL, payload_raw, SimpleActionPayload);
+        let table_id = simple.table_id;
         if !try_on_chain_action(&s, &state, table_id, "call", None).await {
-            send_simple_action(&s, &state, table_id, "call").await;
+            send_simple_action_signed(&s, &state, table_id, "call", simple.seq, simple.sig).await;
         }
     });
 
@@ -808,7 +812,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                     .and_then(|p| gs.tables.get(&payload.table_id).and_then(|t| t.get_pk_hex_by_wallet_address(&p.wallet_address.0)))
             };
             if let (Some(pk_hex), Some(sender)) = (pk_hex, state.get_action_sender(payload.table_id).await) {
-                let _ = sender.send(ActionRequest { pk_hex, action: "raise".to_string(), amount: Some(payload.amount) }).await;
+                let _ = sender.send(ActionRequest { pk_hex, action: "raise".to_string(), amount: Some(payload.amount), seq: payload.seq, sig: payload.sig.map(|s| crate::pokergame::actions::ActionSig { r_hex: s.r_hex, s_hex: s.s_hex }) }).await;
             }
         }
     });

@@ -827,6 +827,16 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
             };
             if let Some(res) = check_result {
                 broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
+                // #17 auto 默认动作标记：服务器代打入日志（seq 服务器分配）
+                {
+                    let mut gs = state.state.write().await;
+                    if let Some(table) = gs.tables.get_mut(&table_id) {
+                        if let Some(seat) = table.find_player_by_pk(&GamePkHex(pk_hex.clone())).map(|x| x.id) {
+                            let seq = table.accepted_seq_of(seat) + 1;
+                            table.record_action(seat, seq, "check", 0, true, false);
+                        }
+                    }
+                }
                 handle_turn_advance(io, state, table_id).await;
                 return true;
             }
@@ -843,6 +853,16 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
             };
             if let Some(res) = call_result {
                 broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
+                // #17 auto 默认动作标记：服务器代打入日志（seq 服务器分配）
+                {
+                    let mut gs = state.state.write().await;
+                    if let Some(table) = gs.tables.get_mut(&table_id) {
+                        if let Some(seat) = table.find_player_by_pk(&GamePkHex(pk_hex.clone())).map(|x| x.id) {
+                            let seq = table.accepted_seq_of(seat) + 1;
+                            table.record_action(seat, seq, "call", 0, true, false);
+                        }
+                    }
+                }
                 handle_turn_advance(io, state, table_id).await;
                 return true;
             }
@@ -916,23 +936,72 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                 );
                 None
             } else {
+                // ===== #16/#17 抗审查：动作签名验证 + seq 单调 + 动作日志 =====
+                // 签名域 = (table_id, seq, action, amount)；pk = 座位牌局公钥。
+                let seat_id = table.find_player_by_pk(&req.pk_hex).map(|s| s.id);
+                let amount_for_sig = req.amount.unwrap_or(0);
+                match (req.seq, req.sig.as_ref(), seat_id) {
+                    (Some(seq), Some(sig), Some(seat)) => {
+                        let sig_ok = table.verify_action_sig(
+                            &req.pk_hex, seq, &req.action, amount_for_sig, sig,
+                        );
+                        let seq_ok = seq > table.accepted_seq_of(seat);
+                        if !sig_ok {
+                            tracing::warn!(
+                                "[process_action] REJECT action {} seat {seat} seq {seq}: invalid action signature (censorship evidence)",
+                                req.action
+                            );
+                            None
+                        } else if !seq_ok {
+                            tracing::warn!(
+                                "[process_action] REJECT action {} seat {seat} seq {seq}: seq not monotonic (accepted <= {})",
+                                req.action,
+                                table.accepted_seq_of(seat)
+                            );
+                            None
+                        } else {
+                            let action_result = match req.action.as_str() {
+                                "fold" => table.handle_fold(&req.pk_hex),
+                                "check" => table.handle_check(&req.pk_hex),
+                                "call" => table.handle_call(&req.pk_hex),
+                                "raise" => table.handle_raise(&req.pk_hex, req.amount.unwrap_or(0)),
+                                "allin" => table.handle_allin(&req.pk_hex),
+                                _ => None,
+                            };
+                            if action_result.is_some() {
+                                table.record_action(seat, seq, &req.action, amount_for_sig, false, true);
+                            }
+                            action_result
+                        }
+                    }
+                    // 迁移期兼容：未签名动作按现状处理（enforcement 开关见
+                    // actions_sig_required()）。
+                    _ => {
                 // F9 fix: only clear sitting_out after turn validation passes.
                 // (A valid turn implies the player is not sitting_out, but we
                 // keep this for safety in case of race conditions.)
                 if let Some(seat) = table.find_player_by_pk_mut(&req.pk_hex) {
                     seat.sitting_out = false;
                 }
-                let action_result = match req.action.as_str() {
-                    "fold" => table.handle_fold(&req.pk_hex),
-                    "check" => table.handle_check(&req.pk_hex),
-                    "call" => table.handle_call(&req.pk_hex),
-                    "raise" => table.handle_raise(&req.pk_hex, req.amount.unwrap_or(0)),
-                    "allin" => table.handle_allin(&req.pk_hex), // D2 fix
-                    _ => None,
-                };
-                // 方案A：下注动作的 mirror 派发已移入 betting.rs 各 handle_*
-                // 的接受点（含超时自动行动路径），此处不再重复派发。
-                action_result
+                    let action_result = match req.action.as_str() {
+                        "fold" => table.handle_fold(&req.pk_hex),
+                        "check" => table.handle_check(&req.pk_hex),
+                        "call" => table.handle_call(&req.pk_hex),
+                        "raise" => table.handle_raise(&req.pk_hex, req.amount.unwrap_or(0)),
+                        "allin" => table.handle_allin(&req.pk_hex), // D2 fix
+                        _ => None,
+                    };
+                    if action_result.is_some() {
+                        if let Some(seat) = table.find_player_by_pk(&req.pk_hex).map(|s| s.id) {
+                            let seq = req.seq.unwrap_or_else(|| table.accepted_seq_of(seat));
+                            table.record_action(seat, seq, &req.action, amount_for_sig, false, false);
+                        }
+                    }
+                    // 方案A：下注动作的 mirror 派发已移入 betting.rs 各 handle_*
+                    // 的接受点（含超时自动行动路径），此处不再重复派发。
+                    action_result
+                    }
+                }
             }
         } else { None }
     };
