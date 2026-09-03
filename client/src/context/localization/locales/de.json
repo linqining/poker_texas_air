@@ -753,5 +753,15 @@
       "signoff": "ZGame Whitepaper v2.0 · Juli 2026 · Dieses Dokument dient nur technischen Referenzzwecken"
     }
   },
-  "homepage_footer-whitepaper": "Whitepaper"
+  "homepage_footer-whitepaper": "Whitepaper",
+  "socket_error_INSUFFICIENT_CHIPS": "Nicht genug Chips: Bitte stellen Sie sicher, dass Ihr Buy-in on-chain bestätigt ist, oder senken Sie den Betrag",
+  "socket_error_BUYIN_TX_PENDING": "Buy-in wird noch bestätigt, bitte warten Sie einige Sekunden und versuchen Sie es erneut",
+  "socket_error_BUYIN_TX_REVERTED": "Buy-in fehlgeschlagen: Prüfen Sie die Transaktion in Ihrer Wallet",
+  "socket_error_BUYIN_VERIFY_FAILED": "Buy-in-Verifizierung fehlgeschlagen: Bitte wiederholen Sie oder kontaktieren Sie den Support",
+  "socket_error_AMOUNT_POSITIVE": "Buy-in-Betrag muss größer als 0 sein",
+  "socket_error_AMOUNT_TOO_LARGE": "Buy-in-Betrag überschreitet das Limit",
+  "socket_error_AUTH_FAILED": "Sitzung abgelaufen, bitte Wallet neu verbinden",
+  "socket_error_NOT_TURN_OR_PHASE": "Sie sind nicht am Zug oder die Hand ist nicht in einer Wettphase",
+  "socket_error_SIG_INVALID": "Signaturprüfung fehlgeschlagen, bitte Seite neu laden",
+  "socket_error_SEQ_NON_MONOTONIC": "Aktionssequenzfehler, bitte Seite neu laden"
 }

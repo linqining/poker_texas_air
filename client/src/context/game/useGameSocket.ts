@@ -34,6 +34,7 @@ import {
   ShuffleHandleResult,
 } from './gameInternal';
 import { logger } from '../../helpers/logger';
+import { useContentContext } from '../content/contentContext';
 import { useContext } from 'react';
 import authContext from '../auth/authContext';
 import { ENDORSEMENT_REQUEST, ENDORSEMENT_SUBMIT } from '../../pokergame/actions';
@@ -103,6 +104,7 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
     stopActionLoading,
   } = params;
   const { walletAddress } = useContext(authContext)!;
+  const { getLocalizedString } = useContentContext();
 
   // TABLE_UPDATED shuffle fallback 去重：同一 shuffle 轮（phase + 已完成人数）
   // 只补交一次，防止重复广播触发重复洗牌提交。
@@ -381,20 +383,31 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       // Global error handling for server-sent errors (e.g. SIT_DOWN_V2 deck
       // out of sync). For betting action errors, close the loading overlay
       // so the player can act again.
-      socket.on('error', (data: { msg?: string; action?: string; table_id?: string }) => {
+      socket.on('error', (data: { code?: string; key?: string; msg?: string; detail?: string; action?: string; table_id?: string }) => {
         // 良性幂等：同一玩家重复提交 reveal token（同账号多浏览器/双触发竞态）
         // 被服务器拒绝属正常现象，首次提交已生效，不作为错误展示。
         if (data?.msg && data.msg.includes('already submitted or not pending')) {
           logger.log('[Socket error] benign duplicate reveal submit:', data.msg);
           return;
         }
+        if (data?.code && data.code === 'REVEAL_DUPLICATE') {
+          logger.log('[Socket error] benign duplicate reveal submit (code)');
+          return;
+        }
+        // 开发者视角：完整结构化信息进 console（code/detail 用于排障）
         logger.error('[Socket error]', data);
         if (data?.action && BETTING_ACTIONS.has(data.action)) {
           stopActionLoading();
         }
-        if (data?.msg) {
-          addMessage(data.msg);
+        // i18n：payload.key = locale 文件的稳定键（socket_error_<CODE>）；
+        // 本地化缺失时回退服务端 msg，再回退通用文案
+        let friendly: string | undefined;
+        if (data?.key) {
+          const localized = getLocalizedString(data.key);
+          if (localized !== data.key) friendly = localized;
         }
+        if (!friendly) friendly = data?.msg || '操作失败，请稍候重试';
+        addMessage(friendly);
       });
     }
     return () => {

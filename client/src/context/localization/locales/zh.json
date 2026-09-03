@@ -896,5 +896,15 @@
       "signoff": "ZGame 白皮书 v2.0 · 2026 年 7 月 · 本文件仅供技术参考"
     }
   },
-  "homepage_footer-whitepaper": "白皮书"
+  "homepage_footer-whitepaper": "白皮书",
+  "socket_error_INSUFFICIENT_CHIPS": "筹码不足：请确认买入已上链，或降低买入额度",
+  "socket_error_BUYIN_TX_PENDING": "买入交易确认中，请稍候几秒后重试",
+  "socket_error_BUYIN_TX_REVERTED": "买入交易失败：请检查钱包交易记录",
+  "socket_error_BUYIN_VERIFY_FAILED": "买入校验未通过：请稍后重试，或联系支持",
+  "socket_error_AMOUNT_POSITIVE": "买入额度必须大于 0",
+  "socket_error_AMOUNT_TOO_LARGE": "买入额度超出上限",
+  "socket_error_AUTH_FAILED": "登录已失效，请重新连接钱包",
+  "socket_error_NOT_TURN_OR_PHASE": "还没轮到你，或牌局不在下注阶段",
+  "socket_error_SIG_INVALID": "动作签名校验失败，请刷新页面重试",
+  "socket_error_SEQ_NON_MONOTONIC": "动作序列异常，请刷新页面重试"
 }

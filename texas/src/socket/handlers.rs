@@ -889,7 +889,23 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             let buyer = payload.wallet_address.clone().unwrap_or_else(|| player.wallet_address.0.clone());
             if let Err(e) = crate::starknet::chips::verify_deposit(deposit_tx_hash, &buyer, payload.amount as i64).await {
                 tracing::warn!("[SIT_DOWN_V2] STRK20 buy-in verification failed, user={}, tx={}: {}", player.id, deposit_tx_hash, e);
-                let _ = s.emit("error", &serde_json::json!({"msg": format!("Buy-in verification failed: {}", e)}));
+                // #错误标准：按失败种类映射用户可读提示（detail 保留技术信息）
+                let (code, msg) = if e.contains("not confirmed") {
+                    ("BUYIN_TX_PENDING", "买入交易确认中，请稍候几秒重试")
+                } else if e.contains("reverted") {
+                    ("BUYIN_TX_REVERTED", "买入交易失败：请检查钱包交易记录")
+                } else if e.contains("coverage") || e.contains("chip_balance") {
+                    ("INSUFFICIENT_CHIPS", "vault 筹码余额不足：请确认买入已上链")
+                } else {
+                    ("BUYIN_VERIFY_FAILED", "买入校验未通过：请稍后重试，或联系支持")
+                };
+                let _ = s.emit("error", &serde_json::json!({
+                    "code": code,
+                    "msg": msg,
+                    "detail": format!("{e}"),
+                    "action": "sit_down",
+                    "table_id": payload.table_id
+                }));
                 return;
             }
             tracing::info!("[SIT_DOWN_V2] STRK20 buy-in verified: user={}, amount={}, tx={}", player.id, payload.amount, deposit_tx_hash);
@@ -982,7 +998,11 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                         available,
                         payload.amount
                     );
-                    let _ = s.emit("error", &serde_json::json!({"msg": "Insufficient chips"}));
+                    let _ = s.emit("error", &serde_json::json!({
+                        "code": "INSUFFICIENT_CHIPS",
+                        "msg": crate::pokergame::errors::user_message("INSUFFICIENT_CHIPS"),
+                        "detail": format!("available={available}, required={}", payload.amount)
+                    }));
                     // 余额不足，回滚 rebuy_player 的座位状态变更
                     let mut gs = state.state.write().await;
                     if let Some(table) = gs.tables.get_mut(&payload.table_id) {
