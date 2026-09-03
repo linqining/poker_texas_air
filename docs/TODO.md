@@ -186,8 +186,11 @@
 - [x] **17. accepted-seq 承诺 + auto 代打标记**（2026-09-03 完成游戏层部分）：
   超时代打（fold/check/call 三路径）入日志并标 `auto`（seq 服务器分配 =
   accepted+1）；`acceptedSeqs` 向量随 ClientTable 广播（settle 前玩家可见）。
-  ⬜ 剩余（可后置）：operator 对回执的服务端签名（`Sig_operator`）——需
-  服务器游戏域密钥管理，当前以日志 + 广播向量作为可举证形态。
+  - ✅ 回签收据（2026-09-03 补全）：operator 游戏域密钥（随机生成、持久化
+    `<work_dir>/operator-game-key.json`，与钱包零派生）对每个动作决定
+    （accepted/autoAccepted/rejected+reason）签收据，ACTION_RECEIPT 广播
+    全桌（`receipts.rs`，3 单测：签验回路/篡改拒绝/密钥持久化）。客户端
+    留存回执 + acceptedSeqs 向量即可举证审查。
 - [ ] **18. auto 默认动作签名化**：服务器代打标 `(auto, server_sig)`；
   **电路必须校验"合法默认"（零下注才可 auto-check，面对下注只能 auto-fold）后才可上线**
   ——否则服务器可借代打折叠任意玩家。

@@ -60,3 +60,4 @@ pub struct ActionLogEntry {
     pub auto: bool,
     pub sig_ok: bool,
 }
+pub const ACTION_RECEIPT: &str = "ACTION_RECEIPT";

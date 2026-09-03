@@ -810,6 +810,17 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
             };
             if let Some(res) = fold_result {
                 broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
+                // #17 auto 默认动作标记：服务器代打入日志（seq 服务器分配）
+                {
+                    let mut gs = state.state.write().await;
+                    if let Some(table) = gs.tables.get_mut(&table_id) {
+                        if let Some(seat) = table.find_player_by_pk(&GamePkHex(pk_hex.clone())).map(|x| x.id) {
+                            let seq = table.accepted_seq_of(seat) + 1;
+                            table.record_action(seat, seq, "fold", 0, true, false);
+                            emit_action_receipt(io, state, table_id, &GamePkHex(pk_hex.clone()), seq, "fold", 0, "autoAccepted", "").await;
+                        }
+                    }
+                }
                 handle_turn_advance(io, state, table_id).await;
                 // 已 fold 并推进 turn，调用方不应再次检查 is_complete（避免双重推进）
                 return true;
@@ -834,6 +845,7 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
                         if let Some(seat) = table.find_player_by_pk(&GamePkHex(pk_hex.clone())).map(|x| x.id) {
                             let seq = table.accepted_seq_of(seat) + 1;
                             table.record_action(seat, seq, "check", 0, true, false);
+                            emit_action_receipt(io, state, table_id, &GamePkHex(pk_hex.clone()), seq, "check", 0, "autoAccepted", "").await;
                         }
                     }
                 }
@@ -860,6 +872,7 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
                         if let Some(seat) = table.find_player_by_pk(&GamePkHex(pk_hex.clone())).map(|x| x.id) {
                             let seq = table.accepted_seq_of(seat) + 1;
                             table.record_action(seat, seq, "call", 0, true, false);
+                            emit_action_receipt(io, state, table_id, &GamePkHex(pk_hex.clone()), seq, "call", 0, "autoAccepted", "").await;
                         }
                     }
                 }
@@ -912,6 +925,40 @@ pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>,
     }
 }
 
+/// #17：回签收据并广播 ACTION_RECEIPT（operator 无密钥时退化为未签名通知）。
+#[allow(clippy::too_many_arguments)]
+async fn emit_action_receipt(
+    io: &SocketIo,
+    state: &Arc<SocketState>,
+    table_id: u32,
+    player_pk_hex: &crate::pokergame::player::GamePkHex,
+    seq: u64,
+    action: &str,
+    amount: u64,
+    decision: &str,
+    reason: &str,
+) {
+    use crate::pokergame::receipts;
+    let Some((sk, operator_pk)) = receipts::operator() else { return };
+    let receipt = receipts::ActionReceipt {
+        table_id,
+        player_pk: player_pk_hex.0.clone(),
+        seq,
+        action: action.to_string(),
+        amount,
+        decision: decision.to_string(),
+        reason: reason.to_string(),
+        operator_pk,
+    };
+    let Some((r_hex, s_hex)) = receipts::sign_receipt_with_operator(&receipt) else {
+        let payload = serde_json::json!({ "receipt": receipt, "rHex": "", "sHex": "" });
+        super::broadcast::broadcast_action_receipt(io, state, table_id, &payload).await;
+        return;
+    };
+    let payload = serde_json::json!({ "receipt": receipt, "rHex": r_hex, "sHex": s_hex });
+    super::broadcast::broadcast_action_receipt(io, state, table_id, &payload).await;
+}
+
 pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, req: ActionRequest) {
     let result = {
         let mut gs = state.state.write().await;
@@ -934,6 +981,7 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                     "[process_action] Rejected action {} from pk={}: not their turn or not betting phase (turn={:?}, state={:?})",
                     req.action, req.pk_hex, table.turn(), table.round_state()
                 );
+                emit_action_receipt(io, state, table_id, &req.pk_hex, req.seq.unwrap_or(0), &req.action, req.amount.unwrap_or(0), "rejected", "not_turn_or_phase").await;
                 None
             } else {
                 // ===== #16/#17 抗审查：动作签名验证 + seq 单调 + 动作日志 =====
@@ -951,6 +999,7 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                                 "[process_action] REJECT action {} seat {seat} seq {seq}: invalid action signature (censorship evidence)",
                                 req.action
                             );
+                            emit_action_receipt(io, state, table_id, &req.pk_hex, seq, &req.action, amount_for_sig, "rejected", "invalid_sig").await;
                             None
                         } else if !seq_ok {
                             tracing::warn!(
@@ -958,6 +1007,7 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                                 req.action,
                                 table.accepted_seq_of(seat)
                             );
+                            emit_action_receipt(io, state, table_id, &req.pk_hex, seq, &req.action, amount_for_sig, "rejected", "seq_not_monotonic").await;
                             None
                         } else {
                             let action_result = match req.action.as_str() {
@@ -970,6 +1020,7 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                             };
                             if action_result.is_some() {
                                 table.record_action(seat, seq, &req.action, amount_for_sig, false, true);
+                                emit_action_receipt(io, state, table_id, &req.pk_hex, seq, &req.action, amount_for_sig, "accepted", "").await;
                             }
                             action_result
                         }
@@ -995,6 +1046,7 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                         if let Some(seat) = table.find_player_by_pk(&req.pk_hex).map(|s| s.id) {
                             let seq = req.seq.unwrap_or_else(|| table.accepted_seq_of(seat));
                             table.record_action(seat, seq, &req.action, amount_for_sig, false, false);
+                            emit_action_receipt(io, state, table_id, &req.pk_hex, seq, &req.action, amount_for_sig, "accepted", "").await;
                         }
                     }
                     // 方案A：下注动作的 mirror 派发已移入 betting.rs 各 handle_*

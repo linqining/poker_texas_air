@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod receipts;
 pub mod betting;
 pub mod deck;
 pub mod error;

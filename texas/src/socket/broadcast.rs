@@ -378,3 +378,33 @@ pub async fn broadcast_player_update(
         Err(e) => tracing::warn!("broadcast_player_update emit failed: {}", e),
     }
 }
+
+/// #17：ACTION_RECEIPT 广播（全桌可见；客户端留存作为审查证据）。
+pub(crate) async fn broadcast_action_receipt(
+    io: &SocketIo,
+    state: &Arc<SocketState>,
+    table_id: u32,
+    payload: &serde_json::Value,
+) {
+    let socket_ids: Vec<String> = {
+        let gs = state.state.read().await;
+        let Some(table) = gs.tables.get(&table_id) else { return };
+        table
+            .players()
+            .iter()
+            .flat_map(|(_, wallet_addr)| {
+                gs.players
+                    .values()
+                    .filter(|p| p.wallet_address.0.eq_ignore_ascii_case(&wallet_addr.0))
+                    .map(|p| p.socket_id.clone())
+            })
+            .collect()
+    };
+    for sid in socket_ids {
+        if let Ok(sid) = sid.parse::<socketioxide::socket::Sid>() {
+            if let Some(socket) = io.get_socket(sid) {
+                let _ = socket.emit(crate::pokergame::actions::ACTION_RECEIPT, payload);
+            }
+        }
+    }
+}
