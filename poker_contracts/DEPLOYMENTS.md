@@ -198,3 +198,21 @@ settlement_private 电路公开段），**链上部署被 gas 预算阻塞**：
 → `set_settlement_contract(DUAL_OLD)` → dual v3 以新 vault 地址构造。
 迁移：旧 vault 玩家余额经公开 `withdraw` 提取后在新 vault 重新 deposit
 （或运营 `deposit_for`）。
+
+### ✅ 已部署（2026-09-04，sepolia）
+
+| 合约 | 地址 | 说明 |
+| --- | --- | --- |
+| Vault v3 | `0x0629385f1e3b43684828cf46488fbd0ef2b1ec0dc27c7827ecbe6b2f15c7fa13` | class `0x2c829f5c...`；#33 在局锁定 + withdraw_to + unshield 门 |
+| Dual v3 | `0x516b8289a8b154644b5098e4d4301f2f0c9cf1fd67cdac0516b439094d35f61` | class `0x2e039e95...`；#16/#17 动作签名预留 + `verify_and_settle_dapv_stark_private_v2` 零明文结算 |
+| CashoutUnshieldHelper | `0x1c35d8083e25c166bfa033d77009541a2a3a79a5beeca58e7a0a9134a06aaf1` | #25 unshield 提现通道；已在 vault v3 `set_unshield_helper` 授权 |
+
+接线完成：vault v3 `set_settlement_contract(Dual v3)`、`set_unshield_helper(CashoutUnshieldHelper)`；
+dual v3 `set_claim_helper(0x393f...)` + `set_circuit_program_hash(0x2ad1...)`。
+
+**迁移步骤（切换 texas/.env 前，玩家先从旧 vault 提走/花掉余额）**：
+1. `texas/.env`：`STARKNET_VAULT_ADDRESS` → vault v3、`STARKNET_DUAL_SETTLEMENT_ADDRESS` → dual v3，重启服务器；
+2. 旧 vault 余款：`0x1e9f4a93...` 上的剩余 STRK 由 owner `withdraw` 收回。
+
+相关 TX：vault declare `0x14fb018a...`、dual declare `0x1d5aa149...`（类 `0x2e039e95`）、
+helper declare `0x5d751a8e...`、接线 TX 均 ACCEPTED_ON_L2（见各 `set_*` 调用）。
