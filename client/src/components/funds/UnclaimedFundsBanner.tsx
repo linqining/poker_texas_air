@@ -27,12 +27,19 @@ const wasRecentlyDismissed = (): boolean => {
   }
 };
 
+// 宿主页面（Lobby/Home）多为居中 flex 列布局，flex 子项会 shrink-to-fit
+// 被长文本撑满整行——外层 wrapper 强制自身宽度并居中，与页面内容栏对齐
+const BannerWrap = styled.div`
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto 1.25rem;
+`;
+
 const Banner = styled.section`
   position: relative;
   display: flex;
   align-items: center;
   gap: 0.9rem;
-  margin-bottom: 1.25rem;
   padding: 0.8rem 1.1rem;
   background: linear-gradient(135deg, #fffbeb, #fef3c7);
   border: 1px solid rgba(245, 158, 11, 0.35);
@@ -154,7 +161,8 @@ const UnclaimedFundsBanner: React.FC = () => {
 
   return (
     <>
-      <Banner role="status" aria-live="polite">
+      <BannerWrap>
+        <Banner role="status" aria-live="polite">
         <BannerIcon aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
             <circle cx="12" cy="12" r="10" fill="#f59e0b" />
@@ -186,7 +194,8 @@ const UnclaimedFundsBanner: React.FC = () => {
             />
           </svg>
         </DismissButton>
-      </Banner>
+        </Banner>
+      </BannerWrap>
       {showClaim && (
         <ClaimRewardsModal
           isOpen={showClaim}

@@ -21,3 +21,4 @@ client/.env*
 !.env.example
 poker_protocol_lean/.lake/
 texas/.env
+.vite
