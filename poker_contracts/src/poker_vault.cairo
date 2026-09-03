@@ -33,12 +33,28 @@ pub trait IPokerVault<TContractState> {
     /// Withdraw up to `amount` chips as STRK20 tokens.
     fn withdraw(ref self: TContractState, amount: u256);
 
+    /// #25 全链路私密提现：burn `player` 的 `amount` 筹码，STRK 直接转到
+    /// `recipient`（如 unshield helper / 隐私池），**不经过玩家公开钱包**。
+    /// 仅授权 helper 可调用（与 `burn_chips` 同一信任门）。
+    fn withdraw_to(
+        ref self: TContractState,
+        player: ContractAddress,
+        recipient: ContractAddress,
+        amount: u256,
+    );
+
     /// Plan D P2.2 (unshield): burn `player`'s chips without any token
     /// movement. Only the authorized helper (PokerVaultAnonymizer) may call
     /// it; the STRK conservation happens inside the privacy pool (the pool
     /// transfers the user's burned input note to the helper, which returns
     /// it to the pool as the recipient's output note).
     fn burn_chips(ref self: TContractState, player: ContractAddress, amount: u256);
+
+    /// Owner-gated: authorize the helper contract allowed to call
+    /// `withdraw_to`（#25 全链路私密提现的 unshield helper）。
+    fn set_unshield_helper(ref self: TContractState, helper: ContractAddress);
+    /// View: the authorized unshield helper.
+    fn unshield_helper(self: @TContractState) -> ContractAddress;
 
     /// Owner-gated: authorize the helper contract allowed to call
     /// `burn_chips` (the PokerVaultAnonymizer deployment).
@@ -116,6 +132,8 @@ pub mod PokerVault {
         settlement_contract: ContractAddress,
         /// Helper contract authorized to call burn_chips (PokerVaultAnonymizer).
         authorized_helper: ContractAddress,
+        /// #25：unshield 方向 helper（chip_to_note 提现通道）。
+        unshield_helper: ContractAddress,
         /// Per-player payout claim commitments (0 = unregistered).
         payout_commitments: Map<ContractAddress, felt252>,
         #[substorage(v0)]
@@ -137,6 +155,7 @@ pub mod PokerVault {
         ChipDebited: ChipDebited,
         SettlementContractSet: SettlementContractSet,
         AuthorizedHelperSet: AuthorizedHelperSet,
+        UnshieldHelperSet: UnshieldHelperSet,
         PayoutCommitmentRegistered: PayoutCommitmentRegistered,
         EscrowFunded: EscrowFunded,
     }
@@ -152,6 +171,11 @@ pub mod PokerVault {
         hand_binding: felt252,
         escrow: ContractAddress,
         amount: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct UnshieldHelperSet {
+        helper: ContractAddress,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -236,6 +260,37 @@ pub mod PokerVault {
             self.emit(Withdraw { player: caller, amount });
         }
 
+        /// #25 全链路私密提现：burn `player` 的 `amount` 筹码，STRK 直接转到
+        /// `recipient`（如 unshield helper / 隐私池），**不经过玩家公开钱包**。
+        /// 仅授权 helper 可调用（与 `burn_chips` 同一信任门）。
+        fn withdraw_to(
+            ref self: ContractState,
+            player: ContractAddress,
+            recipient: ContractAddress,
+            amount: u256,
+        ) {
+            self.pausable.assert_not_paused();
+            assert!(
+                starknet::get_caller_address() == self.unshield_helper.read(),
+                "Only the unshield helper"
+            );
+            assert!(amount > 0_u256, "Amount must be > 0");
+            assert!(!player.is_zero(), "Player must be set");
+            assert!(!recipient.is_zero(), "Recipient must be set");
+
+            let current = self.chip_balances.read(player);
+            assert!(current >= amount, "Insufficient chip balance");
+            self.chip_balances.write(player, current - amount);
+            self.total_chips.write(self.total_chips.read() - amount);
+
+            let token = self.token_address.read();
+            let dispatcher = IERC20Dispatcher { contract_address: token };
+            let ok = dispatcher.transfer(recipient, amount);
+            assert!(ok, "Token transfer failed");
+
+            self.emit(ChipDebited { player, amount });
+        }
+
         fn burn_chips(ref self: ContractState, player: ContractAddress, amount: u256) {
             self.pausable.assert_not_paused();
             assert!(
@@ -256,6 +311,16 @@ pub mod PokerVault {
             self.ownable.assert_only_owner();
             self.authorized_helper.write(helper);
             self.emit(AuthorizedHelperSet { helper });
+        }
+
+        fn set_unshield_helper(ref self: ContractState, helper: ContractAddress) {
+            self.ownable.assert_only_owner();
+            self.unshield_helper.write(helper);
+            self.emit(UnshieldHelperSet { helper });
+        }
+
+        fn unshield_helper(self: @ContractState) -> ContractAddress {
+            self.unshield_helper.read()
         }
 
         fn register_payout_commitment(ref self: ContractState, commitment: felt252) {

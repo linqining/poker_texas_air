@@ -14,3 +14,7 @@ mod poker_dual_settlement;
 /// Part A Phase 1 (SETTLEMENT_PRIVACY_PLAN.md): winners claim escrowed
 /// payouts privately via secp256k1-signed STRK20 pool claims.
 mod settlement_payout_anonymizer;
+
+/// #25 全链路私密提现（unshield 方向第二个 anonymizer）：vault 筹码 →
+/// STRK20 池 open note，不经玩家公开钱包。
+mod cashout_unshield_helper;

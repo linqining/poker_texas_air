@@ -211,8 +211,17 @@
 - [ ] **24. 性能 followups**（需 release 基准 + soundness 矩阵后实施）：
   专用标量乘 AIR、MSM 平衡树、limb backend 选型、outer_aggregate 流式编码、
   错误分类、`/metrics` 路由。见 `PERFORMANCE_FOLLOWUPS.md`。
-- [ ] **25. 全链路私密提现**：vault `withdraw_to` + 第二个 anonymizer（unshield 方向）。
-  见 `docs/starknet-plan-b-anonymizer.md` §已知 seam。
+- [x] **25. 全链路私密提现**（2026-09-03 合约完成，snforge 77/77 ✅）：
+  - vault `withdraw_to(player, recipient, amount)`：helper 门控（独立
+    `unshield_helper` 信任门 + `set_unshield_helper` owner 设置），烧筹码并把
+    STRK 定向转出（不经过玩家公开钱包）；
+  - 第二个 anonymizer `CashoutUnshieldHelper`（unshield 方向）：
+    `chip_to_note(amount, note_id)`——玩家发起，vault.withdraw_to 进 helper →
+    approve 池 → 返回 `OpenNoteDeposit`（与 anonymizer 返回形状一致，池侧
+    集成属 SDK_SEAM）。snforge 3 用例：烧筹码+approve 断言、无筹码回退、
+    非绕过 helper 直调 vault 回退。
+  - ⬜ 剩余（依赖外部）：池侧 note 应用入口（SDK_SEAM，随 #12 SDK）；
+    生产部署归入下一轮 vault/合约重部署批次。
 - [ ] **26. STRK20 官方 SDK 跟踪**：SDK 上 npm 后核对 `tryComposeInvoke` 接口
   （当前运行时探测 + 公开路径回退）。
 - [ ] **27. 杂项**：`texas/src/starknet/hooks.rs:168` 滞后 TODO 注释清理。

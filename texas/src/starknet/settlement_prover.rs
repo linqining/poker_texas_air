@@ -503,3 +503,17 @@ mod tests {
         assert!(parsed.iter().all(|h| h.starts_with("0x")));
     }
 }
+
+
+#[cfg(test)]
+mod selector_probe {
+    #[test]
+    fn print_action_selectors() {
+        let names = ["transfer", "approve", "balance_of", "allowance", "mint",
+            "withdraw_to", "token", "chip_to_note", "shieldable_balance", "vault", "pool",
+            "set_unshield_helper", "unshield_helper", "set_authorized_helper"];
+        for n in names {
+            println!("SEL {} = {:x}", n, starknet::core::utils::starknet_keccak(n.as_bytes()));
+        }
+    }
+}
