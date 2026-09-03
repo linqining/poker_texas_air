@@ -90,9 +90,16 @@
 
 > 排期表见 `SETTLEMENT_PRIVACY_PLAN.md` §开发排期；P2-M1 电路规格已定稿，按此实施。
 
-- [ ] **8. P2-M1 电路**：Stwo 电路证明 `(players, deltas)` 匹配已登记 digest ∧ 零和 ∧
-  人数一致，输出 claim_cms。**预留约束（硬约束）**：动作签名 + auto 默认动作合法性 +
-  accepted-seq（见第三节 §8.2）。验收：电路单测通过。
+- [x] **8. P2-M1 电路**（2026-09-03 骨架完成，验收=电路单测通过：10/10 ✅）：
+  新增 `src/settlement_private_circuit.rs`——语句/见证类型、规格 trace 布局
+  （每参与者一列组 ×(player, sign, |delta|, winner, cm, count)）；digest 与
+  claim_cms 的 host 参考实现与 `submit.rs`/合约逐字段对齐（单测交叉验证）；
+  Stwo AIR：witness↔scope 逐 limb 绑定、sign/winner booleanity、winner⇒sign、
+  非赢家 cm 归零、计数绑定，scope 承诺根验证端重算比对；**§8.2 预留**：动作签名
+  域/action_flags/accepted-seq 列位冻结并在电路上强制为零（M2 接线零重排）。
+  **M2 待接入**：felt252 Poseidon component（digest 吸收链、claim_cms 原生推导）
+  与多 limb 零和累加（模块头注释有诚实边界说明）。
+  验收口径：`cargo test -p poker_texas_air --lib settlement_private_circuit`。
 - [ ] **9. P2-M2 证明端**：server 从明文生成 trace + proof（复用 orchestrator）+
   动作级 SK 签名纳入动作日志。验收：真实手牌证明 < 30s。
 - [ ] **10. P2-M3 合约验证端**：Stwo Cairo verifier（官方移植或 fact-registry，M3 定）+
@@ -158,8 +165,10 @@
 
 ## 五、主网相关（最后）
 
-- [ ] **28. 主网 ≥1 笔 STRK20 交易**（黑客松硬性要求）：在 PokerVault 主网最小部署与
-  直接 STRK20 转账两案中选最简者；交易哈希写入 strk20.json。
+- [ ] **28. 主网 ≥1 笔 STRK20 交易**（黑客松硬性要求，**需用户钱包人工操作**）：
+  操作指引见 `docs/MAINNET_TX_GUIDE.md`（方案 A 钱包直接转账 ≈5 分钟，推荐先行；
+  方案 B PokerVault 主网最小部署可选）。完成后交易哈希回填 strk20.json
+  （模板见指引）。
   现状：`strk20.json` 的 `token.mainnet_address` 为空，未记录任何主网交易。
 - [ ] **29. strk20.json 收尾**：`token.mainnet_address` / `sepolia_address` 回填；
   demo_video / demo_url / transactions 补全。

@@ -133,6 +133,9 @@ pub mod ristretto_shuffle_air;
 /// Statement-level projection of L1 sparse-Merkle openings onto the shared
 /// hash-prover seam.
 pub mod smt_statements;
+/// P2-M1 结算隐私电路骨架（Stwo）：公开语句展开 scope + witness trace 绑定，
+/// digest/claim_cms 参考实现与链上逐字段对齐；§8.2 动作签名域预留列强制零化。
+pub mod settlement_private_circuit;
 
 /// Canonical tagged-seat fixture operations, available only to tests and debug test helpers.
 #[cfg(any(test, feature = "test-helpers"))]
