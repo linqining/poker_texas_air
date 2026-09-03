@@ -70,7 +70,11 @@
     等自然过期）；④ 前端展示"在局锁定额度"（可提 vs 锁定），锁定内提款给出
     预期提示；⑤ e2e：入座锁 → 中途 withdraw 被拒 → 结算解锁（配合 #11 联调）。
 
-- [x] **1. 牌局抽水显示**（2026-09-03 完成）
+- [x] **1. 牌局抽水显示**（2026-09-03 完成；2026-09-04 补漏：亮牌路径漏收台费）
+  - 增补：`on_reveal_complete(ShowdownReveal)` 分池前漏调
+    `collect_rake_for_settlement`——链上 deltas 含 5% 台费而前端筹码不扣，
+    两本账每手偏差 5%（服务端 stack 总和守恒、牌史 rake=0）。已补齐，
+    前端 stack/牌史 rake 字段/链上 delta 三者一致。
   - 实现：新增 `texas/src/pokergame/rake.rs`（公式与分层分摊逐字对齐链上
     `settle.rs`/`settlement.rs`，带单测）；摊牌路径 `collect_rake_for_settlement`
     在分池前抽水（争夺层按比例分摊、uncontested 层豁免）；fold-win 不抽水；
