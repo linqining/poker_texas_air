@@ -8,6 +8,7 @@ import {
 import { motion, useInView, useScroll, useTransform } from 'framer-motion'
 import { useRef, useState, useEffect, useCallback, useMemo } from 'react'
 import { useContentContext } from '../context/content/contentContext'
+import UnclaimedFundsBanner from '../components/funds/UnclaimedFundsBanner'
 
 function FadeIn({ children, delay = 0, direction = 'up' }: { children: React.ReactNode; delay?: number; direction?: 'up' | 'down' | 'left' | 'right' }) {
   const ref = useRef(null)
@@ -136,6 +137,8 @@ export default function SecretPokerHomePage() {
 
   return (
     <S.Home>
+      {/* 未领取资金提醒（登录且金库有筹码时常驻） */}
+      <UnclaimedFundsBanner />
       {/* Subtle ambient particles */}
       <S.Particles>
         {particles.map((p) => (

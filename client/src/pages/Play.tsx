@@ -21,6 +21,8 @@ import { GameUI } from '../components/game/GameUI';
 import { GameStateInfo } from '../components/game/GameStateInfo';
 import PokerCard from '../components/game/PokerCard';
 import { useContentContext } from '../context/content/contentContext';
+import { useGlobalContext } from '../context/global/globalContext';
+import { chipsToStrkText } from '../starknet/config';
 import { PlayerContext } from '../context/player/PlayerContext';
 import Loader from '../components/loading/Loader';
 import { logger } from '../helpers/logger';
@@ -81,6 +83,8 @@ const Play: React.FC = () => {
   } = useContext(gameContext)!;
   const { getLocalizedString } = useContentContext();
   const { pkHex } = useContext(PlayerContext)!;
+  // 离开确认时提醒金库里还有未领取筹码（1 chip = 0.001 STRK）
+  const { chipsAmount } = useGlobalContext();
 
   const [bet, setBet] = useState(0);
   const [isLeaving, setIsLeaving] = useState(false);
@@ -242,6 +246,25 @@ const Play: React.FC = () => {
             <Text textAlign="center" style={{ color: theme.colors.mutedText }}>
               {getLocalizedString('leave_confirm-message')}
             </Text>
+            {(chipsAmount ?? 0) > 0 && (
+              <Text
+                textAlign="center"
+                style={{
+                  margin: 0,
+                  padding: '0.5rem 0.75rem',
+                  background: '#fffbeb',
+                  border: '1px solid rgba(245, 158, 11, 0.35)',
+                  borderRadius: theme.radius.sm,
+                  color: '#92400e',
+                  fontSize: '0.85rem',
+                  lineHeight: 1.45,
+                }}
+              >
+                {getLocalizedString('funds-leave_prefix')}
+                {chipsToStrkText(chipsAmount ?? 0)} STRK
+                {getLocalizedString('funds-leave_suffix')}
+              </Text>
+            )}
             <div
               style={{
                 display: 'flex',

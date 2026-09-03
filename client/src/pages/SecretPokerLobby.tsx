@@ -11,6 +11,7 @@ import { useModalContext } from '../context/modal/modalContext';
 import authContext from '../context/auth/authContext';
 import Text from '../components/typography/Text';
 import { PlayerName } from '../components/game/PlayerName';
+import UnclaimedFundsBanner from '../components/funds/UnclaimedFundsBanner';
 
 /* ===== Styled Components ===== */
 
@@ -191,6 +192,7 @@ export default function Lobby() {
 
   return (
     <PageWrapper>
+      <UnclaimedFundsBanner />
       <WelcomeHeading>
         {getLocalizedString('main_page-salutation')}{' '}
         <span><PlayerName name={userName} />!</span>

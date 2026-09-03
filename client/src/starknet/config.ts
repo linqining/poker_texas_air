@@ -23,6 +23,10 @@ export const WEI_PER_CHIP = 1_000_000_000_000_000n;
 /** 1 STRK = 1_000 chips. */
 export const CHIPS_PER_STRK = 1_000;
 
+/** 筹码数 → STRK 显示文本（4 位小数）。与 ClaimRewardsModal 的换算一致。 */
+export const chipsToStrkText = (chips: number): string =>
+  (Number(BigInt(Math.max(0, Math.floor(chips))) * WEI_PER_CHIP) / 1e18).toFixed(4);
+
 const DEFAULT_SEPOLIA_RPCS = [
   'https://starknet-sepolia-rpc.publicnode.com',
   'https://starknet-sepolia.public.blastapi.io',
