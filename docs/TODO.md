@@ -80,6 +80,8 @@
     `end_without_showdown`）统一记录；HTTP 端点 `GET /api/tables/:id/history`
     与 `/history/:hand_seq`；前端 `HandHistoryPanel`（Play 页"记录"按钮，
     行内展开公共牌/座位明细，i18n zh/en/de）。
+  - 增补（2026-09-03）：记录每座位的**已亮出底牌**（摊牌亮牌座位才记录，
+    弃牌/未亮牌不暴露——隐私一致）；看板展开行内渲染座位底牌。
 
 ### P1 — 短期
 
