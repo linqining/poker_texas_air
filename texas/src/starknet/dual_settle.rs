@@ -602,7 +602,9 @@ fn build_dual_settlement_with(
     // deltas: Span<i128>（负数取模补，与合约 from_felt_signed_i128 对齐）。
     // 单位与 legacy 路径一致：vault 以 wei 记账，这里放大为 wei，
     // 与 register 的 settlement_digest（同样按 wei 计算）保持一致。
-    const DAPV_WEI_PER_CHIP: i128 = 100_000_000_000_000;
+    // 2026-09-04 修复：曾局部定义 1e14 与全局 config::WEI_PER_CHIP(1e15) 差
+    // 10 倍（买入 1e15 记账 / 结算 1e14 挪账），统一引用全局常量。
+    const DAPV_WEI_PER_CHIP: i128 = super::config::WEI_PER_CHIP as i128;
     settle_calldata.push(Felt::from(settlement.deltas.len() as u64));
     for d in &settlement.deltas {
         let wei = d

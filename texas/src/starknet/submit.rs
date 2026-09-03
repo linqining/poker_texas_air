@@ -8,7 +8,9 @@
 //! dev 模式（未配置 settlement 合约/操作员）只生成 calldata 并记日志，
 //! 保证无链环境可以跑完整流程（证明生成照常执行）。
 
-use poker_l1::vm::contracts::texas_poker::settlement::{derive_settlement_plan, SettlementPlan};
+use poker_l1::vm::contracts::texas_poker::settlement::{
+    derive_fold_win_plan, derive_settlement_plan, SettlementPlan,
+};
 use poker_texas_air::outer_aggregate::{prove_outer_aggregate, verify_outer_aggregate, VerifiedOuterAggregate};
 use poker_texas_air::orchestrator::Orchestrator;
 use poker_texas_air::starknet_settlement::{
@@ -97,8 +99,22 @@ pub fn settle_hand(
         .unwrap_or(&mirror.table);
 
     // 1. 分池 / rake / awards（库内计算，含零和校验）。
-    let plan = derive_settlement_plan(settle_table)
-        .map_err(|e| format!("derive_settlement_plan failed: {e}"))?;
+    //    fold-win 分派：全场仅剩一名未弃牌玩家时走 derive_fold_win_plan
+    //    （无牌面校验，"no flop, no drop" 抽水）。2026-09-04 前 fold-win 手
+    //    在 derive_settlement_plan 的牌面校验上必然失败（board<5 / 未亮牌）
+    //    → 输赢从不上链（线上复现：玩家链上余额只剩买入流水）。
+    let unfolded_count = settle_table
+        .seats
+        .iter()
+        .filter(|seat| seat.is_occupied() && !seat.is_folded() && !seat.has_left_hand())
+        .count();
+    let plan = if unfolded_count <= 1 {
+        derive_fold_win_plan(settle_table)
+            .map_err(|e| format!("derive_fold_win_plan failed: {e}"))?
+    } else {
+        derive_settlement_plan(settle_table)
+            .map_err(|e| format!("derive_settlement_plan failed: {e}"))?
+    };
 
     // 2. 证明链（receipt chain）。
     let _chain = Orchestrator::prove_and_verify_chain(tasks)
@@ -141,7 +157,10 @@ pub fn settle_hand(
     // SettlementPlan 的 deltas 以服务端 chips（1 chip = WEI_PER_CHIP wei）计。
     // settle_hand 上链前必须放大到 wei，且 Poseidon digest 与 calldata 用同一
     // 放大值（合约按 calldata 重算承诺与 register root 比对）。
-    const WEI_PER_CHIP: i128 = 100_000_000_000_000;
+    // 2026-09-04 修复：此处曾局部定义 1e14，与全局 config::WEI_PER_CHIP(1e15)
+    // 差 10 倍——买入按 1e15 记账、结算按 1e14 挪账，链上余额与游戏输赢每手
+    // 漂移 9/10。统一引用全局常量，杜绝两份定义（dual_settle 同步修）。
+    const WEI_PER_CHIP: i128 = super::config::WEI_PER_CHIP as i128;
     let deltas_wei: Vec<i128> = settle
         .deltas()
         .iter()

@@ -153,3 +153,15 @@ impl StarknetConfig {
             && !self.operator_private_key.is_empty()
     }
 }
+
+#[cfg(test)]
+mod wei_tests {
+    /// 2026-09-04 回归：结算腿（submit.rs / dual_settle.rs 的 deltas 放大）
+    /// 与买入记账（client WEI_PER_CHIP 同值）必须用同一常量。曾出现局部
+    /// 定义 1e14 与全局 1e15 差 10 倍 → 链上余额与游戏输赢每手漂移 9/10。
+    /// 客户端对应 client/src/starknet/config.ts（1 chip = 1e15 wei = 0.001 STRK）。
+    #[test]
+    fn wei_per_chip_is_locked_to_client_parity() {
+        assert_eq!(super::WEI_PER_CHIP, 1_000_000_000_000_000u128);
+    }
+}

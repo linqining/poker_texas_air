@@ -27,13 +27,31 @@ impl Table {
             let total_win = self.pot() + self.summary.side_pots.iter().map(|sp| sp.amount).sum::<u64>();
             let winner_id = winner.id;
             let player_name = winner.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+            // 抽水（"no flop, no drop"，2026-09-04）：翻前结束不抽；翻后结束
+            // 对扣除未跟注返还后的底池抽——与链上 derive_fold_win_plan 同公式，
+            // 前端筹码 / 牌史 rake / 链上 delta 三本账一致。此前 fold-win 恒不抽，
+            // 而链上（修复后）会抽，两本账在翻后弃牌手上分叉。
+            let flop_seen = self.mental_poker_game.list_revealed_community_cards().len() >= 3;
+            let mut seat_bets: Vec<(u32, u64)> = self.seats().iter()
+                .map(|(id, s)| (*id, s.total_bet))
+                .collect();
+            seat_bets.sort_unstable_by_key(|(id, _)| *id);
+            let winner_idx = seat_bets.iter().position(|(id, _)| *id == winner_id);
+            let rake = winner_idx
+                .map(|idx| crate::pokergame::rake::fold_win_rake(total_win, &seat_bets.iter().map(|(_, b)| *b).collect::<Vec<_>>(), idx, flop_seen))
+                .unwrap_or(0);
+            let net_win = total_win.saturating_sub(rake);
             if let Some(seat) = self.local_seats.get_mut(&winner_id) {
-                seat.win_hand(total_win);
+                seat.win_hand(net_win);
             }
-            self.summary.win_messages.push(format!("{} wins ${:.2}", player_name, total_win));
+            self.summary.rake_collected = rake;
+            // 与摊牌路径同口径：派奖后 pot 记净额（record_hand_history 的
+            // gross = pot + rake_collected 重建毛额）。
+            self.set_pot(self.pot().saturating_sub(rake));
+            self.summary.win_messages.push(format!("{} wins ${:.2}", player_name, net_win));
         }
         self.end_hand();
-        // 终局记录入看板存储（P0-2；fold-win 无台费）
+        // 终局记录入看板存储（P0-2；fold-win 翻前无台费、翻后按公式）
         self.record_hand_history();
 
         // fold-win 手牌同样上链结算（showdown 路径由 finish_showdown 触发）。

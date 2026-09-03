@@ -16,7 +16,8 @@
 use crate::object_model::ObjectID;
 use crate::vm::contracts::texas_poker::card::Card;
 use crate::vm::contracts::texas_poker::settlement::{
-    SETTLEMENT_SEATS, SettlementBoards, SettlementPlan, derive_settlement_plan_for_boards,
+    SETTLEMENT_SEATS, SettlementBoards, SettlementPlan, derive_fold_win_plan,
+    derive_settlement_plan_for_boards,
 };
 use crate::vm::contracts::texas_poker::side_pot::calculate_side_pots;
 use crate::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
@@ -251,6 +252,164 @@ pub fn raked_odd_chip_split() -> SettlementScene {
     }
 }
 
+/// Fold-win（全场仅剩一名未弃牌玩家）场景集合——走
+/// [`derive_fold_win_plan`]（无牌面校验 + "no flop, no drop" 抽水）。
+/// `plan()` 语义不适用（fold 场景不是摊牌），测试直接调
+/// `derive_fold_win_plan(&scene.table)`。
+pub mod fold_win {
+    use super::{Card, SettlementBoards, SettlementScene, SeatStatus, base_table, seat};
+
+    fn raked_rules(table: &mut crate::vm::contracts::texas_poker::types::TexasPokerTable) {
+        table.rules.rake_mode =
+            crate::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+        table.rules.rake_bps = 500;
+        table.rules.rake_cap = 1_000;
+    }
+
+    /// 翻前盲注偷池：BB 面对加注弃牌，board 空 → 不抽水。
+    pub fn preflop_blind_steal() -> SettlementScene {
+        let mut table = base_table(2);
+        seat(
+            &mut table,
+            0,
+            970,
+            30,
+            SeatStatus::Active,
+            [Card::new(0, 14), Card::new(1, 14)],
+        );
+        seat(
+            &mut table,
+            1,
+            980,
+            20,
+            SeatStatus::Folded,
+            [Card::new(2, 2), Card::new(3, 3)],
+        );
+        table.pot = 50;
+        table.chip_pool = 5_000;
+        raked_rules(&mut table);
+        SettlementScene {
+            boards: SettlementBoards::single(table.community_cards.to_vec()),
+            table,
+        }
+    }
+
+    /// 翻后弃牌 + 未跟注返还排除：A 下注 300，B 跟到 100 后翻牌弃牌。
+    /// 底池 400，未跟注 200，争夺 200 → 抽 10。
+    pub fn postflop_uncalled_excluded() -> SettlementScene {
+        let mut table = base_table(2);
+        seat(
+            &mut table,
+            0,
+            700,
+            300,
+            SeatStatus::Active,
+            [Card::new(0, 14), Card::new(1, 14)],
+        );
+        seat(
+            &mut table,
+            1,
+            900,
+            100,
+            SeatStatus::Folded,
+            [Card::new(2, 2), Card::new(3, 3)],
+        );
+        table.pot = 400;
+        table.chip_pool = 5_000;
+        raked_rules(&mut table);
+        table.community_cards = vec![
+            Card::new(2, 4),
+            Card::new(3, 6),
+            Card::new(2, 8),
+        ]
+        .try_into()
+        .unwrap();
+        SettlementScene {
+            boards: SettlementBoards::single(table.community_cards.to_vec()),
+            table,
+        }
+    }
+
+    /// 三人翻后弃牌：未跟注按所有非赢家的最高下注计。
+    /// bets [500(winner), 300, 100]：未跟注 200，争夺 700 → 抽 35。
+    pub fn postflop_three_way() -> SettlementScene {
+        let mut table = base_table(3);
+        seat(
+            &mut table,
+            0,
+            500,
+            500,
+            SeatStatus::Active,
+            [Card::new(0, 14), Card::new(1, 14)],
+        );
+        seat(
+            &mut table,
+            1,
+            700,
+            300,
+            SeatStatus::Folded,
+            [Card::new(2, 2), Card::new(3, 3)],
+        );
+        seat(
+            &mut table,
+            2,
+            900,
+            100,
+            SeatStatus::Folded,
+            [Card::new(1, 5), Card::new(2, 7)],
+        );
+        table.pot = 900;
+        table.chip_pool = 5_000;
+        raked_rules(&mut table);
+        table.community_cards = vec![
+            Card::new(2, 4),
+            Card::new(3, 6),
+            Card::new(2, 8),
+        ]
+        .try_into()
+        .unwrap();
+        SettlementScene {
+            boards: SettlementBoards::single(table.community_cards.to_vec()),
+            table,
+        }
+    }
+
+    /// 翻后弃牌触达 cap：200 万全争夺，5% = 10 万 > cap 1000 → 1000。
+    pub fn postflop_cap() -> SettlementScene {
+        let mut table = base_table(2);
+        seat(
+            &mut table,
+            0,
+            0,
+            1_000_000,
+            SeatStatus::Active,
+            [Card::new(0, 14), Card::new(1, 14)],
+        );
+        seat(
+            &mut table,
+            1,
+            0,
+            1_000_000,
+            SeatStatus::Folded,
+            [Card::new(2, 2), Card::new(3, 3)],
+        );
+        table.pot = 2_000_000;
+        table.chip_pool = 5_000_000;
+        raked_rules(&mut table);
+        table.community_cards = vec![
+            Card::new(2, 4),
+            Card::new(3, 6),
+            Card::new(2, 8),
+        ]
+        .try_into()
+        .unwrap();
+        SettlementScene {
+            boards: SettlementBoards::single(table.community_cards.to_vec()),
+            table,
+        }
+    }
+}
+
 /// Run-it-twice with per-board winners: seat 0 wins board 1, seat 1 wins
 /// board 2, exercising both runout slots of every layer.
 pub fn run_it_twice_split_winners() -> SettlementScene {
@@ -367,6 +526,62 @@ mod tests {
         let mut awards = [plan.awards[0], plan.awards[1]];
         awards.sort();
         assert_eq!(awards, [47, 48]);
+    }
+
+    // ---- fold-win（"no flop, no drop"）----
+
+    #[test]
+    fn fold_win_preflop_blind_steal_is_never_raked() {
+        let scene = fold_win::preflop_blind_steal();
+        let plan = derive_fold_win_plan(&scene.table).expect("fold plan derives");
+        // 翻前结束：零抽水，赢家独得底池，守恒通过 validate。
+        assert_eq!(plan.rake, 0);
+        assert_eq!(plan.awards[0], 50);
+        assert_eq!(plan.total_awards, 50);
+        assert_eq!(plan.winner_mask, 0b001);
+        assert_eq!(plan.pots.len(), 1);
+        assert_eq!(plan.pots[0].rake, 0);
+    }
+
+    #[test]
+    fn fold_win_postflop_rakes_only_contested_money() {
+        let scene = fold_win::postflop_uncalled_excluded();
+        let plan = derive_fold_win_plan(&scene.table).expect("fold plan derives");
+        // 底池 400，未跟注返还 200（A 的 300 − B 的 100）不抽；
+        // 争夺 200 × 5% = 10；赢家净得 390。
+        assert_eq!(plan.rake, 10);
+        assert_eq!(plan.awards[0], 390);
+        assert_eq!(plan.total_awards, 390);
+        assert_eq!(plan.pots[0].rake, 10);
+        assert_eq!(plan.pots[0].net_amount, 390);
+        // 零和（对账用）：赢家 delta = 390 − 300 = +90；输家 = −100；
+        // treasury = +10。
+        assert_eq!(plan.awards[0] as i128 - 300, 90);
+        assert_eq!(100_i128 + 10, 110);
+    }
+
+    #[test]
+    fn fold_win_three_way_uses_max_other_bet_for_uncalled() {
+        let scene = fold_win::postflop_three_way();
+        let plan = derive_fold_win_plan(&scene.table).expect("fold plan derives");
+        // 未跟注 = 500 − 300（非赢家的最高下注）= 200；争夺 700 × 5% = 35。
+        assert_eq!(plan.rake, 35);
+        assert_eq!(plan.awards[0], 865);
+    }
+
+    #[test]
+    fn fold_win_postflop_respects_rake_cap() {
+        let scene = fold_win::postflop_cap();
+        let plan = derive_fold_win_plan(&scene.table).expect("fold plan derives");
+        // 5% = 100,000 > cap 1,000。
+        assert_eq!(plan.rake, 1_000);
+        assert_eq!(plan.awards[0], 1_999_000);
+    }
+
+    #[test]
+    fn fold_win_rejects_multi_unfolded_tables() {
+        let scene = three_seat_ladder(); // 三名 all-in（未弃牌）
+        assert!(derive_fold_win_plan(&scene.table).is_err());
     }
 
     #[test]

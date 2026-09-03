@@ -436,12 +436,12 @@ impl SettlementPlan {
                     "settlement: pot has no eligible seats".into(),
                 ));
             }
+            // 2026-09-04：不再断言 uncontested 层零抽水——"no flop, no drop"
+            // 语义下翻后 fold-win 的底池是被争夺过的钱（derive_fold_win_plan
+            // 合法携带抽水）。抽水上限仍由下方 gross/rake/net 守恒与
+            // compute_rake 的 min(cap, base) 保证；翻前 fold 与未跟注返还层
+            // 不抽由 derive_fold_win_plan 构造纪律 + fixture 测试锁定。
             let contested = pot.is_contested();
-            if !contested && pot.rake != 0 {
-                return Err(PokerL1Error::Serialization(
-                    "settlement: uncontested pot must not be raked".into(),
-                ));
-            }
             gross = gross.checked_add(pot.gross_amount).ok_or_else(|| {
                 PokerL1Error::Serialization("settlement: gross pot sum overflow".into())
             })?;
@@ -545,6 +545,111 @@ pub fn derive_settlement_plan(table: &TexasPokerTable) -> PokerL1Result<Settleme
         table,
         &SettlementBoards::single(table.community_cards.to_vec()),
     )
+}
+
+/// Fold-win（全场仅剩一名未弃牌玩家）专用结算计划。
+///
+/// 与摊牌路径（[`derive_settlement_plan`]）的差别：
+/// - **不做牌面校验**：弃牌事实由聚合证明链中的 fold receipts 证明，
+///   赢家判定不依赖任何牌——牌面对该路径不可知也不需要（翻前结束时
+///   board 甚至不足 5 张，摊牌路径的 `validate_exposed_cards` 必然失败，
+///   2026-09-04 前 fold-win 手因此从未上链）；
+/// - **抽水规则（"no flop, no drop" 行业惯例）**：翻前结束（board < 3）
+///   不抽；翻后结束按公式抽，基数为「被争夺过的钱」= 底池 − 未跟注返还。
+///   未跟注返还 = 唯一最高下注超出次高下注的部分（只有赢家一人出资，
+///   直接退回，不参与抽水）。摊牌路径的 eligible≥2 层语义与此一致
+///   （未跟注返还层 eligible=1 从不抽）。
+///
+/// # Errors
+/// - 参与者不是恰好一名未弃牌玩家；
+/// - 下注总额与 `table.pot` 不符（对齐摊牌路径的同款守卫）。
+pub fn derive_fold_win_plan(table: &TexasPokerTable) -> PokerL1Result<SettlementPlan> {
+    if table.seats.len() > SETTLEMENT_SEATS {
+        return Err(PokerL1Error::Serialization(
+            "settlement: table exceeds MAX_PLAYERS".into(),
+        ));
+    }
+    let unfolded: Vec<usize> = table
+        .seats
+        .iter()
+        .enumerate()
+        .filter(|(_, seat)| seat.is_occupied() && !seat.is_folded() && !seat.has_left_hand())
+        .map(|(index, _)| index)
+        .collect();
+    let winner = match unfolded.as_slice() {
+        [only] => *only,
+        _ => {
+            return Err(PokerL1Error::Serialization(format!(
+                "settlement: fold-win plan requires exactly one unfolded seat, got {}",
+                unfolded.len()
+            )));
+        }
+    };
+    let bets: Vec<u64> = table.seats.iter().map(Seat::total_bet).collect();
+    let gross_pot: u64 = bets.iter().try_fold(0u64, |sum, bet| {
+        sum.checked_add(*bet).ok_or_else(|| {
+            PokerL1Error::Serialization("settlement: bet sum overflow".into())
+        })
+    })?;
+    if gross_pot > MAX_TOTAL_BET || gross_pot != table.pot {
+        return Err(PokerL1Error::Serialization(format!(
+            "settlement: contribution total {gross_pot} does not match table pot {}",
+            table.pot
+        )));
+    }
+    // 未跟注返还：唯一最高下注（fold-win 下必属赢家——其余人皆已弃牌，
+    // 弃牌时面对的下注不超过赢家当前投入）超出次高下注的部分。
+    let second_max = bets
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != winner)
+        .map(|(_, bet)| *bet)
+        .max()
+        .unwrap_or(0);
+    let uncalled = bets[winner].saturating_sub(second_max);
+    let contested_gross = gross_pot.saturating_sub(uncalled);
+    // "no flop, no drop"：翻前结束（board 不足 3 张）不抽水。
+    let flop_seen = table.community_cards.len() >= 3;
+    let rake = if flop_seen {
+        compute_rake(table, contested_gross)?
+    } else {
+        0
+    };
+    let net = gross_pot
+        .checked_sub(rake)
+        .ok_or_else(|| PokerL1Error::Serialization("settlement: rake exceeds pot".into()))?;
+    let winner_bit = 1u16 << winner;
+    let mut awards = [0u64; SETTLEMENT_SEATS];
+    awards[winner] = net;
+    let mut runout_awards = [0u64; SETTLEMENT_SEATS];
+    runout_awards[winner] = net;
+    let plan = SettlementPlan {
+        version: SETTLEMENT_PLAN_VERSION,
+        schedule: SettlementRunoutSchedule::Single,
+        gross_pot,
+        rake,
+        total_awards: net,
+        winner_mask: winner_bit,
+        awards,
+        pots: vec![SettlementPotPlan {
+            pot_index: 0,
+            gross_amount: gross_pot,
+            rake,
+            net_amount: net,
+            eligible_mask: winner_bit,
+            runouts: [
+                RunoutPotPlan {
+                    amount: net,
+                    winner_mask: winner_bit,
+                    ranks: [None; SETTLEMENT_SEATS],
+                    awards: runout_awards,
+                },
+                RunoutPotPlan::inactive(),
+            ],
+        }],
+    };
+    plan.validate(table.seats.len())?;
+    Ok(plan)
 }
 
 /// Derive a deterministic settlement plan for one or two canonical boards.
