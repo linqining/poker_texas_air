@@ -19,6 +19,7 @@ pub mod dual_settle;
 pub mod hooks;
 pub mod mirror;
 pub mod paymaster;
+pub mod settlement_prover;
 pub mod submit;
 
 pub use chain::StarknetChain;

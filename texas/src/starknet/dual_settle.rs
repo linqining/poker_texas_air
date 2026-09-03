@@ -1194,6 +1194,42 @@ pub async fn submit_dual_settlement(
     // 模式决策（proved → 尝试 prover → 失败回退 linear）。
     let mode = if chain.config.settle_mode == SettleMode::Proved {
         export_prover_workload(dual, std::path::Path::new(&chain.config.prover_work_dir));
+        // P2-M2：settlement-private 电路 inputs 导出 + prover attestation。
+        // best-effort：任何失败只告警，绝不阻塞结算（与 batch prover 同语义）。
+        {
+            let settlement_prover = super::settlement_prover::HttpSettlementProver::new(
+                chain.config.prover_url.clone(),
+            );
+            if settlement_prover.configured() {
+                match super::settlement_prover::prepare_request(
+                    dual.hand_id,
+                    dual.hand_binding,
+                    players_remapped,
+                    deltas,
+                )
+                .await
+                {
+                    Ok(req) => {
+                        super::settlement_prover::export_settlement_private_inputs(
+                            &req,
+                            std::path::Path::new(&chain.config.prover_work_dir),
+                        );
+                        match settlement_prover.prove_settlement_private(&req).await {
+                            Ok(att) => tracing::info!(
+                                "[settlement-private] attested (program {})",
+                                att.program_hash
+                            ),
+                            Err(e) => tracing::warn!(
+                                "[settlement-private] prover attestation failed (non-fatal): {e}"
+                            ),
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        "[settlement-private] request build failed (non-fatal): {e}"
+                    ),
+                }
+            }
+        }
         let prover = HttpBatchProver::new(chain.config.prover_url.clone());
         let workload = ProverWorkload {
             hand_binding: dual.hand_binding,
