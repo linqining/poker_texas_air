@@ -237,8 +237,15 @@
   现状：`strk20.json` 的 `token.mainnet_address` 为空，未记录任何主网交易。
 - [ ] **29. strk20.json 收尾**：`token.mainnet_address` / `sepolia_address` 回填；
   demo_video / demo_url / transactions 补全。
-- [ ] **30. paymaster 生产加固**：中继请求附钱包签名（session key / typed-data）鉴权。
-  位置：`texas/src/starknet/paymaster.rs:145`。主网开放前必须完成。
+- [x] **30. paymaster 生产加固**（2026-09-03 完成，texas 回归 58/58 ✅）：
+  `paymaster_executeTransaction` 的 body 本就携带用户对 OutsideExecution
+  typed data 的签名——服务端现于中继层本地验证：提取
+  `(userAddress, typedData, signature)` → `TypedData::message_hash`（SNIP-12）
+  → 链上 `get_public_key`（TTL 缓存）+ `starknet_crypto::verify`。
+  `STARKNET_PAYMASTER_SIG_REQUIRED=1` 时无效/缺失 → 拒绝；默认 off
+  （迁移期仅记日志，buy-in 关键路径零破坏）。客户端零改动
+  （签名本就在 executeTransaction 载荷内）。
+  位置：`texas/src/starknet/paymaster.rs`。
 - [ ] **31. 债券 / 罚没合约（Phase 3）**：operator 链上质押债券；被证明的审查
   （签名动作 + accepted-seq 缺口）触发罚没赔付；债券 > 最大可窃取价值。主网化前提。
 - [ ] **32. Demo 视频**：录"浏览器验证 G 证明"录屏（配合主网交易展示）。
