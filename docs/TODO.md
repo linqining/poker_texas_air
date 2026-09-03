@@ -12,6 +12,46 @@
 
 ### P0 — 尽快
 
+- [ ] **33. ⚠️ 在局锁定：牌局未结束取款逃单 / 全桌结算砖死（资金安全，主网前必须）**
+  > 来源：会话「牌局未结束池子取款逃单风险」（2026-09-04 分析定稿，仅分析未改代码）。
+  > 该风险此前未记录于任何文档。
+
+  - **风险（当前合约下完全可行，且不需要抢跑）**：`vault.withdraw` 无许可
+    （唯一门 = 余额 + 全局暂停，`poker_vault.cairo:244`；全合约无座位注册 /
+    在局锁定概念）。逃跑窗口 = 买入直到该手结算上链（结算异步：ZK 证明 →
+    register → settle）。后果三重：
+    1. 输家中途提款逃单，拿回 100% 本金；
+    2. **殃及全桌**：settle 循环逐玩家 `apply_settlement`，一个输家余额不足
+       → assert revert（`poker_vault.cairo:386`，调用点
+       `poker_settlement.cairo:282`）→ 整手结算失败，赢家也拿不到钱；
+    3. **永久卡死**：digest/aggregate 一次性注册
+       （`poker_settlement.cairo:176-182`），同一手无法用其他结果重结算。
+    非恶意也触发：有未结算手时正常 cashout（客户端未拦截）。隐私路径同中招：
+    `CashoutUnshieldHelper::chip_to_note`（`withdraw_to` 烧筹码直进池 note，
+    `cashout_unshield_helper.cairo:110`）；v2 私密结算的输家公开扣款同样
+    （`poker_dual_settlement.cairo:664`）。
+  - **根因**：金库是"余额 = 随时可提债权"的纯账本；链上 pull 型结算用
+    assert 假设扣款时余额还在——零和 ≠ 可支付。
+  - **修复方案（会话已定稿，未实施）**：
+    ① vault 加 `locked` 映射：入座/开局锁整份桌面筹码（覆盖该手全部风险
+       额度，不只冻结快照）；`withdraw` / `withdraw_to` / `chip_to_note`
+       只放行未锁定部分；结算先扣锁定额度再解锁（改动集中 vault）；
+    ② 链上 session 注册（记 `last_activity`，operator 结算/续局刷新）——
+       **必要组成**（否则 operator 触发锁定 = 后端失联即冻结玩家资金）；
+    ③ 玩家自助 `unlock_after_deadline(session_id)`：
+       `block.timestamp > last_activity + T`（T 建议 6–24h，明显大于正常
+       结算耗时）；
+    ④ （可选）operator 债券/罚没，转移不作为风险。
+    底线：**从未入座（无活跃 session）的余额必须始终无许可可提**；锁定只
+    覆盖明确入局的筹码。残余风险：锁刚过期、结算未上链的抢跑间隙（调大 T
+    + 链下追责）。
+  - **短期缓释（只缩窗不封死）**：每手即时结算 / operator 链下拦截提款 /
+    最低在局余额。
+  - 关键位置：`poker_vault.cairo:230/244/386`、`poker_settlement.cairo:282`、
+    `poker_dual_settlement.cairo:664`、`cashout_unshield_helper.cairo:110`。
+  - 建议顺序：①+②+③ 一并实施（纯② 会冻结资金；只做① 无超时解锁不可接
+    受）；`chip_to_note` / `poker_vault_anonymizer` 的提现路径同样过锁定门。
+
 - [x] **1. 牌局抽水显示**（2026-09-03 完成）
   - 实现：新增 `texas/src/pokergame/rake.rs`（公式与分层分摊逐字对齐链上
     `settle.rs`/`settlement.rs`，带单测）；摊牌路径 `collect_rake_for_settlement`
