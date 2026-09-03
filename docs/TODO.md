@@ -147,6 +147,9 @@
     零明文结算联调（配合 #28 的 sepolia 侧实机验证）。
 - [ ] **12. C3.2-M1 认领 sidecar**：Node sidecar 封装 STRK20 私密转账
   （运营浮存 → 赢家 viewing key note），Rust 服务端 HTTP 调用；需 SDK 依赖 + 服务器 KMS。
+  **前置核查（2026-09-03）**：官方 STRK20 Privacy SDK 仍未上 npm（registry 检索只有
+  社区第三方包）——SDK_SEAM 继续阻塞本节全部四项；SDK 上线后按
+  `docs/starknet-plan-b-anonymizer.md` §SDK_SEAM 核对 `tryComposeInvoke` 即可开工。
 - [ ] **13. C3.2-M2 赔付路由**：settle 后异步队列：延迟抖动 + 批量 shield 补浮存 + 失败重试。
 - [ ] **14. C3.2-M3 通知与 UX**：加密赔付通知推送 + 领取入口 UX；赢家零操作看到 note。
 - [ ] **15. C3.2-M4 合规加固**：限额/频控/审计日志 + 运营手册。
