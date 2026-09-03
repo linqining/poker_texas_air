@@ -116,6 +116,14 @@
         开局基线重建、本轮 TODO 功能开发——截至 2026-09-04：claim 弹窗重构
         b6ce436/80c3cb1、anonymizer v3 + v3 切换 1a147b5 等均已入库）。
   - [ ] `set_authorized_helper` owner 单点问题：建议冷存储 / 时间锁（运维动作）。
+  - [x] **DAPV 认可键不一致 → 链上结算静默跳过（2026-09-04 线上复现+修复）**：
+        注册侧存客户端补零地址（0x017cfd...），take 侧按 Felt {:#x} 查询
+        （0x17cfd...）——前导零钱包永远 MISS，endorsement 永远收不齐，
+        DAPV 每手被静默跳过，输赢从未上链（表现为"领取额=纯买入额，结算少了"）。
+        修复：注册侧 canonical_wallet_key 统一规范化 + ENDORSEMENT_REQUEST
+        每次重投重播（客户端 per-hand 去重）+ 认可等待窗 3s→10s +
+        JOIN_TABLE 进房即重投待结算手。已验证两局 dapv on-chain 成交，
+        链上 delta 与服务器牌史逐分吻合（含 5% 抽水）。
   - [x] （可选）对账：链上筹码 5000 → 0 但领取为 4000，差额 1000 来自后续手牌
         `apply_settlement` 结算变动，可核对结算流水确认。
 

@@ -645,6 +645,10 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         let table_id = payload.table_id;
         s.join(table_room_name(table_id));
         tracing::info!("join_table: {} {}", payload.pk_hex, table_id);
+        // 客户端（重新）进房即重投该桌未收齐认可的待结算手：ENDORSEMENT_REQUEST
+        // 会随重投重播给刚进房的新 socket（否则错过单次广播的客户端永远补不上，
+        // 结算被静默跳过——2026-09-04 线上复现）。
+        tokio::spawn(crate::starknet::hooks::retry_pending_settlement(table_id));
         let socket_id = s.id.to_string();
         // let join_msg = {
         //     let mut gs = state.state.write().await;

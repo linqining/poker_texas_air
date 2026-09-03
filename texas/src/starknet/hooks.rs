@@ -255,9 +255,10 @@ async fn run_settle_attempt(table_id: u32) {
             .as_ref()
             .map(|b| b.hand_id_bytes)
             .unwrap_or([0u8; 32]);
-        // 重投节流：请求广播只在前 3 次尝试发送（客户端每手只需回应一次；
-        // 无节流的重播会以 3.5s/次轰炸浏览器 wasm 铸造，把页面卡死）。
-        if pending.attempts <= 3 {
+        // 重投节流：客户端每手只需回应一次（有 per-hand 去重），但请求本身
+        // 每次尝试都重发——客户端恰好在刷新/重连窗口错过单次广播会永久
+        // 丢失请求，导致认可永远收不齐、结算被静默跳过（2026-09-04 线上
+        // 复现）。客户端去重保证重播不会重复铸造。
         if let Some(io) = crate::socket::get_socket_io() {
             let hand_binding_hex = hex_encode(&binding_bytes);
             if !hand_binding_hex.is_empty() {
@@ -270,13 +271,14 @@ async fn run_settle_attempt(table_id: u32) {
                 let _ = io.to(room).emit(crate::pokergame::actions::ENDORSEMENT_REQUEST, &request).await;
             }
         }
-        }
         mint_bot_endorsements(
             &binding_bytes,
             settlement.hand_id,
             &settlement.players_remapped,
         );
-        let deadline = std::time::Duration::from_secs(3);
+        // 认可等待窗口：10s（刷新页面/后台标签页的客户端靠重播请求补交，
+        // 3s 对手动钱包确认场景太紧——线上复现收不齐即被跳过）。
+        let deadline = std::time::Duration::from_secs(10);
         let start = std::time::Instant::now();
         while start.elapsed() < deadline {
             if super::dual_settle::take_client_endorsements(

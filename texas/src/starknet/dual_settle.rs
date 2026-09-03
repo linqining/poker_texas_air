@@ -74,6 +74,17 @@ static CLIENT_ENDORSEMENTS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<u32, ClientEndorsement>>>,
 > = std::sync::OnceLock::new();
 
+/// 注册/查询两侧共用的钱包键：统一按 Felt `{:#x}` 规范化（去前导零）。
+/// 客户端上报地址常带补零（如 0x017cfd...），而 Felt 格式化为 0x17cfd...——
+/// 两侧键不一致曾让认可查找永远 MISS、DAPV 链上结算被静默跳过（结算少了
+/// = 牌局输赢从未上链；2026-09-04 线上复现并修复）。
+fn canonical_wallet_key(wallet: &str) -> Option<String> {
+    let t = wallet.trim();
+    let hex = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X"))?;
+    let felt = Ff::from_hex_be(&format!("0x{hex}")).ok()?;
+    Some(format!("{felt:#x}"))
+}
+
 /// 客户端提交其铸造的认可（hand-bound）。点坐标做 on-curve 校验，
 /// 标量做域校验；重复提交同一 (wallet, hand_id) 覆盖（幂等）。
 /// 生产形态：请求须附钱包签名（session key / typed-data）证明身份；
@@ -109,11 +120,13 @@ pub fn register_client_endorsement(
     s_bytes.copy_from_slice(&s_raw);
     let s = Sc::from_canonical_bytes(&s_bytes).ok_or("s out of range")?;
 
+    let key = canonical_wallet_key(wallet)
+        .ok_or_else(|| format!("wallet address invalid: {wallet}"))?;
     let registry = CLIENT_ENDORSEMENTS.get_or_init(|| std::sync::Mutex::new(Default::default()));
     registry
         .lock()
         .unwrap_or_else(|e| e.into_inner()) // 锁污染不连锁 panic（audit M1）
-        .entry(wallet.to_string())
+        .entry(key)
         .or_default()
         .insert(hand_id, ClientEndorsement { pk, r, s });
     Ok(())
@@ -122,11 +135,13 @@ pub fn register_client_endorsement(
 /// 进程内 bot 认可注册（bot 无 WS 会话，由服务器代持认可私钥后本地铸造；
 /// 与 `register_client_endorsement` 等价，只是免去 hex 往返）。
 pub fn register_client_endorsement_raw(wallet: &str, hand_id: u32, e: Endorsement) {
+    // bot 钱包来自服务器配置（非客户端上报），解析失败按原样兜底
+    let key = canonical_wallet_key(wallet).unwrap_or_else(|| wallet.to_string());
     let registry = CLIENT_ENDORSEMENTS.get_or_init(|| std::sync::Mutex::new(Default::default()));
     registry
         .lock()
         .unwrap_or_else(|e| e.into_inner()) // 锁污染不连锁 panic（audit M1）
-        .entry(wallet.to_string())
+        .entry(key)
         .or_default()
         .insert(hand_id, ClientEndorsement { pk: e.pk, r: e.r, s: e.s });
 }
@@ -2791,5 +2806,40 @@ mod settle_mode_tests {
         assert_eq!(words.len(), dual.batch_words.len());
         assert_eq!(words[0], hex::encode(dual.batch_words[0]).as_str());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod endorsement_key_tests {
+    use super::canonical_wallet_key;
+
+    /// 2026-09-04 线上复现：客户端补零地址注册，Felt 格式化查询必须命中
+    ///（此前键不一致 → 认可永远 MISS → DAPV 静默跳过 → 输赢不上链）。
+    #[test]
+    fn padded_wallet_matches_felt_format() {
+        let padded = "0x017cfd337939d62ecd2e8f6340a33ea341366e15c58a092c392664289cfd706e";
+        let key = canonical_wallet_key(padded).unwrap();
+        assert_eq!(
+            key,
+            "0x17cfd337939d62ecd2e8f6340a33ea341366e15c58a092c392664289cfd706e"
+        );
+    }
+
+    #[test]
+    fn padding_and_case_normalize_identically() {
+        let a = canonical_wallet_key(
+            "0x6e37d33462f7319261396d7d7f669d147e40cdef91c6a8305cfde771805c782",
+        )
+        .unwrap();
+        let b = canonical_wallet_key(
+            "0X06E37D33462F7319261396D7D7F669D147E40CDEF91C6A8305CFDE771805C782",
+        )
+        .unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn invalid_wallet_rejected() {
+        assert!(canonical_wallet_key("not-an-address").is_none());
     }
 }
