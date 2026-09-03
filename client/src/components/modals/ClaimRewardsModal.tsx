@@ -208,6 +208,8 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   );
   const [poolRegistering, setPoolRegistering] = useState(false);
   const [checking, setChecking] = useState(false);
+  // 折叠摘要的展开/收起（两份注册都完成后默认折叠）
+  const [collapsedSummary, setCollapsedSummary] = useState(false);
 
   const vaultAddr = starknetConfig.pokerVaultAddress || '';
   const flagsKey = `poker.claimReg:${(walletAddress || '').toLowerCase()}`;
@@ -241,6 +243,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
       if (cached && cached.payout && cached.pool) {
         setReg({ payout: true, pool: true, fromCache: true });
         setCommitRegistered(true);
+        setStrk20Ready(true); // 缓存前提 = 此前钱包 API 可用（否则到不了已注册态）
         setChecking(false);
         return;
       }
@@ -420,10 +423,20 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
           </HeroCard>
 
           {reg.payout === true && reg.pool === true ? (
-            // 一次性注册全部完成 → 折叠为单行摘要（打开弹窗零查询零弹窗）
+            // 一次性注册全部完成 → 默认折叠为单行摘要（打开弹窗零查询零弹窗），
+            // 可展开查看两张注册卡详情
             <CollapsedReg>
               <StatusDot $ok />
-              <span>赔付承诺（我们合约）与隐私池注册（Ready 隐私系统）均已完成 ✓</span>
+              <span>
+                赔付承诺（我们合约）与隐私池注册（Ready 隐私系统）均已完成 ✓
+              </span>
+              <button
+                type="button"
+                onClick={() => setCollapsedSummary((v) => !v)}
+                title="展开/收起注册卡详情"
+              >
+                {collapsedSummary ? '收起' : '展开'}
+              </button>
               <button
                 type="button"
                 onClick={reverify}
@@ -474,41 +487,40 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
                     <StatusDot $ok={commitRegistered} />
                     赔付承诺（我们合约）
                   </PathTitle>
-              {commitRegistered ? (
-                <StatusText $ok>已注册 ✓</StatusText>
-              ) : (
-                <Button
-                  type="button"
-                  small
-                  disabled={pending !== null || regPending}
-                  onClick={async () => {
-                    setRegPending(true);
-                    try {
-                      const res = await ensurePayoutCommitment(account);
-                      if (res.status === 'error') {
-                        setError(res.error);
-                      } else {
-                        setCommitRegistered(true);
-                      }
-                    } catch (e) {
-                      // 注册交易被拒/钱包锁定等：不再作为 uncaught rejection 逃逸
-                      setError(String((e as Error)?.message || e));
-                    } finally {
-                      setRegPending(false);
-                    }
-                  }}
-                  title="提交 payout commitment（一次性链上交易，任何钱包均可）"
-                >
-                  {regPending ? '注册中…' : '一键注册'}
-                </Button>
-              )}
-            </PathHeader>
-            <PathDetail>注册后结算奖励才能私密领取（一次性）</PathDetail>
+                  {commitRegistered ? (
+                    <StatusText $ok>已注册 ✓</StatusText>
+                  ) : (
+                    <Button
+                      type="button"
+                      small
+                      disabled={pending !== null || regPending}
+                      onClick={async () => {
+                        setRegPending(true);
+                        try {
+                          const res = await ensurePayoutCommitment(account);
+                          if (res.status === 'error') {
+                            setError(res.error);
+                          } else {
+                            setCommitRegistered(true);
+                          }
+                        } catch (e) {
+                          setError(String((e as Error)?.message || e));
+                        } finally {
+                          setRegPending(false);
+                        }
+                      }}
+                      title="提交 payout commitment（一次性链上交易，任何钱包均可）"
+                    >
+                      {regPending ? '注册中…' : '一键注册'}
+                    </Button>
+                  )}
+                </PathHeader>
+                <PathDetail>注册后结算奖励才能私密领取（一次性）</PathDetail>
               </PathCard>
             </>
           )}
 
-          {strk20Ready === true && shielded === null && !poolRegistering && !commitRegistered && (
+          {strk20Ready === true && shielded === null && !poolRegistering && (
             <Button
               type="button"
               variant="secondary"
@@ -539,7 +551,8 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
               {poolRegistering ? '注册中…' : '一键注册隐私池（小额 Shield 0.01 STRK）'}
             </Button>
           )}
-          {privateBlockedReason && <Notice $kind="warn">{privateBlockedReason}</Notice>}
+
+{privateBlockedReason && <Notice $kind="warn">{privateBlockedReason}</Notice>}
           {error && <Notice $kind="error">{error}</Notice>}
 
           <Button
