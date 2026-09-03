@@ -61,3 +61,9 @@ pub struct ActionLogEntry {
     pub sig_ok: bool,
 }
 pub const ACTION_RECEIPT: &str = "ACTION_RECEIPT";
+
+/// #16 enforcement 开关：`STARKNET_ACTION_SIG_REQUIRED=1` 时，携带了签名但
+/// 验签失败/seq 非单调的动作会被拒绝；默认 off（迁移期放行并记日志）。
+pub fn action_sig_required() -> bool {
+    std::env::var("STARKNET_ACTION_SIG_REQUIRED").as_deref() == Ok("1")
+}

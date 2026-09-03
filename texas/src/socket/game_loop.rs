@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::pokergame::actions::action_sig_required;
 use crate::pokergame::table::now_ms;
 
 pub(crate) async fn game_loop_task(io: SocketIo, state: Arc<SocketState>, table_id: u32, mut action_rx: tokio::sync::mpsc::Receiver<ActionRequest>, mut stop_rx: tokio::sync::watch::Receiver<bool>) {
@@ -811,14 +812,23 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
             if let Some(res) = fold_result {
                 broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
                 // #17 auto 默认动作标记：服务器代打入日志（seq 服务器分配）
-                {
+                let auto_receipt = {
                     let mut gs = state.state.write().await;
                     if let Some(table) = gs.tables.get_mut(&table_id) {
                         if let Some(seat) = table.find_player_by_pk(&GamePkHex(pk_hex.clone())).map(|x| x.id) {
                             let seq = table.accepted_seq_of(seat) + 1;
                             table.record_action(seat, seq, "fold", 0, true, false);
-                            emit_action_receipt(io, state, table_id, &GamePkHex(pk_hex.clone()), seq, "fold", 0, "autoAccepted", "").await;
+                            Some(build_action_receipt_payload(table_id, &GamePkHex(pk_hex.clone()), seq, "fold", 0, "autoAccepted", ""))
+                        } else {
+                            None
                         }
+                    } else {
+                        None
+                    }
+                };
+                if let Some(p) = &auto_receipt {
+                    if !p.is_null() {
+                        super::broadcast::broadcast_action_receipt(io, state, table_id, p).await;
                     }
                 }
                 handle_turn_advance(io, state, table_id).await;
@@ -839,14 +849,23 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
             if let Some(res) = check_result {
                 broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
                 // #17 auto 默认动作标记：服务器代打入日志（seq 服务器分配）
-                {
+                let auto_receipt = {
                     let mut gs = state.state.write().await;
                     if let Some(table) = gs.tables.get_mut(&table_id) {
                         if let Some(seat) = table.find_player_by_pk(&GamePkHex(pk_hex.clone())).map(|x| x.id) {
                             let seq = table.accepted_seq_of(seat) + 1;
                             table.record_action(seat, seq, "check", 0, true, false);
-                            emit_action_receipt(io, state, table_id, &GamePkHex(pk_hex.clone()), seq, "check", 0, "autoAccepted", "").await;
+                            Some(build_action_receipt_payload(table_id, &GamePkHex(pk_hex.clone()), seq, "check", 0, "autoAccepted", ""))
+                        } else {
+                            None
                         }
+                    } else {
+                        None
+                    }
+                };
+                if let Some(p) = &auto_receipt {
+                    if !p.is_null() {
+                        super::broadcast::broadcast_action_receipt(io, state, table_id, p).await;
                     }
                 }
                 handle_turn_advance(io, state, table_id).await;
@@ -866,14 +885,23 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
             if let Some(res) = call_result {
                 broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
                 // #17 auto 默认动作标记：服务器代打入日志（seq 服务器分配）
-                {
+                let auto_receipt = {
                     let mut gs = state.state.write().await;
                     if let Some(table) = gs.tables.get_mut(&table_id) {
                         if let Some(seat) = table.find_player_by_pk(&GamePkHex(pk_hex.clone())).map(|x| x.id) {
                             let seq = table.accepted_seq_of(seat) + 1;
                             table.record_action(seat, seq, "call", 0, true, false);
-                            emit_action_receipt(io, state, table_id, &GamePkHex(pk_hex.clone()), seq, "call", 0, "autoAccepted", "").await;
+                            Some(build_action_receipt_payload(table_id, &GamePkHex(pk_hex.clone()), seq, "call", 0, "autoAccepted", ""))
+                        } else {
+                            None
                         }
+                    } else {
+                        None
+                    }
+                };
+                if let Some(p) = &auto_receipt {
+                    if !p.is_null() {
+                        super::broadcast::broadcast_action_receipt(io, state, table_id, p).await;
                     }
                 }
                 handle_turn_advance(io, state, table_id).await;
@@ -925,11 +953,10 @@ pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>,
     }
 }
 
-/// #17：回签收据并广播 ACTION_RECEIPT（operator 无密钥时退化为未签名通知）。
+/// #17：构建回签收据 payload（operator 无密钥时退化为未签名通知）。
+/// **同步、无锁**——必须在 process_action 的状态写锁释放后广播。
 #[allow(clippy::too_many_arguments)]
-async fn emit_action_receipt(
-    io: &SocketIo,
-    state: &Arc<SocketState>,
+fn build_action_receipt_payload(
     table_id: u32,
     player_pk_hex: &crate::pokergame::player::GamePkHex,
     seq: u64,
@@ -937,9 +964,12 @@ async fn emit_action_receipt(
     amount: u64,
     decision: &str,
     reason: &str,
-) {
-    use crate::pokergame::receipts;
-    let Some((sk, operator_pk)) = receipts::operator() else { return };
+) -> serde_json::Value {
+    use crate::pokergame::actions::action_sig_required;
+use crate::pokergame::receipts;
+    let Some((_, operator_pk)) = receipts::operator() else {
+        return serde_json::Value::Null;
+    };
     let receipt = receipts::ActionReceipt {
         table_id,
         player_pk: player_pk_hex.0.clone(),
@@ -951,15 +981,15 @@ async fn emit_action_receipt(
         operator_pk,
     };
     let Some((r_hex, s_hex)) = receipts::sign_receipt_with_operator(&receipt) else {
-        let payload = serde_json::json!({ "receipt": receipt, "rHex": "", "sHex": "" });
-        super::broadcast::broadcast_action_receipt(io, state, table_id, &payload).await;
-        return;
+        return serde_json::Value::Null;
     };
-    let payload = serde_json::json!({ "receipt": receipt, "rHex": r_hex, "sHex": s_hex });
-    super::broadcast::broadcast_action_receipt(io, state, table_id, &payload).await;
+    serde_json::json!({ "receipt": receipt, "rHex": r_hex, "sHex": s_hex })
 }
 
 pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, req: ActionRequest) {
+    // #17：在状态写锁内只收集回执 payload，锁释放后统一广播
+    //（此前在锁内 await 读锁 → 死锁，表现为下注面板点击无响应）。
+    let mut pending_receipts: Vec<serde_json::Value> = Vec::new();
     let result = {
         let mut gs = state.state.write().await;
         if let Some(table) = gs.tables.get_mut(&table_id) {
@@ -981,59 +1011,49 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                     "[process_action] Rejected action {} from pk={}: not their turn or not betting phase (turn={:?}, state={:?})",
                     req.action, req.pk_hex, table.turn(), table.round_state()
                 );
-                emit_action_receipt(io, state, table_id, &req.pk_hex, req.seq.unwrap_or(0), &req.action, req.amount.unwrap_or(0), "rejected", "not_turn_or_phase").await;
+                pending_receipts.push(build_action_receipt_payload(table_id, &req.pk_hex, req.seq.unwrap_or(0), &req.action, req.amount.unwrap_or(0), "rejected", "not_turn_or_phase"));
                 None
             } else {
-                // ===== #16/#17 抗审查：动作签名验证 + seq 单调 + 动作日志 =====
-                // 签名域 = (table_id, seq, action, amount)；pk = 座位牌局公钥。
-                let seat_id = table.find_player_by_pk(&req.pk_hex).map(|s| s.id);
-                let amount_for_sig = req.amount.unwrap_or(0);
-                match (req.seq, req.sig.as_ref(), seat_id) {
-                    (Some(seq), Some(sig), Some(seat)) => {
-                        let sig_ok = table.verify_action_sig(
-                            &req.pk_hex, seq, &req.action, amount_for_sig, sig,
-                        );
-                        let seq_ok = seq > table.accepted_seq_of(seat);
-                        if !sig_ok {
-                            tracing::warn!(
-                                "[process_action] REJECT action {} seat {seat} seq {seq}: invalid action signature (censorship evidence)",
-                                req.action
-                            );
-                            emit_action_receipt(io, state, table_id, &req.pk_hex, seq, &req.action, amount_for_sig, "rejected", "invalid_sig").await;
-                            None
-                        } else if !seq_ok {
-                            tracing::warn!(
-                                "[process_action] REJECT action {} seat {seat} seq {seq}: seq not monotonic (accepted <= {})",
-                                req.action,
-                                table.accepted_seq_of(seat)
-                            );
-                            emit_action_receipt(io, state, table_id, &req.pk_hex, seq, &req.action, amount_for_sig, "rejected", "seq_not_monotonic").await;
-                            None
-                        } else {
-                            let action_result = match req.action.as_str() {
-                                "fold" => table.handle_fold(&req.pk_hex),
-                                "check" => table.handle_check(&req.pk_hex),
-                                "call" => table.handle_call(&req.pk_hex),
-                                "raise" => table.handle_raise(&req.pk_hex, req.amount.unwrap_or(0)),
-                                "allin" => table.handle_allin(&req.pk_hex),
-                                _ => None,
-                            };
-                            if action_result.is_some() {
-                                table.record_action(seat, seq, &req.action, amount_for_sig, false, true);
-                                emit_action_receipt(io, state, table_id, &req.pk_hex, seq, &req.action, amount_for_sig, "accepted", "").await;
-                            }
-                            action_result
-                        }
-                    }
-                    // 迁移期兼容：未签名动作按现状处理（enforcement 开关见
-                    // actions_sig_required()）。
-                    _ => {
                 // F9 fix: only clear sitting_out after turn validation passes.
                 // (A valid turn implies the player is not sitting_out, but we
                 // keep this for safety in case of race conditions.)
                 if let Some(seat) = table.find_player_by_pk_mut(&req.pk_hex) {
                     seat.sitting_out = false;
                 }
+                // ===== #16/#17 抗审查：动作签名验证 + seq 单调 + 动作日志 =====
+                // 签名域 = (table_id, seq, action, amount)；pk = 座位牌局公钥。
+                let seat_id = table.find_player_by_pk(&req.pk_hex).map(|s| s.id);
+                let amount_for_sig = req.amount.unwrap_or(0);
+                let (sig_ok, seq_ok) = match (req.seq, req.sig.as_ref(), seat_id) {
+                    (Some(seq), Some(sig), Some(seat)) => {
+                        let sig_ok = table.verify_action_sig(
+                            &req.pk_hex, seq, &req.action, amount_for_sig, sig,
+                        );
+                        let seq_ok = seq > table.accepted_seq_of(seat);
+                        (sig_ok, seq_ok)
+                    }
+                    // 迁移期兼容：未签名动作（enforcement off 时放行）
+                    _ => (true, true),
+                };
+                let enforcement = action_sig_required();
+                let reject = (!sig_ok || !seq_ok) && enforcement;
+                if reject {
+                    let reason = if !sig_ok { "invalid_sig" } else { "seq_not_monotonic" };
+                    tracing::warn!(
+                        "[process_action] REJECT action {} seat {:?} seq {:?}: {reason} (enforcement on)",
+                        req.action, seat_id, req.seq
+                    );
+                    if let Some(seat) = seat_id {
+                        pending_receipts.push(build_action_receipt_payload(table_id, &req.pk_hex, req.seq.unwrap_or(0), &req.action, amount_for_sig, "rejected", reason));
+                    }
+                    None
+                } else {
+                    if !sig_ok || !seq_ok {
+                        tracing::warn!(
+                            "[process_action] action {} seat {:?} seq {:?}: sig/seq check failed — accepted unsigned (enforcement off)",
+                            req.action, seat_id, req.seq
+                        );
+                    }
                     let action_result = match req.action.as_str() {
                         "fold" => table.handle_fold(&req.pk_hex),
                         "check" => table.handle_check(&req.pk_hex),
@@ -1043,20 +1063,24 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                         _ => None,
                     };
                     if action_result.is_some() {
-                        if let Some(seat) = table.find_player_by_pk(&req.pk_hex).map(|s| s.id) {
-                            let seq = req.seq.unwrap_or_else(|| table.accepted_seq_of(seat));
-                            table.record_action(seat, seq, &req.action, amount_for_sig, false, false);
-                            emit_action_receipt(io, state, table_id, &req.pk_hex, seq, &req.action, amount_for_sig, "accepted", "").await;
+                        if let Some(seat) = seat_id {
+                            // seq 只前进不回退（未签名迁移动作保持 accepted 单调）
+                            let seq = req.seq.unwrap_or(0).max(table.accepted_seq_of(seat));
+                            table.record_action(seat, seq, &req.action, amount_for_sig, false, sig_ok);
+                            pending_receipts.push(build_action_receipt_payload(table_id, &req.pk_hex, seq, &req.action, amount_for_sig, "accepted", ""));
                         }
                     }
                     // 方案A：下注动作的 mirror 派发已移入 betting.rs 各 handle_*
                     // 的接受点（含超时自动行动路径），此处不再重复派发。
                     action_result
-                    }
                 }
             }
         } else { None }
     };
+    // 状态锁已释放：统一广播回执
+    for payload in pending_receipts.iter().filter(|p| !p.is_null()) {
+        super::broadcast::broadcast_action_receipt(io, state, table_id, payload).await;
+    }
     if let Some(res) = result {
         broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
         handle_turn_advance(io, state, table_id).await;
