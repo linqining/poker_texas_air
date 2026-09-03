@@ -4,11 +4,11 @@ use super::*;
 pub(crate) use crate::pokergame::table::events::CryptoEventType;
 
 pub(crate) async fn broadcast_to_table(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, message: Option<&str>) {
-    let table_views = {
+    let (table_views, spectator_sids, spectator_view) = {
         let gs = state.state.read().await;
         let Some(table) = gs.tables.get(&table_id) else { return };
         let base_client_table = table.to_client();
-        table.players().iter()
+        let table_views = table.players().iter()
             .flat_map(|(_game_pk, wallet_addr)| {
                 // 同一钱包可能残留多条 players 条目（旧会话 socket 未清理），
                 // 只 find 一个会把广播发到僵尸 socket 上造成客户端丢事件；
@@ -18,7 +18,22 @@ pub(crate) async fn broadcast_to_table(io: &SocketIo, state: &Arc<SocketState>, 
                     .filter(|p| p.wallet_address.0.eq_ignore_ascii_case(&wallet_addr.0))
                     .map(move |p| (p.socket_id.clone(), view.clone()))
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        // 围观者补发：JOIN_TABLE 不注册 players()（add_player 已注释，买入时才注册），
+        // 若只按 players() 定向发送，进桌未买入的 socket 收不到任何 TABLE_UPDATED，
+        // 界面会停在进桌快照上（A 买入对 B 不可见，直到 B 自己买入）。
+        // 从房间成员中剔除已注册 socket，剩余围观者按全隐藏手牌视图补发
+        // （空钱包与任何座位都不匹配，hide_opponent_cards 即全隐藏）。
+        let player_sids: std::collections::HashSet<String> =
+            table_views.iter().map(|(sid, _)| sid.clone()).collect();
+        let spectator_view = hide_opponent_cards(&base_client_table, &WalletAddress::new(String::new()));
+        let spectator_sids = io.within(table_room_name(table_id))
+            .sockets()
+            .into_iter()
+            .map(|s| s.id.to_string())
+            .filter(|sid| !player_sids.contains(sid))
+            .collect::<Vec<_>>();
+        (table_views, spectator_sids, spectator_view)
     };
 
     for (sid_str, table_view) in table_views {
@@ -35,6 +50,24 @@ pub(crate) async fn broadcast_to_table(io: &SocketIo, state: &Arc<SocketState>, 
                 }
             } else {
                 tracing::warn!("broadcast_to_table: socket {} not found (wallet_addr mismatch - possible proxy_address issue)", sid_str);
+            }
+        }
+    }
+
+    if spectator_sids.is_empty() {
+        return;
+    }
+    let payload = TableUpdatePayload {
+        table: spectator_view,
+        message: message.map(|s| s.to_string()),
+        from: None,
+    };
+    for sid_str in spectator_sids {
+        if let Ok(sid) = sid_str.parse::<socketioxide::socket::Sid>() {
+            if let Some(socket) = io.get_socket(sid) {
+                if let Err(e) = socket.emit(actions::TABLE_UPDATED, &payload) {
+                    tracing::warn!("broadcast_to_table spectator emit failed for {}: {:?}", sid_str, e);
+                }
             }
         }
     }

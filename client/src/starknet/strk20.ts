@@ -390,6 +390,67 @@ export interface ClaimRewardsArgs {
  * 池 → helper → 烧筹码 → open note，全在一笔池证明交易里；提交 envelope
  * 与 note owner 都不指向玩家。
  */
+/**
+ * #隐私池注册辅助：发起一笔**小额 Shield 入池**（公开 deposit）。
+ * 钱包隐私引擎处理该动作时会自动生成并登记 viewing key——这是 Ready
+ * 118(NOT_REGISTERED) 的官方解法（"先做一次 Shield，钱包会自动完成注册"）。
+ * 动作形状按钱包兼容性依次尝试：deposit → shield。
+ */
+export async function shieldForPoolRegistration(
+  account: Strk20CapableAccount | null,
+  amountWei: bigint,
+): Promise<TxResult> {
+  const wallet = getInjectedStarknetWallet() as Record<string, unknown> | null;
+  const acct = account as Strk20CapableAccount | null;
+  const hasWalletSurface = !!wallet
+    && (typeof (wallet as { request?: unknown }).request === 'function'
+      || !!((wallet as { features?: Record<string, unknown> }).features?.['starknet:walletApi']));
+  const hasAccountSurface = !!acct?.strk20InvokeTransaction && !!acct.address;
+  if (!hasWalletSurface && !hasAccountSurface) {
+    return { hash: '', success: false, error: 'Wallet does not support STRK20 private transactions' };
+  }
+  if (amountWei <= 0n) {
+    return { hash: '', success: false, error: 'Amount must be positive' };
+  }
+  const { CANONICAL_STRK_ADDRESS } = await import('./starknetGameActions');
+  const amountHex = '0x' + amountWei.toString(16);
+  // 钱包兼容形状序列：deposit（STRK20 标准入池）→ shield（部分钱包命名）
+  const shapeVariants: unknown[][] = [
+    [{ type: 'deposit', token: CANONICAL_STRK_ADDRESS, amount: amountHex }],
+    [{ type: 'shield', token: CANONICAL_STRK_ADDRESS, amount: amountHex }],
+  ];
+  let lastErr = 'wallet returned empty tx hash';
+  for (const actions of shapeVariants) {
+    try {
+      if (acct?.strk20InvokeTransaction) {
+        const res = await acct.strk20InvokeTransaction(actions);
+        const hash = res?.transaction_hash ?? '';
+        if (hash) return { hash, success: true };
+        lastErr = 'wallet returned empty tx hash';
+      }
+    } catch (e) {
+      lastErr = String(e);
+      logger.warn('[strk20] shield variant failed:', lastErr);
+    }
+    try {
+      if (typeof (wallet as { request?: unknown }).request === 'function') {
+        const res = await walletApiRequest<{ transaction_hash?: string }>(
+          wallet ?? {},
+          'wallet_strk20InvokeTransaction',
+          { actions },
+        );
+        const hash = res?.transaction_hash ?? '';
+        if (hash) return { hash, success: true };
+        lastErr = 'wallet returned empty tx hash';
+      }
+    } catch (e) {
+      lastErr = String(e);
+      logger.warn('[strk20] shield flat variant failed:', lastErr);
+    }
+  }
+  return { hash: '', success: false, error: lastErr };
+}
+
 export async function claimRewardsPrivate(
   account: unknown,
   args: ClaimRewardsArgs,
