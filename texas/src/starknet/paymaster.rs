@@ -96,6 +96,25 @@ pub async fn relay(Json(body): Json<Value>) -> Response {
         return rpc_error(id, -32601, &format!("method {method:?} not allowed"));
     }
 
+    // ===== #30 签名加固 =====
+    // executeTransaction 携带用户对 OutsideExecution typed data 的签名——
+    // 服务端本地验证（SNIP-12 hash + 链上 get_public_key + starknet_crypto）。
+    // STARKNET_PAYMASTER_SIG_REQUIRED=1 时无效/缺失 → 拒绝（401）；
+    // 默认 off：验证结果仅记日志（迁移期兼容）。
+    if method == "paymaster_executeTransaction" {
+        match verify_execute_signature(&body).await {
+            Ok(user) => {
+                tracing::info!("[paymaster] executeTransaction signature OK (user {user})");
+            }
+            Err(e) => {
+                tracing::warn!("[paymaster] executeTransaction signature check failed: {e}");
+                if sig_required() {
+                    return rpc_error(id, -32001, &format!("signature check failed: {e}"));
+                }
+            }
+        }
+    }
+
     let client = match reqwest::Client::builder().timeout(UPSTREAM_TIMEOUT).build() {
         Ok(c) => c,
         Err(e) => return rpc_error(id, -32603, &format!("http client: {e}")),
@@ -163,5 +182,217 @@ pub async fn register_endorsement(Json(body): Json<EndorsementRegistration>) -> 
             Json(serde_json::json!({ "ok": true })).into_response()
         }
         Err(e) => (axum::http::StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+// ============================================================
+// #30 签名加固：executeTransaction 的用户签名本地验证
+// ============================================================
+
+/// enforcement 开关：`STARKNET_PAYMASTER_SIG_REQUIRED=1` 时
+/// executeTransaction 必须携带可验证的用户签名（缺失/无效 → 401）。
+fn sig_required() -> bool {
+    std::env::var("STARKNET_PAYMASTER_SIG_REQUIRED").as_deref() == Ok("1")
+}
+
+/// 递归查找同时携带 userAddress / typedData / signature 的对象
+///（兼容 params 数组或对象包裹两种 wire 形态）。
+fn find_execute_fields(value: &Value) -> Option<(&Value, &Value, &Value)> {
+    match value {
+        Value::Object(map) => {
+            let user = map.get("userAddress");
+            let td = map.get("typedData");
+            let sig = map.get("signature");
+            if let (Some(u), Some(t), Some(s)) = (user, td, sig) {
+                return Some((u, t, s));
+            }
+            for v in map.values() {
+                if let Some(found) = find_execute_fields(v) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items.iter().find_map(find_execute_fields),
+        _ => None,
+    }
+}
+
+fn sig_enforcement_enabled() -> bool {
+    sig_required()
+}
+
+/// 验证 executeTransaction 的用户签名：
+/// 1. 从 body 提取 (userAddress, typedData, signature)；
+/// 2. TypedData::message_hash(user) 计算 SNIP-12 哈希；
+/// 3. 链上 `get_public_key()`（带 TTL 缓存）+ starknet_crypto::verify。
+/// 返回 Ok(user_address_hex) 表示签名有效。
+async fn verify_execute_signature(body: &Value) -> Result<String, String> {
+    let (user_value, typed_data_value, signature) = find_execute_fields(body)
+        .ok_or_else(|| "execute fields not found in body".to_string())?;
+
+    let user_str = user_value
+        .as_str()
+        .ok_or_else(|| "userAddress not a string".to_string())?;
+    let user_felt = crate::starknet::chain::parse_felt(user_str)
+        .ok_or_else(|| "userAddress not a felt".to_string())?;
+
+    // 签名数组：标准账户为 [r, s]（十进制字符串）；其他形状直接判无效
+    let sig_items = signature
+        .as_array()
+        .ok_or_else(|| "signature not an array".to_string())?;
+    if sig_items.len() != 2 {
+        return Err(format!(
+            "unsupported signature shape (len={})",
+            sig_items.len()
+        ));
+    }
+    let r = starknet::core::types::Felt::from_dec_str(
+        sig_items[0].as_str().unwrap_or_default(),
+    )
+    .map_err(|e| format!("sig r: {e}"))?;
+    let s = starknet::core::types::Felt::from_dec_str(
+        sig_items[1].as_str().unwrap_or_default(),
+    )
+    .map_err(|e| format!("sig s: {e}"))?;
+
+    // SNIP-12 哈希（typed data 三段拆解后交给 TypedData）
+    let td_obj = typed_data_value
+        .as_object()
+        .ok_or_else(|| "typedData not an object".to_string())?;
+    let types = td_obj
+        .get("types")
+        .cloned()
+        .ok_or_else(|| "typedData.types missing".to_string())?;
+    let domain = td_obj
+        .get("domain")
+        .cloned()
+        .ok_or_else(|| "typedData.domain missing".to_string())?;
+    let primary = td_obj
+        .get("primaryType")
+        .cloned()
+        .ok_or_else(|| "typedData.primaryType missing".to_string())?;
+    let message = td_obj
+        .get("message")
+        .cloned()
+        .ok_or_else(|| "typedData.message missing".to_string())?;
+
+    let types_typed: starknet::core::types::typed_data::Types =
+        serde_json::from_value(types).map_err(|e| format!("types: {e}"))?;
+    let domain_typed: starknet::core::types::typed_data::Domain =
+        serde_json::from_value(domain).map_err(|e| format!("domain: {e}"))?;
+    let primary_ref: starknet::core::types::typed_data::InlineTypeReference =
+        serde_json::from_value(primary).map_err(|e| format!("primaryType: {e}"))?;
+    let message_val: starknet::core::types::typed_data::Value =
+        serde_json::from_value(message).map_err(|e| format!("message: {e}"))?;
+
+    let typed_data = starknet::core::types::TypedData::new(
+        types_typed,
+        domain_typed,
+        primary_ref,
+        message_val,
+    )
+    .map_err(|e| format!("typed data invalid: {e}"))?;
+    let hash = typed_data
+        .message_hash(user_felt)
+        .map_err(|e| format!("message hash: {e}"))?;
+
+    // signer pk：链上 account.get_public_key()（TTL 缓存）
+    let pk = get_public_key_cached(user_felt).await?;
+
+    // starknet_crypto::verify 使用 starknet-ff 的 FieldElement（与 core Felt 字节兼容）
+    let to_ff = |f: starknet::core::types::Felt| {
+        starknet_ff::FieldElement::from_bytes_be(&f.to_bytes_be())
+            .expect("any 32-byte value is a canonical felt252")
+    };
+    let ok = starknet_crypto::verify(&to_ff(pk), &to_ff(hash), &to_ff(r), &to_ff(s))
+        .map_err(|e| format!("verify: {e}"))?;
+    if !ok {
+        return Err("signature does not match user public key".into());
+    }
+    Ok(user_str.to_string())
+}
+
+static PK_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, starknet::core::types::Felt)>>> =
+    std::sync::OnceLock::new();
+const PK_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+async fn get_public_key_cached(
+    user: starknet::core::types::Felt,
+) -> Result<starknet::core::types::Felt, String> {
+    let cache = PK_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    {
+        let map = match cache.lock() {
+            Ok(m) => m,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some((ts, pk)) = map.get(&user.to_hex_string()) {
+            if ts.elapsed() < PK_TTL {
+                return Ok(*pk);
+            }
+        }
+    }
+    let selector = starknet::core::utils::starknet_keccak(b"get_public_key");
+    let chain = super::chain().ok_or("starknet chain not initialized")?;
+    let felts = chain
+        .call_contract(user, selector, vec![])
+        .await
+        .map_err(|e| format!("get_public_key call failed: {e}"))?;
+    let pk_felt = felts
+        .first()
+        .copied()
+        .ok_or_else(|| "empty get_public_key result".to_string())?;
+    {
+        let mut map = match cache.lock() {
+            Ok(m) => m,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if map.len() > 1000 {
+            map.clear();
+        }
+        map.insert(user.to_hex_string(), (std::time::Instant::now(), pk_felt));
+    }
+    Ok(pk_felt)
+}
+
+#[cfg(test)]
+mod sig_tests {
+    use super::*;
+
+    #[test]
+    fn find_execute_fields_walks_nested_params() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "paymaster_executeTransaction",
+            "params": [{
+                "type": "invoke",
+                "invoke": {
+                    "userAddress": "0x1234",
+                    "typedData": { "types": {}, "primaryType": "OutsideExecution", "domain": {}, "message": {} },
+                    "signature": ["123", "456"]
+                }
+            }, { "version": "0x1" }]
+        });
+        let (user, typed_data, sig) =
+            find_execute_fields(&body).expect("fields must be found");
+        assert_eq!(user.as_str(), Some("0x1234"));
+        assert!(typed_data.get("types").is_some());
+        assert_eq!(sig.as_array().map(|a| a.len()), Some(2));
+    }
+
+    #[test]
+    fn find_execute_fields_returns_none_when_absent() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "paymaster_isAvailable", "params": []
+        });
+        assert!(find_execute_fields(&body).is_none());
+    }
+
+    #[test]
+    fn enforcement_flag_defaults_off() {
+        // 未设 env 时迁移期默认放行（signature check 仅记日志）
+        assert!(!sig_required());
     }
 }
