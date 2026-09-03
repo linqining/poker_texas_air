@@ -14,6 +14,13 @@
 # 方案与本地 cairo 2.11.4 计算不一致——declare 会报
 #   "Mismatch compiled class hash ... Actual: 0x<链上算的> Expected: 0x<sierra 声明的>"
 # 脚本自动抓 Actual 并以 --compiled-hash 重试。
+# 地址说明：
+# - HELPER  = SettlementPayoutAnonymizer 合约地址（认领托管 helper，**合约
+#             地址而非钱包**；默认自动读 texas/.env 的
+#             STARKNET_CLAIM_HELPER_ADDRESS）；
+# - CASHOUT_HELPER = CashoutUnshieldHelper（#25 unshield 提现通道）合约地址；
+#   未提供且 DEPLOY_VAULT_V3=1 时自动部署；
+# - OWNER   = poker-deployer 钱包地址（签名用，也是 operator/owner）。
 # gas 预算：declare 该 class 约需 l2_gas 2.86e9 单位（当前价格 ≈142 STRK），
 # 部署账户余额不足时先去水龙头补充 STRK。
 set -euo pipefail
@@ -21,9 +28,16 @@ ROOT=/Users/mac/projects/poker_texas_air
 SNOPS=/Users/mac/projects/zgame/target/debug/snops
 URL="${URL:-https://starknet-sepolia-rpc.publicnode.com}"
 ART="$ROOT/poker_contracts/target/dev"
-HELPER="${HELPER:?HELPER address required}"
+# HELPER = SettlementPayoutAnonymizer 合约地址（认领托管 helper，是合约不是
+# 钱包；与部署者 OWNER 无关）。默认自动从 texas/.env 的
+# STARKNET_CLAIM_HELPER_ADDRESS 读取，可用环境变量覆盖。
+HELPER="${HELPER:-$(grep '^STARKNET_CLAIM_HELPER_ADDRESS=' "$ROOT/texas/.env" | cut -d= -f2)}"
+VAULT="${VAULT:-$(grep '^STARKNET_VAULT_ADDRESS=' "$ROOT/texas/.env" | cut -d= -f2)}"
+HELPER="${HELPER:?HELPER address required (texas/.env STARKNET_CLAIM_HELPER_ADDRESS)}"
+VAULT="${VAULT:-$(grep '^STARKNET_VAULT_ADDRESS=' "$ROOT/texas/.env" | cut -d= -f2)}"
+POOL="${POOL:-$(grep '^VITE_STRK20_POOL_ADDRESS=' "$ROOT/client/.env.development" | cut -d= -f2)}"
+POOL="${POOL:?POOL (STRK20 sepolia pool) address required}"
 PROGRAM_HASH="${PROGRAM_HASH:?PROGRAM_HASH required (prove-hand public_outputs.json)}"
-VAULT="${VAULT:?VAULT address required}"
 
 # shellcheck disable=SC1091
 . "$ROOT/.env.dev"
@@ -107,6 +121,7 @@ TOKEN="${TOKEN:?TOKEN (STRK20) address required}"
 CASHOUT_HELPER="${CASHOUT_HELPER:?CASHOUT_HELPER (CashoutUnshieldHelper) address required}"
 DUAL_OLD="${DUAL_OLD:?DUAL_OLD (current dual settlement) address required}"
 echo "== [1b/5] declare + deploy vault v3（#33 在局锁定；可选：DEPLOY_VAULT_V3=1）"
+CASHOUT_HELPER="${CASHOUT_HELPER:-}"
 if [ "${DEPLOY_VAULT_V3:-0}" = "1" ]; then
     VCLS=""
     for attempt in 1 2 3; do
@@ -143,6 +158,45 @@ if [ "${DEPLOY_VAULT_V3:-0}" = "1" ]; then
     # 新 vault 上的授权与结算指向（旧 vault 筹码迁移走既有 withdraw 路径）
     submit_wait set_unshield_helper "$SN" invoke --contract "$VAULT_NEW" --fn set_unshield_helper --calldata "$CASHOUT_HELPER" >/dev/null
     submit_wait set_settlement_contract "$SN" invoke --contract "$VAULT_NEW" --fn set_settlement_contract --calldata "$DUAL_OLD" >/dev/null
+
+    # #25：部署 CashoutUnshieldHelper 绑定新 vault（pool=token 占位，池集成
+    # 属 SDK_SEAM），并把 vault 的 unshield 信任门指到它
+    if [ -z "${CASHOUT_HELPER:-}" ]; then
+        HCLS=""
+        for attempt in 1 2 3; do
+          n=$(get_nonce)
+          out=$("$SN" declare \
+            --class "$ART/poker_contracts_CashoutUnshieldHelper.contract_class.json" \
+            --compiled "$ART/poker_contracts_CashoutUnshieldHelper.compiled_contract_class.json" 2>&1 || true)
+          tx=$(printf '%s' "$out" | grep -oE 'TX=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
+          if [ -n "$tx" ]; then wait_nonce_gt "$n"; HCLS="$tx"; break; fi
+          actual=$(printf '%s' "$out" | grep -oE 'Actual: 0x[0-9a-fA-F]+' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
+          if [ -n "$actual" ]; then
+            n=$(get_nonce)
+            out=$("$SN" declare \
+              --class "$ART/poker_contracts_CashoutUnshieldHelper.contract_class.json" \
+              --compiled "$ART/poker_contracts_CashoutUnshieldHelper.compiled_contract_class.json" \
+              --compiled-hash "$actual" 2>&1 || true)
+            tx=$(printf '%s' "$out" | grep -oE 'TX=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
+            if [ -n "$tx" ]; then wait_nonce_gt "$n"; HCLS="$tx"; break; fi
+          fi
+          sleep 10
+        done
+        [ -n "$HCLS" ] || { echo "cashout helper declare FAILED" >&2; exit 1; }
+        echo "CASHOUT_HELPER_CLASS=$HCLS"
+        CASHOUT_HELPER=""
+        for attempt in 1 2 3 4 5; do
+          n=$(get_nonce)
+          out=$("$SN" deploy --class-hash "$HCLS" --calldata "$VAULT_NEW,$POOL" 2>&1 || true)
+          addr=$(printf '%s' "$out" | grep -oE 'CONTRACT_ADDRESS=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
+          if [ -n "$addr" ]; then wait_nonce_gt "$n"; CASHOUT_HELPER="$addr"; break; fi
+          sleep 5
+        done
+        [ -n "$CASHOUT_HELPER" ] || { echo "cashout helper deploy FAILED" >&2; exit 1; }
+        echo "CASHOUT_HELPER=$CASHOUT_HELPER"
+    fi
+    submit_wait set_unshield_helper "$SN" invoke --contract "$VAULT_NEW" --fn set_unshield_helper --calldata "${CASHOUT_HELPER:?}" >/dev/null
+
     VAULT="$VAULT_NEW"
 else
     echo "（跳过 vault v3 部署：DEPLOY_VAULT_V3 未设；沿用现有 vault）"
