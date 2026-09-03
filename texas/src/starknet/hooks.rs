@@ -615,6 +615,21 @@ pub fn mirror_force_fold(table_id: u32, wallet_addr: &str) {
     let Some(addr) = TableMirror::addr_from_starknet(wallet_addr) else { return };
     let result = mirror_registry().with_mirror(table_id, || new_mirror(table_id), |m| {
         let Some(seat) = m.seat_index_of(addr) else { return Ok(()) };
+        // 踢人强制弃牌同样可能终结手牌：派奖前快照 + 记录待应用的终局
+        // 弃牌座位（与 apply_mirror_bet 的 fold 分支同款——否则被踢者的
+        // fold-win 手牌永远无法构建结算）。
+        let unfolded_others = m
+            .table
+            .seats
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != seat as usize)
+            .filter(|(_, s)| s.is_occupied() && !s.is_folded() && !s.is_waiting())
+            .count();
+        if unfolded_others == 1 {
+            m.mark_pre_settlement();
+            m.pre_settlement_final_fold = Some(seat);
+        }
         let args = borsh::to_vec(&poker_l1::vm::contracts::texas_poker::dispatch::SeatIndexArgs {
             seat_index: seat,
         })
@@ -650,6 +665,9 @@ fn apply_mirror_bet(m: &mut TableMirror, seat: u8, action: &str, total_bet: Opti
             // 次 fold 转换里直接派奖并 reset（pot 清零、回 Waiting）。而
             // settle_hand 需要派奖前状态（pot/total_bet/folded 完整）——
             // 派奖前先打 pre_settlement 快照，弃牌获胜手牌才有可证明结算。
+            // 快照打在 fold 应用之前：记录待应用的终局弃牌座位，结算派发
+            // 时先在快照副本上落这记弃牌（derive_fold_win_plan 需要
+            // "恰好一名未弃牌"的终局形态）。
             let unfolded_others = m
                 .table
                 .seats
@@ -660,6 +678,7 @@ fn apply_mirror_bet(m: &mut TableMirror, seat: u8, action: &str, total_bet: Opti
                 .count();
             if unfolded_others == 1 {
                 m.mark_pre_settlement();
+                m.pre_settlement_final_fold = Some(seat);
             }
             m.fold(seat)
         }

@@ -41,6 +41,11 @@ pub struct TableMirror {
     /// 派奖前快照（board/pot/total_bet 完整），供 SettleHandCalldata 构建。
     /// 在 showdown 展示期结束、advance_deadline 派奖之前调用 [`mark_pre_settlement`]。
     pub pre_settlement: Option<TexasPokerTable>,
+    /// fold-win 快照的"待应用终局弃牌"座位：`mark_pre_settlement` 打在
+    /// `fold(seat)` 应用之前，快照里该座位仍为未弃牌——结算派发时须先把
+    /// 这一记弃牌应用到快照副本上，`derive_fold_win_plan` 才能看到
+    /// "恰好一名未弃牌玩家"（showdown 路径恒为 None）。
+    pub pre_settlement_final_fold: Option<u8>,
     /// 本 mirror 的 table_id 种子（hand_binding 的 table_id 分量）。
     pub table_seed: u64,
     /// 服务器 caller 地址（镜像内管理操作如 advance_deadline 的 caller）。
@@ -75,6 +80,7 @@ impl TableMirror {
             table_seed: table_id_seed,
             tasks: Vec::new(),
             pre_settlement: None,
+            pre_settlement_final_fold: None,
             caller,
             block_height: 1,
             // 与服务端 collect_rake_for_settlement 同源读 env
@@ -162,6 +168,7 @@ impl TableMirror {
         // 全新手状态（TableMirror 由调用方刚构造）：清上一手残留，保证
         // deck 注入点是干净 canonical 状态。
         self.pre_settlement = None;
+        self.pre_settlement_final_fold = None;
         self.tasks.clear();
         self.table.community_cards.clear();
         self.table.pot = 0;

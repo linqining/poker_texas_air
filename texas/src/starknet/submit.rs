@@ -11,6 +11,7 @@
 use poker_l1::vm::contracts::texas_poker::settlement::{
     derive_fold_win_plan, derive_settlement_plan, SettlementPlan,
 };
+use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 use poker_texas_air::outer_aggregate::{prove_outer_aggregate, verify_outer_aggregate, VerifiedOuterAggregate};
 use poker_texas_air::orchestrator::Orchestrator;
 use poker_texas_air::starknet_settlement::{
@@ -93,9 +94,15 @@ pub fn settle_hand(
 
     // 0. 派奖前快照优先：VM 在 advance_deadline 时已派奖（pot 清零、board 复位），
     //    而 settle_hand 需要 pre-payout 状态（board 5 张、pot、total_bet）。
-    let settle_table = mirror
-        .pre_settlement
+    //    fold-win 快照打在终局弃牌应用之前：先在副本上落这记弃牌，
+    //    derive_fold_win_plan 才能看到"恰好一名未弃牌玩家"的终局形态。
+    let fold_snapshot = mirror
+        .pre_settlement_final_fold
+        .zip(mirror.pre_settlement.as_ref())
+        .map(|(seat, snap)| apply_pending_final_fold(snap, seat));
+    let settle_table = fold_snapshot
         .as_ref()
+        .or(mirror.pre_settlement.as_ref())
         .unwrap_or(&mirror.table);
 
     // 1. 分池 / rake / awards（库内计算，含零和校验）。
@@ -351,9 +358,75 @@ pub fn i128_to_ff(value: i128) -> Ff {
     }
 }
 
+/// fold-win 快照补应用终局弃牌：`apply_mirror_bet` 的 `mark_pre_settlement`
+/// 打在 `fold(seat)` 应用之前，快照里该座位仍是未弃牌——派发前在副本上
+/// 落这记弃牌，`derive_fold_win_plan` 才能看到"恰好一名未弃牌"的终局形态。
+/// 座位越界时原样返回副本（防御，不 panic）。
+fn apply_pending_final_fold(snap: &TexasPokerTable, seat: u8) -> TexasPokerTable {
+    let mut table = snap.clone();
+    if let Some(target) = table.seats.get_mut(usize::from(seat)) {
+        target.set_status(poker_l1::vm::contracts::texas_poker::types::SeatStatus::Folded);
+    }
+    table
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-09-04：fold-win 快照补弃牌——快照里两名未弃牌（含待落弃的
+    /// 输家），应用后必须恰好剩一名（赢家），且 pot/total_bet 不变。
+    #[test]
+    fn pending_final_fold_yields_single_unfolded() {
+        use poker_l1::object_model::ObjectID;
+        use poker_l1::vm::contracts::texas_poker::card::Card;
+        use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xF2; 20], 0),
+            "fold-snapshot-test".into(),
+            [0xEE; 20],
+            2,
+            1,
+            2,
+        );
+        table.seats[0].fixture_set_player([1; 20]);
+        table.seats[0].fixture_set_total_bet(300);
+        table.seats[0].set_status(SeatStatus::Active);
+        table.seats[1].fixture_set_player([2; 20]);
+        table.seats[1].fixture_set_total_bet(100);
+        table.seats[1].set_status(SeatStatus::Active);
+        table.pot = 400;
+
+        let mut folded = apply_pending_final_fold(&table, 1);
+
+        let unfolded: Vec<usize> = folded
+            .seats
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_occupied() && !s.is_folded())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(unfolded, vec![0], "winner must be the only unfolded seat");
+        assert!(folded.seats[1].is_folded());
+        // 派发守卫的精确形态：恰一名未弃牌 → fold 计划路径。
+        assert_eq!(unfolded.len(), 1);
+        // 财务字段不被补弃牌动作触碰。
+        assert_eq!(folded.pot, 400);
+        assert_eq!(folded.seats[0].total_bet(), 300);
+        assert_eq!(folded.seats[1].total_bet(), 100);
+        // 补弃牌后可直接派生 fold-win 计划（翻后 3 张 board 的抽水路径）。
+        folded.community_cards = vec![Card::new(2, 4), Card::new(3, 6), Card::new(2, 8)]
+            .try_into()
+            .unwrap();
+        folded.rules.rake_mode =
+            poker_l1::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+        folded.rules.rake_bps = 500;
+        folded.rules.rake_cap = 1_000;
+        let plan = poker_l1::vm::contracts::texas_poker::settlement::derive_fold_win_plan(&folded)
+            .expect("fold plan derives after final fold applied");
+        assert_eq!(plan.rake, 10, "400 - 200 uncalled = 200 contested * 5%");
+        assert_eq!(plan.awards[0], 390);
+    }
 
     #[test]
     fn i128_felt_roundtrip_semantics() {

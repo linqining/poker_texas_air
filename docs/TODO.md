@@ -75,6 +75,19 @@
     `collect_rake_for_settlement`——链上 deltas 含 5% 台费而前端筹码不扣，
     两本账每手偏差 5%（服务端 stack 总和守恒、牌史 rake=0）。已补齐，
     前端 stack/牌史 rake 字段/链上 delta 三者一致。
+  - **2026-09-04 第二轮（规则对齐行业 "no flop, no drop" + 两个上链 bug）**：
+    ① 结算腿单位错 10 倍：submit.rs / dual_settle.rs 局部 WEI_PER_CHIP=1e14
+    vs 全局/买入 1e15 → 链上余额与游戏输赢每手漂移 9/10（线上复现：玩家
+    链上只剩买入流水）。统一引用 config 常量 + 回归测试锁定。
+    ② fold-win 手从未上链：derive_settlement_plan 牌面校验（board=5/亮牌）
+    对弃牌手必败 → 输赢静默跳过。新增 `derive_fold_win_plan`（无牌面校验；
+    弃牌事实由聚合链 fold receipts 证明）+ 快照补应用终局弃牌
+    （`pre_settlement_final_fold`，踢人 force_fold 路径同款）。
+    ③ 抽水规则对齐：翻前 fold-win 不抽；翻后 fold-win 抽「被争夺的钱」
+    （底池 − 未跟注返还），游戏层 `fold_win_rake` 与链上 fold plan 同公式；
+    validate 的 "uncontested 不抽" 不变量相应放宽。测试：poker_l1 fixture
+    5 例（翻前/翻后未跟注排除/三人次高/cap/多人拒绝）+ texas rake 7 例 +
+    快照补弃牌端到端 1 例 + WEI 锁定 1 例，全部通过。
   - 全面审核（2026-09-04，含 AIR 约束）三处修正：
     ① 台费基数改为**争夺层总额**（contested_gross，镜像链上
     settlement.rs）——原按总池计算，all-in 未跟注返还层会被多抽
