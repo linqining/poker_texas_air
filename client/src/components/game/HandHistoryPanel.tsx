@@ -217,12 +217,24 @@ const HandHistoryPanel: React.FC<HandHistoryPanelProps> = ({ tableId, visible, o
                     </BoardRow>
                   )}
                   <DetailGrid>
-                    {Object.entries(r.seats).map(([seatId, s]) => (
-                      <span key={seatId}>
-                        #{seatId} {s.player?.username || s.player?.id?.slice(0, 10) || '—'} ·{' '}
-                        {labels.pot} {formatChips(s.stack)}
-                      </span>
-                    ))}
+                    {Object.entries(r.seats).map(([seatId, s]) => {
+                      const cards = r.holeCards?.[seatId] ?? [];
+                      return (
+                        <span key={seatId} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                          <span>
+                            #{seatId} {s.player?.username || s.player?.id?.slice(0, 10) || '—'} ·{' '}
+                            {labels.pot} {formatChips(s.stack)}
+                          </span>
+                          {cards.length > 0 && (
+                            <span style={{ display: 'inline-flex', gap: '0.15rem' }}>
+                              {cards.map((c, i) => (
+                                <PokerCard key={i} card={c} width="1.4rem" />
+                              ))}
+                            </span>
+                          )}
+                        </span>
+                      );
+                    })}
                   </DetailGrid>
                 </>
               )}

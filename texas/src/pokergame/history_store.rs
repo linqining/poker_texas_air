@@ -39,6 +39,8 @@ pub struct HandHistoryRecord {
     pub side_pots: Vec<SidePot>,
     /// 公共牌（终局面）。
     pub board: Vec<Card>,
+    /// 已亮出的玩家手牌（seat → 两张底牌；仅摊牌亮牌座位）。
+    pub hole_cards: std::collections::HashMap<u32, Vec<Card>>,
     /// 赢家消息（净额，与前端展示一致）。
     pub win_messages: Vec<String>,
     /// 座位快照（钱包、用户名、下注、筹码，见 `Table::clean_seats_for_history`）。
@@ -143,6 +145,7 @@ mod tests {
             rake_collected: 5,
             side_pots: vec![],
             board: vec![],
+            hole_cards: std::collections::HashMap::new(),
             win_messages: vec!["A wins $95.00".into()],
             seats: serde_json::json!({}),
             streets: vec![],

@@ -4,8 +4,5 @@ $S --url http://127.0.0.1:5051 --pk 0x71d7bb07b9a64f6f78ac4c816aff4da9 \
    invoke --contract 0x508ab1bc518227bc444ced3b720f3e4f36309f53a32303fd2498ab26c5acb57 \
    --fn transfer --calldata 0x03af032bc00274a7b4cefcb9e9da0268616089dca02504ff2129a8f4a6939695,100000000000000000000,0
 
-
-todo：
-2. 牌局中抽水显示
-3. 牌局记录
-5. 抗审查
+// 构建和启动服务
+cd /Users/mac/projects/poker_texas_air && cargo build --release -p texas 2>&1 | tail -1 && pkill -f "target/release/texas" 2>/dev/null; sleep 2; cd texas && nohup script -q /tmp/texas_server.log /Users/mac/projects/poker_texas_air/target/release/texas > /dev/null 

@@ -316,6 +316,8 @@ export interface HandHistoryRecord {
   rakeCollected: number;
   sidePots: { amount: number }[];
   board: { suit: string; rank: string }[];
+  /** 已亮出的玩家手牌（seat → 两张底牌；仅摊牌亮牌座位） */
+  holeCards: Record<string, { suit: string; rank: string }[]>;
   winMessages: string[];
   seats: Record<string, {
     player: { id: string | null; username: string | null };

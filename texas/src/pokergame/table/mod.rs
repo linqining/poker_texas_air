@@ -664,6 +664,22 @@ impl Table {
     /// gross_pot = 当前 pot + 台费（摊牌路径 pot 已扣台费；fold-win 台费为 0）。
     pub fn record_hand_history(&self) {
         let board = self.mental_poker_game.list_revealed_community_cards().iter().map(|c| Card::from_playing_card(c)).collect::<Vec<_>>();
+        // 已亮出的手牌（摊牌亮牌的座位才有；弃牌/未亮牌座位不记录——隐私）
+        let (player_revealed, _) = self.mental_poker_game.list_revealed_cards();
+        let mut hole_cards: std::collections::HashMap<u32, Vec<Card>> = std::collections::HashMap::new();
+        for (pk_hex, cards) in player_revealed.iter() {
+            if cards.is_empty() {
+                continue;
+            }
+            if let Some((seat_id, _)) = self.seats().iter().find(|(_, s)| {
+                s.player.as_ref().map(|p| p.pk_hex.0 == *pk_hex).unwrap_or(false)
+            }) {
+                hole_cards.insert(
+                    *seat_id,
+                    cards.iter().map(|c| Card::from_playing_card(c)).collect::<Vec<_>>(),
+                );
+            }
+        }
         let record = crate::pokergame::history_store::HandHistoryRecord {
             hand_seq: 0, // 由 store 按桌分配单调 seq
             hand_over_at: now_ms(),
@@ -672,6 +688,7 @@ impl Table {
             rake_collected: self.summary.rake_collected,
             side_pots: self.summary.side_pots.clone(),
             board,
+            hole_cards,
             win_messages: self.summary.win_messages.clone(),
             seats: self.clean_seats_for_history(),
             streets: self.summary.history.clone(),
