@@ -59,6 +59,30 @@ pub trait IPokerVault<TContractState> {
     /// Owner-gated: authorize the helper contract allowed to call
     /// `burn_chips` (the PokerVaultAnonymizer deployment).
     fn set_authorized_helper(ref self: TContractState, helper: ContractAddress);
+
+    // ===== #33 在局锁定（牌局未结束取款逃单 / 结算砖死风险，见 TODO.md #33）=====
+
+    /// Owner-gated（operator）：入座/开局时锁定 `player` 的 `amount` 筹码。
+    /// 锁定额度只能被结算（apply_settlement 负 delta 优先扣锁定）消耗，
+    /// 玩家取款路径只能动未锁定部分。
+    fn lock(ref self: TContractState, player: ContractAddress, amount: u256);
+    /// Owner-gated（operator）：结算/续局后刷新 session 时钟。
+    fn refresh_session(ref self: TContractState, player: ContractAddress);
+    /// 无许可自助解锁：`block.timestamp > last_activity + lock_ttl` 后任何人
+    /// 可解锁（后端失联时玩家资金不被无限期冻结）。TTL=0 表示禁用自助解锁。
+    fn unlock_after_deadline(ref self: TContractState, player: ContractAddress);
+    /// Owner-gated: 调整自助解锁 TTL（秒）。
+    fn set_lock_ttl(ref self: TContractState, ttl: u64);
+    /// Owner-gated: 应急强制解锁（运营应急通道）。
+    fn force_unlock(ref self: TContractState, player: ContractAddress);
+    /// View: 锁定中的筹码。
+    fn locked_balance(self: @TContractState, player: ContractAddress) -> u256;
+    /// View: session 时钟（0 = 无活跃 session）。
+    fn session_last_activity(self: @TContractState, player: ContractAddress) -> u64;
+    /// View: 自助解锁 TTL（秒；0 = 禁用）。
+    fn lock_ttl(self: @TContractState) -> u64;
+    /// View: 是否存在活跃在局 session。
+    fn session_active(self: @TContractState, player: ContractAddress) -> bool;
     /// Read chip balance of a player.
     fn chip_balance(self: @TContractState, player: ContractAddress) -> u256;
     /// Token (STRK20) address.
@@ -134,6 +158,15 @@ pub mod PokerVault {
         authorized_helper: ContractAddress,
         /// #25：unshield 方向 helper（chip_to_note 提现通道）。
         unshield_helper: ContractAddress,
+        /// #33 在局锁定：player → 锁定筹码（入局额度；结算优先从这里扣）。
+        locked: Map<ContractAddress, u256>,
+        /// #33 在局 session：player → last_activity（秒）。解锁时钟基准。
+        session_last_activity: Map<ContractAddress, u64>,
+        /// #33 在局 session 活跃标志（与 last=0 哨兵解耦——测试/新链的
+        /// block timestamp 可能为 0）。
+        session_active: Map<ContractAddress, bool>,
+        /// #33 自助解锁 TTL（秒；0 = 禁用自助解锁）。constructor 默认 12h。
+        lock_ttl: u64,
         /// Per-player payout claim commitments (0 = unregistered).
         payout_commitments: Map<ContractAddress, felt252>,
         #[substorage(v0)]
@@ -156,6 +189,9 @@ pub mod PokerVault {
         SettlementContractSet: SettlementContractSet,
         AuthorizedHelperSet: AuthorizedHelperSet,
         UnshieldHelperSet: UnshieldHelperSet,
+        Locked: Locked,
+        SessionRefreshed: SessionRefreshed,
+        Unlocked: Unlocked,
         PayoutCommitmentRegistered: PayoutCommitmentRegistered,
         EscrowFunded: EscrowFunded,
     }
@@ -176,6 +212,22 @@ pub mod PokerVault {
     #[derive(Drop, starknet::Event)]
     struct UnshieldHelperSet {
         helper: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct Locked {
+        player: ContractAddress,
+        amount: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct SessionRefreshed {
+        player: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct Unlocked {
+        player: ContractAddress,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -223,6 +275,19 @@ pub mod PokerVault {
         self.token_address.write(token_address);
         self.settlement_contract.write(settlement_contract);
         self.authorized_helper.write(starknet::get_contract_address());
+        // #33：自助解锁 TTL 默认 12h（owner 可经 set_lock_ttl 调整）
+        self.lock_ttl.write(43200);
+    }
+
+    /// #33：可花费余额 = 余额 − 锁定。所有玩家侧取款路径共用。
+    fn assert_spendable(self: @ContractState, player: ContractAddress, amount: u256) {
+        let current = self.chip_balances.read(player);
+        assert!(current >= amount, "Insufficient chip balance");
+        let locked = self.locked.read(player);
+        assert!(
+            current - amount >= locked,
+            "Insufficient unlocked balance (in-hand lock)"
+        );
     }
 
     #[abi(embed_v0)]
@@ -248,6 +313,7 @@ pub mod PokerVault {
 
             let current = self.chip_balances.read(caller);
             assert!(current >= amount, "Insufficient chip balance");
+            assert_spendable(@self, caller, amount);
 
             self.chip_balances.write(caller, current - amount);
             self.total_chips.write(self.total_chips.read() - amount);
@@ -280,6 +346,7 @@ pub mod PokerVault {
 
             let current = self.chip_balances.read(player);
             assert!(current >= amount, "Insufficient chip balance");
+            assert_spendable(@self, player, amount);
             self.chip_balances.write(player, current - amount);
             self.total_chips.write(self.total_chips.read() - amount);
 
@@ -299,6 +366,7 @@ pub mod PokerVault {
             );
             assert!(amount > 0_u256, "Amount must be > 0");
             assert!(!player.is_zero(), "Player must be set");
+            assert_spendable(@self, player, amount);
 
             let current = self.chip_balances.read(player);
             assert!(current >= amount, "Insufficient chip balance");
@@ -311,6 +379,81 @@ pub mod PokerVault {
             self.ownable.assert_only_owner();
             self.authorized_helper.write(helper);
             self.emit(AuthorizedHelperSet { helper });
+        }
+
+        // ===== #33 在局锁定 =====
+
+        fn lock(ref self: ContractState, player: ContractAddress, amount: u256) {
+            self.ownable.assert_only_owner();
+            assert!(amount > 0_u256, "Amount must be > 0");
+            assert!(!player.is_zero(), "Player must be set");
+            let current = self.chip_balances.read(player);
+            assert!(current >= amount, "Insufficient chip balance");
+            let now = starknet::get_block_timestamp();
+            self.locked.write(player, self.locked.read(player) + amount);
+            self.session_last_activity.write(player, now);
+            self.session_active.write(player, true);
+            self.emit(Locked { player, amount });
+        }
+
+        fn refresh_session(ref self: ContractState, player: ContractAddress) {
+            self.ownable.assert_only_owner();
+            assert!(
+                self.session_last_activity.read(player) != 0_u64,
+                "No active session"
+            );
+            self.session_last_activity.write(player, starknet::get_block_timestamp());
+            self.session_active.write(player, true);
+            self.emit(SessionRefreshed { player });
+        }
+
+        fn unlock_after_deadline(ref self: ContractState, player: ContractAddress) {
+            // 无许可自助解锁：后端失联时玩家资金不被无限期冻结（#33 必要组成）
+            assert!(
+                self.session_active.read(player),
+                "No active session"
+            );
+            let ttl = self.lock_ttl.read();
+            assert!(ttl != 0_u64, "Self unlock disabled");
+            assert!(
+                starknet::get_block_timestamp()
+                    >= self.session_last_activity.read(player) + ttl,
+                "Lock not expired"
+            );
+            self.locked.write(player, 0_u256);
+            self.session_last_activity.write(player, 0_u64);
+            self.session_active.write(player, false);
+            self.emit(Unlocked { player });
+        }
+
+        fn set_lock_ttl(ref self: ContractState, ttl: u64) {
+            self.ownable.assert_only_owner();
+            self.lock_ttl.write(ttl);
+        }
+
+        fn force_unlock(ref self: ContractState, player: ContractAddress) {
+            self.ownable.assert_only_owner();
+            self.locked.write(player, 0_u256);
+            self.session_last_activity.write(player, 0_u64);
+            self.session_active.write(player, false);
+            self.emit(Unlocked { player });
+        }
+
+        fn locked_balance(self: @ContractState, player: ContractAddress) -> u256 {
+            self.locked.read(player)
+        }
+
+        fn session_last_activity(self: @ContractState, player: ContractAddress) -> u64 {
+            self.session_last_activity.read(player)
+        }
+
+        /// View: 是否存在活跃在局 session。
+        fn session_active(self: @ContractState, player: ContractAddress) -> bool {
+            self.session_active.read(player)
+        }
+
+        fn lock_ttl(self: @ContractState) -> u64 {
+            self.lock_ttl.read()
         }
 
         fn set_unshield_helper(ref self: ContractState, helper: ContractAddress) {
@@ -382,6 +525,14 @@ pub mod PokerVault {
                 let abs_delta = -delta;
                 let abs_delta_u64: u64 = abs_delta.try_into().expect('abs delta fits u64');
                 let amount: u256 = abs_delta_u64.into();
+                // #33：结算扣款**优先消耗锁定额度**——输家即使提走全部未锁定
+                // 余额，锁定部分仍足以覆盖输额，结算不再被砖死。
+                let locked = self.locked.read(player);
+                let from_locked = if locked < amount { locked } else { amount };
+                if from_locked != 0_u256 {
+                    self.locked.write(player, locked - from_locked);
+                }
+                // 锁定部分本就是余额的一部分：全额扣减余额（winner 从托管拿钱）
                 let current = self.chip_balances.read(player);
                 assert!(current >= amount, "Insufficient chip balance");
                 self.chip_balances.write(player, current - amount);
@@ -441,3 +592,215 @@ pub mod PokerVault {
 // Tests (snforge): Part A Phase 1 payout-commitment registry +
 // settlement-gated escrow funding.
 // ============================================================
+
+// ============================================================
+// Tests (snforge)：#33 在局锁定 — 取款门 / 结算扣款顺序 / 超时自助解锁 /
+// 非 helper 直调拒绝。结构与 cashout_unshield_helper 一致。
+// ============================================================
+
+#[cfg(test)]
+mod in_hand_lock_mocks {
+    use starknet::{ContractAddress, get_caller_address};
+
+    #[starknet::interface]
+    pub trait ILockMockToken<ContractState> {
+        fn mint(ref self: ContractState, to: ContractAddress, amount: u256);
+        fn approve(ref self: ContractState, spender: ContractAddress, amount: u256) -> bool;
+        fn balance_of(self: @ContractState, account: ContractAddress) -> u256;
+        fn allowance(
+            self: @ContractState,
+            owner: ContractAddress,
+            spender: ContractAddress,
+        ) -> u256;
+        fn transfer(ref self: ContractState, to: ContractAddress, amount: u256) -> bool;
+        fn transfer_from(
+            ref self: ContractState,
+            from: ContractAddress,
+            to: ContractAddress,
+            amount: u256,
+        ) -> bool;
+    }
+
+    #[starknet::contract]
+    pub mod LockMockToken {
+        use starknet::{ContractAddress, get_caller_address};
+        use starknet::storage::{Map, StorageMapReadAccess, StorageMapWriteAccess};
+
+        #[storage]
+        struct Storage {
+            balances: Map<ContractAddress, u256>,
+            allowances: Map<(ContractAddress, ContractAddress), u256>,
+        }
+
+        #[constructor]
+        fn constructor(ref self: ContractState) {}
+
+        #[abi(embed_v0)]
+        pub impl LockMockTokenImpl of super::ILockMockToken<ContractState> {
+            fn mint(ref self: ContractState, to: ContractAddress, amount: u256) {
+                let current = self.balances.read(to);
+                self.balances.write(to, current + amount);
+            }
+
+            fn approve(
+                ref self: ContractState,
+                spender: ContractAddress,
+                amount: u256,
+            ) -> bool {
+                let caller = get_caller_address();
+                let current = self.allowances.read((caller, spender));
+                self.allowances.write((caller, spender), current + amount);
+                true
+            }
+
+            fn balance_of(self: @ContractState, account: ContractAddress) -> u256 {
+                self.balances.read(account)
+            }
+
+            fn allowance(
+                self: @ContractState,
+                owner: ContractAddress,
+                spender: ContractAddress,
+            ) -> u256 {
+                self.allowances.read((owner, spender))
+            }
+
+            fn transfer(ref self: ContractState, to: ContractAddress, amount: u256) -> bool {
+                let caller = get_caller_address();
+                let current = self.balances.read(caller);
+                assert!(current >= amount, "insufficient token balance");
+                self.balances.write(caller, current - amount);
+                let to_current = self.balances.read(to);
+                self.balances.write(to, to_current + amount);
+                true
+            }
+
+            fn transfer_from(
+                ref self: ContractState,
+                from: ContractAddress,
+                to: ContractAddress,
+                amount: u256,
+            ) -> bool {
+                let spender = get_caller_address();
+                let allowed = self.allowances.read((from, spender));
+                assert!(allowed >= amount, "insufficient allowance");
+                self.allowances.write((from, spender), allowed - amount);
+                let from_balance = self.balances.read(from);
+                assert!(from_balance >= amount, "insufficient balance");
+                self.balances.write(from, from_balance - amount);
+                let to_balance = self.balances.read(to);
+                self.balances.write(to, to_balance + amount);
+                true
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod in_hand_lock_tests {
+    use core::num::traits::Zero;
+    use starknet::{ContractAddress, get_contract_address};
+    use snforge_std::{ContractClassTrait, DeclareResultTrait, declare};
+
+    use super::in_hand_lock_mocks::{
+        ILockMockTokenDispatcher, ILockMockTokenDispatcherTrait,
+    };
+    use super::{IPokerVaultDispatcher, IPokerVaultDispatcherTrait};
+
+    /// 部署 token + vault（owner/operator/玩家 = 测试合约），充 1000 筹码。
+    /// `lock_amount` > 0 时同时锁定。返回 (token, vault, player, vault_d)。
+    fn setup(lock_amount: u256) -> (
+        ContractAddress,
+        ContractAddress,
+        ContractAddress,
+        IPokerVaultDispatcher,
+    ) {
+        let test = get_contract_address();
+        let zero: ContractAddress = 0.try_into().unwrap();
+        let token = declare("LockMockToken").unwrap().contract_class();
+        let (token_addr, _) = token.deploy(@array![]).unwrap();
+        let token_d = ILockMockTokenDispatcher { contract_address: token_addr };
+        token_d.mint(test, 1000);
+
+        let vault_class = declare("PokerVault").unwrap().contract_class();
+        let (vault, _) = vault_class
+            .deploy(@array![test.into(), token_addr.into(), zero.into()])
+            .unwrap();
+        let vault_d = IPokerVaultDispatcher { contract_address: vault };
+        token_d.approve(vault, 1000);
+        println!("DEBUG allowance test-vault={}", token_d.allowance(test, vault));
+        println!("DEBUG bal test={} vault={}", token_d.balance_of(test), token_d.balance_of(vault));
+        vault_d.deposit_for(test, 1000);
+        if lock_amount != 0_u256 {
+            vault_d.lock(test, lock_amount);
+        }
+        (token_addr, vault, test, vault_d)
+    }
+
+    #[test]
+    #[should_panic(expected: "Insufficient unlocked balance (in-hand lock)")]
+    fn withdraw_above_unlocked_reverted() {
+        let (_, _, _, vault_d) = setup(800);
+        // 未锁定仅 200；取 300 必须被拒（否则逃单）
+        vault_d.withdraw(300);
+    }
+
+    #[test]
+    fn withdraw_unlocked_part_allowed() {
+        let (_, _, player, vault_d) = setup(800);
+        vault_d.withdraw(200);
+        assert!(vault_d.chip_balance(player) == 800_u256, "remaining");
+        assert!(vault_d.locked_balance(player) == 800_u256, "locked");
+    }
+
+    #[test]
+    fn settlement_consumes_locked_first() {
+        let (_, _, player, mut vault_d) = setup(800);
+        // apply_settlement 仅 settlement 合约可调：测试合约自任 settlement
+        vault_d.set_settlement_contract(get_contract_address());
+        // 结算 -900：先扣锁定 800，再扣未锁定 100 → 不砖死
+        vault_d.apply_settlement(player, -900);
+        assert!(vault_d.locked_balance(player) == 0_u256, "locked drained");
+        assert!(vault_d.chip_balance(player) == 100_u256, "balance net");
+    }
+
+    #[test]
+    fn settlement_within_locked_keeps_unlocked_intact() {
+        let (_, _, player, vault_d) = setup(800);
+        vault_d.set_settlement_contract(get_contract_address());
+        vault_d.apply_settlement(player, -500);
+        assert!(vault_d.locked_balance(player) == 300_u256, "locked rest");
+        assert!(vault_d.chip_balance(player) == 500_u256, "unlocked intact");
+    }
+
+    #[test]
+    #[should_panic(expected: "Lock not expired")]
+    fn self_unlock_before_ttl_reverted() {
+        let (_, _, _, vault_d) = setup(800);
+        // 同一 block 内 timestamp 未推进 → 未过期，自助解锁被拒
+        vault_d.unlock_after_deadline(get_contract_address());
+    }
+
+    #[test]
+    #[should_panic(expected: "Self unlock disabled")]
+    fn self_unlock_disabled_when_ttl_zero() {
+        let (_, _, _, vault_d) = setup(800);
+        vault_d.set_lock_ttl(0);
+        vault_d.unlock_after_deadline(get_contract_address());
+    }
+
+    #[test]
+    fn force_unlock_allows_withdrawal() {
+        let (_, _, _, vault_d) = setup(800);
+        vault_d.force_unlock(get_contract_address());
+        assert!(vault_d.locked_balance(get_contract_address()) == 0_u256, "unlocked");
+        vault_d.withdraw(900);
+    }
+
+    #[test]
+    fn set_lock_ttl_takes_effect() {
+        let (_, _, _, vault_d) = setup(800);
+        vault_d.set_lock_ttl(600);
+        assert!(vault_d.lock_ttl() == 600_u64);
+    }
+}

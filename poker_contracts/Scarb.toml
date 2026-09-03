@@ -24,3 +24,7 @@ casm = true
 # 编译器 lowering crash（既有问题），门控到该 feature，默认关闭。
 [features]
 dual_legacy_tests = []
+
+[profile.dev.cairo]
+unstable-add-statements-code-locations-debug-info = true
+unstable-add-statements-functions-debug-info = true

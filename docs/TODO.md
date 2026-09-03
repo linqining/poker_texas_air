@@ -51,6 +51,16 @@
     `poker_dual_settlement.cairo:664`、`cashout_unshield_helper.cairo:110`。
   - 建议顺序：①+②+③ 一并实施（纯② 会冻结资金；只做① 无超时解锁不可接
     受）；`chip_to_note` / `poker_vault_anonymizer` 的提现路径同样过锁定门。
+  - ✅ **实现完成（2026-09-03，snforge 85/85 ✅）**：`poker_vault.cairo` 增加
+    `locked` / `session_last_activity` / `session_active` / `lock_ttl` 存储；
+    `lock`（owner=operator）/ `refresh_session` / `unlock_after_deadline`
+    （无许可，`timestamp >= last + ttl`）/ `set_lock_ttl`（owner，0=禁用）/
+    `force_unlock`（owner 应急）；`withdraw` / `withdraw_to` / `burn_chips`
+    统一 `assert_spendable`（只可花未锁定余额）；`apply_settlement` 负 delta
+    **优先消耗锁定额度**并全额扣减余额（修结算砖死）。8 个 snforge 用例：
+    锁定内取款拒绝 / 未锁定可取 / 结算先扣锁定（-900：锁定 800+未锁定 100）/
+    锁定内结算不伤未锁定 / TTL 未过期拒绝 / TTL=0 禁用拒绝 / force_unlock /
+    TTL 设置生效。随 #11 部署批次上线（vault v3 + dual v3 同批）。
 
 - [x] **1. 牌局抽水显示**（2026-09-03 完成）
   - 实现：新增 `texas/src/pokergame/rake.rs`（公式与分层分摊逐字对齐链上
