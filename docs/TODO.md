@@ -134,7 +134,17 @@
     （vendored `third_party/proving/stwo_cairo_verifier`）或 SNIP-36 fact
     registry，替换 operator 登记的 residual trust；sepolia 部署 + gas/size
     实测归入 #11。
-- [ ] **11. P2-M4 联调部署**：sepolia 部署 + gas/size 测量 + 文档。
+- [ ] **11. P2-M4 联调部署**（2026-09-03 测量/文档/脚本完成，**链上部署被 sepolia
+  gas 预算阻塞——需给 poker-deployer 补 ≈77 STRK**）：
+  - ✅ 测量：dual v3 class = sierra 859 KB / casm 737 KB / 32,901 words；
+    declare 需 l2_gas 2.86e9 单位 ≈ 142 STRK（实时价），账户余额 65 STRK；
+    电路证明 14s / 2021 步 / 公开段 14 felt。
+  - ✅ 脚本 `poker_contracts/scripts/deploy_sepolia_v3.sh`：declare（自动处理
+    sepolia compiled-hash 方案差异，`--compiled-hash` 重试）→ deploy(owner,
+    vault, prover) → set_claim_helper → set_circuit_program_hash → 回填
+    texas/.env。文档详见 `poker_contracts/DEPLOYMENTS.md` 末节。
+  - ⬜ 剩余：补 STRK 后执行脚本，然后把 texas 服务端指到 v3 做一笔真实
+    零明文结算联调（配合 #28 的 sepolia 侧实机验证）。
 - [ ] **12. C3.2-M1 认领 sidecar**：Node sidecar 封装 STRK20 私密转账
   （运营浮存 → 赢家 viewing key note），Rust 服务端 HTTP 调用；需 SDK 依赖 + 服务器 KMS。
 - [ ] **13. C3.2-M2 赔付路由**：settle 后异步队列：延迟抖动 + 批量 shield 补浮存 + 失败重试。

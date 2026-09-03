@@ -164,3 +164,19 @@ DUAL_PROOF_PROTOCOL.md §5.3 做客户端协议对齐（独立工作量）。
 8. dev_bot 循环 mirror 分支 `continue` 饿死游戏层动作
 9. snops 估价系数不可调（低余额 declare 被拒）→
    `SNOPS_GAS_AMOUNT_MULT` / `SNOPS_GAS_PRICE_MULT`
+
+## Dual settlement v3（P2-M3 零明文结算，2026-09-03 待部署）
+
+代码已就绪（`verify_and_settle_dapv_stark_private_v2`：calldata 零明文，消费
+settlement_private 电路公开段），**链上部署被 gas 预算阻塞**：
+
+| 项 | 值 |
+| --- | --- |
+| class 产物 | sierra 859 KB / casm 737 KB / 32,901 bytecode words |
+| declare 资源需求（sepolia 实时报价） | l2_gas 2.86e9 单位 × 4.95e10 wei ≈ **142 STRK** |
+| 部署账户（poker-deployer）余额 | ≈ 65 STRK → **缺 ≈77 STRK** |
+| 已知坑 | sepolia 当前版本的 compiled-class hash 方案与本地 cairo 2.11.4 不一致——declare 报 `Mismatch compiled class hash ... Actual: 0x55387af9...`；脚本自动以 `--compiled-hash <Actual>` 重试 |
+| 电路 program hash（set_circuit_program_hash 用） | `0x2ad181fc357c19c7e7d8a626314605436f6e5c24594d436b0e50af088977478`（prove 实测 14s / 2021 步） |
+
+一键部署（补足 STRK 后）：`HELPER=0x393f... VAULT=0x1e9f... PROGRAM_HASH=0x2ad1... ./scripts/deploy_sepolia_v3.sh`
+（自动：declare（含 hash 方案重试）→ deploy(owner, vault, prover) → set_claim_helper → set_circuit_program_hash → 回填 texas/.env。）
