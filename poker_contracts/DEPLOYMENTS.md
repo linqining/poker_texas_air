@@ -214,5 +214,32 @@ dual v3 `set_claim_helper(0x393f...)` + `set_circuit_program_hash(0x2ad1...)`。
 1. `texas/.env`：`STARKNET_VAULT_ADDRESS` → vault v3、`STARKNET_DUAL_SETTLEMENT_ADDRESS` → dual v3，重启服务器；
 2. 旧 vault 余款：`0x1e9f4a93...` 上的剩余 STRK 由 owner `withdraw` 收回。
 
+**✅ 已切换（2026-09-04，测试网不做余额迁移）**：`texas/.env`（vault v3 + dual v3）与
+`client/.env.development`（vault v3 + anonymizer v3）均已指向 v3，texas 服务器已重启生效。
+旧 vault v2 `0x1e9f4a93...` 上遗留的玩家筹码余额留在原地（筹码读数跟随
+`vault.chip_balance`，切后即从 v3 起算；旧余额玩家可随时自行 `withdraw` 取回 STRK）。
+
 相关 TX：vault declare `0x14fb018a...`、dual declare `0x1d5aa149...`（类 `0x2e039e95`）、
 helper declare `0x5d751a8e...`、接线 TX 均 ACCEPTED_ON_L2（见各 `set_*` 调用）。
+
+## PokerVaultAnonymizer v3（2026-09-04，绑定 vault v3 + set_vault 维护口）
+
+随 v3 切换重部署的私密买入/领取 helper（`privacy_invoke` operation 分流：0=买入
+approve+deposit_for、1=领取 burn_chips+回池）。新增内容：
+
+- **`set_vault(owner 门控)`**：vault 升级不再需要重部署 helper（此前 vault 地址
+  构造器写死，切 v3 必须重部署）。
+- **owner 改为显式构造参数**（`constructor(owner, vault, pool)`）：不能在构造器里
+  用 `get_caller_address()` 取部署者——starknet-rs `deploy_v3` 经 UDC 部署，构造期
+  caller 是 UDC 合约地址，用它当 owner 会让 `set_vault` 永远无人可调（实测踩坑）。
+
+| 项 | 值 |
+| --- | --- |
+| class | `0x405327310fad98fc864d63282a97495fd9373e28987577ad4c54e8d900ec561` |
+| 地址 | `0x6fd4be6e7af47f15b5c801623f49801e00610673fb42f6d7519d9119991b8f5` |
+| 部署 TX | `0x228575a24d52d0c59db804ab6a21af4826a5b8c6f10631241bb406adf4b2527` |
+| 构造参数 | owner=deployer(`0x6e37...c782`) vault=`0x0629385f...`(v3) pool=`0x254a6b...d91` |
+| vault 授权 | vault v3 `set_authorized_helper(本合约)` TX `0x286ae4f39f68...` SUCCEEDED |
+
+（中途一次部署 `0x3854d580...` 因 owner=UDC 缺陷作废，未授权、不可用。）
+

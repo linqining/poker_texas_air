@@ -35,8 +35,8 @@
 /// - Per-token temp balance must end exactly zero after the pool pulls.
 /// - Only the pool may call `privacy_invoke`.
 ///
-/// Deployment: constructor takes the PokerVault and the STRK20 privacy pool
-/// addresses.
+/// Deployment: constructor takes the maintenance owner (may rebind the vault
+/// via `set_vault`), the PokerVault, and the STRK20 privacy pool addresses.
 use starknet::ContractAddress;
 
 /// `privacy_invoke` operation: convert pool-supplied STRK into chips.
@@ -86,6 +86,16 @@ pub trait IAnonymizerInfo<TContractState> {
     fn pool(self: @TContractState) -> ContractAddress;
 }
 
+/// Owner-gated maintenance: rebind the vault without redeploying the helper
+/// (a vault upgrade would otherwise strand the helper on the old vault —
+/// the helper's STRK flows are vault-bound via approve/deposit_for/burn_chips).
+/// The owner is the deployer account recorded at construction.
+#[starknet::interface]
+pub trait IAnonymizerAdmin<TContractState> {
+    fn set_vault(ref self: TContractState, vault: ContractAddress);
+    fn owner(self: @TContractState) -> ContractAddress;
+}
+
 #[starknet::contract]
 pub mod PokerVaultAnonymizer {
     use core::num::traits::Zero;
@@ -96,8 +106,8 @@ pub mod PokerVaultAnonymizer {
     };
 
     use super::{
-        IAnonymizerInfo, IPokerVaultAnonymizer, IVaultLikeDispatcher, IVaultLikeDispatcherTrait,
-        OpenNoteDeposit, OP_BUY_IN, OP_WITHDRAW,
+        IAnonymizerAdmin, IAnonymizerInfo, IPokerVaultAnonymizer, IVaultLikeDispatcher,
+        IVaultLikeDispatcherTrait, OpenNoteDeposit, OP_BUY_IN, OP_WITHDRAW,
     };
 
     #[storage]
@@ -107,6 +117,8 @@ pub mod PokerVaultAnonymizer {
         vault: ContractAddress,
         /// STRK20 privacy pool — the only authorized caller.
         pool: ContractAddress,
+        /// Maintenance owner (the deployer account): may rebind the vault.
+        owner: ContractAddress,
     }
 
     #[event]
@@ -114,6 +126,12 @@ pub mod PokerVaultAnonymizer {
     enum Event {
         BuyInExecuted: BuyInExecuted,
         UnshieldExecuted: UnshieldExecuted,
+        VaultRebound: VaultRebound,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct VaultRebound {
+        vault: ContractAddress,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -138,11 +156,21 @@ pub mod PokerVaultAnonymizer {
     }
 
     #[constructor]
-    fn constructor(ref self: ContractState, vault: ContractAddress, pool: ContractAddress) {
+    fn constructor(
+        ref self: ContractState,
+        owner: ContractAddress,
+        vault: ContractAddress,
+        pool: ContractAddress,
+    ) {
+        assert!(!owner.is_zero(), "owner required");
         assert!(!vault.is_zero(), "vault required");
         assert!(!pool.is_zero(), "pool required");
         self.vault.write(vault);
         self.pool.write(pool);
+        // Owner is explicit: UDC-based deploy pipelines execute the
+        // constructor from the UDC address, so get_caller_address() would
+        // strand set_vault behind an address nobody can act as.
+        self.owner.write(owner);
     }
 
     #[abi(embed_v0)]
@@ -228,6 +256,21 @@ pub mod PokerVaultAnonymizer {
 
         fn pool(self: @ContractState) -> ContractAddress {
             self.pool.read()
+        }
+    }
+
+    /// Owner-gated maintenance: rebind the vault without redeploying.
+    #[abi(embed_v0)]
+    impl AnonymizerAdminImpl of IAnonymizerAdmin<ContractState> {
+        fn set_vault(ref self: ContractState, vault: ContractAddress) {
+            assert!(get_caller_address() == self.owner.read(), "only owner");
+            assert!(!vault.is_zero(), "vault required");
+            self.vault.write(vault);
+            self.emit(VaultRebound { vault });
+        }
+
+        fn owner(self: @ContractState) -> ContractAddress {
+            self.owner.read()
         }
     }
 }
@@ -320,10 +363,19 @@ mod mock_token {
 mod tests {
     use core::byte_array::ByteArray;
     use starknet::{ContractAddress, get_contract_address};
-    use snforge_std::{ContractClassTrait, DeclareResultTrait, declare};
+    use snforge_std::{
+        ContractClassTrait, DeclareResultTrait, declare,
+        cheatcodes::execution_info::caller_address::{
+            start_cheat_caller_address, stop_cheat_caller_address,
+        },
+    };
 
     use super::mock_token::{IMockTokenDispatcher, IMockTokenDispatcherTrait};
-    use super::{IPokerVaultAnonymizerDispatcher, IPokerVaultAnonymizerDispatcherTrait};
+    use super::{
+        IAnonymizerAdminDispatcher, IAnonymizerAdminDispatcherTrait, IAnonymizerInfoDispatcher,
+        IAnonymizerInfoDispatcherTrait, IPokerVaultAnonymizerDispatcher,
+        IPokerVaultAnonymizerDispatcherTrait,
+    };
     use crate::poker_vault::{IPokerVaultDispatcher, IPokerVaultDispatcherTrait};
 
     fn deploy_contract(name: ByteArray, calldata: @Array<felt252>) -> ContractAddress {
@@ -332,6 +384,7 @@ mod tests {
         address
     }
 
+    #[derive(Drop)]
     struct Setup {
         token: ContractAddress,
         vault: ContractAddress,
@@ -351,7 +404,7 @@ mod tests {
         );
         let anonymizer = deploy_contract(
             "PokerVaultAnonymizer",
-            @array![vault.into(), pool.into()],
+            @array![test_addr.into(), vault.into(), pool.into()],
         );
         let player: ContractAddress = 1234567.try_into().unwrap();
         Setup { token, vault, anonymizer, player }
@@ -548,5 +601,36 @@ mod tests {
         let s = setup(test_addr);
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
         anon.privacy_invoke(2, s.player, 100, 1);
+    }
+
+    // ---- maintenance: set_vault ----
+
+    #[test]
+    fn set_vault_rebinds_vault_for_owner() {
+        let test_addr = get_contract_address();
+        let s = setup(test_addr); // 构造 caller = 部署者 → owner
+        let anon_admin = IAnonymizerAdminDispatcher { contract_address: s.anonymizer };
+        assert!(anon_admin.owner() == test_addr, "deployer must be owner");
+
+        let zero: ContractAddress = 0.try_into().unwrap();
+        let new_vault = deploy_contract(
+            "PokerVault",
+            @array![test_addr.into(), s.token.into(), zero.into()],
+        );
+        anon_admin.set_vault(new_vault);
+        let anon_info = IAnonymizerInfoDispatcher { contract_address: s.anonymizer };
+        assert!(anon_info.vault() == new_vault, "vault not rebound");
+    }
+
+    #[test]
+    #[should_panic(expected: "only owner")]
+    fn set_vault_rejects_non_owner() {
+        let test_addr = get_contract_address();
+        let s = setup(test_addr);
+        let intruder: ContractAddress = 987654.try_into().unwrap();
+        start_cheat_caller_address(s.anonymizer, intruder);
+        IAnonymizerAdminDispatcher { contract_address: s.anonymizer }
+            .set_vault(98765.try_into().unwrap());
+        stop_cheat_caller_address(s.anonymizer);
     }
 }

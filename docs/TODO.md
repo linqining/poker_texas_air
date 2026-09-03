@@ -110,7 +110,7 @@
   - [ ] **提交 git**：按主题拆分 commit（合约/anonymizer 重部署、协议三动作、
         开局基线重建、本轮 TODO 功能开发）。
   - [ ] `set_authorized_helper` owner 单点问题：建议冷存储 / 时间锁（运维动作）。
-  - [ ] （可选）对账：链上筹码 5000 → 0 但领取为 4000，差额 1000 来自后续手牌
+  - [x] （可选）对账：链上筹码 5000 → 0 但领取为 4000，差额 1000 来自后续手牌
         `apply_settlement` 结算变动，可核对结算流水确认。
 
 ### P2 — 上线前
@@ -189,17 +189,25 @@
     （vendored `third_party/proving/stwo_cairo_verifier`）或 SNIP-36 fact
     registry，替换 operator 登记的 residual trust；sepolia 部署 + gas/size
     实测归入 #11。
-- [ ] **11. P2-M4 联调部署**（2026-09-03 测量/文档/脚本完成，**链上部署被 sepolia
-  gas 预算阻塞——需给 poker-deployer 补 ≈77 STRK**）：
+- [x] **11. P2-M4 联调部署**（2026-09-04 部署 + 环境切换完成）：
   - ✅ 测量：dual v3 class = sierra 859 KB / casm 737 KB / 32,901 words；
-    declare 需 l2_gas 2.86e9 单位 ≈ 142 STRK（实时价），账户余额 65 STRK；
-    电路证明 14s / 2021 步 / 公开段 14 felt。
+    declare 需 l2_gas 2.86e9 单位 ≈ 142 STRK（实时价），电路证明 14s / 2021 步 /
+    公开段 14 felt。
   - ✅ 脚本 `poker_contracts/scripts/deploy_sepolia_v3.sh`：declare（自动处理
     sepolia compiled-hash 方案差异，`--compiled-hash` 重试）→ deploy(owner,
     vault, prover) → set_claim_helper → set_circuit_program_hash → 回填
     texas/.env。文档详见 `poker_contracts/DEPLOYMENTS.md` 末节。
-  - ⬜ 剩余：补 STRK 后执行脚本，然后把 texas 服务端指到 v3 做一笔真实
-    零明文结算联调（配合 #28 的 sepolia 侧实机验证）。
+  - ✅ 链上部署（2026-09-04）：vault v3 `0x0629385f...` + dual v3 `0x516b8289...` +
+    CashoutUnshieldHelper `0x1c35d808...`，全部接线 SUCCEEDED（见
+    `DEPLOYMENTS.md`）；anonymizer v3 `0x6fd4be6e...`（新增 owner 门控
+    `set_vault`，owner 显式构造参数）绑定 vault v3 并完成
+    `set_authorized_helper`。
+  - ✅ 环境切换（2026-09-04）：`texas/.env` → vault v3 + dual v3，
+    `client/.env.development` → vault v3 + anonymizer v3，服务器已重启。
+    测试网不做余额迁移（筹码读数实时跟随 `vault.chip_balance`，旧 v2 余额
+    玩家可随时自行 withdraw）。
+  - ⬜ 剩余：一笔真实零明文结算联调（需实机对局，配合 #28 的 sepolia 侧
+    实机验证，见 C5 清单）。
 - [ ] **12. C3.2-M1 认领 sidecar**：Node sidecar 封装 STRK20 私密转账
   （运营浮存 → 赢家 viewing key note），Rust 服务端 HTTP 调用；需 SDK 依赖 + 服务器 KMS。
   **前置核查（2026-09-03）**：官方 STRK20 Privacy SDK 仍未上 npm（registry 检索只有
