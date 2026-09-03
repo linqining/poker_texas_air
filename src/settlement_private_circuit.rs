@@ -842,4 +842,113 @@ mod tests {
             }
         }
     }
+
+    // ===== P2-M2：prove-hand（Cairo VM → Stwo）跨语言对齐夹具 =====
+
+    /// P2-M2 电路的 Magic 标记（`proving-tool/src/settlement_private.cairo`）。
+    /// = 0x5350324d5f4f4b（'SP2M_OK' 短字符串，大端尾对齐）。
+    const PROVE_MAGIC: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[25] = 0x53;
+        b[26] = 0x50;
+        b[27] = 0x32;
+        b[28] = 0x4d;
+        b[29] = 0x5f;
+        b[30] = 0x4f;
+        b[31] = 0x4b;
+        b
+    };
+
+    /// 真实量级的样例手牌：wei 记账（+3000/-2000/-1000 chips × 1e14），
+    /// 零变动 5 槽（sign=1, |delta|=0，与 submit.rs 的 d≥0→1 口径一致）。
+    fn prove_sample_statement() -> SettlementPrivateStatement {
+        let wei_chip: i128 = 100_000_000_000_000;
+        let mut players = [ZERO_FELT; MAX_PARTICIPANTS];
+        for (index, player) in players.iter_mut().enumerate() {
+            if index < 3 {
+                *player = sample_felt(index as u8 + 1);
+            }
+        }
+        SettlementPrivateStatement {
+            hand_id: 42,
+            hand_binding: sample_felt(0xAA),
+            registered_digest: ZERO_FELT,
+            players,
+            signed_deltas: [3000 * wei_chip, -2000 * wei_chip, -1000 * wei_chip, 0, 0, 0, 0, 0],
+            n_participants: 3,
+            action_domain_digest: ZERO_FELT,
+            action_flags: 0,
+            accepted_seq_digest: ZERO_FELT,
+        }
+    }
+
+    fn hex(felt: FieldElement) -> String {
+        format!("0x{felt:x}")
+    }
+
+    /// 生成 prove-hand 夹具（inputs.json / expected_outputs.json）。
+    ///
+    /// 默认 no-op（CI 无 proving-tool 也绿）；设 `SETTLEMENT_PROVE_FIXTURES_OUT`
+    /// 后写入目录，供 `proving-tool/scripts/prove-settlement.sh` 使用：
+    /// Cairo VM 执行（Stwo 证明覆盖）的公开段必须与 Rust `starknet_crypto`
+    /// 参考值逐 felt 一致——跨语言对齐即规格四条约束的端到端验证。
+    #[test]
+    fn write_prove_hand_fixtures_when_requested() {
+        let Some(out_dir) = std::env::var_os("SETTLEMENT_PROVE_FIXTURES_OUT") else {
+            return;
+        };
+        let statement = prove_sample_statement();
+        let mut witness = SettlementPrivateWitness {
+            payout_commitments: [ZERO_FELT; MAX_PARTICIPANTS],
+        };
+        witness.payout_commitments[0] = sample_felt(0x21);
+
+        let digest = compute_settlement_digest(&statement).expect("digest");
+        let cms = derive_claim_cms(&statement, &witness).expect("cms");
+
+        let mut inputs: Vec<String> = vec![
+            hex(FieldElement::from(statement.hand_id)),
+            hex(felt_from_bytes(digest).expect("canonical")),
+            hex(FieldElement::from(statement.n_participants)),
+            hex(felt_from_bytes(statement.hand_binding).expect("canonical")),
+        ];
+        for player in &statement.players {
+            inputs.push(hex(felt_from_bytes(*player).expect("canonical")));
+        }
+        for delta in statement.signed_deltas.iter().copied() {
+            inputs.push(hex(FieldElement::from(u64::from(delta >= 0))));
+        }
+        for delta in statement.signed_deltas.iter().copied() {
+            inputs.push(hex(FieldElement::from(delta.unsigned_abs() as u64)));
+        }
+        for commitment in &witness.payout_commitments {
+            inputs.push(hex(felt_from_bytes(*commitment).expect("canonical")));
+        }
+        assert_eq!(inputs.len(), 4 + 4 * MAX_PARTICIPANTS);
+
+        // 公开段期望：[MAGIC, hand_id, digest, n, binding, cm_0..cm_7]
+        let mut expected: Vec<String> = vec![
+            hex(FieldElement::from_bytes_be(&PROVE_MAGIC).expect("canonical")),
+            hex(FieldElement::from(statement.hand_id)),
+            hex(felt_from_bytes(digest).expect("canonical")),
+            hex(FieldElement::from(statement.n_participants)),
+            hex(felt_from_bytes(statement.hand_binding).expect("canonical")),
+        ];
+        for cm in &cms {
+            expected.push(hex(felt_from_bytes(*cm).expect("canonical")));
+        }
+
+        let out = std::path::PathBuf::from(out_dir);
+        std::fs::create_dir_all(&out).expect("create fixture dir");
+        std::fs::write(
+            out.join("settlement_inputs.json"),
+            serde_json::to_string_pretty(&inputs).expect("json"),
+        )
+        .expect("write inputs");
+        std::fs::write(
+            out.join("settlement_expected_outputs.json"),
+            serde_json::to_string_pretty(&expected).expect("json"),
+        )
+        .expect("write expected");
+    }
 }

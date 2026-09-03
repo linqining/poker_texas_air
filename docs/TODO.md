@@ -100,8 +100,19 @@
   **M2 待接入**：felt252 Poseidon component（digest 吸收链、claim_cms 原生推导）
   与多 limb 零和累加（模块头注释有诚实边界说明）。
   验收口径：`cargo test -p poker_texas_air --lib settlement_private_circuit`。
-- [ ] **9. P2-M2 证明端**：server 从明文生成 trace + proof（复用 orchestrator）+
-  动作级 SK 签名纳入动作日志。验收：真实手牌证明 < 30s。
+- [ ] **9. P2-M2 证明端**（2026-09-03 电路+管线侧完成，服务端接线待做）：
+  - ✅ Cairo1 电路 `proving-tool/src/settlement_private.cairo`：规格四条约束全部
+    落进证明（digest 匹配、零和、人数、赢家 claim_cms 原生推导，签名/值域守卫）；
+    公开段 = `[MAGIC, hand_id, digest, n, binding, cm_0..cm_7]`——(players, deltas,
+    commitments) 全部留在 witness，不进公开段。
+  - ✅ 端到端脚本 `proving-tool/scripts/prove-settlement.sh`：Rust 参考
+    （starknet_crypto）生成夹具 → prove-hand（Cairo VM → Stwo prove → verify）→
+    跨语言公开段逐 felt 对齐（13 felt）→ registered_digest 篡改负例拒绝。
+    **实测 8.6s << 30s 验收线**（96-bit 生产参数，blake2s channel）。
+  - ⬜ 剩余：server 侧 `SettlementPrivateStatement` 构建（需 async 读赢家 payout
+    commitment）+ inputs 导出 + `STARKNET_PROVER_URL` 客户端从 stub 变真实
+    （与 #10 P2-M3 合约消费成对接线）；动作级 SK 签名纳入动作日志
+    （#16 落地后自动进本电路吸收链，列位已预留）。
 - [ ] **10. P2-M3 合约验证端**：Stwo Cairo verifier（官方移植或 fact-registry，M3 定）+
   `verify_and_settle_dapv_stark_private_v2` 接入 π。验收：calldata 零明文。
 - [ ] **11. P2-M4 联调部署**：sepolia 部署 + gas/size 测量 + 文档。

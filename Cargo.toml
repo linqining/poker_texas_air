@@ -91,6 +91,7 @@ starknet-crypto = { workspace = true }
 borsh = { workspace = true }
 bincode = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 blake2 = { workspace = true }
 # ===== 二元域哈希证明后端（vendored flock，BLAKE3 merkle fork）=====
