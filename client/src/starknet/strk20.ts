@@ -394,7 +394,10 @@ export interface ClaimRewardsArgs {
  * #隐私池注册辅助：发起一笔**小额 Shield 入池**（公开 deposit）。
  * 钱包隐私引擎处理该动作时会自动生成并登记 viewing key——这是 Ready
  * 118(NOT_REGISTERED) 的官方解法（"先做一次 Shield，钱包会自动完成注册"）。
- * 动作形状按钱包兼容性依次尝试：deposit → shield。
+ * 官方 schema 的 shield 动作只有 {type:'deposit', token, amount} 一种形状
+ * （不存在 'shield' 类型；shield 实际是 approve+deposit 两笔，钱包弹两次确认）。
+ * 提交管线与 claimRewardsPrivate 完全一致：v6 通道 → 114 时平铺通道带
+ * api_version 重试。
  */
 export async function shieldForPoolRegistration(
   account: Strk20CapableAccount | null,
@@ -413,42 +416,66 @@ export async function shieldForPoolRegistration(
     return { hash: '', success: false, error: 'Amount must be positive' };
   }
   const { CANONICAL_STRK_ADDRESS } = await import('./starknetGameActions');
+  // Ready 的 payload schema 对金额只认规范化 0x 十六进制（十进制字符串直接
+  // INVALID_REQUEST_PAYLOAD(114)——与私密领取同一教训，线上实测）。
   const amountHex = '0x' + amountWei.toString(16);
-  // 钱包兼容形状序列：deposit（STRK20 标准入池）→ shield（部分钱包命名）
-  const shapeVariants: unknown[][] = [
-    [{ type: 'deposit', token: CANONICAL_STRK_ADDRESS, amount: amountHex }],
-    [{ type: 'shield', token: CANONICAL_STRK_ADDRESS, amount: amountHex }],
-  ];
-  let lastErr = 'wallet returned empty tx hash';
-  for (const actions of shapeVariants) {
+  const actions = [{ type: 'deposit', token: CANONICAL_STRK_ADDRESS, amount: amountHex }];
+  // 与 claimRewardsPrivate 相同：先取钱包声明的最高 0.10.x 版本，v6 通道
+  // 被 114 拒绝后经平铺请求面带上 api_version 重试（starknet.js 的
+  // strk20InvokeTransaction 只发 params:{actions}，无法携带 api_version，
+  // Ready 5.x 缺它必回 114——线上实测）。
+  const declared = await getWalletApiVersions();
+  const apiVersion = declared
+    .filter((v) => compareVersions(v, STRK20_WALLET_API_MIN) >= 0)
+    .sort(compareVersions)
+    .pop();
+  const v6 = await getStrk20WalletAccount();
+  if (v6) {
     try {
-      if (acct?.strk20InvokeTransaction) {
-        const res = await acct.strk20InvokeTransaction(actions);
-        const hash = res?.transaction_hash ?? '';
-        if (hash) return { hash, success: true };
-        lastErr = 'wallet returned empty tx hash';
+      const res = await v6.strk20InvokeTransaction(actions);
+      const hash = res?.transaction_hash ?? '';
+      if (hash) {
+        logger.log('[strk20] pool-registration shield submitted (V6):', hash);
+        return { hash, success: true };
       }
-    } catch (e) {
-      lastErr = String(e);
-      logger.warn('[strk20] shield variant failed:', lastErr);
-    }
-    try {
-      if (typeof (wallet as { request?: unknown }).request === 'function') {
-        const res = await walletApiRequest<{ transaction_hash?: string }>(
-          wallet ?? {},
-          'wallet_strk20InvokeTransaction',
-          { actions },
-        );
-        const hash = res?.transaction_hash ?? '';
-        if (hash) return { hash, success: true };
-        lastErr = 'wallet returned empty tx hash';
-      }
-    } catch (e) {
-      lastErr = String(e);
-      logger.warn('[strk20] shield flat variant failed:', lastErr);
+    } catch (err) {
+      // 非 114 的错误平铺通道大概率同样失败，但仍兜底一次让钱包给最终答复
+      if (!/INVALID_REQUEST_PAYLOAD/i.test(String(err))) throw err;
+      logger.warn(
+        '[strk20] v6 shield rejected (INVALID_REQUEST_PAYLOAD); retrying flat request with api_version',
+        apiVersion ?? '(none)',
+      );
+      if (typeof (wallet as { request?: unknown } | null)?.request !== 'function') throw err;
     }
   }
-  return { hash: '', success: false, error: lastErr };
+  try {
+    // 平铺/WSF 统一经 walletApiRequest，带 api_version（若已知）
+    const res = await walletApiRequest<{ transaction_hash?: string }>(
+      wallet ?? {},
+      'wallet_strk20InvokeTransaction',
+      { actions, ...(apiVersion ? { api_version: apiVersion } : {}) },
+    );
+    const hash = res?.transaction_hash ?? '';
+    if (hash) {
+      logger.log('[strk20] pool-registration shield submitted (flat):', hash);
+      return { hash, success: true };
+    }
+  } catch (e) {
+    const msg = String(e);
+    logger.warn('[strk20] pool-registration shield flat submit failed:', msg);
+    if (/INVALID_REQUEST_PAYLOAD/i.test(msg)) {
+      return {
+        hash: '',
+        success: false,
+        error:
+          '钱包校验 Shield 请求失败（114 INVALID_REQUEST_PAYLOAD）。' +
+          '请在 Ready 钱包内直接使用 Shield/入池 入口手工入池一次（钱包会自动完成注册），再回来重试；' +
+          '若已入池仍报此错，请把 Console 里 [strk20] 日志发维护者。',
+      };
+    }
+    return { hash: '', success: false, error: msg };
+  }
+  return { hash: '', success: false, error: 'wallet returned empty tx hash' };
 }
 
 export async function claimRewardsPrivate(

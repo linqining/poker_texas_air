@@ -8,8 +8,10 @@
 // 私密路径需要：钱包支持 STRK20 Wallet API（capability 探测）且池内
 // 屏蔽余额 ≥ 领取额（守恒在池内闭环）。
 //
-// UI（P1-3 重设计）：金额主卡 + 路径状态卡 + 单一主行动按钮；
-// 技术细节（Wallet API 版本等）降级为卡片内的次级行。
+// UI：金额主卡 + 两张同构注册状态卡（未注册的一侧在标题行内联
+// 「一键注册」小按钮，样式完全一致）+ 单一主行动按钮。两份注册都
+// 完成后折叠为单行摘要（disclosure，整行可点，aria-expanded），展开
+// 可回看两张卡详情与重新校验。
 import React, { useContext, useEffect, useState } from 'react';
 import styled, { useTheme } from 'styled-components';
 import { useAccount } from '@starknet-react/core';
@@ -76,8 +78,8 @@ const HeroSub = styled.span`
   font-variant-numeric: tabular-nums;
 `;
 
-/** 路径状态卡：左侧状态点 + 标题行 + 次级信息行 */
-const PathCard = styled.div<{ $ok: boolean | null }>`
+/** 注册/路径状态卡：左侧状态点 + 标题行（右侧状态文本或内联注册按钮）+ 次级信息行 */
+const PathCard = styled.div`
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
@@ -115,39 +117,74 @@ const StatusDot = styled.span<{ $ok: boolean | null }>`
 const StatusText = styled.span<{ $ok: boolean | null }>`
   font-size: 0.8rem;
   font-weight: 600;
+  flex: none;
   color: ${({ $ok, theme }) =>
     $ok === null ? theme.colors.warningDark : $ok ? theme.colors.successStrong : theme.colors.danger};
 `;
 
 const PathDetail = styled.span`
   font-size: 0.72rem;
+  line-height: 1.45;
   color: ${({ theme }) => theme.colors.mutedText};
   padding-left: 1rem;
 `;
 
-/** 两份注册都完成后的折叠摘要行 */
-const CollapsedReg = styled.div`
+/** 两份注册都完成后的折叠摘要：整行是一个 disclosure 按钮（aria-expanded） */
+const RegSummary = styled.button`
   display: flex;
   align-items: center;
   gap: 0.45rem;
-  padding: 0.55rem 0.7rem;
+  width: 100%;
+  padding: 0.6rem 0.75rem;
   border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
   border-radius: ${({ theme }) => theme.radius.md};
   background: ${({ theme }) => theme.colors.successAlpha06};
+  font-family: inherit;
   font-size: 0.8rem;
+  font-weight: 600;
+  text-align: left;
   color: ${({ theme }) => theme.colors.fontColorDark};
-  & > button {
-    margin-left: auto;
-    background: none;
-    border: none;
-    color: ${({ theme }) => theme.colors.mutedText};
-    font-size: 0.72rem;
-    cursor: pointer;
-    padding: 0 0.2rem;
-    text-decoration: underline;
+  cursor: pointer;
+  transition: background ${({ theme }) => theme.timing.fast} ${({ theme }) => theme.easing.easeStandard};
+  &:hover {
+    background: ${({ theme }) => theme.colors.successAlpha12};
   }
-  & > button:hover {
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.5);
+  }
+`;
+
+const Chevron = styled.span<{ $open: boolean }>`
+  margin-left: auto;
+  flex: none;
+  font-size: 0.7rem;
+  color: ${({ theme }) => theme.colors.mutedText};
+  transition: transform ${({ theme }) => theme.timing.fast} ${({ theme }) => theme.easing.easeStandard};
+  transform: rotate(${({ $open }) => ($open ? '180deg' : '0deg')});
+`;
+
+const RegDetailStack = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+`;
+
+const ReverifyLink = styled.button`
+  align-self: center;
+  background: none;
+  border: none;
+  padding: 0.1rem 0.3rem;
+  font-size: 0.72rem;
+  color: ${({ theme }) => theme.colors.mutedText};
+  text-decoration: underline;
+  cursor: pointer;
+  &:hover:not(:disabled) {
     color: ${({ theme }) => theme.colors.fontColorDark};
+  }
+  &:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
 `;
 
@@ -196,20 +233,20 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
 
   const [strk20Ready, setStrk20Ready] = useState<boolean | null>(null);
   const [walletApiVersions, setWalletApiVersions] = useState<string[] | null>(null);
-  const [commitRegistered, setCommitRegistered] = useState<boolean | null>(null);
-  const [regPending, setRegPending] = useState(false);
   const [shielded, setShielded] = useState<bigint | null>(null);
   const [pending, setPending] = useState<'private' | 'public' | null>(null);
   const [done, setDone] = useState<{ hash: string; kind: 'private' | 'public' } | null>(null);
   const [error, setError] = useState('');
-  // 一次性注册缓存：两份都确认过 → 折叠注册卡片、跳过链上查询
+  // 两份注册的真实状态（null = 检测中）。payout = 我们合约的 commitment，
+  // pool = Ready 隐私池 viewing key（互不等同，各自一张卡）。
   const [reg, setReg] = useState<{ payout: boolean | null; pool: boolean | null; fromCache: boolean }>(
     { payout: null, pool: null, fromCache: false },
   );
+  const [regPending, setRegPending] = useState(false);
   const [poolRegistering, setPoolRegistering] = useState(false);
   const [checking, setChecking] = useState(false);
-  // 折叠摘要的展开/收起（两份注册都完成后默认折叠）
-  const [collapsedSummary, setCollapsedSummary] = useState(false);
+  // 折叠摘要的展开/收起：展开后真正渲染两张注册卡详情（含重新校验入口）
+  const [showRegDetail, setShowRegDetail] = useState(false);
 
   const vaultAddr = starknetConfig.pokerVaultAddress || '';
   const flagsKey = `poker.claimReg:${(walletAddress || '').toLowerCase()}`;
@@ -242,7 +279,6 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
       const cached = readFlags();
       if (cached && cached.payout && cached.pool) {
         setReg({ payout: true, pool: true, fromCache: true });
-        setCommitRegistered(true);
         setStrk20Ready(true); // 缓存前提 = 此前钱包 API 可用（否则到不了已注册态）
         setChecking(false);
         return;
@@ -276,33 +312,38 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
       await getRegisteredPayoutCommitment(account).then((r) => {
         if (cancelled) return;
         payout = r !== null;
-        setCommitRegistered(payout);
       });
       // 赔付承诺：打开弹窗时查询注册状态（已注册不发交易；未注册才可一键注册）
       try {
         const res = await ensurePayoutCommitment(account);
         if (!cancelled && res.status === 'registered') {
           payout = true;
-          setCommitRegistered(true);
         }
       } catch {
-        if (!cancelled) setCommitRegistered(false);
+        if (!cancelled && payout === null) payout = false;
       }
     });
     if (!cancelled) {
       setReg({ payout: payout === true, pool: pool === true, fromCache: false });
-      if (payout === true && pool === true) writeFlags(true, true);
     }
     setChecking(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account, vaultAddr, walletAddress]);
 
   useEffect(() => {
     if (!isOpen || !account) return;
     setDone(null);
     setError('');
+    setShowRegDetail(false);
     void runChecks(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, account]);
+
+  // 任一端完成注册后两份都齐 → 写一次性缓存（下次打开零查询直接折叠）
+  useEffect(() => {
+    if (reg.payout === true && reg.pool === true) writeFlags(true, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reg.payout, reg.pool]);
 
   const reverify = () => {
     clearFlags();
@@ -345,17 +386,146 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     }
   };
 
+  // 一键注册赔付承诺（我们合约的 payout commitment，一次性链上交易）
+  const registerPayout = async () => {
+    setRegPending(true);
+    setError('');
+    try {
+      const res = await ensurePayoutCommitment(account);
+      if (res.status === 'error') {
+        setError(res.error);
+      } else {
+        setReg((r) => ({ ...r, payout: true }));
+      }
+    } catch (e) {
+      setError(String((e as Error)?.message || e));
+    } finally {
+      setRegPending(false);
+    }
+  };
+
+  // 一键注册隐私池：向池 shield 0.01 STRK，钱包在首笔 shield 时自动完成
+  // viewing key 注册（金额留在池内余额，后续私密领取可全额使用）
+  const registerPool = async () => {
+    setPoolRegistering(true);
+    setError('');
+    try {
+      const res = await shieldForPoolRegistration(
+        account as unknown as Parameters<typeof shieldForPoolRegistration>[0],
+        10n ** 16n,
+      ); // 0.01 STRK
+      if (res.success) {
+        await runChecks(false);
+      } else {
+        setError(res.error || 'Shield 提交失败');
+      }
+    } catch (e) {
+      setError(String((e as Error)?.message || e));
+    } finally {
+      setPoolRegistering(false);
+    }
+  };
+
+  const toggleRegDetail = () => setShowRegDetail((v) => !v);
+
+  // 池 viewing key 卡的整体状态色：已注册绿 / 钱包不支持红 / 其余（检测中、
+  // 未注册但可一键修复）黄
+  const poolOk: boolean | null =
+    reg.pool === true ? true : strk20Ready === false ? false : null;
+
+  const renderPayoutCard = () => (
+    <PathCard>
+      <PathHeader>
+        <PathTitle>
+          <StatusDot $ok={reg.payout} aria-hidden />
+          赔付承诺（我们合约）
+        </PathTitle>
+        {reg.payout === true ? (
+          <StatusText $ok>已注册 ✓</StatusText>
+        ) : reg.payout === null ? (
+          <StatusText $ok={null}>检测中…</StatusText>
+        ) : (
+          <Button
+            type="button"
+            variant="primary"
+            small
+            style={{ whiteSpace: 'nowrap' }}
+            disabled={pending !== null || regPending || checking}
+            onClick={() => void registerPayout()}
+            title="提交 payout commitment（一次性链上交易，任何钱包均可）"
+          >
+            {regPending ? '注册中…' : '一键注册'}
+          </Button>
+        )}
+      </PathHeader>
+      <PathDetail>注册后结算奖励才能私密领取（一次性，合约内的链上登记）</PathDetail>
+    </PathCard>
+  );
+
+  const renderPoolCard = () => (
+    <PathCard>
+      <PathHeader>
+        <PathTitle>
+          <StatusDot $ok={poolOk} aria-hidden />
+          池 viewing key（Ready 隐私系统）
+        </PathTitle>
+        {reg.pool === true ? (
+          <StatusText $ok>已注册 ✓</StatusText>
+        ) : strk20Ready === false ? (
+          <StatusText $ok={false}>钱包不支持</StatusText>
+        ) : reg.pool === false ? (
+          <Button
+            type="button"
+            variant="primary"
+            small
+            style={{ whiteSpace: 'nowrap' }}
+            disabled={pending !== null || poolRegistering || checking}
+            onClick={() => void registerPool()}
+            title="向隐私池小额 Shield 0.01 STRK：钱包会依次弹出 approve 与 deposit 两次确认（非重复交易），确认后自动注册 viewing key（金额留在池内余额）"
+          >
+            {poolRegistering ? '注册中…' : '一键注册'}
+          </Button>
+        ) : (
+          <StatusText $ok={null}>检测中…</StatusText>
+        )}
+      </PathHeader>
+      <PathDetail>
+        {strk20Ready === false
+          ? `需支持 STRK20 Wallet API ≥ ${STRK20_WALLET_API_MIN} 的钱包（如 Ready）`
+          : reg.pool === true
+            ? (shieldedText !== null ? `池内屏蔽余额 ${shieldedText} STRK` : '池内余额查询中…')
+            : reg.pool === false
+              ? '从未入池：一键注册会小额 Shield 0.01 STRK，钱包随之自动完成注册（金额留在池内余额）'
+              : '池内屏蔽余额检测中…'}
+      </PathDetail>
+      <PathDetail>
+        Wallet API{' '}
+        {walletApiVersions === null
+          ? '检测中…'
+          : walletApiVersions.length
+            ? walletApiVersions.join(', ')
+            : '未报告（钱包不支持或版本过旧）'}
+        {' '}· 需 ≥ {STRK20_WALLET_API_MIN}
+      </PathDetail>
+    </PathCard>
+  );
+
   const privateBlockedReason = (() => {
     if (strk20Ready === false) return '当前钱包不支持 STRK20 私密交易（需 Wallet API ≥ 0.10.3，如 Ready）';
     if (walletApiVersions !== null && walletApiVersions.length > 0
         && !walletApiVersions.some((v) => compareVersions(v, STRK20_WALLET_API_MIN) >= 0)) {
       return `钱包 Wallet API 版本（${walletApiVersions.join(', ')}）低于 0.10.3，不支持 STRK20 私密交易——请更新 Ready`;
     }
+    if (reg.pool === false) {
+      return '隐私池尚未注册：点击「池 viewing key」卡片中的「一键注册」（小额 Shield 0.01 STRK）后再私密领取';
+    }
     if (shielded !== null && shielded < amountWei) {
       return '池内屏蔽余额不足：请先在钱包内将 STRK shield 入隐私池（私密领取要求池内余额 ≥ 领取额，执行后等额退回）';
     }
     return null;
   })();
+
+  const bothRegistered = reg.payout === true && reg.pool === true;
 
   return (
     <ModalShell
@@ -422,137 +592,38 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
             )}
           </HeroCard>
 
-          {reg.payout === true && reg.pool === true ? (
-            // 一次性注册全部完成 → 默认折叠为单行摘要（打开弹窗零查询零弹窗），
-            // 可展开查看两张注册卡详情
-            <CollapsedReg>
-              <StatusDot $ok />
-              <span>
-                赔付承诺（我们合约）与隐私池注册（Ready 隐私系统）均已完成 ✓
-              </span>
-              <button
+          {bothRegistered ? (
+            // 两份注册全部完成 → 默认折叠为单行摘要（打开弹窗零查询零弹窗），
+            // 整行可点展开/收起两张注册卡详情（disclosure）
+            <>
+              <RegSummary
                 type="button"
-                onClick={() => setCollapsedSummary((v) => !v)}
-                title="展开/收起注册卡详情"
+                onClick={toggleRegDetail}
+                aria-expanded={showRegDetail}
+                aria-controls="claim-reg-detail"
               >
-                {collapsedSummary ? '收起' : '展开'}
-              </button>
-              <button
-                type="button"
-                onClick={reverify}
-                disabled={checking}
-                title="重新做一次链上校验（vault 重部署后使用）"
-              >
-                {checking ? '校验中…' : '重新校验'}
-              </button>
-            </CollapsedReg>
+                <StatusDot $ok aria-hidden />
+                <span>赔付承诺与隐私池注册均已完成，可直接领取</span>
+                <Chevron $open={showRegDetail} aria-hidden>▾</Chevron>
+              </RegSummary>
+              {showRegDetail && (
+                <RegDetailStack id="claim-reg-detail">
+                  {renderPayoutCard()}
+                  {renderPoolCard()}
+                  <ReverifyLink type="button" onClick={reverify} disabled={checking}>
+                    {checking ? '校验中…' : '重新校验（vault 重部署后使用）'}
+                  </ReverifyLink>
+                </RegDetailStack>
+              )}
+            </>
           ) : (
             <>
-              <PathCard $ok={strk20Ready}>
-                <PathHeader>
-                  <PathTitle>
-                    <StatusDot $ok={strk20Ready} />
-                    池 viewing key（Ready 隐私系统）
-                  </PathTitle>
-                  <StatusText $ok={strk20Ready}>
-                    {strk20Ready === null ? '检测中…' : strk20Ready ? '可用 ✓' : '不可用'}
-                  </StatusText>
-                </PathHeader>
-                <PathDetail>
-                  {shieldedText !== null
-                    ? `池内屏蔽余额 ${shieldedText} STRK`
-                    : poolRegistering
-                      ? 'Shield 提交中，确认后即完成注册…'
-                      : '池内屏蔽余额检测中…'}
-                </PathDetail>
-                <PathDetail>
-                  Wallet API{' '}
-                  {walletApiVersions === null
-                    ? '检测中…'
-                    : walletApiVersions.length
-                      ? walletApiVersions.join(', ')
-                      : '未报告（钱包不支持或版本过旧）'}
-                  {' '}· 需 ≥ {STRK20_WALLET_API_MIN}
-                </PathDetail>
-                {strk20Ready === true && shielded === null && (
-                  <PathDetail style={{ color: theme.colors.warningDark }}>
-                    疑似从未入池：做一次小额 Shield 即可自动注册 viewing key。
-                  </PathDetail>
-                )}
-              </PathCard>
-
-              <PathCard $ok={commitRegistered}>
-                <PathHeader>
-                  <PathTitle>
-                    <StatusDot $ok={commitRegistered} />
-                    赔付承诺（我们合约）
-                  </PathTitle>
-                  {commitRegistered ? (
-                    <StatusText $ok>已注册 ✓</StatusText>
-                  ) : (
-                    <Button
-                      type="button"
-                      small
-                      disabled={pending !== null || regPending}
-                      onClick={async () => {
-                        setRegPending(true);
-                        try {
-                          const res = await ensurePayoutCommitment(account);
-                          if (res.status === 'error') {
-                            setError(res.error);
-                          } else {
-                            setCommitRegistered(true);
-                          }
-                        } catch (e) {
-                          setError(String((e as Error)?.message || e));
-                        } finally {
-                          setRegPending(false);
-                        }
-                      }}
-                      title="提交 payout commitment（一次性链上交易，任何钱包均可）"
-                    >
-                      {regPending ? '注册中…' : '一键注册'}
-                    </Button>
-                  )}
-                </PathHeader>
-                <PathDetail>注册后结算奖励才能私密领取（一次性）</PathDetail>
-              </PathCard>
+              {renderPoolCard()}
+              {renderPayoutCard()}
             </>
           )}
 
-          {strk20Ready === true && shielded === null && !poolRegistering && (
-            <Button
-              type="button"
-              variant="secondary"
-              small
-              fullWidth
-              onClick={async () => {
-                setPoolRegistering(true);
-                setError('');
-                try {
-                  const res = await shieldForPoolRegistration(
-                    account as unknown as Parameters<typeof shieldForPoolRegistration>[0],
-                    10n ** 16n,
-                  ); // 0.01 STRK
-                  if (res.success) {
-                    setError('');
-                    await runChecks(false);
-                  } else {
-                    setError(res.error || 'Shield 提交失败');
-                  }
-                } catch (e) {
-                  setError(String((e as Error)?.message || e));
-                } finally {
-                  setPoolRegistering(false);
-                }
-              }}
-              title="向隐私池 shield 0.01 STRK：钱包会自动注册 viewing key（金额保留在你的池内余额中）"
-            >
-              {poolRegistering ? '注册中…' : '一键注册隐私池（小额 Shield 0.01 STRK）'}
-            </Button>
-          )}
-
-{privateBlockedReason && <Notice $kind="warn">{privateBlockedReason}</Notice>}
+          {privateBlockedReason && <Notice $kind="warn">{privateBlockedReason}</Notice>}
           {error && <Notice $kind="error">{error}</Notice>}
 
           <Button
