@@ -926,7 +926,7 @@ mod tests {
         }
         assert_eq!(inputs.len(), 4 + 4 * MAX_PARTICIPANTS);
 
-        // 公开段期望：[MAGIC, hand_id, digest, n, binding, cm_0..cm_7]
+        // 公开段期望：[MAGIC, hand_id, digest, n, binding, cm_0..cm_7, total_winnings]
         let mut expected: Vec<String> = vec![
             hex(FieldElement::from_bytes_be(&PROVE_MAGIC).expect("canonical")),
             hex(FieldElement::from(statement.hand_id)),
@@ -934,9 +934,15 @@ mod tests {
             hex(FieldElement::from(statement.n_participants)),
             hex(felt_from_bytes(statement.hand_binding).expect("canonical")),
         ];
-        for cm in &cms {
+        let mut total_winnings: u64 = 0;
+        for (index, cm) in cms.iter().enumerate() {
             expected.push(hex(felt_from_bytes(*cm).expect("canonical")));
+            if statement.winner(index) {
+                total_winnings += statement.signed_deltas[index].unsigned_abs() as u64;
+            }
         }
+        // v2 合约托管金额来源（Σ 赢家 |delta|，电路内累加）
+        expected.push(hex(FieldElement::from(total_winnings)));
 
         let out = std::path::PathBuf::from(out_dir);
         std::fs::create_dir_all(&out).expect("create fixture dir");

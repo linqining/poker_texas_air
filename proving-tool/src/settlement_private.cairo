@@ -105,23 +105,30 @@ fn main(
     out.append(registered_digest);
     out.append(n_expected);
     out.append(hand_binding);
+    // total_winnings = Σ 赢家 |delta|（有界 < 2^67，无模回绕）——v2 合约据此
+    // 把 pot 划入认领托管（公开段取代明文 deltas 成为托管金额来源）。
+    let mut total_winnings: felt252 = 0;
     let mut i: usize = 0;
     while i < N_PLAYERS {
         let s = *signs.at(i);
         let m = *mags.at(i);
-        let mut cm: felt252 = 0;
         if s == 1 {
             if m != 0 {
+                total_winnings += m;
                 let mut ch = PoseidonTrait::new();
                 ch = ch.update(*commitments.at(i));
                 ch = ch.update(hand_binding);
                 ch = ch.update(m);
                 ch = ch.update(0);
-                cm = ch.finalize();
-            }
+                out.append(ch.finalize());
+            } else {
+                out.append(0);
+            };
+        } else {
+            out.append(0);
         };
-        out.append(cm);
         i += 1;
     }
+    out.append(total_winnings);
     out
 }

@@ -47,6 +47,8 @@ pub trait IVaultPayout<TContractState> {
 pub trait ISettlementClaims<TContractState> {
     fn claim_cm(self: @TContractState, hand_binding: felt252, seat_index: u32) -> felt252;
     fn claim_amount(self: @TContractState, hand_binding: felt252, seat_index: u32) -> u256;
+    /// P2-M3 v2：金额藏在 cm（电路证明），合约不保存明文 claim_amount。
+    fn amounts_hidden(self: @TContractState, hand_binding: felt252) -> bool;
     fn consume_claim(
         ref self: TContractState,
         hand_binding: felt252,
@@ -173,7 +175,15 @@ pub mod SettlementPayoutAnonymizer {
                 .update(amount.high.into())
                 .finalize();
             assert!(cm == expected, "claim commitment mismatch");
-            assert!(claims.claim_amount(hand_binding, seat_index) == amount, "claim amount mismatch");
+            if claims.amounts_hidden(hand_binding) {
+                // P2-M3 v2：金额由电路证明的 cm 绑定、托管余额由 vault 封顶，
+                // 合约不再保存明文 claim_amount——跳过明文等值断言。
+            } else {
+                assert!(
+                    claims.claim_amount(hand_binding, seat_index) == amount,
+                    "claim amount mismatch"
+                );
+            };
 
             // 3. Capability: only the secret's owner can reveal it, and the
             //    reveal binds the destination note — an observer replaying

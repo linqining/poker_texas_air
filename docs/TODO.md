@@ -118,8 +118,22 @@
   - ⬜ 剩余：与 #10 P2-M3 成对——合约 `verify_and_settle_dapv_stark_private_v2`
     消费公开段 + Stwo Cairo verifier（官方移植或 fact-registry）；动作级 SK
     签名纳入动作日志（#16 落地后进吸收链，列位已预留）。
-- [ ] **10. P2-M3 合约验证端**：Stwo Cairo verifier（官方移植或 fact-registry，M3 定）+
-  `verify_and_settle_dapv_stark_private_v2` 接入 π。验收：calldata 零明文。
+- [x] **10. P2-M3 合约验证端**（2026-09-03 完成：fact-registry 过渡形态，验收=零明文
+  calldata ✅ 74/74 snforge）：
+  - ✅ 电路增发 `total_winnings`（公开段 14 felt：`[MAGIC, hand_id, digest, n,
+    binding, cm_0..cm_7, total]`），prove-settlement 端到端重跑全过（15.3s）；
+  - ✅ 合约 `verify_and_settle_dapv_stark_private_v2`：calldata 只有
+    `(hand_binding, hand_id, segment)`——**无 players/deltas**；入口校验段形
+    （MAGIC/hand_id/binding/n）+ digest 对注册值 + fact 锚
+    `poseidon([program_hash ++ segment])`（`set_circuit_program_hash` 钉电路 +
+    `register_settlement_fact` prover/owner 登记）→ 托管 `total_winnings` +
+    写 `claim_cms` + `amounts_hidden`；`consume_claim`/anonymizer 走隐藏模式
+    （cm 绑定金额，escrow 余额封顶 Σ claim）。snforge 4 用例：诚实零明文结算 /
+    算改 digest / 缺 fact / 重放全过；
+  - ⬜ 剩余（与 #11 成对）：fact 登记的信任升级——Stwo Cairo verifier 上链
+    （vendored `third_party/proving/stwo_cairo_verifier`）或 SNIP-36 fact
+    registry，替换 operator 登记的 residual trust；sepolia 部署 + gas/size
+    实测归入 #11。
 - [ ] **11. P2-M4 联调部署**：sepolia 部署 + gas/size 测量 + 文档。
 - [ ] **12. C3.2-M1 认领 sidecar**：Node sidecar 封装 STRK20 私密转账
   （运营浮存 → 赢家 viewing key note），Rust 服务端 HTTP 调用；需 SDK 依赖 + 服务器 KMS。

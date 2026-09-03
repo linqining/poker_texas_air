@@ -207,19 +207,44 @@ impl SettlementPrivateRequest {
             .collect()
     }
 
-    /// 期望公开段：`[MAGIC, hand_id, digest, n, binding, cm_0..cm_7]`。
-    pub fn expected_public_segment(&self) -> Vec<String> {
+    /// 期望公开段（felt 形态）：`[MAGIC, hand_id, digest, n, binding,
+    /// cm_0..cm_7, total_winnings]`——v2 合约托管金额 = total_winnings
+    /// （电路内累加）。
+    pub fn public_segment_felts(&self) -> Vec<Ff> {
         let mut segment = vec![
-            format!("0x{:x}", prove_magic()),
-            format!("0x{:x}", Ff::from(self.hand_id)),
-            format!("0x{:x}", Ff::from_bytes_be(&self.registered_digest).expect("canonical")),
-            format!("0x{:x}", Ff::from(self.n_participants)),
-            format!("0x{:x}", Ff::from_bytes_be(&self.hand_binding).expect("canonical")),
+            prove_magic(),
+            Ff::from(self.hand_id),
+            Ff::from_bytes_be(&self.registered_digest).expect("canonical digest"),
+            Ff::from(self.n_participants),
+            Ff::from_bytes_be(&self.hand_binding).expect("canonical binding"),
         ];
-        for cm in self.derive_claim_cms() {
-            segment.push(format!("0x{:x}", Ff::from_bytes_be(&cm).expect("canonical")));
+        let mut total_winnings: u64 = 0;
+        for (index, cm) in self.derive_claim_cms().iter().enumerate() {
+            segment.push(Ff::from_bytes_be(cm).expect("canonical cm"));
+            if self.signs[index] == 1 && self.magnitudes[index] != 0 {
+                total_winnings = total_winnings.saturating_add(self.magnitudes[index]);
+            }
         }
+        segment.push(Ff::from(total_winnings));
         segment
+    }
+
+    /// 期望公开段（hex 形态，供公开段比对）。
+    pub fn expected_public_segment(&self) -> Vec<String> {
+        self.public_segment_felts()
+            .iter()
+            .map(|f| format!("0x{f:x}"))
+            .collect()
+    }
+
+    /// fact-registry 锚：`fact = poseidon([circuit_program_hash ++ 公开段])`。
+    /// 电路 program_hash 部署时钉入合约常量，prover 侧经
+    /// `register_settlement_fact` 登记，`..._v2` 结算入口校验。
+    pub fn settlement_fact(&self, circuit_program_hash: [u8; 32]) -> Result<[u8; 32], String> {
+        let ph = Ff::from_bytes_be(&circuit_program_hash).map_err(|e| e.to_string())?;
+        let mut fields = vec![ph];
+        fields.extend(self.public_segment_felts());
+        Ok(starknet_crypto::poseidon_hash_many(&fields).to_bytes_be())
     }
 }
 
@@ -327,7 +352,11 @@ impl HttpSettlementProver {
             .iter()
             .position(|w| *w == magic)
             .ok_or("prover public segment missing MAGIC")?;
-        let got = &segment[start..start + 5 + MAX_PARTICIPANTS.min(segment.len().saturating_sub(start))];
+        let want_len = 5 + MAX_PARTICIPANTS + 1; // MAGIC..binding + cms + total
+        if segment.len() < start + want_len {
+            return Err("prover public segment too short".into());
+        }
+        let got = &segment[start..start + want_len];
         let expected = req.expected_public_segment();
         if got.len() < expected.len() || got[..expected.len()] != expected[..] {
             return Err(format!(
@@ -427,12 +456,12 @@ mod tests {
     fn expected_segment_shape() {
         let req = sample_request();
         let segment = req.expected_public_segment();
-        assert_eq!(segment.len(), 5 + MAX_PARTICIPANTS);
+        assert_eq!(segment.len(), 6 + MAX_PARTICIPANTS);
         assert!(segment[0].starts_with("0x5350324d5f4f4b"), "MAGIC='SP2M_OK'");
         assert_eq!(segment[1], "0x2a", "hand_id=42");
         assert_eq!(segment[3], "0x3", "n_participants");
         // 非赢家 cm 全零
-        for cm in &segment[6..] {
+        for cm in &segment[6..13] {
             assert_eq!(cm, "0x0");
         }
         // 赢家 cm 与合约公式一致
@@ -445,6 +474,25 @@ mod tests {
             Ff::ZERO,
         ]);
         assert_eq!(segment[5], format!("0x{expected_cm:x}"));
+        // total_winnings = Σ 赢家 |delta|（chips 口径样例 = 3000）
+        assert_eq!(segment[13], format!("0x{:x}", Ff::from(3_000u64)));
+    }
+
+    #[test]
+    fn settlement_fact_binds_program_hash_and_segment() {
+        let req = sample_request();
+        let fact_a = req.settlement_fact(sample_felt_bytes(1)).expect("fact");
+        let fact_b = req.settlement_fact(sample_felt_bytes(1)).expect("fact");
+        let fact_c = req.settlement_fact(sample_felt_bytes(2)).expect("fact");
+        assert_eq!(fact_a, fact_b, "同语句同 program hash → 同 fact");
+        assert_ne!(fact_a, fact_c, "program hash 不同 → fact 不同");
+        let mut tampered = sample_request();
+        tampered.registered_digest[31] ^= 1;
+        assert_ne!(
+            fact_a,
+            tampered.settlement_fact(sample_felt_bytes(1)).expect("fact"),
+            "语句任何字段变化 → fact 不同"
+        );
     }
 
     #[test]

@@ -90,6 +90,30 @@ pub trait IPokerDualSettlement<TContractState> {
         p_batch: Span<felt252>,
     );
 
+    /// P2-M3（SETTLEMENT_PRIVACY_PLAN.md §4 Phase 2）：零明文结算入口。
+    /// calldata 只含 (hand_binding, hand_id, segment)，**不含 players/deltas**；
+    /// segment 是 settlement_private 电路（program_hash 钉死）的公开段：
+    /// `[MAGIC, hand_id, digest, n, binding, cm_0..cm_7, total_winnings]`。
+    /// 信任锚为 fact-registry：`fact = poseidon([program_hash ++ segment])`
+    /// 须已由授权 prover/owner 登记（Stwo Cairo verifier 上链前的过渡形态，
+    /// 与 G 层 host-verified 同一 residual-trust 口径）；托管金额取自公开段
+    /// total_winnings（零和由电路证明，Σ claim ≤ escrow 由 vault 余额封顶）。
+    fn verify_and_settle_dapv_stark_private_v2(
+        ref self: TContractState,
+        hand_binding: felt252,
+        hand_id: u64,
+        segment: Span<felt252>,
+    );
+    /// Owner-gated: 钉死电路 program hash（fact 的绑定根，换电路须重设）。
+    fn set_circuit_program_hash(ref self: TContractState, program_hash: felt252);
+    /// Prover/owner-gated: 登记已生成证明的 fact（prove-hand 后由运营侧调用）。
+    fn register_settlement_fact(ref self: TContractState, fact: felt252);
+    /// View: 钉死的电路 program hash。
+    fn circuit_program_hash(self: @TContractState) -> felt252;
+    /// View: fact 是否已登记。
+    fn settlement_fact(self: @TContractState, fact: felt252) -> bool;
+    /// View: 该手是否为 v2（金额藏在 cm 中，consume_claim 走隐藏模式）。
+    fn amounts_hidden(self: @TContractState, hand_binding: felt252) -> bool;
     /// Owner-gated: set the claim escrow helper that receives the winners'
     /// pot via `vault.settlement_fund_escrow`.
     fn set_claim_helper(ref self: TContractState, helper: ContractAddress);
@@ -113,13 +137,30 @@ pub mod PokerDualSettlement {
     use openzeppelin::access::ownable::OwnableComponent;
     use starknet::ContractAddress;
     use core::num::traits::Zero;
-    use core::poseidon::poseidon_hash_span;
+    use core::hash::HashStateTrait;
+    use core::poseidon::{poseidon_hash_span, PoseidonTrait};
     use starknet::storage::{
         Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
         StoragePointerWriteAccess,
     };
     use super::super::dual::hand_batch_stark::verify_hand_batch_stark;
     use super::IVaultDispatcherDispatcherTrait;
+
+    // P2-M3 公开段常量与 fact 公式（与 proving-tool/src/settlement_private.cairo
+    // 及 texas/src/starknet/settlement_prover.rs 三方一致）。
+    const SETTLEMENT_SEGMENT_MAGIC: felt252 = 0x5350324d5f4f4b;
+    const SETTLEMENT_SEGMENT_LEN: usize = 14;
+
+    fn fact_for_segment(program_hash: felt252, segment: Span<felt252>) -> felt252 {
+        let mut h = PoseidonTrait::new();
+        h = h.update(program_hash);
+        let mut w: u32 = 0;
+        while w < segment.len() {
+            h = h.update(*segment.at(w));
+            w += 1;
+        }
+        h.finalize()
+    }
 
 /// Big-endian bytes → felt252 (Horner). Used to bind the DAPV batch's
 /// hand-domain input to the registered `hand_binding` felt.
@@ -312,6 +353,12 @@ fn dapv_prelude(
         claim_amounts: Map<(felt252, u32), u256>,
         /// (hand_binding, seat_index) → consumed flag (anti double-claim).
         claims_consumed: Map<(felt252, u32), bool>,
+        /// P2-M3：钉死的 settlement_private 电路 program hash（fact 绑定根）。
+        circuit_program_hash: felt252,
+        /// P2-M3：已登记的证明 fact（fact-registry 过渡形态）。
+        settlement_facts: Map<felt252, bool>,
+        /// P2-M3：v2 手的金额藏在 cm 中（consume_claim 走隐藏模式）。
+        amounts_hidden: Map<felt252, bool>,
         #[substorage(v0)]
         ownable: OwnableComponent::Storage,
     }
@@ -327,6 +374,8 @@ fn dapv_prelude(
         ClaimHelperSet: ClaimHelperSet,
         DualProofSettledPrivate: DualProofSettledPrivate,
         ClaimConsumed: ClaimConsumed,
+        SettlementFactRegistered: SettlementFactRegistered,
+        DualProofSettledPrivateV2: DualProofSettledPrivateV2,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -347,6 +396,19 @@ fn dapv_prelude(
         hand_binding: felt252,
         seat_index: u32,
         amount: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct SettlementFactRegistered {
+        fact: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct DualProofSettledPrivateV2 {
+        hand_binding: felt252,
+        settlement_digest: felt252,
+        participant_count: u32,
+        total_winnings: u256,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -651,8 +713,98 @@ fn dapv_prelude(
         fn claim_helper(self: @ContractState) -> ContractAddress {
             self.claim_helper.read()
         }
+
+        fn set_circuit_program_hash(ref self: ContractState, program_hash: felt252) {
+            self.ownable.assert_only_owner();
+            assert!(program_hash != 0, "Zero program hash");
+            self.circuit_program_hash.write(program_hash);
+        }
+
+        fn register_settlement_fact(ref self: ContractState, fact: felt252) {
+            let caller = starknet::get_caller_address();
+            assert!(
+                caller == self.ownable.owner() || self.provers.read(caller),
+                "Caller not authorized"
+            );
+            assert!(fact != 0, "Zero fact");
+            self.settlement_facts.write(fact, true);
+            self.emit(SettlementFactRegistered { fact });
+        }
+
+        fn circuit_program_hash(self: @ContractState) -> felt252 {
+            self.circuit_program_hash.read()
+        }
+
+        fn settlement_fact(self: @ContractState, fact: felt252) -> bool {
+            self.settlement_facts.read(fact)
+        }
+
+        fn amounts_hidden(self: @ContractState, hand_binding: felt252) -> bool {
+            self.amounts_hidden.read(hand_binding)
+        }
+
+        /// P2-M3：零明文结算（见接口文档）。digest 取注册值，托管金额与
+        /// claim_cms 全部来自已证明的公开段。
+        fn verify_and_settle_dapv_stark_private_v2(
+            ref self: ContractState,
+            hand_binding: felt252,
+            hand_id: u64,
+            segment: Span<felt252>,
+        ) {
+            assert!(hand_binding != 0, "Zero binding");
+            assert!(
+                !self.settled_bindings.read(hand_binding),
+                "Hand already settled"
+            );
+            assert!(segment.len() == SETTLEMENT_SEGMENT_LEN, "Segment length mismatch");
+            assert!(
+                *segment.at(0) == SETTLEMENT_SEGMENT_MAGIC,
+                "Segment magic mismatch"
+            );
+            assert!(*segment.at(1) == hand_id.into(), "Segment hand_id mismatch");
+            assert!(*segment.at(4) == hand_binding, "Segment binding mismatch");
+            let n: u32 = (*segment.at(3)).try_into().expect('n fits u32');
+            assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
+            // digest 取 register_aggregate 时的注册值（无明文参与比对）
+            let registered_digest = read_registered_digest(@self, hand_binding);
+            assert!(*segment.at(2) == registered_digest, "Segment digest mismatch");
+            // fact-registry 锚：fact = poseidon([program_hash ++ segment])，
+            // 由授权 prover/owner 在 prove-hand 之后登记。
+            let program_hash = self.circuit_program_hash.read();
+            assert!(program_hash != 0, "Circuit program hash not set");
+            let fact = fact_for_segment(program_hash, segment);
+            assert!(
+                self.settlement_facts.read(fact),
+                "Settlement fact not registered"
+            );
+
+            let total_u128: u128 = (*segment.at(13)).try_into().expect('total fits u128');
+            let total_winnings: u256 = total_u128.into();
+            assert!(total_winnings > 0_u256, "No winnings to escrow");
+            let vault_addr = self.vault_address.read();
+            let helper = self.claim_helper.read();
+            assert!(!helper.is_zero(), "Claim helper not set");
+            let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
+            vault.settlement_fund_escrow(helper, hand_binding, total_winnings);
+            let mut i: u32 = 0;
+            while i < 8_u32 {
+                self.claim_cms.write((hand_binding, i), *segment.at(5 + i));
+                i += 1;
+            }
+            self.amounts_hidden.write(hand_binding, true);
+            self.settled_bindings.write(hand_binding, true);
+            self.emit(
+                DualProofSettledPrivateV2 {
+                    hand_binding,
+                    settlement_digest: registered_digest,
+                    participant_count: n,
+                    total_winnings,
+                },
+            );
+        }
     }
 }
+
 
 /// Minimal vault interface consumed by the settlement contract.
 #[starknet::interface]
@@ -673,3 +825,254 @@ pub trait IVaultDispatcher<TContractState> {
 // Tests (snforge): mock vault + deploy through the dispatcher so
 // register/settle run through the real prover-gate paths.
 // ============================================================
+
+// ============================================================
+// Tests (snforge): P2-M3 零明文结算 v2 — fact-registry 锚定公开段。
+// MockVault 记录 escrow 划转；register 用 prover 授权（test 合约即
+// initial_prover）；电路公开段由测试内 Poseidon 复算（与 Cairo 电路
+// 及 Rust 参考三方一致）。
+// ============================================================
+
+#[cfg(test)]
+mod settlement_private_v2_tests {
+    use core::hash::HashStateTrait;
+    use core::poseidon::PoseidonTrait;
+    use starknet::{ContractAddress, get_contract_address};
+    use snforge_std::{ContractClassTrait, DeclareResultTrait, declare};
+
+    use super::mock_vault::IMockVaultDispatcherTrait;
+    use super::mock_vault::IMockVaultDispatcher;
+    use super::{
+        IPokerDualSettlement, IPokerDualSettlementDispatcher,
+        IPokerDualSettlementDispatcherTrait,
+    };
+
+    const MAGIC: felt252 = 0x5350324d5f4f4b;
+    const PROGRAM_HASH: felt252 = 0xabcdef;
+
+    fn deploy_contract(name: ByteArray, calldata: @Array<felt252>) -> ContractAddress {
+        let class = declare(name).unwrap().contract_class();
+        let (address, _) = class.deploy(calldata).unwrap();
+        address
+    }
+
+    struct Setup {
+        dual: IPokerDualSettlementDispatcher,
+        vault: IMockVaultDispatcher,
+        hand_binding: felt252,
+        digest: felt252,
+        segment: Array<felt252>,
+        total: felt252,
+    }
+
+    /// 部署 mock vault + dual（test 合约为 owner 与 initial_prover），
+    /// 注册 binding（digest=0x99..）、钉 program hash，构造诚实公开段并
+    /// 登记 fact。`tamper` 可选：覆盖 segment 的 digest 槽。
+    fn setup(tamper_digest: bool, with_fact: bool) -> Setup {
+        let test_addr = get_contract_address();
+        let vault = deploy_contract("MockVault", @array![]);
+        let dual_addr = deploy_contract(
+            "PokerDualSettlement",
+            @array![test_addr.into(), vault.into(), test_addr.into()],
+        );
+        let dual = IPokerDualSettlementDispatcher { contract_address: dual_addr };
+        dual.set_claim_helper(test_addr);
+        dual.set_circuit_program_hash(PROGRAM_HASH);
+
+        let hand_binding: felt252 = 0xBBBB;
+        let hand_id: u64 = 42;
+        let digest: felt252 = 0x9900;
+        // 与 register_hand 一致的注册（prover = test_addr）
+        dual.register_hand(hand_binding, digest, 0, 0, 0, 0);
+
+        // 公开段：赢家 seat0（+3000），输家 seat1/2，其余零变动
+        let mut cms = array![];
+        let mut total: felt252 = 0;
+        let commitment = 0x21;
+        let binding = hand_binding;
+        let mut i: u32 = 0;
+        while i < 8_u32 {
+            let (s, m): (felt252, felt252) = if i == 0 {
+                (1, 3000)
+            } else if i == 1 {
+                (0, 2000)
+            } else if i == 2 {
+                (0, 1000)
+            } else {
+                (1, 0)
+            };
+            i += 1;
+            if s == 1 {
+                if m != 0 {
+                    total += m;
+                    let mut ch = PoseidonTrait::new();
+                    ch = ch.update(commitment);
+                    ch = ch.update(binding);
+                    ch = ch.update(m);
+                    ch = ch.update(0);
+                    cms.append(ch.finalize());
+                } else {
+                    cms.append(0);
+                };
+            } else {
+                cms.append(0);
+            };
+        }
+
+        // tamper_digest：segment 的 digest 槽换成 0xDEAD（注册值仍是真 digest）
+        let digest_in_segment: felt252 = if tamper_digest { 0xDEAD } else { digest };
+        let mut segment = array![MAGIC, hand_id.into(), digest_in_segment, 3, binding];
+        let mut w: u32 = 0;
+        while w < 8_u32 {
+            segment.append(*cms.at(w));
+            w += 1;
+        };
+        segment.append(total);
+
+        if with_fact {
+            // fact = poseidon([program_hash ++ segment])（与合约公式一致）
+            let mut f = PoseidonTrait::new();
+            f = f.update(PROGRAM_HASH);
+            let mut w: u32 = 0;
+            while w < segment.len() {
+                f = f.update(*segment.at(w));
+                w += 1;
+            }
+            dual.register_settlement_fact(f.finalize());
+        }
+
+        Setup {
+            dual,
+            vault: IMockVaultDispatcher { contract_address: vault },
+            hand_binding,
+            digest,
+            segment,
+            total,
+        }
+    }
+
+    #[test]
+    fn v2_honest_segment_settles_without_plaintext_calldata() {
+        let s = setup(false, true);
+        // v2 calldata：只有 (hand_binding, hand_id, segment)——无 players/deltas
+        s.dual
+            .verify_and_settle_dapv_stark_private_v2(s.hand_binding, 42, s.segment.span());
+        assert!(s.dual.hand_settled(s.hand_binding), "hand must be settled");
+        // claim_cms 来自公开段（seat0 = 赢家承诺）
+        let mut ch = PoseidonTrait::new();
+        ch = ch.update(0x21);
+        ch = ch.update(s.hand_binding);
+        ch = ch.update(3000);
+        ch = ch.update(0);
+        assert!(s.dual.claim_cm(s.hand_binding, 0) == ch.finalize(), "cm0");
+        assert!(s.dual.claim_cm(s.hand_binding, 1) == 0, "non-winner cm must be zero");
+        // 托管金额 = 公开段 total_winnings
+        let total_u256: u256 = s.total.into();
+        assert!(
+            s.vault.escrowed_for(s.hand_binding) == total_u256,
+            "escrow must equal total_winnings"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected: "Segment digest mismatch")]
+    fn v2_tampered_digest_reverts() {
+        let s = setup(true, true);
+        s.dual
+            .verify_and_settle_dapv_stark_private_v2(s.hand_binding, 42, s.segment.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Settlement fact not registered")]
+    fn v2_missing_fact_reverts() {
+        let s = setup(false, false);
+        s.dual
+            .verify_and_settle_dapv_stark_private_v2(s.hand_binding, 42, s.segment.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Hand already settled")]
+    fn v2_replay_reverts() {
+        let s = setup(false, true);
+        s.dual
+            .verify_and_settle_dapv_stark_private_v2(s.hand_binding, 42, s.segment.span());
+        s.dual
+            .verify_and_settle_dapv_stark_private_v2(s.hand_binding, 42, s.segment.span());
+    }
+}
+
+/// P2-M3 测试用 MockVault：记录 escrow 划转，payout_commitment 返回常数。
+#[cfg(test)]
+mod mock_vault {
+    use starknet::ContractAddress;
+    use starknet::storage::{StorageMapReadAccess, StorageMapWriteAccess};
+
+    #[starknet::interface]
+    pub trait IMockVault<TContractState> {
+        fn payout_commitment(self: @TContractState, player: ContractAddress) -> felt252;
+        fn settlement_fund_escrow(
+            ref self: TContractState,
+            escrow: ContractAddress,
+            hand_binding: felt252,
+            amount: u256,
+        );
+        fn apply_settlement(ref self: TContractState, player: ContractAddress, delta: i128);
+        fn escrowed_for(self: @TContractState, hand_binding: felt252) -> u256;
+    }
+
+    #[starknet::contract]
+    pub mod MockVault {
+        use starknet::ContractAddress;
+        use starknet::storage::{Map, StorageMapReadAccess, StorageMapWriteAccess};
+
+        #[storage]
+        struct Storage {
+            escrowed: Map<felt252, u256>,
+        }
+
+        #[event]
+        #[derive(Drop, starknet::Event)]
+        enum Event {
+            EscrowFunded: EscrowFunded,
+        }
+
+        #[derive(Drop, starknet::Event)]
+        struct EscrowFunded {
+            escrow: ContractAddress,
+            hand_binding: felt252,
+            amount: u256,
+        }
+
+        #[constructor]
+        fn constructor(ref self: ContractState) {}
+
+        #[abi(embed_v0)]
+        impl IMockVaultImpl of super::IMockVault<ContractState> {
+            fn payout_commitment(self: @ContractState, player: ContractAddress) -> felt252 {
+                0x1234
+            }
+
+            fn settlement_fund_escrow(
+                ref self: ContractState,
+                escrow: ContractAddress,
+                hand_binding: felt252,
+                amount: u256,
+            ) {
+                let current = self.escrowed.read(hand_binding);
+                self.escrowed.write(hand_binding, current + amount);
+                self.emit(EscrowFunded { escrow, hand_binding, amount });
+            }
+
+            fn apply_settlement(
+                ref self: ContractState,
+                player: ContractAddress,
+                delta: i128,
+            ) {
+            }
+
+            fn escrowed_for(self: @ContractState, hand_binding: felt252) -> u256 {
+                self.escrowed.read(hand_binding)
+            }
+        }
+    }
+}
