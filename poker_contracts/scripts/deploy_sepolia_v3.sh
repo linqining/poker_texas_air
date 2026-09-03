@@ -103,6 +103,51 @@ done
 [ -n "$CLS" ] || { echo "declare FAILED" >&2; exit 1; }
 echo "DUAL_CLASS=$CLS"
 
+TOKEN="${TOKEN:?TOKEN (STRK20) address required}"
+CASHOUT_HELPER="${CASHOUT_HELPER:?CASHOUT_HELPER (CashoutUnshieldHelper) address required}"
+DUAL_OLD="${DUAL_OLD:?DUAL_OLD (current dual settlement) address required}"
+echo "== [1b/5] declare + deploy vault v3（#33 在局锁定；可选：DEPLOY_VAULT_V3=1）"
+if [ "${DEPLOY_VAULT_V3:-0}" = "1" ]; then
+    VCLS=""
+    for attempt in 1 2 3; do
+      n=$(get_nonce)
+      out=$("$SN" declare \
+        --class "$ART/poker_contracts_PokerVault.contract_class.json" \
+        --compiled "$ART/poker_contracts_PokerVault.compiled_contract_class.json" 2>&1 || true)
+      tx=$(printf '%s' "$out" | grep -oE 'TX=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
+      if [ -n "$tx" ]; then wait_nonce_gt "$n"; VCLS="$tx"; break; fi
+      actual=$(printf '%s' "$out" | grep -oE 'Actual: 0x[0-9a-fA-F]+' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
+      if [ -n "$actual" ]; then
+        n=$(get_nonce)
+        out=$("$SN" declare \
+          --class "$ART/poker_contracts_PokerVault.contract_class.json" \
+          --compiled "$ART/poker_contracts_PokerVault.compiled_contract_class.json" \
+          --compiled-hash "$actual" 2>&1 || true)
+        tx=$(printf '%s' "$out" | grep -oE 'TX=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
+        if [ -n "$tx" ]; then wait_nonce_gt "$n"; VCLS="$tx"; break; fi
+      fi
+      sleep 10
+    done
+    [ -n "$VCLS" ] || { echo "vault declare FAILED" >&2; exit 1; }
+    echo "VAULT_V3_CLASS=$VCLS"
+    VAULT_NEW=""
+    for attempt in 1 2 3 4 5; do
+      n=$(get_nonce)
+      out=$("$SN" deploy --class-hash "$VCLS" --calldata "$OWNER,$TOKEN,$ZERO" 2>&1 || true)
+      addr=$(printf '%s' "$out" | grep -oE 'CONTRACT_ADDRESS=(0x[0-9a-fA-F]+)' | grep -oE '0x[0-9a-fA-F]+' | tail -1)
+      if [ -n "$addr" ]; then wait_nonce_gt "$n"; VAULT_NEW="$addr"; break; fi
+      sleep 5
+    done
+    [ -n "$VAULT_NEW" ] || { echo "vault deploy FAILED" >&2; exit 1; }
+    echo "VAULT_V3_ADDR=$VAULT_NEW"
+    # 新 vault 上的授权与结算指向（旧 vault 筹码迁移走既有 withdraw 路径）
+    submit_wait set_unshield_helper "$SN" invoke --contract "$VAULT_NEW" --fn set_unshield_helper --calldata "$CASHOUT_HELPER" >/dev/null
+    submit_wait set_settlement_contract "$SN" invoke --contract "$VAULT_NEW" --fn set_settlement_contract --calldata "$DUAL_OLD" >/dev/null
+    VAULT="$VAULT_NEW"
+else
+    echo "（跳过 vault v3 部署：DEPLOY_VAULT_V3 未设；沿用现有 vault）"
+fi
+
 echo "== [2/5] deploy dual v3（owner=$OWNER vault=$VAULT prover=$OWNER）"
 DUAL=""
 for attempt in 1 2 3 4 5; do

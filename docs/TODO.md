@@ -51,7 +51,10 @@
     `poker_dual_settlement.cairo:664`、`cashout_unshield_helper.cairo:110`。
   - 建议顺序：①+②+③ 一并实施（纯② 会冻结资金；只做① 无超时解锁不可接
     受）；`chip_to_note` / `poker_vault_anonymizer` 的提现路径同样过锁定门。
-  - ✅ **实现完成（2026-09-03，snforge 85/85 ✅）**：`poker_vault.cairo` 增加
+  - ✅ **实现完成（2026-09-03，snforge 85/85 ✅）；随 #11 部署批次上线
+    （`deploy_sepolia_v3.sh` 的 `DEPLOY_VAULT_V3=1` 段：vault v3 declare/deploy
+    + set_unshield_helper + set_settlement_contract；详见 DEPLOYMENTS.md
+    「Vault v3」节）。：`poker_vault.cairo` 增加
     `locked` / `session_last_activity` / `session_active` / `lock_ttl` 存储；
     `lock`（owner=operator）/ `refresh_session` / `unlock_after_deadline`
     （无许可，`timestamp >= last + ttl`）/ `set_lock_ttl`（owner，0=禁用）/

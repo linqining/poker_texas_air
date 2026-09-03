@@ -180,3 +180,21 @@ settlement_private 电路公开段），**链上部署被 gas 预算阻塞**：
 
 一键部署（补足 STRK 后）：`HELPER=0x393f... VAULT=0x1e9f... PROGRAM_HASH=0x2ad1... ./scripts/deploy_sepolia_v3.sh`
 （自动：declare（含 hash 方案重试）→ deploy(owner, vault, prover) → set_claim_helper → set_circuit_program_hash → 回填 texas/.env。）
+
+## Vault v3（#33 在局锁定，与 dual v3 同批，2026-09-03 代码就绪待部署）
+
+`poker_vault.cairo` 新增（#33 逃单/砖死修复，snforge 8/8 ✅）：
+- `locked` / `session_last_activity` / `session_active` / `lock_ttl` 存储；
+- `lock`（owner=operator）：入座锁额度；`refresh_session`：结算/续局续时钟；
+- `unlock_after_deadline`（无许可）：`timestamp >= last_activity + lock_ttl`
+  后任何人可解锁（后端失联保护；TTL=0 禁用，constructor 默认 12h，
+  `set_lock_ttl` owner 可调）；`force_unlock`（owner 应急）；
+- `withdraw` / `withdraw_to` / `burn_chips` 统一 `assert_spendable`
+  （只可花未锁定余额）；`apply_settlement` 负 delta **优先消耗锁定额度**
+  （修"输家提款 → 结算砖死"）。
+
+部署（脚本 `DEPLOY_VAULT_V3=1` 段自动完成）：declare vault v3 → deploy
+(owner, token, settlement=旧 dual) → `set_unshield_helper(CashoutUnshieldHelper)`
+→ `set_settlement_contract(DUAL_OLD)` → dual v3 以新 vault 地址构造。
+迁移：旧 vault 玩家余额经公开 `withdraw` 提取后在新 vault 重新 deposit
+（或运营 `deposit_for`）。
