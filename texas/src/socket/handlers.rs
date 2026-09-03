@@ -277,18 +277,31 @@ async fn validate_sit_down_request(
     let player_id = player.id.clone();
 
     // E3 修复：检查用户余额是否足够（PokerVault 链上筹码 - locked_chips）
+    // #验收修复：携带 deposit_tx_hash 时**跳过该预检**——钱包返回哈希≠上链
+    // 确认，latest 余额读数会抢先拒绝（用户实测 "Insufficient chips"）。
+    // 权威校验由下方 verify_deposit 轮询回执 + 筹码覆盖完成。
+    let has_deposit_tx = payload
+        .deposit_tx_hash
+        .as_deref()
+        .is_some_and(|h| !h.trim().is_empty());
     let db_user = state.db.find_user_by_id(&player_id).await;
     if let Some(ref user) = db_user {
-        let available = get_available_chips(&state, user).await;
-        if available < payload.amount as i64 {
-            tracing::warn!(
-                "[SIT_DOWN_V2] Insufficient chips: user_id={}, available={}, required={}",
-                player_id,
-                available,
-                payload.amount
+        if !has_deposit_tx {
+            let available = get_available_chips(&state, user).await;
+            if available < payload.amount as i64 {
+                tracing::warn!(
+                    "[SIT_DOWN_V2] Insufficient chips: user_id={}, available={}, required={}",
+                    player_id,
+                    available,
+                    payload.amount
+                );
+                let _ = s.emit("error", &serde_json::json!({"msg": "Insufficient chips"}));
+                return None;
+            }
+        } else {
+            tracing::info!(
+                "[SIT_DOWN_V2] deposit tx present — deferring balance check to buy-in verification"
             );
-            let _ = s.emit("error", &serde_json::json!({"msg": "Insufficient chips"}));
-            return None;
         }
     }
 

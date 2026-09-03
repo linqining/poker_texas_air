@@ -93,40 +93,64 @@ pub async fn verify_deposit(
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    // 公共 RPC 偶发限流/断连：网络层失败重试 3 次（指数间隔），避免单次
-    // 抖动让用户买入直接失败。
-    let mut rj: serde_json::Value = serde_json::Value::Null;
+
+    // #验收修复：钱包返回哈希 ≠ 上链确认。轮询回执直到 SUCCEEDED /
+    // REVERTED / 超时（30s），网络层失败按指数间隔重试——避免"提交后
+    // 立刻下坐"被 latest 态误拒。
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut attempt: u64 = 0;
     let mut last_err = String::new();
-    for attempt in 1..=3 {
+    let status;
+    loop {
+        attempt += 1;
         let res = http.post(&chain.config.rpc_url).json(&receipt_body).send().await;
-        match res {
+        let parsed = match res {
             Ok(resp) => match resp.text().await {
                 Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-                    Ok(parsed) => {
-                        rj = parsed;
-                        last_err.clear();
-                        break;
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        last_err = format!("receipt json: {e}");
+                        None
                     }
-                    Err(e) => last_err = format!("receipt json: {e}"),
                 },
-                Err(e) => last_err = format!("receipt text: {e}"),
+                Err(e) => {
+                    last_err = format!("receipt text: {e}");
+                    None
+                }
             },
-            Err(e) => last_err = format!("receipt http: {e}"),
+            Err(e) => {
+                last_err = format!("receipt http: {e}");
+                None
+            }
+        };
+        if let Some(rj) = parsed {
+            match rj["result"]["execution_status"].as_str() {
+                Some("SUCCEEDED") => {
+                    eprintln!("[verify_deposit] receipt SUCCEEDED after {attempt} poll(s)");
+                    status = "SUCCEEDED".to_string();
+                    break;
+                }
+                Some(other) if other.contains("REVERTED") => {
+                    return Err(format!("deposit tx {deposit_tx_hash} reverted"));
+                }
+                other => {
+                    // RECEIVED / NOT_RECEIVED / 无字段 = 仍待确认
+                    last_err = format!(
+                        "pending (status={:?})",
+                        other
+                    );
+                }
+            }
         }
-        eprintln!("[verify_deposit] receipt fetch attempt {attempt} failed: {last_err}");
-        tokio::time::sleep(std::time::Duration::from_millis(1500 * attempt as u64)).await;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "deposit not confirmed within 30s: {last_err}"
+            ));
+        }
+        eprintln!("[verify_deposit] poll {attempt}: not confirmed yet ({})…", last_err);
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
     }
-    if !last_err.is_empty() {
-        return Err(format!("deposit receipt fetch failed after retries: {last_err}"));
-    }
-    let status = rj["result"]["execution_status"].as_str().ok_or_else(|| {
-        format!("no execution_status in receipt: {rj}")
-    })?;
     eprintln!("[verify_deposit] receipt status={status}");
-    let status_ok = status == "SUCCEEDED";
-    if !status_ok {
-        return Err(format!("deposit tx {deposit_tx_hash} did not succeed"));
-    }
 
     // 2. 未配置 vault → 只要求回执成功（devnet 部署可能没有 vault）。
     // 3. vault 筹码余额必须覆盖买入数量。
