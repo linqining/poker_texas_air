@@ -77,8 +77,12 @@ impl TableMirror {
             pre_settlement: None,
             caller,
             block_height: 1,
-            rake_bps: poker_l1::vm::contracts::texas_poker::constants::DEFAULT_RAKE_BPS,
-            rake_cap: poker_l1::vm::contracts::texas_poker::constants::DEFAULT_RAKE_CAP,
+            // 与服务端 collect_rake_for_settlement 同源读 env
+            // （STARKNET_RAKE_BPS/CAP）：镜像 deltas 是链上结算的权威输入，
+            // 参数必须与服务端牌桌账同一套，否则改 env 只改一半，
+            // 链上/前端每手偏差 = 抽水差额（2026-09-04 审核发现）。
+            rake_bps: crate::pokergame::rake::rake_params().rake_bps,
+            rake_cap: crate::pokergame::rake::rake_params().rake_cap,
         }
     }
 

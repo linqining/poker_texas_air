@@ -131,4 +131,20 @@ mod tests {
     fn allocate_zero_rake() {
         assert_eq!(allocate_rake(&[(1000, 2)], 0, 1000), vec![0]);
     }
+
+    /// 2026-09-04 审核发现：台费基数 = 争夺层总额（链上 contested_gross），
+    /// 未跟注返还层不参与。1000 池 = 主池 600 争夺 + 400 未跟注返还：
+    /// 链上抽 600×5% = 30（非 50），且全落主池。
+    #[test]
+    fn rake_base_excludes_uncontested_layer() {
+        let layers = [(600u64, 2usize), (400, 1)];
+        let contested_gross = layers.iter()
+            .filter(|(_, e)| *e >= 2)
+            .map(|(a, _)| a)
+            .sum::<u64>();
+        assert_eq!(contested_gross, 600);
+        let rake = compute_rake(contested_gross, &params(500, 1000));
+        assert_eq!(rake, 30);
+        assert_eq!(allocate_rake(&layers, rake, contested_gross), vec![30, 0]);
+    }
 }

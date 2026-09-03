@@ -75,6 +75,18 @@
     `collect_rake_for_settlement`——链上 deltas 含 5% 台费而前端筹码不扣，
     两本账每手偏差 5%（服务端 stack 总和守恒、牌史 rake=0）。已补齐，
     前端 stack/牌史 rake 字段/链上 delta 三者一致。
+  - 全面审核（2026-09-04，含 AIR 约束）三处修正：
+    ① 台费基数改为**争夺层总额**（contested_gross，镜像链上
+    settlement.rs）——原按总池计算，all-in 未跟注返还层会被多抽
+    （1000 池=600 争夺+400 返还时抽 50 而非 30）；
+    ② mirror 抽水参数改从 env 读（原固定 DEFAULT 常量，改
+    STARKNET_RAKE_BPS/CAP 只改服务端一半）；
+    ③ AIR 电路（settlement_private.cairo）审核结论：电路不重算抽水
+    （正确——digest 是锚），约束四条与 v2 合约消费逐字段一致；但
+    `verify_and_settle_dapv_stark_private_v2` **不扣输家**（设计如此：
+    计划文档 §2 "输赢只在服务器内存"），配 permissionless withdraw =
+    输家可超提 → vault 对其他玩家资不抵债。v2 在现金出口迁移到
+    服务端受控模型前**不可启用**（当前线上走 v1 明文路径不受影响）。
   - 实现：新增 `texas/src/pokergame/rake.rs`（公式与分层分摊逐字对齐链上
     `settle.rs`/`settlement.rs`，带单测）；摊牌路径 `collect_rake_for_settlement`
     在分池前抽水（争夺层按比例分摊、uncontested 层豁免）；fold-win 不抽水；

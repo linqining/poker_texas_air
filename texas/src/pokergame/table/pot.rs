@@ -174,10 +174,6 @@ impl Table {
     pub fn collect_rake_for_settlement(&mut self) {
         let params = crate::pokergame::rake::rake_params();
         let gross_pot = self.pot();
-        let total_rake = crate::pokergame::rake::compute_rake(gross_pot, params);
-        if total_rake == 0 {
-            return;
-        }
         let main_amount = self.main_pot();
         let main_eligible = self.unfolded_players().len();
         let side_layers: Vec<(u64, usize)> = self.summary.side_pots.iter()
@@ -191,9 +187,22 @@ impl Table {
         let mut layers = Vec::with_capacity(1 + side_layers.len());
         layers.push((main_amount, main_eligible));
         layers.extend(side_layers);
-        let allocations = crate::pokergame::rake::allocate_rake(&layers, total_rake, gross_pot);
+        // 台费基数 = 争夺层总额（eligible ≥ 2），镜像链上 contested_gross
+        // （poker_l1 settlement.rs:594-595）。未跟注返还层（如 all-in 超出
+        // 部分退回）不参与抽水——若按总池计算会在该场景多抽：1000 池 =
+        // 主池 600 争夺 + 400 未跟注返还时，链上抽 600×5%=30，按总池会抽
+        // 50，赢家到账差 20。
+        let contested_gross: u64 = layers.iter()
+            .filter(|(_, eligible)| *eligible >= 2)
+            .map(|(amount, _)| amount)
+            .sum();
+        let total_rake = crate::pokergame::rake::compute_rake(contested_gross, params);
+        if total_rake == 0 {
+            return;
+        }
+        let allocations = crate::pokergame::rake::allocate_rake(&layers, total_rake, contested_gross);
         self.summary.rake_collected = total_rake;
-        // compute_rake 已 min(pot) 封顶；saturating 作第二道防线（audit M4）
+        // compute_rake 已 min(基数) 封顶；saturating 作第二道防线（audit M4）
         self.set_pot(gross_pot.saturating_sub(total_rake));
         for (i, sp) in self.summary.side_pots.iter_mut().enumerate() {
             sp.amount = sp.amount.saturating_sub(allocations.get(i + 1).copied().unwrap_or(0));
