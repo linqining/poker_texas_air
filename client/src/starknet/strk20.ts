@@ -398,11 +398,18 @@ export interface ClaimRewardsArgs {
  * （不存在 'shield' 类型；shield 实际是 approve+deposit 两笔，钱包弹两次确认）。
  * 提交管线与 claimRewardsPrivate 完全一致：v6 通道 → 114 时平铺通道带
  * api_version 重试。
+ *
+ * 已知边界（官方 SDK 文档 sdk/register、setup-requirements）：池注册 = 上链
+ * 发布 viewing key，而 viewing key 只存在于钱包内，dapp 无法代注册（
+ * SetupRequirement.Register 是硬限制："They must register - you cannot do
+ * it for them"）。因此从未入池的钱包对 deposit 直接回 118
+ * NOT_REGISTERED——此时返回 notRegistered:true，由 UI 引导用户去钱包内
+ * Shield 入池（Ready 的 Shield 会自动完成注册）。
  */
 export async function shieldForPoolRegistration(
   account: Strk20CapableAccount | null,
   amountWei: bigint,
-): Promise<TxResult> {
+): Promise<TxResult & { notRegistered?: boolean }> {
   const wallet = getInjectedStarknetWallet() as Record<string, unknown> | null;
   const acct = account as Strk20CapableAccount | null;
   const hasWalletSurface = !!wallet
@@ -415,13 +422,22 @@ export async function shieldForPoolRegistration(
   if (amountWei <= 0n) {
     return { hash: '', success: false, error: 'Amount must be positive' };
   }
+  const notRegisteredResult = (): TxResult & { notRegistered?: boolean } => ({
+    hash: '',
+    success: false,
+    notRegistered: true,
+    error:
+      '池注册需要在 Ready 钱包内完成（viewing key 只保存在钱包中，dapp 无法代注册）：' +
+      '打开 Ready → STRK 资产页「Shield / 入池」→ 做一次小额入池（钱包会自动完成注册），' +
+      '完成后回到本弹窗点「重新校验」。',
+  });
   const { CANONICAL_STRK_ADDRESS } = await import('./starknetGameActions');
   // Ready 的 payload schema 对金额只认规范化 0x 十六进制（十进制字符串直接
   // INVALID_REQUEST_PAYLOAD(114)——与私密领取同一教训，线上实测）。
   const amountHex = '0x' + amountWei.toString(16);
   const actions = [{ type: 'deposit', token: CANONICAL_STRK_ADDRESS, amount: amountHex }];
   // 与 claimRewardsPrivate 相同：先取钱包声明的最高 0.10.x 版本，v6 通道
-  // 被 114 拒绝后经平铺请求面带上 api_version 重试（starknet.js 的
+  // 被拒绝后经平铺请求面带上 api_version 重试（starknet.js 的
   // strk20InvokeTransaction 只发 params:{actions}，无法携带 api_version，
   // Ready 5.x 缺它必回 114——线上实测）。
   const declared = await getWalletApiVersions();
@@ -439,8 +455,11 @@ export async function shieldForPoolRegistration(
         return { hash, success: true };
       }
     } catch (err) {
-      // 非 114 的错误平铺通道大概率同样失败，但仍兜底一次让钱包给最终答复
-      if (!/INVALID_REQUEST_PAYLOAD/i.test(String(err))) throw err;
+      const msg = String(err);
+      // 118：从未入池的钱包不能 deposit——唯一出路是钱包内 Shield（自动注册）
+      if (/NOT_REGISTERED/i.test(msg)) return notRegisteredResult();
+      // 非 114 的错误原样抛出（余额不足等，钱包给最终答复）
+      if (!/INVALID_REQUEST_PAYLOAD/i.test(msg)) throw err;
       logger.warn(
         '[strk20] v6 shield rejected (INVALID_REQUEST_PAYLOAD); retrying flat request with api_version',
         apiVersion ?? '(none)',
@@ -463,6 +482,7 @@ export async function shieldForPoolRegistration(
   } catch (e) {
     const msg = String(e);
     logger.warn('[strk20] pool-registration shield flat submit failed:', msg);
+    if (/NOT_REGISTERED/i.test(msg)) return notRegisteredResult();
     if (/INVALID_REQUEST_PAYLOAD/i.test(msg)) {
       return {
         hash: '',

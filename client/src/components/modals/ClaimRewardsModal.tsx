@@ -129,6 +129,46 @@ const PathDetail = styled.span`
   padding-left: 1rem;
 `;
 
+/** 卡片内的链接式小按钮（注册指引入口等） */
+const CardLink = styled.button`
+  align-self: flex-start;
+  margin-left: 1rem;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.72rem;
+  color: ${({ theme }) => theme.colors.primaryCta};
+  text-decoration: underline;
+  cursor: pointer;
+  &:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+`;
+
+/** 未注册池的引导区：钱包内 Shield 步骤（viewing key 只在钱包内，dapp 无法代注册） */
+const GuideBox = styled.div`
+  margin: 0.1rem 0 0 1rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: ${({ theme }) => theme.radius.md};
+  background: rgba(245, 158, 11, 0.08);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+`;
+
+const GuideSteps = styled.ol`
+  margin: 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: ${({ theme }) => theme.colors.fontColorDark};
+`;
+
 /** 两份注册都完成后的折叠摘要：整行是一个 disclosure 按钮（aria-expanded） */
 const RegSummary = styled.button`
   display: flex;
@@ -244,6 +284,9 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   );
   const [regPending, setRegPending] = useState(false);
   const [poolRegistering, setPoolRegistering] = useState(false);
+  // 池注册指引的展开态：viewing key 只在钱包内，dapp 无法代注册——
+  // 未注册用户点一键注册被钱包 118 拒绝时自动展开
+  const [poolGuideOpen, setPoolGuideOpen] = useState(false);
   const [checking, setChecking] = useState(false);
   // 折叠摘要的展开/收起：展开后真正渲染两张注册卡详情（含重新校验入口）
   const [showRegDetail, setShowRegDetail] = useState(false);
@@ -335,6 +378,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     setDone(null);
     setError('');
     setShowRegDetail(false);
+    setPoolGuideOpen(false);
     void runChecks(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, account]);
@@ -405,7 +449,8 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   };
 
   // 一键注册隐私池：向池 shield 0.01 STRK，钱包在首笔 shield 时自动完成
-  // viewing key 注册（金额留在池内余额，后续私密领取可全额使用）
+  // viewing key 注册（金额留在池内余额，后续私密领取可全额使用）。
+  // 未入池的钱包会回 118 NOT_REGISTERED——自动展开钱包内注册指引。
   const registerPool = async () => {
     setPoolRegistering(true);
     setError('');
@@ -418,9 +463,12 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
         await runChecks(false);
       } else {
         setError(res.error || 'Shield 提交失败');
+        if (res.notRegistered) setPoolGuideOpen(true);
       }
     } catch (e) {
-      setError(String((e as Error)?.message || e));
+      const msg = String((e as Error)?.message || e);
+      setError(msg);
+      if (/NOT_REGISTERED/i.test(msg)) setPoolGuideOpen(true);
     } finally {
       setPoolRegistering(false);
     }
@@ -507,6 +555,34 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
             : '未报告（钱包不支持或版本过旧）'}
         {' '}· 需 ≥ {STRK20_WALLET_API_MIN}
       </PathDetail>
+      {reg.pool === false && strk20Ready !== false && (
+        <>
+          <CardLink type="button" onClick={() => setPoolGuideOpen((v) => !v)}>
+            {poolGuideOpen ? '收起注册指引' : '注册指引（钱包内 Shield）'}
+          </CardLink>
+          {poolGuideOpen && (
+            <GuideBox>
+              <GuideSteps>
+                <li>打开 Ready 钱包 → STRK 资产页「Shield / 入池」（隐私池入口）</li>
+                <li>
+                  小额 Shield 一次（如 0.01 STRK）；钱包会依次弹出 approve 与 deposit
+                  两次确认（非重复交易）
+                </li>
+                <li>首次入池时钱包自动完成池注册——viewing key 只保存在钱包里，dapp 无法代注册</li>
+                <li>回到本弹窗重新校验，本卡片变绿即可私密领取</li>
+              </GuideSteps>
+              <CardLink
+                type="button"
+                style={{ marginLeft: 0 }}
+                onClick={reverify}
+                disabled={checking}
+              >
+                {checking ? '校验中…' : '我已在钱包内完成 Shield，重新校验'}
+              </CardLink>
+            </GuideBox>
+          )}
+        </>
+      )}
     </PathCard>
   );
 
