@@ -35,7 +35,9 @@ use poker_protocol::zk_shuffle::transcript_ext::{
     CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
 };
 
-use crate::crypto_precompiles::bls::BLS_G1_DST;
+/// RFC 9380 hash-to-curve DST（原 `crypto_precompiles::bls::BLS_G1_DST`，
+/// Phase 1 收缩后内联：变更即换域，等价换协议——勿改）。
+pub const BLS_G1_DST: &[u8] = b"POKER_L1_BLS12381G1_XMD:SHA-256_SSWU_RO_";
 use crate::error::{PokerL1Error, PokerL1Result};
 
 /// Whether crate-internal unit tests may bypass expensive Mental Poker verification.

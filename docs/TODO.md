@@ -354,9 +354,56 @@
 
 ## 四、协议 / 证明层长期项
 
-- [ ] **20. mirror 证明层与游戏 deck 客户端协议对齐**：浏览器玩家 mirror 份额缺失曾致
-  settle 阻断（09-01 已通过回退路径跑通结算，证明层对齐仍是遗留）。
-  按 `DUAL_PROOF_PROTOCOL.md` §5.3，独立工作量。见 `poker_contracts/DEPLOYMENTS.md:140`。
+- [ ] **20. poker_l1 收缩 + mirror 重放移除（2026-09-05 重新定性，取代原"证明层协议对齐"）**：
+  > 用户定调：仓库模型已变——证明层 = Starknet 链下 stwo 程序（根 crate
+  > poker_texas_air），不存在"mirror 交易重放"概念；poker_l1 的 L1 链本体未完成
+  > 也非目标。原按 `DUAL_PROOF_PROTOCOL.md` §5.3 的"客户端协议对齐"方案作废。
+  - **审计结论（2026-09-05 全仓核查）**：线上结算路径 = 游戏层(权威) → mirror VM
+    重放（`mirror.rs`，角色已收缩为 ProveTask 铸造 + 终局快照）→ stwo
+    orchestrator/outer_aggregate → register_aggregate/settle_hand(+DAPV)。
+    poker_l1 共 99k 行/110 文件，其中活路径仅消费 **texas_poker 合约库**
+    （types/state_machine/dispatch/settlement/betting/card/constants/events/
+    utils + vm::contracts::dispatch，~17k 行）+ 5 个小类型（Address/error/
+    ObjectID/TaggedPubkey/DispatchContext）；其余 **~80k 行链机制零外部消费者**
+    （node 7.2k/state_machine 外的 executor/governance/sync/rpc/network/bridge/
+    economics/indexer/storage/offline/consensus(bullshark 等)/syscalls/precompile/
+    upgrade/texas_poker_precompile）。游戏层生产代码仅 rake.rs 引 2 个常量。
+    注意：AIR trace_gen 本身调 state_machine::apply_bet/dispatch::dispatch 重放
+    命令生成 trace（MethodBatchV2 = initial_table+commands+final_table，重放
+    在证明内部是 STARK 语义，**不能删**）；要删的是服务端第二本账（mirror）。
+    另：`verify_against_anchor` 是显式选配（活路径不带锚定），consensus_anchor
+    及其引入的 consensus/block/transaction 依赖可随链机制一并归档。
+  - **Phase 1（纯删除，零行为变化）✅ 完成（2026-09-05）**：poker_l1 收缩为
+    合约库小 crate——删除 account/block/bridge/consensus/crypto_precompiles/
+    economics/executor/genesis/governance/indexer/metrics/network/node/offline/
+    rpc/storage/sync/transaction/wallet + vm/{context,contract,crypto_blstrs,
+    gas_strategy,gas_table,loader,precompile,syscalls,upgrade} + vm/contracts/
+    旧 GameContract 合约族（settle/force_*/checkpoint_*/ack/revert/DA/censor 等）
+    + 根 crate consensus_anchor（1219 行，零消费者）+ task36 benches；净删
+    **77,230 行**。保留闭包：error/object_model/signature/vm::contracts::
+    {dispatch 边界类型, texas_poker 合约库}；两处内联修复（store.rs 的
+    MAX_OBJECT_SIZE 改引 vm-common、utils.rs 的 BLS_G1_DST 常量内联——值逐字节
+    相同）；error.rs 删除 7 个链机制专属变体（WrongLane/NotYourTurn/
+    NotEligibleSubmitter/NotAssignedValidator/HandStartedError/ForceAdvanceError/
+    SettleError + 2 个 governance 提案变体）；store.rs 的 is_system_object 恒为
+    false（链系统单例已不存在，保护区结构保留）。Cargo.toml 修剪 9 个链依赖
+    （rocksdb/solana_rbpf/tokio/rayon/vrf/openssl vendored 等）。
+    **回归**：poker_l1 320/320 ✅、根 crate（stwo 证明层）362/362 ✅、
+    texas 边界过滤集 15/15（submit/rake/mirror）✅、workspace cargo check ✅。
+    ⚠️ 遗留：`fuzz/` 在 workspace exclude 外引用已删模块，构建会失败——随
+    Phase 2 一并处理；poker_l1 326 条 missing_docs 风格警告为存量，不阻塞。
+  - **Phase 2（架构对齐，"直接应用程序"）**：移除 mirror.rs 重放——结算直接从
+    游戏层真相构造：plan 从游戏层 winners/rake 派生（pot.rs/lifecycle.rs 已算，
+    settlement.rs 是重复实现），MethodBatchV2 命令从游戏事件 + 已验证客户端
+    证明直接组装，玩家直接以完整钱包 felt 记账（顺带消除 20 字节截断重映射）；
+    保 register_aggregate/settle_hand/DAPV hand_binding ABI 不变。需解决：
+    receipt 链 state-root 连续性——不再全量重放后，须在命令边界从游戏态合成
+    canonical 表状态，或放宽为手级锚定（settle_hand 本就只取首 pre/末 post）。
+    附带收益：原 #20 目标（deck/stack/reveal 时序失步类 bug，含 2026-09-04
+    hand 2 未结算的 insufficient-stack 根因：mirror 每手用原始 buy_in 重建而
+    游戏 stack 跨手结转）随第二本账一并消失。
+  - **Phase 3（可选，需单独拍板）**：v1 链上仅验 digest 注册 + delta 应用，
+    可评估证明内容暂缩为 digest 承诺直至上链验证路线启用——改变安全模型。
 - [ ] **21. Phase 3：独立 prover 服务**：`STARKNET_PROVER_URL` 从 stub 变真实端点，
   移除 host attestation。见 README Roadmap。
 - [ ] **22. canonical AIR 缺口**：reveal/reconstruction 密码学、final shuffle/reveal

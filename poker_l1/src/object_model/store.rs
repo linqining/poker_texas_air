@@ -11,7 +11,7 @@ use super::object::Object;
 use super::smt::SparseMerkleTree;
 use crate::Address;
 use crate::error::{PokerL1Error, PokerL1Result};
-use crate::vm::gas_table::MAX_OBJECT_SIZE;
+use vm_common::gas::MAX_OBJECT_SIZE;
 use std::collections::HashMap;
 
 /// Whether an object has a reserved identity whose lifecycle is controlled by consensus code.
@@ -19,77 +19,15 @@ use std::collections::HashMap;
 /// Snapshot restoration must use the same classification as normal object mutation: an
 /// authenticated snapshot is a trusted state-transfer path, but it must not fall back to the
 /// public `create` API for protected objects.
-pub(crate) fn is_system_object(object: &Object) -> bool {
-    crate::economics::is_treasury_cap_object(object)
-        || crate::economics::is_fee_policy_object(object)
-        || crate::consensus::validator_set::is_validator_set_object(object)
-        || crate::governance::is_governance_state_object(object)
-        || crate::bridge::is_bridge_registry_config_object(object)
-        || crate::bridge::is_bridge_replay_state_object(object)
-        || crate::genesis::is_genesis_anchor_object(object)
-        || crate::governance::validator_bond_escrow::is_validator_bond_escrow_object(object)
-        || crate::consensus::validator_key_history::is_validator_key_history_object(object)
-        || crate::vm::precompile::is_precompile_governance_state_object(object)
-        || crate::vm::contract::is_contract_object(object)
-        || crate::vm::contract::is_contract_upgrade_state_object(object)
+///
+/// Phase 1 收缩后链侧保留单例（treasury / validator set / governance / bridge /
+/// genesis / 合约升级等）全部随链机制移除，此分类恒为 false；保留函数体以维持
+/// ObjectStore 写路径的保护区结构（`is_system_object` 的调用点语义不变）。
+pub(crate) fn is_system_object(_object: &Object) -> bool {
+    false
 }
 
-fn validate_system_object(object: &Object) -> PokerL1Result<()> {
-    if crate::economics::is_treasury_cap_object(object) {
-        crate::economics::decode_treasury_cap(object)?;
-        return Ok(());
-    }
-    if crate::economics::is_fee_policy_object(object) {
-        crate::economics::validate_fee_policy_object(object)?;
-        return Ok(());
-    }
-    if crate::consensus::validator_set::is_validator_set_object(object) {
-        crate::consensus::validator_set::validate_validator_set_object(object)?;
-        return Ok(());
-    }
-    if crate::governance::is_governance_state_object(object) {
-        crate::governance::validate_governance_state_object(object)?;
-        return Ok(());
-    }
-    if crate::bridge::is_bridge_registry_config_object(object) {
-        // The chain-id binding is checked by Node when it loads/executes state. ObjectStore only
-        // validates the singleton shape during generic storage operations.
-        crate::bridge::validate_bridge_registry_config_object(object)?;
-        return Ok(());
-    }
-    if crate::bridge::is_bridge_replay_state_object(object) {
-        crate::bridge::validate_bridge_replay_state_object(object)?;
-        return Ok(());
-    }
-    if crate::genesis::is_genesis_anchor_object(object) {
-        crate::genesis::decode_genesis_anchor(object)?;
-        return Ok(());
-    }
-    if crate::governance::validator_bond_escrow::is_validator_bond_escrow_object(object) {
-        // The chain-id binding is checked at the consensus caller.  Generic storage only
-        // establishes that this is a structurally valid, reserved singleton.
-        crate::governance::validator_bond_escrow::validate_validator_bond_escrow_object(object)?;
-        return Ok(());
-    }
-    if crate::consensus::validator_key_history::is_validator_key_history_object(object) {
-        // As above, chain namespace binding belongs to the node/consensus path.
-        crate::consensus::validator_key_history::validate_validator_key_history_object(object)?;
-        return Ok(());
-    }
-    if crate::vm::precompile::is_precompile_governance_state_object(object) {
-        crate::vm::precompile::validate_precompile_governance_state_object(object)?;
-        return Ok(());
-    }
-    if crate::vm::contract::is_contract_object(object) {
-        crate::vm::contract::decode_contract_object(object)?;
-        return Ok(());
-    }
-    if crate::vm::contract::is_contract_upgrade_state_object(object) {
-        // The object key is bound to its encoded `(chain_id, contract_id)` tuple.  Chain-id
-        // membership is checked by the executor before it acts on the record.
-        crate::vm::contract::validate_contract_upgrade_state_object(object)?;
-        return Ok(());
-    }
+fn validate_system_object(_object: &Object) -> PokerL1Result<()> {
     Err(PokerL1Error::Other(
         "object is not a recognized system singleton".into(),
     ))
@@ -232,12 +170,6 @@ impl ObjectStore {
                 "reserved system objects may only be updated by a system path".into(),
             ));
         }
-        if crate::economics::is_native_coin_object(obj) {
-            return Err(PokerL1Error::Other(format!(
-                "native coin {id:?} is an immutable UTXO and cannot be updated"
-            )));
-        }
-
         if !obj.can_write(actor) {
             return if obj.owner.is_immutable() {
                 Err(PokerL1Error::ObjectImmutable(*id))
@@ -274,12 +206,6 @@ impl ObjectStore {
                 "reserved system objects may only be transferred by a system path".into(),
             ));
         }
-        if crate::economics::is_native_coin_object(obj) {
-            return Err(PokerL1Error::Other(format!(
-                "native coin {id:?} is an immutable UTXO and cannot be transferred in place"
-            )));
-        }
-
         if !obj.owner.is_transferable() {
             return Err(PokerL1Error::ObjectImmutable(*id));
         }
@@ -398,28 +324,6 @@ mod tests {
         s.create(o.clone()).unwrap();
         let err = s.create(o).unwrap_err();
         assert!(matches!(err, PokerL1Error::ObjectIDCollision(_)));
-    }
-
-    #[test]
-    fn new_consensus_singletons_require_the_system_creation_path() {
-        let mut store = ObjectStore::new();
-        let bond = crate::governance::validator_bond_escrow_object(
-            crate::DEFAULT_CHAIN_ID,
-            &crate::governance::ValidatorBondEscrow::default(),
-            0,
-        )
-        .unwrap();
-        let history = crate::consensus::validator_key_history_object(
-            crate::DEFAULT_CHAIN_ID,
-            &crate::consensus::ValidatorKeyHistory::default(),
-            0,
-        )
-        .unwrap();
-
-        assert!(store.create(bond.clone()).is_err());
-        assert!(store.create(history.clone()).is_err());
-        store.system_create(bond).unwrap();
-        store.system_create(history).unwrap();
     }
 
     #[test]

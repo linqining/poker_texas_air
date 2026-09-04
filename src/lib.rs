@@ -141,9 +141,6 @@ pub mod settlement_private_circuit;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_support;
 
-// P05-H-source：从已认证共识材料构造 ExpectedChainAnchor。
-pub mod consensus_anchor;
-
 // ===== Prover / Verifier 入口 =====
 pub mod prover;
 pub mod verifier;

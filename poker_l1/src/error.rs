@@ -106,58 +106,6 @@ pub enum PokerL1Error {
     /// 其他错误（带字符串上下文）。
     #[error("{0}")]
     Other(String),
-
-    // ===== Phase 2: 路由 / 轮转 / 游戏分配（Task 7 / 8 / 12） =====
-    /// tx 通道与路由提示不匹配（SubTask 7.2：GameTurn+CheckpointAnchor 应路由到 assigned_validator）。
-    #[error(
-        "wrong lane: lane={lane:?}, route={route:?}, expected assigned_validator for GameTurn/CheckpointAnchor"
-    )]
-    WrongLane {
-        /// tx 通道。
-        lane: crate::transaction::TxLane,
-        /// 路由提示。
-        route: crate::transaction::RouteHint,
-    },
-    /// GameTurn / CheckpointAnchor tx 提交给了非 assigned_validator 的 validator（SubTask 7.5）。
-    #[error(
-        "not assigned validator for game (game_id={game_id:?}, assigned={assigned:?}, receiver={receiver:?})"
-    )]
-    NotAssignedValidator {
-        /// Game 对象 ID。
-        game_id: crate::object_model::ObjectID,
-        /// 链上记录的 assigned_validator pubkey。
-        assigned: crate::signature::TaggedPubkey,
-        /// 当前接收 tx 的 validator pubkey。
-        receiver: crate::signature::TaggedPubkey,
-    },
-    /// 非当前轮次玩家提交 GameTurn tx（SubTask 7.4：轮转约束）。
-    #[error(
-        "not your turn (game_id={game_id:?}, phase={phase:?}, current_turn={current_turn:?}, actor={actor:?})"
-    )]
-    NotYourTurn {
-        /// Game 对象 ID。
-        game_id: crate::object_model::ObjectID,
-        /// 当前游戏阶段（Betting 或 MultiPlayerSubmit）。
-        phase: crate::consensus::GamePhase,
-        /// 当前轮次玩家地址。
-        current_turn: crate::Address,
-        /// 实际提交 tx 的玩家地址。
-        actor: crate::Address,
-    },
-    /// 多玩家提交阶段，提交者不在 pending_submitters 中（spec：NotEligibleSubmitter）。
-    #[error(
-        "not eligible submitter (game_id={game_id:?}, phase={phase:?}, pending={pending:?}, actor={actor:?})"
-    )]
-    NotEligibleSubmitter {
-        /// Game 对象 ID。
-        game_id: crate::object_model::ObjectID,
-        /// 当前游戏阶段。
-        phase: crate::consensus::GamePhase,
-        /// 当前待提交者集合。
-        pending: std::collections::BTreeSet<crate::Address>,
-        /// 实际提交 tx 的玩家地址。
-        actor: crate::Address,
-    },
     /// 玩家活跃 Game 数量超限（SubTask 8.7：S8 修复，max_active_games_per_player 默认 10）。
     #[error("too many active games: player={player:?}, active={active}, limit={limit}")]
     TooManyActiveGames {
@@ -432,15 +380,6 @@ pub enum PokerL1Error {
     /// 未知的合约方法选择器（P0-5：GameTurn 原生合约 dispatch）。
     #[error("unknown contract method: selector={selector:?}")]
     UnknownContractMethod { selector: crate::Hash },
-    /// HandStarted 错误（手牌已在进行中 / 状态非法）。
-    #[error("hand started error: {0}")]
-    HandStartedError(crate::vm::contracts::hand_started::HandStartedError),
-    /// ForceAdvance 错误（超时玩家不存在 / 已 fold / 未超时）。
-    #[error("force advance error: {0}")]
-    ForceAdvanceError(crate::vm::contracts::force_advance::ForceAdvanceError),
-    /// Settle 错误（手牌未到达 showdown / 已结算）。
-    #[error("settle error: {0}")]
-    SettleError(crate::vm::contracts::settle::SettleError),
     /// syscall 参数无效（指针越界 / 长度非法等）。
     #[error("invalid syscall argument: {0}")]
     InvalidSyscallArgument(String),
@@ -646,12 +585,6 @@ pub enum PokerL1Error {
     /// 赞成票未达 quorum（普通 2/3 / 敏感 90%）。
     #[error("yes votes insufficient: yes={yes}, required={required}")]
     YesVotesInsufficient { yes: usize, required: usize },
-    /// 提案不在投票期（已结束 / 未开始 / 已执行 / 已撤销）。
-    #[error("proposal not in voting period: status={0:?}")]
-    ProposalNotInVoting(crate::governance::ProposalStatus),
-    /// 提案不在 timelock 期（无法撤销 / 无法执行）。
-    #[error("proposal not in timelock: status={0:?}")]
-    ProposalNotInTimelock(crate::governance::ProposalStatus),
     /// 撤销提案 quorum 不足（须 >= 90%，SEC-H8）。
     #[error("revocation quorum insufficient: yes={yes}, required={required}")]
     RevocationQuorumInsufficient { yes: usize, required: usize },
@@ -842,10 +775,6 @@ impl PokerL1Error {
             | Self::NotOwner(_)
             | Self::ObjectImmutable(_)
             | Self::ObjectVersionMismatch { .. }
-            | Self::WrongLane { .. }
-            | Self::NotAssignedValidator { .. }
-            | Self::NotYourTurn { .. }
-            | Self::NotEligibleSubmitter { .. }
             | Self::InvalidBondAmount { .. }
             | Self::InsufficientOperatorBond { .. }
             | Self::ParamOutOfBounds { .. }
@@ -932,24 +861,6 @@ impl From<serde_json::Error> for PokerL1Error {
 impl From<blake2::digest::InvalidLength> for PokerL1Error {
     fn from(e: blake2::digest::InvalidLength) -> Self {
         Self::Serialization(format!("blake2 invalid length: {e}"))
-    }
-}
-
-impl From<crate::vm::contracts::hand_started::HandStartedError> for PokerL1Error {
-    fn from(e: crate::vm::contracts::hand_started::HandStartedError) -> Self {
-        Self::HandStartedError(e)
-    }
-}
-
-impl From<crate::vm::contracts::force_advance::ForceAdvanceError> for PokerL1Error {
-    fn from(e: crate::vm::contracts::force_advance::ForceAdvanceError) -> Self {
-        Self::ForceAdvanceError(e)
-    }
-}
-
-impl From<crate::vm::contracts::settle::SettleError> for PokerL1Error {
-    fn from(e: crate::vm::contracts::settle::SettleError) -> Self {
-        Self::SettleError(e)
     }
 }
 
