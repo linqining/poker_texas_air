@@ -69,10 +69,15 @@
   poseidon_builtin **重放整链**并断言链根 == settlement digest 中的动作日志
   哈希；补零槽 canonical + 词值域 < 2^202；prove-settlement 端到端跨语言
   对齐 ✓；新 program hash `0x5b993db5...` 已上链并视图验证 ✓。
-  **⬜ 切片 2（剩余）**："合法默认"约束本体——打包词解包（u256 low/high
-  位域拆解）+ 每条 auto 动作的 (owed, my_bet, big_blind) 见证与 range-check
-  合法性（规则源 `legal_auto_action`）；动作词条字段级校验（flags ∈ {0..3}、
-  action 白名单）随解包一并落。
+  **⬜ 切片 2（剩余，设计已按实测约束修订）**："合法默认"约束本体。
+  实测电路 main 参数上限 100（当前 37 标量 + count + 60 词 = 98，仅 2 余量）
+  → 切片 2 布局改为**每词条 2 词**（日志打包词 + 合法性词
+  `owed(64)|my_bet(64)|big_blind(64)|kind(2)`，194 位）× 30 槽
+  （37+1+60 = 98 不变）；游戏层 ActionLogEntry 扩展 owed/my_bet/big_blind
+  （accept 路径的桌状态可取）；电路解包日志词（u256 low/high 位域）做
+  flags ∈ {0..3} + action 白名单校验，合法性词做 range-check 规则约束
+  （`legal_auto_action`：零下注⇒check；差额≤大盲⇒call；否则 fold）。
+  无 ABI/公开段变化，仅电路内部 + program hash 更新。
   Phase B 已把链根接进 digest 吸收链/公开段尾词/合约注册承诺；切片 2 前的
   代打风险由审计日志 + #33 锁定缓解（§8.2 主网门槛条款不变）。
 - [x] **19. 实施前确认 4 个开放问题**（2026-09-05 定稿，决策全文 =
