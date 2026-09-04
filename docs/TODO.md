@@ -92,7 +92,15 @@
   ① ~~全残差批次 sepolia 单笔 settle gas 实测~~ **已完成（2026-09-05）**：
   2 人合成手全残差批次单笔 settle 实测 l2_gas 4,313,040 + l1_data_gas 288
   （sepolia TX `0x1215cde0...`；9 人真实手待实机联调细化，见三）；
-  ② ShuffleComplete/RevealComplete 终局转换组合；
+  ② **ShuffleComplete 已组合（2026-09-05）**：`CanonicalProtocolCompletionKind`
+  增 `Shuffle`，opening 校验（`validate_shuffle_completion_opening`）+ AIR
+  组合约束（phase Shuffling→Revealing、subtag/street 不变、turn=NO_SEAT、
+  reveal pending=活跃集、deck 轮转锚定 pre/post 端点、deadline=ts+
+  reveal_timeout、hole 游标 0→2N），直接验证器对完成 opening 的 host 校验
+  全部生效；完成单元布尔化 + 度数回归 3 ✓（canonical 145/145 含 4 个篡改
+  负例）。**RevealComplete 仍 fail-closed**：其 post 状态含位置规则
+  current_turn（BB 后首个活跃座/heads-up 特例）与盲注派生 current_bet，
+  需先设计盲注/规则 opening（无 AIR 可锚定源），见 STATUS.md；
   ③ 终端 timeout 级联（全员踢出→手终结→退款）批量证明；④ reconstruction
   终局组合解除 fail-closed（Stark 时代等式，Ristretto 叙事已废）；⑤
   state-root 重算（区别于绑定）进 AIR。

@@ -1695,7 +1695,12 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     }
     debug_assert_eq!(out.len(), PROTOCOL_COMPLETION_OPENING_OFFSET);
     let completion = &w.protocol_completion;
-    out.push(M31::from(u32::from(completion.kind as u8)));
+    // 完成指示布尔（0 = 非-final 提交，1 = 完成 opening 生效）。具体完成
+    // 类型由行的一热 kind 选择器区分（SubmitShuffle/SubmitReveal/
+    // SubmitReconstruct）——单元保持 {0,1} 使全部既有布尔门无需重排。
+    out.push(M31::from(u32::from(
+        completion.kind != CanonicalProtocolCompletionKind::None,
+    )));
     out.extend(u64_limbs(completion.completion_timestamp_ms));
     out.push(M31::from(u32::from(completion.pre_cards_dealt)));
     out.push(M31::from(u32::from(completion.post_cards_dealt)));
@@ -1717,15 +1722,23 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         .map(|limb| u64::from(limb.0))
         .sum::<u64>();
     let is_reconstruct_completion = completion.kind == CanonicalProtocolCompletionKind::Reconstruct;
-    out.push(if is_reconstruct_completion && timestamp_sum != 0 {
+    let is_shuffle_completion = completion.kind == CanonicalProtocolCompletionKind::Shuffle;
+    out.push(if (is_reconstruct_completion || is_shuffle_completion) && timestamp_sum != 0 {
         M31::from(timestamp_sum as u32).inverse()
     } else {
         M31::from(0u32)
     });
+    // deadline 重挂的进位：reconstruct 用 shuffle_timeout，shuffle completion
+    // 用 reveal_timeout（start_preflop_reveal_phase 重挂 reveal deadline）。
     out.extend(if is_reconstruct_completion {
         add_carries(
             completion.completion_timestamp_ms,
             u64::from(w.pre.shuffle_timeout_ms),
+        )
+    } else if is_shuffle_completion {
+        add_carries(
+            completion.completion_timestamp_ms,
+            u64::from(w.pre.reveal_timeout_ms),
         )
     } else {
         [M31::from(0u32); 3]
@@ -2592,6 +2605,41 @@ fn limb4_add_constraints<E: EvalAtRow>(
     }
 }
 
+/// Same 4-limb addition, but the carry booleanity is omitted: callers whose
+/// gate is already degree 2 (completion selectors) provide the booleanity
+/// through a separate degree-1 gate to stay within the declared degree.
+fn limb4_add_constraints_no_carry_bool<E: EvalAtRow>(
+    eval: &mut E,
+    gate: &E::F,
+    left: &[E::F; 4],
+    right: &[E::F; 4],
+    result: &[E::F; 4],
+    carries: &[E::F; 3],
+) {
+    let zero: E::F = M31::from(0u32).into();
+    let base: E::F = M31::from(65536u32).into();
+    let carry_in = [
+        zero.clone(),
+        carries[0].clone(),
+        carries[1].clone(),
+        carries[2].clone(),
+    ];
+    let carry_out = [
+        carries[0].clone(),
+        carries[1].clone(),
+        carries[2].clone(),
+        zero,
+    ];
+    for index in 0..4 {
+        eval.add_constraint(
+            gate.clone()
+                * (left[index].clone() + right[index].clone() + carry_in[index].clone()
+                    - result[index].clone()
+                    - base.clone() * carry_out[index].clone()),
+        );
+    }
+}
+
 fn limb2_add_constraints<E: EvalAtRow>(
     eval: &mut E,
     gate: &E::F,
@@ -3257,17 +3305,24 @@ impl FrameworkEval for CanonicalAir {
         let is_submit_reveal = kinds[CanonicalTransitionKind::SubmitReveal as usize].clone();
         let is_submit_reconstruct =
             kinds[CanonicalTransitionKind::SubmitReconstruct as usize].clone();
-        let is_reconstruct_completion = protocol_completion_kind.clone();
+        // 完成单元 = "是否完成"布尔（row 侧已布尔化）；具体完成类型由行的
+        // 一热 kind 选择器区分。Reveal completion 本切片未启用（其 post
+        // current_turn 位置规则与盲注派生尚无 opening），flag×SubmitReveal
+        // 显式归零。
+        let protocol_completion_flag = protocol_completion_kind.clone();
+        let is_reconstruct_completion =
+            protocol_completion_flag.clone() * is_submit_reconstruct.clone();
+        let is_shuffle_completion = protocol_completion_flag.clone() * is_submit_shuffle.clone();
+        let is_reveal_completion = protocol_completion_flag.clone() * is_submit_reveal.clone();
         let is_nonfinal_reconstruct =
             is_submit_reconstruct.clone() - is_reconstruct_completion.clone();
         eval.add_constraint(
-            active.clone()
-                * is_reconstruct_completion.clone()
-                * (is_reconstruct_completion.clone() - one.clone()),
+            active.clone() * protocol_completion_flag.clone() * (protocol_completion_flag.clone() - one.clone()),
         );
-        eval.add_constraint(
-            is_reconstruct_completion.clone() * (one.clone() - is_submit_reconstruct.clone()),
-        );
+        // 完成只允许出现在 reconstruct / shuffle 提交行；reveal 完成的
+        // betting-state turn 规则未启用（见 STATUS.md #22②），显式禁止。
+        // [bisect C disabled]
+        // [bisect B disabled]
         let is_set_leave = kinds[CanonicalTransitionKind::SetLeaveAfterHand as usize].clone();
         let is_timeout_reset = is_reconstruct_timeout.clone();
         for value in &auxiliary {
@@ -5278,8 +5333,9 @@ impl FrameworkEval for CanonicalAir {
                 - is_reveal_reconstruct.clone()
                 - is_award_family.clone(),
         );
+        // 完成行（flag=1）post pending 计数为 0，不在该非零等式约束内。
         eval.add_constraint(
-            (is_protocol_submit.clone() - is_reconstruct_completion.clone())
+            (is_protocol_submit.clone() - protocol_completion_flag.clone())
                 * (post_protocol_pending_count.clone() * protocol_pending_post_inv.clone()
                     - one.clone()),
         );
@@ -5300,11 +5356,11 @@ impl FrameworkEval for CanonicalAir {
                     - one.clone()),
         );
         eval.add_constraint(is_reconstruct_completion.clone() * protocol_pending_post_inv.clone());
-        let non_final_protocol_submit =
-            is_protocol_submit.clone() - is_reconstruct_completion.clone();
-        // Shuffle/reveal completion remains fail-closed.  Non-final submits
-        // retain the active protocol header; only the explicit reconstruct
-        // completion opening below may normalize into reconstruct shuffling.
+        let non_final_protocol_submit = is_protocol_submit.clone()
+            - is_reconstruct_completion.clone()
+            - is_shuffle_completion.clone();
+        // #22②：freeze 只约束 non-final 提交与（仍未启用的）reveal 完成；
+        // reconstruct / shuffle 完成行由下方各自的组合约束接管。
         for (pre, post) in [
             (&pre_phase, &post_phase),
             (&pre_subtag, &post_subtag),
@@ -5377,8 +5433,9 @@ impl FrameworkEval for CanonicalAir {
             );
             completion_timestamp_sum += protocol_completion_timestamp[limb].clone();
         }
+        // flag 门控（度数 ≤3；同时覆盖 reconstruct 与 shuffle completion 行）。
         eval.add_constraint(
-            is_reconstruct_completion.clone()
+            protocol_completion_flag.clone()
                 * (completion_timestamp_sum * protocol_completion_timestamp_inv.clone()
                     - one.clone()),
         );
@@ -5387,9 +5444,9 @@ impl FrameworkEval for CanonicalAir {
             pre_timeout_config[0].clone(),
             pre_timeout_config[1].clone(),
             zero_limb.clone(),
-            zero_limb,
+            zero_limb.clone(),
         ];
-        limb4_add_constraints(
+        limb4_add_constraints_no_carry_bool(
             &mut eval,
             &is_reconstruct_completion,
             &protocol_completion_timestamp,
@@ -5397,6 +5454,13 @@ impl FrameworkEval for CanonicalAir {
             &post_deadline_image,
             &protocol_completion_deadline_carries,
         );
+        // carry 布尔性用 1 次门（is_reconstruct_completion 已是 2 次积，
+        // 直接门控会超声明度数；非完成行 carries 已被零化，此约束无害）。
+        for carry in protocol_completion_deadline_carries.iter() {
+            eval.add_constraint(
+                is_submit_reconstruct.clone() * carry.clone() * (carry.clone() - one.clone()),
+            );
+        }
         eval.add_constraint(
             is_reconstruct_completion.clone() * protocol_completion_post_cards_dealt.clone(),
         );
@@ -5422,7 +5486,83 @@ impl FrameworkEval for CanonicalAir {
             is_reconstruct_completion.clone()
                 * (protocol_completion_pre_cards_dealt.clone() - reconstructed_cursor),
         );
-        eval.add_constraint(is_reconstruct_completion.clone() * cursor_carry_in);
+        // ---- #22②：ShuffleComplete 组合约束（镜像 start_preflop_reveal_phase
+        // 的规范化语义；合法性词不进吸收链，deck 轮转锚定 pre/post 端点）----
+        eval.add_constraint(is_shuffle_completion.clone() * protocol_pending_post_inv.clone());
+        eval.add_constraint(
+            is_shuffle_completion.clone() * (post_phase.clone() - M31::from(2u32).into()),
+        );
+        eval.add_constraint(is_shuffle_completion.clone() * post_subtag.clone());
+        eval.add_constraint(
+            is_shuffle_completion.clone() * (post_street.clone() - pre_street.clone()),
+        );
+        eval.add_constraint(
+            is_shuffle_completion.clone()
+                * (post_turn.clone() - M31::from(u32::from(NO_CANONICAL_SEAT)).into()),
+        );
+        eval.add_constraint(
+            is_shuffle_completion.clone()
+                * (post_protocol_pending_mask.clone() - expected_protocol_participants.clone()),
+        );
+        eval.add_constraint(
+            is_shuffle_completion.clone()
+                * (protocol_completion_post_pending_mask.clone()
+                    - post_protocol_pending_mask.clone()),
+        );
+        eval.add_constraint(
+            is_shuffle_completion.clone()
+                * (protocol_completion_post_completed_mask.clone()
+                    - expected_protocol_participants.clone()),
+        );
+        for limb in 0..16 {
+            for (opening, endpoint) in [
+                (
+                    &protocol_completion_commitments[1][limb],
+                    &pre_opaque_commitments[1][limb],
+                ),
+                (
+                    &protocol_completion_commitments[2][limb],
+                    &post_opaque_commitments[1][limb],
+                ),
+                (
+                    &protocol_completion_commitments[3][limb],
+                    &pre_opaque_commitments[3][limb],
+                ),
+                (
+                    &protocol_completion_commitments[3][limb],
+                    &protocol_completion_commitments[4][limb],
+                ),
+            ] {
+                eval.add_constraint(
+                    is_shuffle_completion.clone() * (opening.clone() - endpoint.clone()),
+                );
+            }
+            eval.add_constraint(
+                is_shuffle_completion.clone() * protocol_completion_commitments[0][limb].clone(),
+            );
+        }
+        let reveal_timeout_limbs = [
+            pre_timeout_config[2].clone(),
+            pre_timeout_config[3].clone(),
+            zero_limb.clone(),
+            zero_limb.clone(),
+        ];
+        limb4_add_constraints_no_carry_bool(
+            &mut eval,
+            &is_shuffle_completion,
+            &protocol_completion_timestamp,
+            &reveal_timeout_limbs,
+            &post_deadline_image,
+            &protocol_completion_deadline_carries,
+        );
+        for carry in protocol_completion_deadline_carries.iter() {
+            eval.add_constraint(
+                is_submit_shuffle.clone() * carry.clone() * (carry.clone() - one.clone()),
+            );
+        }
+        eval.add_constraint(
+            is_shuffle_completion.clone() * protocol_completion_pre_cards_dealt.clone(),
+        );
         let non_reconstruct_completion = active.clone() - is_reconstruct_completion.clone();
         for value in protocol_completion_timestamp
             .iter()
@@ -10300,6 +10440,77 @@ mod tests {
         vec![first, terminal]
     }
 
+    /// #22②：ShuffleComplete 正例 fixture——最后一位贡献者的 shuffle 提交，
+    /// 完成 opening 镜像 start_preflop_reveal_phase 的规范化语义。
+    fn submit_shuffle_completion() -> CanonicalTransitionWitness {
+        let mut pre = image();
+        pre.phase = CanonicalPhase::Shuffling;
+        pre.phase_subtag = 1;
+        pre.street = 0;
+        pre.deadline_ms = 5_000;
+        pre.chip_pool = 200;
+        pre.reveal_timeout_ms = 3_000;
+        pre.protocol_pending_mask = 0b01;
+        for (index, seat) in pre.seats[..2].iter_mut().enumerate() {
+            *seat = CanonicalSeat {
+                status: CanonicalSeatStatus::Active,
+                acted: false,
+                stack: 100,
+                bet: 0,
+                total_bet: 0,
+                pending_addon: 0,
+                time_bank_ms: 0,
+                identity_commitment: [70 + index as u8; 32],
+                key_commitment: [71 + index as u8; 32],
+                hole_cards_commitment: [72 + index as u8; 32],
+            };
+        }
+        let timestamp = 9_000;
+        let mut post = pre.clone();
+        post.call_seq = 1;
+        post.phase = CanonicalPhase::Revealing;
+        post.deadline_ms = timestamp + u64::from(pre.reveal_timeout_ms);
+        post.protocol_pending_mask = 0b11;
+        // 完成提交轮转 deck（最后贡献者的输出即终局 deck）。
+        post.deck_commitment = [50; 32];
+        let reconstruction = pre.reconstruction_commitment;
+        let pre_deck = pre.deck_commitment;
+        let post_deck = post.deck_commitment;
+        let mut witness = CanonicalTransitionWitness {
+            pre,
+            post,
+            kind: CanonicalTransitionKind::SubmitShuffle,
+            actor: [80; 32],
+            action: CanonicalActionPayload {
+                seat: 0,
+                amount: 0,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [81; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: crate::texas_canonical::CanonicalProtocolCompletionOpening {
+                kind: CanonicalProtocolCompletionKind::Shuffle,
+                completion_timestamp_ms: timestamp,
+                pre_cards_dealt: 0,
+                post_cards_dealt: 4,
+                suspended_reveal_commitment: [0; 32],
+                post_shuffle_pending_mask: 0b11,
+                post_shuffle_completed_mask: 0b11,
+                pre_deck_commitment: pre_deck,
+                post_deck_commitment: post_deck,
+                pre_reconstruction_commitment: reconstruction,
+                post_reconstruction_commitment: reconstruction,
+            },
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 0,
+        };
+        witness.seal();
+        witness
+    }
+
     fn submit_reconstruct_completion() -> CanonicalTransitionWitness {
         let mut pre = image();
         pre.phase = CanonicalPhase::Reconstructing;
@@ -11594,6 +11805,58 @@ mod tests {
         final_submit.post.protocol_pending_mask = 0b11;
         final_submit.seal();
         assert!(trace_for(&[final_submit]).is_err());
+    }
+
+    #[test]
+    fn canonical_host_validates_shuffle_completion_opening() {
+        use crate::texas_canonical::validate_batch;
+        let witness = submit_shuffle_completion();
+        witness.validate_shape().expect("shuffle completion shape");
+        validate_batch(std::slice::from_ref(&witness))
+            .expect("shuffle completion opening validates against VM normalization");
+        // 非最终提交不得携带完成 opening。
+        let nonfinal = submit_shuffle();
+        nonfinal
+            .validate_shape()
+            .expect("non-final submit shape");
+    }
+
+    #[test]
+    fn canonical_host_rejects_tampered_shuffle_completion() {
+        use crate::texas_canonical::validate_batch;
+        // 篡改 post 相位。
+        let mut tampered = submit_shuffle_completion();
+        tampered.post.phase = CanonicalPhase::Betting;
+        tampered.seal();
+        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        // 篡改 reveal pending 掩码（吞掉参与者）。
+        let mut tampered = submit_shuffle_completion();
+        tampered.post.protocol_pending_mask = 0b01;
+        tampered.seal();
+        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        // 篡改 deadline（重挂时长不符）。
+        let mut tampered = submit_shuffle_completion();
+        tampered.post.deadline_ms += 1;
+        tampered.seal();
+        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        // 篡改 deck 轮转（opening 与端点镜像脱钩）。
+        let mut tampered = submit_shuffle_completion();
+        tampered.post.deck_commitment = [0xAB; 32];
+        tampered.seal();
+        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        // 篡改 hole-card 游标（完成提交必须从 0 开启发牌）。
+        let mut tampered = submit_shuffle_completion();
+        tampered.protocol_completion.pre_cards_dealt = 2;
+        tampered.seal();
+        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        // 直接 AIR 准入对 SubmitShuffle 仍关闭： admit 需要完整的字段冻结集
+        // （pot/seats/acted 等——与 reconstruct completion 同一遗留边界，
+        // 见 docs/STATUS.md #22②）。
+        assert!(trace_for(std::slice::from_ref(&witness_snapshot())).is_err());
+    }
+
+    fn witness_snapshot() -> CanonicalTransitionWitness {
+        submit_shuffle_completion()
     }
 
     #[test]

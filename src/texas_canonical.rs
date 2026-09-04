@@ -540,6 +540,12 @@ impl Default for CanonicalRoundAdvanceOpening {
 pub enum CanonicalProtocolCompletionKind {
     None = 0,
     Reconstruct = 1,
+    /// Final shuffle contribution (preflop): the completing submit advances
+    /// the hand from `Shuffling` into the preflop reveal phase.  The opening
+    /// mirrors the VM's `start_preflop_reveal_phase` normalization (deck
+    /// unchanged, hole-card cursor 0 -> 2×participants, reveal pending mask =
+    /// active participants, deadline re-armed with the reveal timeout).
+    Shuffle = 2,
 }
 
 impl Default for CanonicalProtocolCompletionKind {
@@ -921,6 +927,62 @@ fn expected_betting_successor(post: &CanonicalStateImage, actor: usize) -> u8 {
                 && (!seat.acted || seat.bet < post.current_bet)
         })
         .unwrap_or(NO_CANONICAL_SEAT)
+}
+
+/// Validate the final-shuffle-completion opening against the VM's
+/// `advance_shuffle` -> `start_preflop_reveal_phase` normalization: the deck
+/// is unchanged (the completing contribution already replaced it), the
+/// hole-card cursor opens 2 cards per active participant, the reveal pending
+/// mask is the active set, and the deadline is re-armed with the reveal
+/// timeout opened from the pre-state image.
+fn validate_shuffle_completion_opening(
+    pre: &CanonicalStateImage,
+    post: &CanonicalStateImage,
+    opening: &CanonicalProtocolCompletionOpening,
+) -> Result<(), String> {
+    if opening.kind != CanonicalProtocolCompletionKind::Shuffle
+        || opening.completion_timestamp_ms == 0
+        || opening.pre_cards_dealt != 0
+        || opening.post_cards_dealt > 52
+        || opening.post_cards_dealt % 2 != 0
+    {
+        return Err("final shuffle completion has invalid kind/time/deck cursor".into());
+    }
+    let active_mask = active_reveal_mask(&post.seats);
+    if active_mask == 0
+        || opening.post_shuffle_pending_mask != active_mask
+        || opening.post_shuffle_pending_mask != post.protocol_pending_mask
+        || opening.post_shuffle_completed_mask != active_mask
+    {
+        return Err("final shuffle completion has invalid protocol progress".into());
+    }
+    // deck 承诺在完成提交内**轮转**（最后贡献者的输出即终局 deck）——
+    // 轮转与实际密文的绑定属 native/链上 EC_OP 通道（Plan D，设计 ④），
+    // canonical 组合只锚定 opening 与端点镜像一致。
+    if opening.suspended_reveal_commitment != [0; 32]
+        || opening.pre_deck_commitment != pre.deck_commitment
+        || opening.post_deck_commitment != post.deck_commitment
+        || opening.pre_reconstruction_commitment != pre.reconstruction_commitment
+        || opening.post_reconstruction_commitment != post.reconstruction_commitment
+    {
+        return Err("final shuffle completion is detached from endpoint commitments".into());
+    }
+    let deadline_ms = opening
+        .completion_timestamp_ms
+        .checked_add(u64::from(pre.reveal_timeout_ms))
+        .ok_or("final shuffle reveal deadline overflow")?;
+    if pre.phase != CanonicalPhase::Shuffling
+        || pre.phase_subtag != 1
+        || pre.current_turn != NO_CANONICAL_SEAT
+        || post.phase != CanonicalPhase::Revealing
+        || post.phase_subtag != 1
+        || post.street != pre.street
+        || post.current_turn != NO_CANONICAL_SEAT
+        || post.deadline_ms != deadline_ms
+    {
+        return Err("final shuffle completion has invalid VM normalization header".into());
+    }
+    Ok(())
 }
 
 fn validate_reconstruct_completion_opening(
@@ -1871,10 +1933,12 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
     {
         return Err("transition changed an immutable protocol commitment".into());
     }
-    if w.kind != CanonicalTransitionKind::SubmitReconstruct
-        && w.protocol_completion != CanonicalProtocolCompletionOpening::default()
+    if !matches!(
+        w.kind,
+        CanonicalTransitionKind::SubmitReconstruct | CanonicalTransitionKind::SubmitShuffle
+    ) && w.protocol_completion != CanonicalProtocolCompletionOpening::default()
     {
-        return Err("only submit_reconstruct may carry a protocol completion opening".into());
+        return Err("only submit_reconstruct/submit_shuffle may carry a protocol completion opening".into());
     }
     if w.kind != CanonicalTransitionKind::RevealTimeoutRakedAward
         && w.rake_opening != crate::canonical_rake_opening::CanonicalRakeOpening::ZERO
@@ -2706,12 +2770,28 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             }
             let remaining = pre.protocol_pending_mask & !seat_bit;
             if remaining == 0 {
-                if w.kind != CanonicalTransitionKind::SubmitReconstruct {
-                    return Err(
-                        "final shuffle/reveal submission requires its completion AIR".into(),
-                    );
+                match w.kind {
+                    CanonicalTransitionKind::SubmitReconstruct => {
+                        validate_reconstruct_completion_opening(
+                            pre,
+                            post,
+                            &w.protocol_completion,
+                        )?;
+                    }
+                    CanonicalTransitionKind::SubmitShuffle => {
+                        validate_shuffle_completion_opening(
+                            pre,
+                            post,
+                            &w.protocol_completion,
+                        )?;
+                    }
+                    _ => {
+                        return Err(
+                            "final reveal submission requires the reveal-completion opening, whose betting-state turn rule is not enabled yet"
+                                .into(),
+                        );
+                    }
                 }
-                validate_reconstruct_completion_opening(pre, post, &w.protocol_completion)?;
                 only_allowed_changes(pre, post, None, |expected, actual| {
                     expected.call_seq = actual.call_seq;
                     expected.phase = actual.phase;

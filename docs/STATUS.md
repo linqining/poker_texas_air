@@ -81,6 +81,13 @@ the hand's action log (`action_log_digest` tail word, #18 Phase B).
         RevealTimeout 家族测试形态。
      ④ 纪律：crypto 方程本身仍按 Plan D 留在 native/链上 EC_OP 通道——
         本组合只证明"状态机规范化语义"，不证明洗牌/揭示方程。
+   - **实施状态（2026-09-05）**：ShuffleComplete 已全部落地（枚举/校验/AIR
+     约束/正反例测试，canonical 145/145；约束度数保持声明值 3——完成单元
+     布尔化 + 度数门拆分）。**RevealComplete 保持 fail-closed**：VM
+     `start_betting_round` 的 post 状态包含位置规则 current_turn（BB 后首个
+     活跃座，heads-up 特例）与盲注派生 current_bet，二者在 canonical 空间
+     无可锚定的 opening 源（rules_commitment 不透明）；需要先设计盲注/规则
+     opening 才能无损组合——单独排期。
 3. **Terminal timeout cascade** (all players kicked → hand ends → refunds) —
    acceptance: batch proof for the terminal cascade (current cascade scope
    covers non-terminal walk only).
