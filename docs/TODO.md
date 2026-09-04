@@ -418,8 +418,28 @@
       e2e：join→洗牌→reveal→下注→settle_hand 真实证明链→calldata 对拍）通过。
   - **Phase 3（可选，需单独拍板）**：v1 链上仅验 digest 注册 + delta 应用，
     可评估证明内容暂缩为 digest 承诺直至上链验证路线启用——改变安全模型。
+  - **✅ Plan D 完成（2026-09-05，用户拍板"不考虑兼容，清理掉 blst 相关电路"）**：
+    **blst/BLS12-381 从 workspace 全量移除**——poker-protocol-core 删 BLS 后端
+    （backend.rs -354 行）；poker_protocol 删 legacy-bls381 feature（DefaultCurve
+    = StarkCurve 唯一世界）+ bls borsh_impls 重写 + BASE_G 函数化；poker-protocol
+    -proofs/-bg 的 borsh impls 切 StarkCurve（48B→32B 压缩点）；poker_l1 VM 四文件
+    blstrs 硬绑定移植为 curve-generic 门面（utils.rs：parse/serialize 32B、
+    hash_to_scalar/hash_to_curve/generator 委托 core Stark 后端=与 z_poker 客户端
+    同源；pk ownership 证明 80B→64B；reconstruction context 域串改 stark-curve-v1）；
+    abi 增加 `CurveId::StarkCurve = 6` + 三处 validate 白名单；poker_protocol-abi/
+    proofs/rayon/serde_json/tracing/merlin 转 non-optional；根 workspace 删 blstrs
+    依赖；poker_l1 旧链机制集成测试目录清退。**回归**：core 49/49、protocol 68/68、
+    proofs 113/113、poker_l1 320/320、根 crate 证明层 362/362（AIR 消费 Stark 快照
+    全兼容）、texas full_hand_tests 4/4（Stark 全流程真实 BG V2）+ starknet:: 38 绿
+    + 全链路证明 e2e（join→记录→重建→Stark 证明链→calldata）✅。
+    ⚠️ 已知行为变化：曲线点压缩 48B→32B、pk ownership 80B→64B、所有承诺/digest
+    值改变（无兼容要求）；client-wasm 侧按 Plan D P1.2 已在 Stark 后端（blst wasm
+    blocker 消除）。live_flow 测试为既有 debug 证明生成慢点（BLS 时代同样 >5min），
+    非回归。
 - [ ] **21. Phase 3：独立 prover 服务**：`STARKNET_PROVER_URL` 从 stub 变真实端点，
-  移除 host attestation。见 README Roadmap。
+  移除 host attestation。见 README Roadmap。（2026-09-05 评估：暂不动——
+  当前 host 证明路径已实测可用且不是阻塞项；独立 prover 服务引入运维面，
+  等上链验证路线（#23/M3）需要第三方可复现证明时再做。）
 - [ ] **22. canonical AIR 缺口**：reveal/reconstruction 密码学、final shuffle/reveal
   阶段切换、完整 timeout/terminal 级联、settlement、state-root 重算仍在 AIR 之外。
   见 `docs/STATUS.md`。
