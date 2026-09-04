@@ -408,10 +408,10 @@ pub enum PokerL1Error {
     InvalidSubgroup(&'static str),
     /// BLS12-381 compressed bytes 反序列化失败（长度错误 / 非法编码 / 不在曲线上）。
     #[error("invalid bls point: {0}")]
-    InvalidBlsPoint(String),
+    InvalidCurvePoint(String),
     /// BLS12-381 标量反序列化失败。
     #[error("invalid bls scalar: {0}")]
-    InvalidBlsScalar(String),
+    InvalidCurveScalar(String),
 
     // ===== Phase 5a: OfflineState / ZK Verifier（Task 21 / 22 / 23 / 24 / 25 / 26） =====
     /// verifier_status=Stub 时主网 chain_id 拒绝 OffChain checkout（NEW-C1）。
@@ -733,8 +733,8 @@ impl PokerL1Error {
             | Self::MultiReplicaBroadcastFailed { .. } => ErrorCategory::Retryable,
             Self::InvalidZkProofFormat(_)
             | Self::InvalidZkPublicIo(_)
-            | Self::InvalidBlsPoint(_)
-            | Self::InvalidBlsScalar(_)
+            | Self::InvalidCurvePoint(_)
+            | Self::InvalidCurveScalar(_)
             | Self::InvalidVrfProof(_)
             | Self::InvalidVertexSignature { .. }
             | Self::InvalidCommitCertificateSignature { .. }

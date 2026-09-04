@@ -36,7 +36,8 @@ zeroize = { version = "1", features = ["alloc"] }
 futures-util = "0.3"
 
 # ===== 工作区内协议栈（单一真源）=====
-poker_protocol = { path = "../poker_protocol", features = ["borsh", "legacy-bls381"] }
+# Plan D（2026-09-05）：Stark 曲线唯一世界；legacy-bls381/blst 已移除。
+poker_protocol = { path = "../poker_protocol", features = ["borsh", "stark-curve"] }
 poker_l1 = { path = "../poker_l1" }
 poker_texas_air = { path = ".." }
 poker-protocol-core = { path = "../poker-protocol-core" }

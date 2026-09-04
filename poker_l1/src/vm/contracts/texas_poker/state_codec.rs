@@ -130,7 +130,7 @@ fn aggregate_pk_for_mask(
         }
         aggregate = Some(match aggregate {
             None => *pk,
-            Some(current) => ECPoint::from(g1_add(&current.0, &pk.0)),
+            Some(current) => ECPoint(g1_add(&current.0, &pk.0)),
         });
     }
     if aggregate

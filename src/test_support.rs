@@ -1,6 +1,6 @@
 //! Canonical helpers for constructing tagged-seat test fixtures.
 
-use blstrs::G1Projective;
+use poker_l1::vm::contracts::texas_poker::utils::{g1_generator as g1_gen, g1_identity as g1_id, G1Projective};
 use group::Group;
 use poker_l1::Address;
 use poker_l1::vm::contracts::texas_poker::card::HoleCards;
@@ -17,7 +17,7 @@ pub fn set_player(seat: &mut Seat, player: Address) {
             *seat = Seat::occupied(
                 player,
                 0,
-                ECPoint(G1Projective::generator()),
+                ECPoint(g1_gen()),
                 SeatStatus::Active,
             )
             .expect("fixture player must create a canonical active seat");

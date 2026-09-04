@@ -4,10 +4,8 @@
 //! directly. Existing application code can keep using this module.
 
 pub use poker_protocol_core::{
-    ec_encrypt_batch_generic, Bls12381Curve, Bls12381ElGamalCiphertext, BlsCompressedPoint,
-    Bn254Curve, Bn254ElGamalCiphertext, BnCompressedPoint, CompressedPoint, Curve, CurvePoint,
-    CurveScalar, ElGamalCiphertextGeneric, RistrettoCurve, RistrettoElGamalCiphertext,
-    Secp256k1Curve, Secp256k1ElGamalCiphertext, SecpCompressedPoint, StarkCurve,
+    ec_encrypt_batch_generic, Bn254Curve, Bn254ElGamalCiphertext, BnCompressedPoint,
+    CompressedPoint, Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric, RistrettoCurve,
+    RistrettoElGamalCiphertext, Secp256k1Curve, Secp256k1ElGamalCiphertext, SecpCompressedPoint,
+    StarkCurve, StarkElGamalCiphertext,
 };
-#[cfg(feature = "stark-curve")]
-pub use poker_protocol_core::{StarkCurve, StarkElGamalCiphertext};

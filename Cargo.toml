@@ -42,7 +42,6 @@ ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 subtle = "2.5"
 rocksdb = { version = "0.22", default-features = false }
 solana_rbpf = "0.8"
-blstrs = "0.7"
 ff = "0.13"
 group = "0.13"
 pairing = "0.23"
@@ -108,7 +107,6 @@ num-traits = "0.2"
 # 侧 witness 计算，AIR 约束不依赖。
 fiat-crypto = "0.2"
 # BLS12-381（密码学方法 AIR 用）
-blstrs = { workspace = true }
 ff = { workspace = true }
 group = { workspace = true }
 pairing = { workspace = true }

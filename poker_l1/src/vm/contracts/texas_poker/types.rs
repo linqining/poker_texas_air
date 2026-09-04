@@ -12,7 +12,7 @@
 //! plaintext）已从 `Vec<u8>` 改为 typed `poker_protocol` 类型（`ECPoint` / `ECScalar` /
 //! `ElGamalCiphertext`），消除 state_machine.rs 中的 bytes↔G1 转换样板代码。
 //! `ElGamalCiphertext` 直接复用 `poker_protocol::crypto::types::ElGamalCiphertext`
-//! （= `ElGamalCiphertextGeneric<Bls12381Curve>`，字段 `c1/c2: G1Projective`）。
+//! （= `ElGamalCiphertextGeneric<DefaultCurve>`，Plan D 后为 Stark 曲线点）。
 //!
 //! # Borsh orphan rule 处理
 //!
@@ -27,7 +27,8 @@ use std::ops::{Deref, DerefMut, Index, IndexMut};
 use borsh::{BorshDeserialize, BorshSerialize};
 use group::Group;
 
-use blstrs::G1Projective;
+use super::utils::{g1_generator, G1Projective};
+use poker_protocol::crypto::curve::{CurvePoint as CPt, CurveScalar as CSc};
 use poker_protocol::crypto::types::ECPoint;
 // 注：`ElGamalCiphertext` 通过下方 `pub use` 重导出，避免重复导入。
 
@@ -152,7 +153,7 @@ pub const fn seat_mask_is_canonical(mask: SeatMask, max_players: u8) -> bool {
 // ========== ElGamal 密文 ==========
 
 // `ElGamalCiphertext` 直接复用 `poker_protocol::crypto::types::ElGamalCiphertext`
-// （= `ElGamalCiphertextGeneric<Bls12381Curve>`，字段 `c1/c2: G1Projective`，
+// （= `ElGamalCiphertextGeneric<DefaultCurve>`，字段 `c1/c2` 为曲线点，
 //   已在 `poker_protocol::borsh_impls` impl BorshSerialize/BorshDeserialize）。
 // 重导出供外部模块使用。
 pub use poker_protocol::crypto::types::ElGamalCiphertext;
@@ -282,7 +283,7 @@ impl Seat {
                 "Texas newly occupied seat must be waiting or active".into(),
             ));
         }
-        if bool::from(pk.0.is_identity()) {
+        if pk.0.is_identity() {
             return Err(PokerL1Error::Serialization(
                 "Texas newly occupied seat cannot use an identity public key".into(),
             ));
@@ -693,7 +694,7 @@ impl Seat {
         pending_addon: u64,
         time_bank_ms: u32,
     ) -> PokerL1Result<()> {
-        if player == EMPTY_PLAYER || bool::from(pk.0.is_identity()) {
+        if player == EMPTY_PLAYER || pk.0.is_identity() {
             return Err(PokerL1Error::Serialization(
                 "Texas playing seat requires a live identity and key".into(),
             ));
@@ -731,7 +732,7 @@ impl Seat {
                         occupied: OccupiedSeat {
                             player,
                             stack: 0,
-                            pk: ECPoint(G1Projective::generator()),
+                            pk: ECPoint(g1_generator()),
                             pending_addon: 0,
                             time_bank_ms,
                         },
@@ -821,7 +822,7 @@ fn validate_occupied_seat(occupied: &OccupiedSeat) -> PokerL1Result<()> {
             "Texas occupied seat cannot use the empty player address".into(),
         ));
     }
-    if bool::from(occupied.pk.0.is_identity()) {
+    if occupied.pk.0.is_identity() {
         return Err(PokerL1Error::Serialization(
             "Texas occupied seat cannot use an identity public key".into(),
         ));
@@ -2721,7 +2722,7 @@ impl TexasPokerTable {
             }
             aggregate = Some(match aggregate {
                 None => *pk,
-                Some(current) => ECPoint::from(super::utils::g1_add(&current.0, &pk.0)),
+                Some(current) => ECPoint(super::utils::g1_add(&current.0, &pk.0)),
             });
         }
         if aggregate
@@ -3180,12 +3181,12 @@ mod tests {
         PartialHoleCard::new(
             deck_index,
             ElGamalCiphertext {
-                c1: G1Projective::generator(),
-                c2: G1Projective::generator(),
+                c1: g1_generator(),
+                c2: g1_generator(),
             },
             ElGamalCiphertext {
-                c1: G1Projective::generator(),
-                c2: G1Projective::generator(),
+                c1: g1_generator(),
+                c2: g1_generator(),
             },
         )
     }
@@ -3535,7 +3536,7 @@ mod tests {
     #[test]
     fn seat_variant_mutations_preserve_tagged_payload_invariants() {
         let player = [0xAB; 20];
-        let pk = ECPoint(G1Projective::generator());
+        let pk = ECPoint(g1_generator());
         let mut seat = Seat::occupied(player, 1_000, pk, SeatStatus::Active).unwrap();
         assert!(seat.validate_canonical().is_ok());
 
@@ -3706,7 +3707,7 @@ mod tests {
         let mut seat = Seat::occupied(
             [0xCD; 20],
             5_000,
-            ECPoint(G1Projective::generator()),
+            ECPoint(g1_generator()),
             SeatStatus::Active,
         )
         .unwrap();

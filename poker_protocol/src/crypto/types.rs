@@ -12,13 +12,8 @@ use crate::crypto::curve::{Curve, CurvePoint, ElGamalCiphertextGeneric};
 use crate::crypto::curve::Bls12381Curve;
 
 /// The default curve used by the project.
-/// Plan D：`stark-curve` 构建把镜像切到 Cairo 原生 STARK 曲线
-/// （hand_batch_stark 的 EC_OP 折叠、hand_binding 承诺链同曲线）。
-/// 默认 legacy：poker_l1 VM 层仍有 85 处 blstrs 硬绑定待迁移。
-#[cfg(feature = "stark-curve")]
+/// Plan D 落地（2026-09-05）：Stark 曲线唯一世界，blst legacy 已移除。
 pub type DefaultCurve = StarkCurve;
-#[cfg(not(feature = "stark-curve"))]
-pub type DefaultCurve = Bls12381Curve;
 
 pub const N_CARDS: usize = 52;
 
@@ -66,27 +61,13 @@ impl ECPoint {
     }
 }
 
-#[cfg(not(feature = "stark-curve"))]
-impl From<blstrs::G1Projective> for ECPoint {
-    fn from(point: blstrs::G1Projective) -> Self {
-        Self(point)
-    }
-}
-
-#[cfg(not(feature = "stark-curve"))]
-impl From<ECPoint> for blstrs::G1Projective {
-    fn from(point: ECPoint) -> Self {
-        point.0
-    }
-}
-
 // ============================================================
 // ECScalar wrapper — Borsh 友好的 Scalar newtype
 // ============================================================
 //
-// 与 `ECPoint` 对偶：`BlsScalar`（= `<DefaultCurve as Curve>::Scalar`）
-// 是外部 blstrs 类型，无法直接 impl `BorshSerialize`/`BorshDeserialize`
-// （orphan rule：blstrs + borsh 均为外部 crate）。
+// 与 `ECPoint` 对偶：`Scalar`（= `<DefaultCurve as Curve>::Scalar`）
+// 是外部曲线类型，无法直接 impl `BorshSerialize`/`BorshDeserialize`
+// （orphan rule），使用本地 newtype 包装。
 // 使用本地 newtype `ECScalar(BlsScalar)` 包装，borsh_impls.rs 中
 // impl Borsh 序列化为 32 字节大端序（与 Move 兼容）。
 //
@@ -113,19 +94,7 @@ impl ECScalar {
     }
 }
 
-#[cfg(not(feature = "stark-curve"))]
-impl From<blstrs::Scalar> for ECScalar {
-    fn from(scalar: blstrs::Scalar) -> Self {
-        Self(scalar)
-    }
-}
 
-#[cfg(not(feature = "stark-curve"))]
-impl From<ECScalar> for blstrs::Scalar {
-    fn from(scalar: ECScalar) -> Self {
-        scalar.0
-    }
-}
 
 // ============================================================
 // Utility functions
@@ -156,6 +125,7 @@ pub fn derive_scalar_from_card_and_pk(user_card: &ElGamalCiphertext, user_pk: &E
     hash_to_scalar(&data)
 }
 
-lazy_static::lazy_static! {
-    pub static ref BASE_G: EcPoint = DefaultCurve::base_g();
+/// 聚合公钥基点（原 lazy_static；Stark base_g 为纯计算，直接函数化）。
+pub fn base_g() -> EcPoint {
+    DefaultCurve::base_g()
 }

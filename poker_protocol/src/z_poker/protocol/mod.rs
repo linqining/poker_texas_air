@@ -23,7 +23,7 @@ pub use game::new_plain_text;
 mod tests {
     use super::*;
     use crate::crypto::curve::{Curve, CurvePoint, CurveScalar};
-    use crate::crypto::{DefaultCurve, EcPoint, ElGamalCiphertext, Scalar, BASE_G, N_CARDS};
+    use crate::crypto::{DefaultCurve, EcPoint, ElGamalCiphertext, Scalar, base_g, N_CARDS};
     use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
     use crate::zk_shuffle::reveal_token_proof::{
         ExpelHandState, RevealTokenAndProof, REVEAL_TOKEN_PROOF_LABEL,
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn test_shuffle_round_execute_and_verify() {
         let sk = Scalar::random(&mut OsRng);
-        let pk = *BASE_G * sk;
+        let pk = base_g() *  sk;
         let input = make_full_encrypted_cards(&pk);
 
         let mut transcript = MerlinTranscript::new(b"test_shuffle_round");
@@ -158,14 +158,14 @@ mod tests {
     #[test]
     fn test_shuffle_round_wrong_pk_fails() {
         let sk = Scalar::random(&mut OsRng);
-        let pk = *BASE_G * sk;
+        let pk = base_g() *  sk;
         let input = make_full_encrypted_cards(&pk);
 
         let mut transcript = MerlinTranscript::new(b"test_shuffle_round_wrong_pk");
         let round = ShuffleRound::execute(&input, &pk, &mut transcript, &mut OsRng);
 
         let wrong_sk = Scalar::random(&mut OsRng);
-        let wrong_pk = *BASE_G * wrong_sk;
+        let wrong_pk = base_g() *  wrong_sk;
         let mut transcript = MerlinTranscript::new(b"test_shuffle_round_wrong_pk");
         assert!(
             !round.verify(&wrong_pk, &mut transcript),
@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn test_shuffle_round_tampered_output_fails() {
         let sk = Scalar::random(&mut OsRng);
-        let pk = *BASE_G * sk;
+        let pk = base_g() *  sk;
         let input = make_full_encrypted_cards(&pk);
 
         let mut transcript = MerlinTranscript::new(b"test_shuffle_round_tampered");
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn test_shuffle_round_tampered_input_fails() {
         let sk = Scalar::random(&mut OsRng);
-        let pk = *BASE_G * sk;
+        let pk = base_g() *  sk;
         let input = make_full_encrypted_cards(&pk);
 
         let mut transcript = MerlinTranscript::new(b"test_shuffle_round_tampered_input");
@@ -203,7 +203,7 @@ mod tests {
         // 篡改 input[1]
         let mut tampered_input = input.clone();
         tampered_input[1] = ElGamalCiphertext::encrypt(
-            &(*BASE_G * Scalar::from_u64(99u64)),
+            &(base_g() *  Scalar::from_u64(99u64)),
             &pk,
             &Scalar::random(&mut OsRng),
         );
@@ -223,7 +223,7 @@ mod tests {
     fn test_shuffle_round_deterministic_permutation() {
         // 多次 execute 应产生不同排列（概率极高）
         let sk = Scalar::random(&mut OsRng);
-        let pk = *BASE_G * sk;
+        let pk = base_g() *  sk;
         let input = make_full_encrypted_cards(&pk);
 
         let mut transcript1 = MerlinTranscript::new(b"test_shuffle_round_det1");
@@ -246,9 +246,9 @@ mod tests {
     #[test]
     fn test_mask_and_shuffle_round_execute_and_verify() {
         let player_sk = Scalar::random(&mut OsRng);
-        let player_pk = *BASE_G * player_sk;
+        let player_pk = base_g() *  player_sk;
         let agg_sk = Scalar::random(&mut OsRng);
-        let agg_pk = *BASE_G * agg_sk;
+        let agg_pk = base_g() *  agg_sk;
         let share_pk = agg_pk + player_pk;
 
         let input = make_full_encrypted_cards(&share_pk);

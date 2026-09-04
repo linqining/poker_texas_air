@@ -639,7 +639,7 @@ mod tests {
     use super::*;
     use crate::state_root::StateRoot;
     use crate::verified_chain::{VerificationReceipt, VerifiedChain};
-    use blstrs::G1Projective;
+    use poker_l1::vm::contracts::texas_poker::utils::{g1_generator as g1_gen, g1_identity as g1_id, G1Projective};
     use group::Group;
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::card::{BoardCards, HoleCards};
@@ -681,7 +681,7 @@ mod tests {
                 occupied: OccupiedSeat {
                     player,
                     stack: 1000,
-                    pk: ECPoint(G1Projective::generator()),
+                    pk: ECPoint(g1_gen()),
                     pending_addon: 0,
                     time_bank_ms: 30_000,
                 },

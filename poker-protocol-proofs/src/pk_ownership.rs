@@ -81,7 +81,7 @@ fn challenge<C: Curve>(public_key: &C::Point, commitment: &C::Point) -> C::Scala
 #[cfg(test)]
 mod tests {
     use super::*;
-    use poker_protocol_core::{Bls12381Curve, RistrettoCurve};
+    use poker_protocol_core::{StarkCurve, RistrettoCurve};
     use rand_core::OsRng;
 
     fn roundtrip<C: Curve>() {
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn bls12381_ownership_proof() {
-        roundtrip::<Bls12381Curve>();
+        roundtrip::<StarkCurve>();
     }
 
     #[test]

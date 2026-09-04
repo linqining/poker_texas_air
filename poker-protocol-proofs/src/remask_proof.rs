@@ -522,10 +522,10 @@ mod tests {
 
     #[test]
     fn test_benchmark_remask_proof_52_cards_bls12381() {
-        use poker_protocol_core::Bls12381Curve;
+        use poker_protocol_core::StarkCurve;
         use std::time::{Duration, Instant};
 
-        type BlsElGamalCiphertext = ElGamalCiphertextGeneric<Bls12381Curve>;
+        type BlsElGamalCiphertext = ElGamalCiphertextGeneric<StarkCurve>;
 
         println!("\n{}", "=".repeat(72));
         println!("  RemaskProof Benchmark: prove() & verify() (52 cards, BLS12-381)");
@@ -536,12 +536,12 @@ mod tests {
         const ITERATIONS: usize = 20;
 
         let mut rng = OsRng;
-        let (sk, pk) = gen_keypair::<Bls12381Curve>(&mut rng);
+        let (sk, pk) = gen_keypair::<StarkCurve>(&mut rng);
         let plaintexts: Vec<_> = (0..N)
-            .map(|i| Bls12381Curve::base_h() * <Bls12381Curve as Curve>::Scalar::from_u64(i as u64))
+            .map(|i| StarkCurve::base_h() * <StarkCurve as Curve>::Scalar::from_u64(i as u64))
             .collect();
         let r_values: Vec<_> = (0..N)
-            .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut rng))
+            .map(|_| <StarkCurve as Curve>::Scalar::random(&mut rng))
             .collect();
 
         let input_cts: Vec<BlsElGamalCiphertext> = (0..N)

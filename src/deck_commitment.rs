@@ -38,7 +38,7 @@ pub fn deck_commitment(table: &TexasPokerTable) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blstrs::G1Projective;
+    use poker_l1::vm::contracts::texas_poker::utils::{g1_generator as g1_gen, g1_identity as g1_id, G1Projective};
     use group::Group;
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::types::{ElGamalCiphertext, TexasPokerTable};
@@ -52,7 +52,7 @@ mod tests {
             50,
             100,
         );
-        let g = G1Projective::generator();
+        let g = g1_gen();
         table.deck_state.encrypted = (0..count)
             .map(|_| ElGamalCiphertext { c1: g, c2: second })
             .collect::<Vec<_>>()
@@ -63,15 +63,15 @@ mod tests {
 
     #[test]
     fn commitment_changes_when_ciphertext_changes_at_same_length() {
-        let first = table_with_ciphertexts(52, G1Projective::generator());
-        let second = table_with_ciphertexts(52, G1Projective::identity());
+        let first = table_with_ciphertexts(52, g1_gen());
+        let second = table_with_ciphertexts(52, g1_id());
         assert_ne!(deck_commitment(&first), deck_commitment(&second));
     }
 
     #[test]
     fn commitment_is_order_sensitive_and_deterministic() {
-        let mut first = table_with_ciphertexts(52, G1Projective::generator());
-        first.deck_state.encrypted[1].c1 = G1Projective::identity();
+        let mut first = table_with_ciphertexts(52, g1_gen());
+        first.deck_state.encrypted[1].c1 = g1_id();
         let mut second = first.clone();
         second.deck_state.encrypted.swap(0, 1);
         assert_ne!(deck_commitment(&first), deck_commitment(&second));

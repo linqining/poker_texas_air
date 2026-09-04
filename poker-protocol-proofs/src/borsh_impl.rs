@@ -1,12 +1,14 @@
-//! Borsh encodings for the complete BLS12-381 proof suite.
+//! Borsh encodings for the proof suite（Plan D：Stark 曲线世界；
+//! 48 字节 BLS G1 压缩编码已随 blst 移除，现为 32 字节 Stark 压缩点）。
 
 #![cfg(feature = "borsh")]
 
-use blstrs::{G1Projective, Scalar as BlsScalar};
 use borsh::{BorshDeserialize, BorshSerialize};
-use group::GroupEncoding;
 use poker_protocol_bg::BayerGrothShuffleProof;
-use poker_protocol_core::{Bls12381Curve, CurveScalar, ElGamalCiphertextGeneric};
+use poker_protocol_core::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric, StarkCurve, StarkPoint, StarkScalar};
+
+type G1Projective = StarkPoint;
+type BlsScalar = StarkScalar;
 
 use crate::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use crate::generalized_schnorr_proof::GeneralizedSchnorrProof;
@@ -26,15 +28,15 @@ use crate::versioned::{
 // 内部辅助函数：定长字节读写
 // ============================================================
 
-/// G1 压缩点字节数（BLS12-381 G1）。
-const G1_COMPRESSED_LEN: usize = 48;
+/// Stark 压缩点字节数。
+const G1_COMPRESSED_LEN: usize = 32;
 /// BLS 标量字节数（大端序，Move 兼容）。
 const SCALAR_LEN: usize = 32;
 const MAX_RECONSTRUCTION_DECK_SIZE: usize = 1024;
 
 #[inline]
 fn write_point<W: borsh::io::Write>(p: &G1Projective, w: &mut W) -> borsh::io::Result<()> {
-    let bytes = <G1Projective as GroupEncoding>::to_bytes(p);
+    let bytes = CurvePoint::compress(p);
     w.write_all(bytes.as_ref())
 }
 
@@ -42,15 +44,12 @@ fn write_point<W: borsh::io::Write>(p: &G1Projective, w: &mut W) -> borsh::io::R
 fn read_point<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<G1Projective> {
     let mut bytes = [0u8; G1_COMPRESSED_LEN];
     r.read_exact(&mut bytes)?;
-    let ct = G1Projective::from_compressed(&bytes);
-    if bool::from(ct.is_some()) {
-        Ok(ct.unwrap())
-    } else {
-        Err(borsh::io::Error::new(
+    CurvePoint::from_compressed(&bytes).ok_or_else(|| {
+        borsh::io::Error::new(
             borsh::io::ErrorKind::InvalidData,
-            "invalid G1 compressed bytes",
-        ))
-    }
+            "invalid compressed curve point",
+        )
+    })
 }
 
 #[inline]
@@ -66,15 +65,12 @@ fn read_scalar<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<BlsScalar> {
     r.read_exact(&mut bytes)?;
     // Proof encodings must be canonical. Reducing an attacker-controlled
     // non-canonical value modulo q would make the wire format malleable.
-    let scalar = BlsScalar::from_bytes_be(&bytes);
-    if bool::from(scalar.is_some()) {
-        Ok(scalar.unwrap())
-    } else {
-        Err(borsh::io::Error::new(
+    <BlsScalar as CurveScalar>::from_canonical_bytes(&bytes).ok_or_else(|| {
+        borsh::io::Error::new(
             borsh::io::ErrorKind::InvalidData,
-            "non-canonical BLS12-381 scalar",
-        ))
-    }
+            "non-canonical curve scalar",
+        )
+    })
 }
 
 #[inline]
@@ -122,10 +118,10 @@ fn read_scalar_vec<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Vec<BlsSc
 }
 
 // ============================================================
-// GeneralizedSchnorrProof<Bls12381Curve>
+// GeneralizedSchnorrProof<StarkCurve>
 // ============================================================
 
-impl BorshSerialize for GeneralizedSchnorrProof<Bls12381Curve> {
+impl BorshSerialize for GeneralizedSchnorrProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         write_point(&self.commitment, w)?;
         write_scalar_vec(&self.responses, w)?;
@@ -133,7 +129,7 @@ impl BorshSerialize for GeneralizedSchnorrProof<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for GeneralizedSchnorrProof<Bls12381Curve> {
+impl BorshDeserialize for GeneralizedSchnorrProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let commitment = read_point(r)?;
         let responses = read_scalar_vec(r)?;
@@ -145,10 +141,10 @@ impl BorshDeserialize for GeneralizedSchnorrProof<Bls12381Curve> {
 }
 
 // ============================================================
-// ZKShuffleProof<Bls12381Curve> (= ShuffleProof)
+// ZKShuffleProof<StarkCurve> (= ShuffleProof)
 // ============================================================
 
-impl BorshSerialize for ZKShuffleProof<Bls12381Curve> {
+impl BorshSerialize for ZKShuffleProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         write_point(&self.sum_c1_commit, w)?;
         write_point(&self.sum_c2_commit, w)?;
@@ -160,7 +156,7 @@ impl BorshSerialize for ZKShuffleProof<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for ZKShuffleProof<Bls12381Curve> {
+impl BorshDeserialize for ZKShuffleProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let sum_c1_commit = read_point(r)?;
         let sum_c2_commit = read_point(r)?;
@@ -183,7 +179,7 @@ impl BorshDeserialize for ZKShuffleProof<Bls12381Curve> {
 // Bayer--Groth V2 and versioned shuffle proofs
 // ============================================================
 
-impl BorshSerialize for VersionedShuffleProof<Bls12381Curve> {
+impl BorshSerialize for VersionedShuffleProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         match self {
             Self::LegacyV1(proof) => {
@@ -198,7 +194,7 @@ impl BorshSerialize for VersionedShuffleProof<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for VersionedShuffleProof<Bls12381Curve> {
+impl BorshDeserialize for VersionedShuffleProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let mut version = [0u8; 1];
         r.read_exact(&mut version)?;
@@ -218,12 +214,12 @@ impl BorshDeserialize for VersionedShuffleProof<Bls12381Curve> {
 }
 
 // ============================================================
-// DLEqProof<Bls12381Curve, K>（RemaskProof / LeaveProof）
+// DLEqProof<StarkCurve, K>（RemaskProof / LeaveProof）
 // ============================================================
 //
 // PhantomData<K> 不参与序列化。
 
-impl BorshSerialize for DLEqProof<Bls12381Curve, RemaskKind> {
+impl BorshSerialize for DLEqProof<StarkCurve, RemaskKind> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         write_point_vec(&self.per_card_commitments, w)?;
         write_point(&self.commitment_pk, w)?;
@@ -233,7 +229,7 @@ impl BorshSerialize for DLEqProof<Bls12381Curve, RemaskKind> {
     }
 }
 
-impl BorshDeserialize for DLEqProof<Bls12381Curve, RemaskKind> {
+impl BorshDeserialize for DLEqProof<StarkCurve, RemaskKind> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let per_card_commitments = read_point_vec(r)?;
         let commitment_pk = read_point(r)?;
@@ -248,7 +244,7 @@ impl BorshDeserialize for DLEqProof<Bls12381Curve, RemaskKind> {
     }
 }
 
-impl BorshSerialize for DLEqProof<Bls12381Curve, LeaveKind> {
+impl BorshSerialize for DLEqProof<StarkCurve, LeaveKind> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         write_point_vec(&self.per_card_commitments, w)?;
         write_point(&self.commitment_pk, w)?;
@@ -258,7 +254,7 @@ impl BorshSerialize for DLEqProof<Bls12381Curve, LeaveKind> {
     }
 }
 
-impl BorshDeserialize for DLEqProof<Bls12381Curve, LeaveKind> {
+impl BorshDeserialize for DLEqProof<StarkCurve, LeaveKind> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let per_card_commitments = read_point_vec(r)?;
         let commitment_pk = read_point(r)?;
@@ -274,10 +270,10 @@ impl BorshDeserialize for DLEqProof<Bls12381Curve, LeaveKind> {
 }
 
 // ============================================================
-// RevealTokenProof<Bls12381Curve>
+// RevealTokenProof<StarkCurve>
 // ============================================================
 
-impl BorshSerialize for RevealTokenProof<Bls12381Curve> {
+impl BorshSerialize for RevealTokenProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         write_point(&self.user_public_key, w)?;
         write_point(&self.commitment_t1, w)?;
@@ -288,7 +284,7 @@ impl BorshSerialize for RevealTokenProof<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for RevealTokenProof<Bls12381Curve> {
+impl BorshDeserialize for RevealTokenProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let user_public_key = read_point(r)?;
         let commitment_t1 = read_point(r)?;
@@ -306,10 +302,10 @@ impl BorshDeserialize for RevealTokenProof<Bls12381Curve> {
 }
 
 // ============================================================
-// ChaumPedersenDLEQProof<Bls12381Curve>
+// ChaumPedersenDLEQProof<StarkCurve>
 // ============================================================
 
-impl BorshSerialize for ChaumPedersenDLEQProof<Bls12381Curve> {
+impl BorshSerialize for ChaumPedersenDLEQProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         write_point(&self.commitment_a, w)?;
         write_point(&self.commitment_b, w)?;
@@ -318,7 +314,7 @@ impl BorshSerialize for ChaumPedersenDLEQProof<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for ChaumPedersenDLEQProof<Bls12381Curve> {
+impl BorshDeserialize for ChaumPedersenDLEQProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let commitment_a = read_point(r)?;
         let commitment_b = read_point(r)?;
@@ -332,10 +328,10 @@ impl BorshDeserialize for ChaumPedersenDLEQProof<Bls12381Curve> {
 }
 
 // ============================================================
-// ReconstructionDLEQProof<Bls12381Curve>
+// ReconstructionDLEQProof<StarkCurve>
 // ============================================================
 
-impl BorshSerialize for ReconstructionDLEQProof<Bls12381Curve> {
+impl BorshSerialize for ReconstructionDLEQProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         write_point(&self.commitment, w)?;
         write_scalar(&self.response, w)?;
@@ -344,7 +340,7 @@ impl BorshSerialize for ReconstructionDLEQProof<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for ReconstructionDLEQProof<Bls12381Curve> {
+impl BorshDeserialize for ReconstructionDLEQProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let commitment = read_point(r)?;
         let response = read_scalar(r)?;
@@ -358,10 +354,10 @@ impl BorshDeserialize for ReconstructionDLEQProof<Bls12381Curve> {
 }
 
 // ============================================================
-// SwapOutCardProof<Bls12381Curve>
+// SwapOutCardProof<StarkCurve>
 // ============================================================
 
-impl BorshSerialize for SwapOutCardProof<Bls12381Curve> {
+impl BorshSerialize for SwapOutCardProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         BorshSerialize::serialize(&self.user_readable_card, w)?;
         BorshSerialize::serialize(&self.swap_out_card, w)?;
@@ -370,7 +366,7 @@ impl BorshSerialize for SwapOutCardProof<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for SwapOutCardProof<Bls12381Curve> {
+impl BorshDeserialize for SwapOutCardProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let user_readable_card = BorshDeserialize::deserialize_reader(r)?;
         let swap_out_card = BorshDeserialize::deserialize_reader(r)?;
@@ -384,7 +380,7 @@ impl BorshDeserialize for SwapOutCardProof<Bls12381Curve> {
 }
 
 // ============================================================
-// ReconstructProof<Bls12381Curve>
+// ReconstructProof<StarkCurve>
 // ============================================================
 
 fn write_reconstruction_len<W: borsh::io::Write>(
@@ -420,7 +416,7 @@ fn read_reconstruction_len<R: borsh::io::Read>(r: &mut R, min: usize) -> borsh::
     Ok(len)
 }
 
-impl BorshSerialize for OrderedEncryptionProof<Bls12381Curve> {
+impl BorshSerialize for OrderedEncryptionProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         let n = self.responses.len();
         if self.commitment_g.len() != n || self.commitment_pk.len() != n {
@@ -443,7 +439,7 @@ impl BorshSerialize for OrderedEncryptionProof<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for OrderedEncryptionProof<Bls12381Curve> {
+impl BorshDeserialize for OrderedEncryptionProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let n = read_reconstruction_len(r, 2)?;
         let commitment_g = (0..n).map(|_| read_point(r)).collect::<Result<_, _>>()?;
@@ -457,7 +453,7 @@ impl BorshDeserialize for OrderedEncryptionProof<Bls12381Curve> {
     }
 }
 
-impl BorshSerialize for ReconstructProof<Bls12381Curve> {
+impl BorshSerialize for ReconstructProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         w.write_all(&[RECONSTRUCTION_PROOF_VERSION])?;
         write_reconstruction_len(self.swap_out_cards_proofs.len(), 1, w)?;
@@ -474,7 +470,7 @@ impl BorshSerialize for ReconstructProof<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for ReconstructProof<Bls12381Curve> {
+impl BorshDeserialize for ReconstructProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let mut version = [0u8; 1];
         r.read_exact(&mut version)?;
@@ -497,9 +493,9 @@ impl BorshDeserialize for ReconstructProof<Bls12381Curve> {
         }
         let padded_swap_cards = (0..n)
             .map(|_| BorshDeserialize::deserialize_reader(r))
-            .collect::<Result<Vec<ElGamalCiphertextGeneric<Bls12381Curve>>, _>>()?;
+            .collect::<Result<Vec<ElGamalCiphertextGeneric<StarkCurve>>, _>>()?;
         let padded_swap_shuffle_proof =
-            BayerGrothShuffleProof::<Bls12381Curve>::deserialize_reader(r)?;
+            BayerGrothShuffleProof::<StarkCurve>::deserialize_reader(r)?;
         if padded_swap_shuffle_proof
             .multi_exponentiation
             .alpha_response
@@ -512,7 +508,7 @@ impl BorshDeserialize for ReconstructProof<Bls12381Curve> {
             ));
         }
         let ordered_encryption_proof =
-            OrderedEncryptionProof::<Bls12381Curve>::deserialize_reader(r)?;
+            OrderedEncryptionProof::<StarkCurve>::deserialize_reader(r)?;
         if ordered_encryption_proof.responses.len() != n {
             return Err(borsh::io::Error::new(
                 borsh::io::ErrorKind::InvalidData,
@@ -532,7 +528,7 @@ impl BorshDeserialize for ReconstructProof<Bls12381Curve> {
 // Reconstruction V3 statement and proof package
 // ============================================================
 
-impl BorshSerialize for CrossKeyNegationProof<Bls12381Curve> {
+impl BorshSerialize for CrossKeyNegationProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         write_point(&self.commitment_owner_key, w)?;
         write_point(&self.commitment_contribution_c1, w)?;
@@ -542,7 +538,7 @@ impl BorshSerialize for CrossKeyNegationProof<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for CrossKeyNegationProof<Bls12381Curve> {
+impl BorshDeserialize for CrossKeyNegationProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         Ok(Self {
             commitment_owner_key: read_point(r)?,
@@ -554,7 +550,7 @@ impl BorshDeserialize for CrossKeyNegationProof<Bls12381Curve> {
     }
 }
 
-impl BorshSerialize for SlotContributionOrProof<Bls12381Curve> {
+impl BorshSerialize for SlotContributionOrProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         for point in &self.commitment_g {
             write_point(point, w)?;
@@ -572,7 +568,7 @@ impl BorshSerialize for SlotContributionOrProof<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for SlotContributionOrProof<Bls12381Curve> {
+impl BorshDeserialize for SlotContributionOrProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         Ok(Self {
             commitment_g: [read_point(r)?, read_point(r)?],
@@ -583,7 +579,7 @@ impl BorshDeserialize for SlotContributionOrProof<Bls12381Curve> {
     }
 }
 
-impl BorshSerialize for ReconstructionV3Statement<Bls12381Curve> {
+impl BorshSerialize for ReconstructionV3Statement<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         if self.version != RECONSTRUCTION_V3_PROOF_VERSION
             || self.cards.len() != self.contributions.len()
@@ -618,7 +614,7 @@ impl BorshSerialize for ReconstructionV3Statement<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for ReconstructionV3Statement<Bls12381Curve> {
+impl BorshDeserialize for ReconstructionV3Statement<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let mut version = [0u8; 1];
         r.read_exact(&mut version)?;
@@ -649,10 +645,10 @@ impl BorshDeserialize for ReconstructionV3Statement<Bls12381Curve> {
         }
         let user_readable_cards = (0..k)
             .map(|_| BorshDeserialize::deserialize_reader(r))
-            .collect::<Result<Vec<ElGamalCiphertextGeneric<Bls12381Curve>>, _>>()?;
+            .collect::<Result<Vec<ElGamalCiphertextGeneric<StarkCurve>>, _>>()?;
         let contributions = (0..n)
             .map(|_| BorshDeserialize::deserialize_reader(r))
-            .collect::<Result<Vec<ElGamalCiphertextGeneric<Bls12381Curve>>, _>>()?;
+            .collect::<Result<Vec<ElGamalCiphertextGeneric<StarkCurve>>, _>>()?;
         let statement = Self {
             version: version[0],
             context_digest,
@@ -674,7 +670,7 @@ impl BorshDeserialize for ReconstructionV3Statement<Bls12381Curve> {
     }
 }
 
-impl BorshSerialize for ReconstructProofV3<Bls12381Curve> {
+impl BorshSerialize for ReconstructProofV3<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         let k = self.negative_contributions.len();
         let n = self.slot_membership_proofs.len();
@@ -701,7 +697,7 @@ impl BorshSerialize for ReconstructProofV3<Bls12381Curve> {
     }
 }
 
-impl BorshDeserialize for ReconstructProofV3<Bls12381Curve> {
+impl BorshDeserialize for ReconstructProofV3<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let mut version = [0u8; 1];
         r.read_exact(&mut version)?;
@@ -714,13 +710,13 @@ impl BorshDeserialize for ReconstructProofV3<Bls12381Curve> {
         let k = read_reconstruction_len(r, 1)?;
         let negative_contributions = (0..k)
             .map(|_| BorshDeserialize::deserialize_reader(r))
-            .collect::<Result<Vec<ElGamalCiphertextGeneric<Bls12381Curve>>, _>>(
+            .collect::<Result<Vec<ElGamalCiphertextGeneric<StarkCurve>>, _>>(
         )?;
         let cross_key_proofs = (0..k)
             .map(|_| BorshDeserialize::deserialize_reader(r))
-            .collect::<Result<Vec<CrossKeyNegationProof<Bls12381Curve>>, _>>()?;
+            .collect::<Result<Vec<CrossKeyNegationProof<StarkCurve>>, _>>()?;
         let contribution_shuffle_proof =
-            BayerGrothShuffleProof::<Bls12381Curve>::deserialize_reader(r)?;
+            BayerGrothShuffleProof::<StarkCurve>::deserialize_reader(r)?;
         let n = read_reconstruction_len(r, 2)?;
         if k > n
             || contribution_shuffle_proof
@@ -736,7 +732,7 @@ impl BorshDeserialize for ReconstructProofV3<Bls12381Curve> {
         }
         let slot_membership_proofs = (0..n)
             .map(|_| BorshDeserialize::deserialize_reader(r))
-            .collect::<Result<Vec<SlotContributionOrProof<Bls12381Curve>>, _>>(
+            .collect::<Result<Vec<SlotContributionOrProof<StarkCurve>>, _>>(
         )?;
         Ok(Self {
             negative_contributions,
@@ -762,46 +758,46 @@ mod tests {
     #[test]
     fn elgamal_ciphertext_borsh_roundtrip() {
         let sk = <BlsScalar as CurveScalar>::random(&mut OsRng);
-        let pk = <G1Projective as CurvePoint>::identity() + <Bls12381Curve as Curve>::base_g() * sk;
-        let plaintext = <Bls12381Curve as Curve>::base_h();
+        let pk = <G1Projective as CurvePoint>::identity() + <StarkCurve as Curve>::base_g() * sk;
+        let plaintext = <StarkCurve as Curve>::base_h();
         let r = <BlsScalar as CurveScalar>::random(&mut OsRng);
-        let ct = ElGamalCiphertextGeneric::<Bls12381Curve>::encrypt(&plaintext, &pk, &r);
+        let ct = ElGamalCiphertextGeneric::<StarkCurve>::encrypt(&plaintext, &pk, &r);
 
         let bytes = borsh::to_vec(&ct).unwrap();
         assert_eq!(bytes.len(), 2 * G1_COMPRESSED_LEN);
-        let recovered: ElGamalCiphertextGeneric<Bls12381Curve> = borsh::from_slice(&bytes).unwrap();
+        let recovered: ElGamalCiphertextGeneric<StarkCurve> = borsh::from_slice(&bytes).unwrap();
         assert_eq!(ct, recovered);
     }
 
     #[test]
     fn generalized_schnorr_borsh_roundtrip() {
-        let commitment = <Bls12381Curve as Curve>::base_g();
+        let commitment = <StarkCurve as Curve>::base_g();
         let responses = vec![
             <BlsScalar as CurveScalar>::random(&mut OsRng),
             <BlsScalar as CurveScalar>::random(&mut OsRng),
         ];
-        let proof = GeneralizedSchnorrProof::<Bls12381Curve> {
+        let proof = GeneralizedSchnorrProof::<StarkCurve> {
             commitment,
             responses,
         };
 
         let bytes = borsh::to_vec(&proof).unwrap();
-        let recovered: GeneralizedSchnorrProof<Bls12381Curve> = borsh::from_slice(&bytes).unwrap();
+        let recovered: GeneralizedSchnorrProof<StarkCurve> = borsh::from_slice(&bytes).unwrap();
         assert_eq!(proof.commitment, recovered.commitment);
         assert_eq!(proof.responses.len(), recovered.responses.len());
     }
 
     #[test]
     fn reveal_token_proof_borsh_roundtrip() {
-        let proof = RevealTokenProof::<Bls12381Curve> {
-            user_public_key: <Bls12381Curve as Curve>::base_g(),
-            commitment_t1: <Bls12381Curve as Curve>::base_h(),
-            commitment_t2: <Bls12381Curve as Curve>::base_g(),
+        let proof = RevealTokenProof::<StarkCurve> {
+            user_public_key: <StarkCurve as Curve>::base_g(),
+            commitment_t1: <StarkCurve as Curve>::base_h(),
+            commitment_t2: <StarkCurve as Curve>::base_g(),
             response_s: <BlsScalar as CurveScalar>::random(&mut OsRng),
             nonce: <BlsScalar as CurveScalar>::random(&mut OsRng),
         };
         let bytes = borsh::to_vec(&proof).unwrap();
-        let recovered: RevealTokenProof<Bls12381Curve> = borsh::from_slice(&bytes).unwrap();
+        let recovered: RevealTokenProof<StarkCurve> = borsh::from_slice(&bytes).unwrap();
         // RevealTokenProof 未 derive PartialEq，逐字段比较
         assert_eq!(proof.user_public_key, recovered.user_public_key);
         assert_eq!(proof.commitment_t1, recovered.commitment_t1);
@@ -814,14 +810,14 @@ mod tests {
     fn versioned_bayer_groth_borsh_roundtrip_and_verify() {
         let n = 8;
         let secret_key = <BlsScalar as CurveScalar>::random(&mut OsRng);
-        let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+        let public_key = <StarkCurve as Curve>::base_g() * secret_key;
         let input: Vec<_> = (0..n)
             .map(|i| {
-                let message = <Bls12381Curve as Curve>::hash_to_curve(
+                let message = <StarkCurve as Curve>::hash_to_curve(
                     format!("borsh/bg12/card/{i}").as_bytes(),
                 );
                 let randomness = <BlsScalar as CurveScalar>::random(&mut OsRng);
-                ElGamalCiphertextGeneric::<Bls12381Curve>::encrypt(
+                ElGamalCiphertextGeneric::<StarkCurve>::encrypt(
                     &message,
                     &public_key,
                     &randomness,
@@ -835,7 +831,7 @@ mod tests {
         let output: Vec<_> = (0..n)
             .map(|i| input[permutation[i]].re_encrypt(&public_key, &rerandomizers[i]))
             .collect();
-        let proof = VersionedShuffleProof::<Bls12381Curve>::prove(
+        let proof = VersionedShuffleProof::<StarkCurve>::prove(
             &input,
             &output,
             &permutation,
@@ -848,7 +844,7 @@ mod tests {
 
         let bytes = borsh::to_vec(&proof).unwrap();
         assert_eq!(bytes[0], BAYER_GROTH_SHUFFLE_PROOF_VERSION);
-        let recovered: VersionedShuffleProof<Bls12381Curve> = borsh::from_slice(&bytes).unwrap();
+        let recovered: VersionedShuffleProof<StarkCurve> = borsh::from_slice(&bytes).unwrap();
         assert_eq!(recovered.version(), BAYER_GROTH_SHUFFLE_PROOF_VERSION);
         assert!(recovered
             .verify(
@@ -862,7 +858,7 @@ mod tests {
 
     #[test]
     fn versioned_shuffle_rejects_unknown_version() {
-        let result = borsh::from_slice::<VersionedShuffleProof<Bls12381Curve>>(&[99]);
+        let result = borsh::from_slice::<VersionedShuffleProof<StarkCurve>>(&[99]);
         assert!(result.is_err());
     }
 
@@ -870,25 +866,25 @@ mod tests {
     fn reconstruction_v2_borsh_roundtrip_and_verify() {
         let cards = (0..8)
             .map(|i| {
-                <Bls12381Curve as Curve>::hash_to_curve(
+                <StarkCurve as Curve>::hash_to_curve(
                     format!("borsh/reconstruction/card/{i}").as_bytes(),
                 )
             })
             .collect::<Vec<_>>();
         let user_sk = <BlsScalar as CurveScalar>::from_u64(73);
-        let user_pk = <Bls12381Curve as Curve>::base_g() * user_sk;
+        let user_pk = <StarkCurve as Curve>::base_g() * user_sk;
         let user_readable_cards = [1usize, 6]
             .iter()
             .enumerate()
             .map(|(i, index)| {
-                ElGamalCiphertextGeneric::<Bls12381Curve>::encrypt(
+                ElGamalCiphertextGeneric::<StarkCurve>::encrypt(
                     &cards[*index],
                     &user_pk,
                     &<BlsScalar as CurveScalar>::from_u64(1000 + i as u64),
                 )
             })
             .collect::<Vec<_>>();
-        let (s_vec, output_cards, swap_out_cards) = reconstruct_deck::<Bls12381Curve>(
+        let (s_vec, output_cards, swap_out_cards) = reconstruct_deck::<StarkCurve>(
             &cards,
             &user_readable_cards,
             &user_sk,
@@ -896,7 +892,7 @@ mod tests {
             &<BlsScalar as CurveScalar>::from_u64(7),
         )
         .unwrap();
-        let proof = ReconstructProof::<Bls12381Curve>::prove(
+        let proof = ReconstructProof::<StarkCurve>::prove(
             cards.clone(),
             user_readable_cards.clone(),
             output_cards.clone(),
@@ -910,7 +906,7 @@ mod tests {
 
         let bytes = borsh::to_vec(&proof).unwrap();
         assert_eq!(bytes[0], RECONSTRUCTION_PROOF_VERSION);
-        let recovered: ReconstructProof<Bls12381Curve> = borsh::from_slice(&bytes).unwrap();
+        let recovered: ReconstructProof<StarkCurve> = borsh::from_slice(&bytes).unwrap();
         let swap_ciphertexts = swap_out_cards
             .iter()
             .map(|(_, ciphertext)| ciphertext.clone())
@@ -929,18 +925,18 @@ mod tests {
 
     #[test]
     fn reconstruction_v2_borsh_rejects_unknown_version_and_huge_length() {
-        assert!(borsh::from_slice::<ReconstructProof<Bls12381Curve>>(&[99]).is_err());
+        assert!(borsh::from_slice::<ReconstructProof<StarkCurve>>(&[99]).is_err());
 
         let mut malicious = vec![RECONSTRUCTION_PROOF_VERSION];
         malicious.extend_from_slice(&u32::MAX.to_le_bytes());
-        assert!(borsh::from_slice::<ReconstructProof<Bls12381Curve>>(&malicious).is_err());
+        assert!(borsh::from_slice::<ReconstructProof<StarkCurve>>(&malicious).is_err());
     }
 
     #[test]
     fn reconstruction_v3_statement_and_proof_borsh_roundtrip() {
         let cards = (0..8)
             .map(|i| {
-                <Bls12381Curve as Curve>::hash_to_curve(
+                <StarkCurve as Curve>::hash_to_curve(
                     format!("borsh/reconstruction/v3/card/{i}").as_bytes(),
                 )
             })
@@ -948,13 +944,13 @@ mod tests {
         let owner_sk = <BlsScalar as CurveScalar>::from_u64(73);
         let other_sk = <BlsScalar as CurveScalar>::from_u64(29);
         let aggregate_sk = owner_sk + other_sk;
-        let owner_pk = <Bls12381Curve as Curve>::base_g() * owner_sk;
-        let aggregate_pk = <Bls12381Curve as Curve>::base_g() * aggregate_sk;
+        let owner_pk = <StarkCurve as Curve>::base_g() * owner_sk;
+        let aggregate_pk = <StarkCurve as Curve>::base_g() * aggregate_sk;
         let readable_cards = [1usize, 6]
             .iter()
             .enumerate()
             .map(|(i, index)| {
-                ElGamalCiphertextGeneric::<Bls12381Curve>::encrypt(
+                ElGamalCiphertextGeneric::<StarkCurve>::encrypt(
                     &cards[*index],
                     &owner_pk,
                     &<BlsScalar as CurveScalar>::from_u64(2000 + i as u64),
@@ -962,7 +958,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (statement, proof) = ReconstructProofV3::<Bls12381Curve>::prove(
+        let (statement, proof) = ReconstructProofV3::<StarkCurve>::prove(
             [3u8; 32],
             12,
             [4u8; 32],
@@ -981,9 +977,9 @@ mod tests {
         assert_eq!(statement_bytes[0], RECONSTRUCTION_V3_PROOF_VERSION);
         assert_eq!(proof_bytes[0], RECONSTRUCTION_V3_PROOF_VERSION);
 
-        let recovered_statement: ReconstructionV3Statement<Bls12381Curve> =
+        let recovered_statement: ReconstructionV3Statement<StarkCurve> =
             borsh::from_slice(&statement_bytes).unwrap();
-        let recovered_proof: ReconstructProofV3<Bls12381Curve> =
+        let recovered_proof: ReconstructProofV3<StarkCurve> =
             borsh::from_slice(&proof_bytes).unwrap();
         recovered_proof
             .verify(

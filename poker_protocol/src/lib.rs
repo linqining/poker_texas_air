@@ -1,14 +1,11 @@
-#[cfg(feature = "legacy-bls381")]
-pub mod crypto;
-#[cfg(feature = "legacy-bls381")]
-pub mod z_poker;
-#[cfg(feature = "legacy-bls381")]
-pub mod zk_shuffle;
+//! poker_protocol — mental-poker 协议门面（Plan D Stark 曲线世界）。
+//!
+//! 2026-09-05：BLS12-381/blst legacy 构建整体移除（不考虑兼容），
+//! `DefaultCurve = StarkCurve`（Cairo 原生 EC_OP 结算路线）。
 
-/// Pure Ristretto255 request construction for the AIR-backed mental-poker
-/// epoch.  This module does not expose a native proof verifier.
-#[cfg(feature = "ristretto-air")]
-pub mod ristretto_air;
+pub mod crypto;
+pub mod zk_shuffle;
+pub mod z_poker;
 
 /// BN254 direct-sigma settlement route: canonical card derivation and curve
 /// re-exports (DUAL_PROOF_PROTOCOL.md). Curve-independent of protocol
@@ -22,29 +19,18 @@ pub mod secp256k1_sigma;
 
 /// Stable request/response boundary for STWO foreign calls and chain
 /// precompile adapters.
-#[cfg(any(feature = "legacy-bls381", feature = "ristretto-air"))]
+#[cfg(feature = "ristretto-air")]
 pub mod precompile_abi {
     pub use poker_protocol_abi::*;
 }
 
-#[cfg(all(feature = "legacy-bls381", feature = "borsh"))]
+#[cfg(all(feature = "stark-curve", feature = "borsh"))]
 pub mod precompile;
 
-#[cfg(all(feature = "legacy-bls381", feature = "borsh"))]
+#[cfg(feature = "borsh")]
 pub mod borsh_impls;
 
-/// Canonical browser-to-Rust proof bundles used by client
-/// interoperability checks.
-#[cfg(all(feature = "legacy-bls381", feature = "borsh"))]
-pub mod browser_proof_bundle;
-
-/// Per-player unified Σ-protocol (standard settlement proof shape):
-/// one proof per player per hand covering ownership + fold + reveals with a
-/// single challenge and response. See `poker-protocol-proofs::unified_sigma`.
-#[cfg(feature = "legacy-bls381")]
-pub mod unified_sigma {
-    pub use poker_protocol_proofs::unified_sigma::{
-        labels, PlayerHandSigma, UnifiedFoldCard, UnifiedRevealCard, UnifiedSigmaError,
-        UnifiedStatement, UNIFIED_SIGMA_PROTOCOL_NAME,
-    };
-}
+/// Pure Ristretto255 request construction for the AIR-backed mental-poker
+/// epoch.  This module does not expose a native proof verifier.
+#[cfg(feature = "ristretto-air")]
+pub mod ristretto_air;

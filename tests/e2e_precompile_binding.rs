@@ -15,7 +15,7 @@ use poker_l1::vm::contracts::texas_poker::types::{
     RevealTokenState, RitStartStreet, RunItTwiceState, SeatStatus, ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
-use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
+use poker_protocol::crypto::curve::{StarkCurve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
 use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
@@ -109,25 +109,25 @@ fn fixture(
     let table_id = 42;
     let hand_id = 7;
     let seat_index = 2;
-    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
-    let prior_secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-    let prior_public_key = <Bls12381Curve as Curve>::base_g() * prior_secret_key;
+    let secret_key = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <StarkCurve as Curve>::base_g() * secret_key;
+    let prior_secret_key = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
+    let prior_public_key = <StarkCurve as Curve>::base_g() * prior_secret_key;
     let aggregate_public_key = prior_public_key + public_key;
     let input_cards: Vec<_> = (0..52)
         .map(|i| {
-            let card = Bls12381Curve::hash_to_curve(format!("air-binding/card/{i}").as_bytes());
+            let card = StarkCurve::hash_to_curve(format!("air-binding/card/{i}").as_bytes());
             ElGamalCiphertextGeneric::encrypt(
                 &card,
                 &aggregate_public_key,
-                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                &<StarkCurve as Curve>::Scalar::random(&mut OsRng),
             )
         })
         .collect();
     let mut permutation: Vec<usize> = (0..52).collect();
     permutation[..8].copy_from_slice(&[3, 0, 7, 1, 6, 2, 5, 4]);
     let rerandomizers: Vec<_> = (0..input_cards.len())
-        .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
+        .map(|_| <StarkCurve as Curve>::Scalar::random(&mut OsRng))
         .collect();
     let output_cards: Vec<_> = (0..input_cards.len())
         .map(|i| input_cards[permutation[i]].re_encrypt(&aggregate_public_key, &rerandomizers[i]))
@@ -313,10 +313,10 @@ enum RevealRequestVariant {
 }
 
 fn prove_reveal_token(
-    secret_key: &<Bls12381Curve as Curve>::Scalar,
-    public_key: &<Bls12381Curve as Curve>::Point,
-    encrypted_card: &ElGamalCiphertextGeneric<Bls12381Curve>,
-) -> (ECPoint, RevealTokenProof<Bls12381Curve>) {
+    secret_key: &<StarkCurve as Curve>::Scalar,
+    public_key: &<StarkCurve as Curve>::Point,
+    encrypted_card: &ElGamalCiphertextGeneric<StarkCurve>,
+) -> (ECPoint, RevealTokenProof<StarkCurve>) {
     let reveal_token = encrypted_card.c1 * *secret_key;
     let proof = RevealTokenProof::prove(
         secret_key,
@@ -340,15 +340,15 @@ fn reveal_fixture(
     let hand_id = 11;
     let call_seq = 8;
     let seat_index = 1;
-    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let secret_key = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <StarkCurve as Curve>::base_g() * secret_key;
     let encrypted_cards: Vec<_> = (0..52)
         .map(|i| {
-            let plaintext = Bls12381Curve::hash_to_curve(format!("air-reveal/card/{i}").as_bytes());
+            let plaintext = StarkCurve::hash_to_curve(format!("air-reveal/card/{i}").as_bytes());
             ElGamalCiphertextGeneric::encrypt(
                 &plaintext,
                 &public_key,
-                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                &<StarkCurve as Curve>::Scalar::random(&mut OsRng),
             )
         })
         .collect();
@@ -366,8 +366,8 @@ fn reveal_fixture(
     );
     table.call_seq = call_seq - 1;
     table.hand_id = hand_id;
-    let other_secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-    let other_public_key = <Bls12381Curve as Curve>::base_g() * other_secret_key;
+    let other_secret_key = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
+    let other_public_key = <StarkCurve as Curve>::base_g() * other_secret_key;
     seat_fixture::set_player(&mut table.seats[0], [0x70; 20]);
     table.seats[0].set_status(SeatStatus::Active);
     seat_fixture::set_stack(&mut table.seats[0], 1_000);
@@ -450,11 +450,11 @@ fn reveal_fixture(
     match variant {
         RevealRequestVariant::Honest | RevealRequestVariant::OtherCallSequence => {}
         RevealRequestVariant::OtherCiphertext => {
-            let plaintext = Bls12381Curve::hash_to_curve(b"air-reveal/other-ciphertext");
+            let plaintext = StarkCurve::hash_to_curve(b"air-reveal/other-ciphertext");
             let ciphertext = ElGamalCiphertextGeneric::encrypt(
                 &plaintext,
                 &public_key,
-                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                &<StarkCurve as Curve>::Scalar::random(&mut OsRng),
             );
             let (token, proof) = prove_reveal_token(&secret_key, &public_key, &ciphertext);
             request_table.deck_state.encrypted[0] = ciphertext;
@@ -474,8 +474,8 @@ fn reveal_fixture(
             request_args.proofs[0] = proof;
         }
         RevealRequestVariant::OtherPlayerKey => {
-            let other_secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-            let other_public_key = <Bls12381Curve as Curve>::base_g() * other_secret_key;
+            let other_secret_key = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
+            let other_public_key = <StarkCurve as Curve>::base_g() * other_secret_key;
             let (token, proof) =
                 prove_reveal_token(&other_secret_key, &other_public_key, &encrypted_cards[0]);
             seat_fixture::set_pk(
@@ -600,8 +600,8 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
     let table_id = 72;
     let hand_id = 12;
     let seat_index = 1;
-    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let secret_key = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <StarkCurve as Curve>::base_g() * secret_key;
     let canonical_cards = utils::generate_plaintext_cards();
     let card_order = [30usize, 31]
         .into_iter()
@@ -612,7 +612,7 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
             ElGamalCiphertextGeneric::encrypt(
                 &canonical_cards[card_id],
                 &public_key,
-                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                &<StarkCurve as Curve>::Scalar::random(&mut OsRng),
             )
         })
         .collect();
@@ -671,7 +671,7 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
             .insert(
                 seat_index,
                 u8::try_from(index).unwrap(),
-                PartialHoleCard::new(u8::try_from(index).unwrap(), ciphertext),
+                PartialHoleCard::new(u8::try_from(index).unwrap(), ciphertext, ciphertext),
             )
             .unwrap();
     }
@@ -760,8 +760,8 @@ fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
     let hand_id = 8;
     let call_seq = 6;
     let seat_index = 1;
-    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let secret_key = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <StarkCurve as Curve>::base_g() * secret_key;
     let cards = utils::generate_plaintext_cards();
     let readable_cards: Vec<_> = [2usize, 5]
         .iter()
@@ -769,7 +769,7 @@ fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
             ElGamalCiphertextGeneric::encrypt(
                 &cards[i],
                 &public_key,
-                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                &<StarkCurve as Curve>::Scalar::random(&mut OsRng),
             )
         })
         .collect();
@@ -801,7 +801,7 @@ fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
             .insert(
                 seat_index,
                 index as u8,
-                PartialHoleCard::new(index as u8, ciphertext),
+                PartialHoleCard::new(index as u8, ciphertext, ciphertext),
             )
             .unwrap();
     }

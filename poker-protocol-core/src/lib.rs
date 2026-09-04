@@ -1,8 +1,9 @@
 //! Shared protocol primitives and native curve backends.
 //!
-//! This crate owns the curve traits, the current Ristretto/BLS12-381
-//! implementations, generic ElGamal, transcript interfaces, and verification
-//! errors. It intentionally contains no game state machine, networking code,
+//! This crate owns the curve traits, the current Ristretto/BN254/secp256k1
+//! implementations plus the Plan D Stark-curve backend ([`stark_curve`]),
+//! generic ElGamal, transcript interfaces, and verification errors
+//! （BLS12-381/blst 后端已按 2026-09-05 决策移除，不考虑兼容）. It intentionally contains no game state machine, networking code,
 //! or chain SDK dependency.
 
 mod backend;
@@ -16,9 +17,9 @@ pub mod transcript;
 mod borsh_impl;
 
 pub use backend::{
-    ec_encrypt_batch_generic, Bls12381Curve, Bls12381ElGamalCiphertext, BlsCompressedPoint,
-    Bn254Curve, Bn254ElGamalCiphertext, BnCompressedPoint, CompressedPoint, RistrettoCurve,
-    RistrettoElGamalCiphertext, Secp256k1Curve, Secp256k1ElGamalCiphertext, SecpCompressedPoint,
+    ec_encrypt_batch_generic, Bn254Curve, Bn254ElGamalCiphertext, BnCompressedPoint,
+    CompressedPoint, RistrettoCurve, RistrettoElGamalCiphertext, Secp256k1Curve,
+    Secp256k1ElGamalCiphertext, SecpCompressedPoint,
 };
 #[cfg(feature = "stark-backend")]
 pub use stark_curve::{

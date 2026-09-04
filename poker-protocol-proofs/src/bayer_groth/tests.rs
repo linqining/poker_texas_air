@@ -2,7 +2,7 @@ use super::BayerGrothShuffleProof;
 use crate::error::VerificationError;
 use crate::transcript_ext::{CryptoTranscript, MerlinTranscript};
 use poker_protocol_core::{
-    Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric, RistrettoCurve,
+    StarkCurve, Curve, CurveScalar, ElGamalCiphertextGeneric, RistrettoCurve,
 };
 use rand::seq::SliceRandom;
 use rand_core::OsRng;
@@ -77,7 +77,7 @@ fn honest_ristretto_shuffle_verifies() {
 
 #[test]
 fn honest_bls_52_card_shuffle_verifies() {
-    let (pk, input, output, permutation, rerandomizers) = fixture::<Bls12381Curve>(52);
+    let (pk, input, output, permutation, rerandomizers) = fixture::<StarkCurve>(52);
     let proof = prove(
         &pk,
         &input,

@@ -1,5 +1,5 @@
 use crate::crypto::{
-    hash_to_scalar, DefaultCurve, EcPoint, ElGamalCiphertext, Plaintext, Scalar, BASE_G,
+    hash_to_scalar, DefaultCurve, EcPoint, ElGamalCiphertext, Plaintext, Scalar, base_g,
 };
 use crate::z_poker::convert::{ecpoint_to_hex, hex_to_scalar, scalar_to_hex};
 use crate::zk_shuffle::error::VerificationError;
@@ -29,13 +29,13 @@ pub struct ClientPlayer {
 impl ClientPlayer {
     pub fn new() -> Self {
         let sk = Scalar::random(&mut OsRng);
-        let pk = *BASE_G * sk;
+        let pk = base_g() *  sk;
         Self { sk, pk }
     }
 
     pub fn new_with_wallet_address(wallet_address: &str) -> Self {
         let sk = hash_to_scalar(wallet_address.as_bytes());
-        let pk = *BASE_G * sk;
+        let pk = base_g() *  sk;
         Self { sk, pk }
     }
 
@@ -46,7 +46,7 @@ impl ClientPlayer {
     /// 与钱包零派生关系（对比 new_with_wallet_address 的公开可计算性）。
     pub fn new_with_passphrase(passphrase: &str) -> Self {
         let sk = Self::derive_key_from_passphrase(passphrase);
-        let pk = *BASE_G * sk;
+        let pk = base_g() *  sk;
         Self { sk, pk }
     }
 
@@ -70,7 +70,7 @@ impl ClientPlayer {
 
     pub fn new_with_sk_hex(sk_hex: String) -> Result<Self, VerificationError> {
         let sk = hex_to_scalar(&sk_hex).map_err(|_| VerificationError::InvalidSecretKey)?;
-        let pk = *BASE_G * &sk;
+        let pk = base_g() *  &sk;
         Ok(Self { sk, pk })
     }
 
@@ -410,7 +410,7 @@ mod reconstruction_v3_tests {
     fn client_builds_a_verifiable_v3_package() {
         let owner = ClientPlayer::new();
         let aggregate_sk = Scalar::random(&mut OsRng);
-        let aggregate_pk = *BASE_G * aggregate_sk;
+        let aggregate_pk = base_g() *  aggregate_sk;
         let cards: Vec<_> = (0..8)
             .map(|i| DefaultCurve::hash_to_curve(format!("client/v3/card/{i}").as_bytes()))
             .collect();

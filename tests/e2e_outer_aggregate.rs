@@ -5,7 +5,7 @@ use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch, SubmitShuffleV2Args};
 use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, ShuffleState, TexasPokerTable};
-use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
+use poker_protocol::crypto::curve::{StarkCurve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
 use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
@@ -63,7 +63,7 @@ fn dispatch_task(
 fn next_shuffle_task(
     table: TexasPokerTable,
     seat_index: u8,
-    aggregated_pk: <Bls12381Curve as Curve>::Point,
+    aggregated_pk: <StarkCurve as Curve>::Point,
     round: usize,
 ) -> (ProveTask, TexasPokerTable) {
     let input_cards = table.deck_state.encrypted.to_vec();
@@ -75,7 +75,7 @@ fn next_shuffle_task(
     let mut permutation: Vec<usize> = (0..52).collect();
     permutation[..8].copy_from_slice(&first_eight);
     let rerandomizers: Vec<_> = (0..input_cards.len())
-        .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
+        .map(|_| <StarkCurve as Curve>::Scalar::random(&mut OsRng))
         .collect();
     let output_cards: Vec<_> = (0..input_cards.len())
         .map(|i| input_cards[permutation[i]].re_encrypt(&aggregated_pk, &rerandomizers[i]))
@@ -102,11 +102,11 @@ fn next_shuffle_task(
 
 fn sequential_shuffle_tasks(nonce: u64) -> Vec<ProveTask> {
     let seat_secrets: Vec<_> = (0..4)
-        .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
+        .map(|_| <StarkCurve as Curve>::Scalar::random(&mut OsRng))
         .collect();
     let seat_keys: Vec<_> = seat_secrets
         .iter()
-        .map(|secret| <Bls12381Curve as Curve>::base_g() * secret)
+        .map(|secret| <StarkCurve as Curve>::base_g() * secret)
         .collect();
     let aggregated_pk = seat_keys
         .iter()
@@ -115,13 +115,13 @@ fn sequential_shuffle_tasks(nonce: u64) -> Vec<ProveTask> {
         .expect("four keys");
     let input_cards: Vec<_> = (0..52)
         .map(|i| {
-            let card = Bls12381Curve::hash_to_curve(
+            let card = StarkCurve::hash_to_curve(
                 format!("outer-aggregate/{nonce}/card/{i}").as_bytes(),
             );
             ElGamalCiphertextGeneric::encrypt(
                 &card,
                 &aggregated_pk,
-                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                &<StarkCurve as Curve>::Scalar::random(&mut OsRng),
             )
         })
         .collect();

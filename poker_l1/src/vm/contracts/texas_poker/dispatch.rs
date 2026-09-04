@@ -25,7 +25,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
-use blstrs::{G1Projective, Scalar as BlsScalar};
+use super::utils::{g1_generator, g1_identity, BlsScalar, G1Projective};
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
@@ -1723,7 +1723,7 @@ fn dispatch_join_table(
         ));
     }
     // ECPoint → G1Projective（state_machine::is_pk_registered / Seat.pk 使用裸 G1Projective）
-    let pk: G1Projective = input.pk.into();
+    let pk: G1Projective = *input.pk;
     if super::utils::g1_is_identity(&pk) {
         return Err(PokerL1Error::Serialization(
             "join_table public key cannot be identity".into(),
@@ -1763,7 +1763,7 @@ fn dispatch_join_table(
     table.seats[seat_idx as usize] = Seat::occupied(
         context.caller,
         input.buy_in,
-        ECPoint::from(pk),
+        ECPoint(pk),
         SeatStatus::Waiting,
     )?; // waiting-for-BB：先入座等待，盲注位（大盲）到达时才参与发牌
 
@@ -1938,7 +1938,7 @@ fn dispatch_submit_player_reveal_tokens(
     )?;
     // ECPoint → G1Projective（state_machine 接口使用裸 G1Projective）
     let reveal_tokens: Vec<G1Projective> =
-        input.reveal_tokens.into_iter().map(Into::into).collect();
+        input.reveal_tokens.into_iter().map(|t| *t).collect();
     state_machine::apply_submit_player_reveal_tokens(
         table,
         seat_index,
@@ -2365,7 +2365,7 @@ mod tests {
         let identity_args = JoinTableArgs {
             player,
             buy_in: 1_000,
-            pk: ECPoint(G1Projective::identity()),
+            pk: ECPoint(g1_identity()),
             pk_ownership_proof: vec![0; 80],
         };
         let identity_error = dispatch(
@@ -3252,7 +3252,7 @@ mod tests {
             .unwrap();
 
         // 3 名玩家，pk 都用 generator；lineage 是 canonical fact，aggregate 由其派生。
-        let g = G1Projective::generator();
+        let g = g1_generator();
         for i in 0..3u8 {
             table.seats[i as usize].fixture_set_player([0x11 + i; 20]);
             table.seats[i as usize].set_stack(1000).unwrap();
@@ -3284,7 +3284,7 @@ mod tests {
         let zero = super::super::utils::scalar_zero();
         DLEqProof::from_parts(
             vec![],                   // per_card_commitments
-            G1Projective::identity(), // commitment_pk（C::Point）
+            g1_identity(), // commitment_pk（C::Point）
             zero,                     // response（C::Scalar = BlsScalar）
             zero,                     // nonce（C::Scalar = BlsScalar）
         )
@@ -3294,7 +3294,7 @@ mod tests {
     -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>
     {
         poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof {
-            commitment: G1Projective::identity(),
+            commitment: g1_identity(),
             responses: vec![],
         }
     }
@@ -3302,8 +3302,8 @@ mod tests {
     fn empty_shuffle_proof() -> ShuffleProof {
         let schnorr = empty_schnorr_proof();
         let legacy = poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof {
-            sum_c1_commit: G1Projective::identity(),
-            sum_c2_commit: G1Projective::identity(),
+            sum_c1_commit: g1_identity(),
+            sum_c2_commit: g1_identity(),
             combined_schnorr_proof: schnorr.clone(),
             sum_c1_schnorr_proof: schnorr.clone(),
             sum_c2_schnorr_proof: schnorr,
@@ -3324,7 +3324,7 @@ mod tests {
         };
 
         let zero = super::super::utils::scalar_zero();
-        let identity = G1Projective::identity();
+        let identity = g1_identity();
         let generator = super::super::utils::g1_generator();
         let aggregate_pk = generator * super::super::utils::scalar_from_u64(17);
         let owner_pk = generator * super::super::utils::scalar_from_u64(19);
@@ -3670,7 +3670,7 @@ mod tests {
 
         let ctx_p1 = make_context_as([0x11; 20]);
         // output_cards 用一个新的占位牌组（与 deck_before 不同，验证替换生效）
-        let g = G1Projective::generator();
+        let g = g1_generator();
         let output_cards: Vec<ElGamalCiphertext> = (0..52)
             .map(|_| ElGamalCiphertext {
                 c1: g,
@@ -3708,7 +3708,7 @@ mod tests {
         assert_eq!(table.seats[0].stack(), 1000, "stack 应保留");
         assert_eq!(
             table.seats[0].pk().copied(),
-            Some(ECPoint(G1Projective::generator())),
+            Some(ECPoint(g1_generator())),
             "seat.pk 应保留（不置 identity）"
         );
         assert!(!table.seats[0].has_left_hand(), "left_during_hand 不应设置");
@@ -3865,15 +3865,15 @@ mod tests {
         table.seats[0].set_status(SeatStatus::Active);
         table.seats[0].set_stack(1000).unwrap();
         table.seats[0].fixture_set_total_bet(100);
-        table.seats[0].fixture_set_pk(ECPoint(G1Projective::generator()));
+        table.seats[0].fixture_set_pk(ECPoint(g1_generator()));
         table.seats[1].fixture_set_player([0x22; 20]);
         table.seats[1].set_status(SeatStatus::Active);
         table.seats[1].set_stack(1000).unwrap();
         table.seats[1].fixture_set_total_bet(100);
-        table.seats[1].fixture_set_pk(ECPoint(G1Projective::generator()));
+        table.seats[1].fixture_set_pk(ECPoint(g1_generator()));
         table.deck_state.contributor_mask = 0b11;
         table.derived_aggregated_pk().unwrap();
-        let g = G1Projective::generator();
+        let g = g1_generator();
         table.deck_state.encrypted = (0..52)
             .map(|_| ElGamalCiphertext { c1: g, c2: g })
             .collect::<Vec<_>>()

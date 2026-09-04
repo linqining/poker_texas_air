@@ -14,7 +14,7 @@ use poker_l1::vm::contracts::texas_poker::types::{
     RevealTokenState, SeatStatus, ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
-use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
+use poker_protocol::crypto::curve::{StarkCurve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
 use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
@@ -66,24 +66,24 @@ fn dispatch_task(
 }
 
 fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
-    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let secret_key = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <StarkCurve as Curve>::base_g() * secret_key;
     let input_cards: Vec<_> = (0..52)
         .map(|i| {
-            let card = Bls12381Curve::hash_to_curve(
+            let card = StarkCurve::hash_to_curve(
                 format!("dual-proof/shuffle/{nonce}/card/{i}").as_bytes(),
             );
             ElGamalCiphertextGeneric::encrypt(
                 &card,
                 &public_key,
-                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                &<StarkCurve as Curve>::Scalar::random(&mut OsRng),
             )
         })
         .collect();
     let mut permutation: Vec<usize> = (0..52).collect();
     permutation[..8].copy_from_slice(&[3, 0, 7, 1, 6, 2, 5, 4]);
     let rerandomizers: Vec<_> = (0..input_cards.len())
-        .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
+        .map(|_| <StarkCurve as Curve>::Scalar::random(&mut OsRng))
         .collect();
     let output_cards: Vec<_> = (0..input_cards.len())
         .map(|i| input_cards[permutation[i]].re_encrypt(&public_key, &rerandomizers[i]))
@@ -144,8 +144,8 @@ fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
 }
 
 fn reconstruction_task(nonce: u64) -> ProveTask {
-    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let secret_key = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <StarkCurve as Curve>::base_g() * secret_key;
     let cards = utils::generate_plaintext_cards();
     let readable_cards: Vec<_> = [2usize, 5]
         .iter()
@@ -153,7 +153,7 @@ fn reconstruction_task(nonce: u64) -> ProveTask {
             ElGamalCiphertextGeneric::encrypt(
                 &cards[i],
                 &public_key,
-                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                &<StarkCurve as Curve>::Scalar::random(&mut OsRng),
             )
         })
         .collect();
@@ -184,7 +184,7 @@ fn reconstruction_task(nonce: u64) -> ProveTask {
             .insert(
                 0,
                 index as u8,
-                PartialHoleCard::new(index as u8, ciphertext),
+                PartialHoleCard::new(index as u8, ciphertext, ciphertext),
             )
             .unwrap();
     }
@@ -234,17 +234,17 @@ fn reconstruction_task(nonce: u64) -> ProveTask {
 
 fn fold_with_proof_task(nonce: u64, active_players: u8, compound_reset: bool) -> ProveTask {
     assert!((2..=3).contains(&active_players));
-    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let secret_key = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <StarkCurve as Curve>::base_g() * secret_key;
     let input_cards: Vec<_> = (0..52)
         .map(|i| {
-            let card = Bls12381Curve::hash_to_curve(
+            let card = StarkCurve::hash_to_curve(
                 format!("dual-proof/fold/{nonce}/card/{i}").as_bytes(),
             );
             ElGamalCiphertextGeneric::encrypt(
                 &card,
                 &public_key,
-                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                &<StarkCurve as Curve>::Scalar::random(&mut OsRng),
             )
         })
         .collect();
@@ -255,7 +255,7 @@ fn fold_with_proof_task(nonce: u64, active_players: u8, compound_reset: bool) ->
             c2: ciphertext.decrypt(&secret_key),
         })
         .collect();
-    let fold_proof = DLEqProof::<Bls12381Curve, LeaveKind>::prove(
+    let fold_proof = DLEqProof::<StarkCurve, LeaveKind>::prove(
         &input_cards,
         &output_cards,
         &secret_key,
@@ -323,17 +323,17 @@ fn fold_with_proof_task(nonce: u64, active_players: u8, compound_reset: bool) ->
 }
 
 fn reveal_task(nonce: u64) -> ProveTask {
-    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let secret_key = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <StarkCurve as Curve>::base_g() * secret_key;
     let encrypted_cards: Vec<_> = (0..52)
         .map(|i| {
-            let card = Bls12381Curve::hash_to_curve(
+            let card = StarkCurve::hash_to_curve(
                 format!("dual-proof/reveal/{nonce}/card/{i}").as_bytes(),
             );
             ElGamalCiphertextGeneric::encrypt(
                 &card,
                 &public_key,
-                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                &<StarkCurve as Curve>::Scalar::random(&mut OsRng),
             )
         })
         .collect();

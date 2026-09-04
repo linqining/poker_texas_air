@@ -1,5 +1,5 @@
 use crate::crypto::{
-    encrypt_batch, DefaultCurve, EcPoint, ElGamalCiphertext, Plaintext, Scalar, BASE_G, N_CARDS,
+    encrypt_batch, DefaultCurve, EcPoint, ElGamalCiphertext, Plaintext, Scalar, base_g, N_CARDS,
 };
 use crate::z_poker::convert::hex_to_ecpoint;
 use crate::zk_shuffle::error::VerificationError;
@@ -16,28 +16,14 @@ use crate::crypto::curve::{Curve, CurvePoint, CurveScalar};
 use crate::z_poker::card::{standard_deck, PlayingCard};
 use crate::z_poker::key_manager::KeyManager;
 use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
-#[cfg(not(feature = "stark-curve"))]
-use blstrs::G1Projective;
 use rand_core::OsRng;
 use std::collections::HashMap;
 
 /// Derive 52 deterministic, independent EcPoints as card plaintexts.
 ///
-/// Uses BLS12-381 hash_to_g1 with label "texas_poker/card/{i}".
-/// DST 对齐 poker_l1 VM 的 `generate_plaintext_cards`（BLS_G1_DST）——
-/// 方案A 的 deck 同源要求：游戏层与 VM 必须共享同一规范明文域，
-/// 否则注入 VM 的 deck 在解密时无法 canonical-match。
-#[cfg(not(feature = "stark-curve"))]
-pub fn new_plain_text() -> Vec<Plaintext> {
-    const BLS_DST: &[u8] = b"POKER_L1_BLS12381G1_XMD:SHA-256_SSWU_RO_";
-    (0..N_CARDS)
-        .map(|i| {
-            let label = format!("texas_poker/card/{}", i);
-            G1Projective::hash_to_curve(label.as_bytes(), BLS_DST, b"")
-        })
-        .collect()
-}
-
+/// 明文牌 = `DefaultCurve::hash_to_curve("texas_poker/card/{i}")`
+/// （Poseidon try-and-increment）。VM 侧 `generate_plaintext_cards` 必须同源——
+/// 方案A deck 注入的 canonical-match 前提。
 /// Plan D：STARK 曲线世界的明文牌 = DefaultCurve::hash_to_curve
 /// （poseidon try-and-increment，与本仓库主协议一致）。
 #[cfg(feature = "stark-curve")]
@@ -74,7 +60,7 @@ impl MentalPokerGame {
         let initial_encrypt_deck = deck_plaintext
             .iter()
             .map(|c| ElGamalCiphertext {
-                c1: *BASE_G,
+                c1: base_g(),
                 c2: *c,
             })
             .collect();
@@ -109,7 +95,7 @@ impl MentalPokerGame {
             .deck_plaintext
             .iter()
             .map(|c| ElGamalCiphertext {
-                c1: *BASE_G,
+                c1: base_g(),
                 c2: *c + agg,
             })
             .collect();
@@ -682,7 +668,7 @@ impl MentalPokerGame {
             .get(player_pk)
             .ok_or(VerificationError::EntryNotFound)?;
 
-        let claimed_pk = *BASE_G * sk;
+        let claimed_pk = base_g() *  sk;
         if claimed_pk != player.pk {
             return Err(VerificationError::EntryNotFound);
         }

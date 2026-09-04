@@ -8,9 +8,8 @@ description = "Complete proof suite for the mental-poker protocol"
 [features]
 borsh = [
     "dep:borsh",
-    "dep:blstrs",
-    "dep:group",
     "poker-protocol-core/borsh",
+    "poker-protocol-core/stark-backend",
     "poker-protocol-bg/borsh",
 ]
 
@@ -25,8 +24,6 @@ sha3 = "0.10.8"
 merlin = "3"
 tracing = "0.1"
 borsh = { version = "1.5", optional = true }
-blstrs = { version = "0.7", optional = true }
-group = { version = "0.13", optional = true }
 
 [dev-dependencies]
 curve25519-dalek = { version = "4.1.3", features = ["rand_core"] }

@@ -587,7 +587,7 @@ mod hand_start_baseline_tests {
             .mental_poker_game
             .deck_plaintext
             .iter()
-            .map(|p| ElGamalCiphertext { c1: *poker_protocol::crypto::BASE_G, c2: *p + agg })
+            .map(|p| ElGamalCiphertext { c1: poker_protocol::crypto::base_g(), c2: *p + agg })
             .collect()
     }
 

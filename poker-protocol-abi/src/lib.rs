@@ -51,13 +51,18 @@ pub enum CurveId {
     /// encodings, 32-byte big-endian scalars, FiatShamirSha3 transcript.
     /// Never decodable as a legacy BLS request.
     Secp256k1 = 5,
+    /// Stark curve (Plan D: STARK 曲线世界，Cairo-native EC_OP builtin)。
+    ///
+    /// Cofactor-1 curve：32 字节压缩点、32 字节大端标量、Poseidon 域挑战。
+    /// 2026-09-05 起 `DefaultCurve`。
+    StarkCurve = 6,
 }
 
 impl CurveId {
     pub fn point_size(self) -> usize {
         match self {
             Self::Bls12381G1 | Self::Bls12377G1 => 48,
-            Self::Ristretto255 | Self::Bn254G1 => 32,
+            Self::Ristretto255 | Self::Bn254G1 | Self::StarkCurve => 32,
             Self::Secp256k1 => 33,
         }
     }
@@ -73,6 +78,7 @@ impl TryFrom<u8> for CurveId {
             3 => Ok(Self::Ristretto255),
             4 => Ok(Self::Bn254G1),
             5 => Ok(Self::Secp256k1),
+            6 => Ok(Self::StarkCurve),
             _ => Err(AbiError::UnsupportedCurve(value)),
         }
     }
@@ -275,6 +281,11 @@ impl ShuffleVerifyRequest {
                 TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
             )
             | (
+                CurveId::StarkCurve,
+                ShuffleProofSystem::BayerGrothV2,
+                TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
+            )
+            | (
                 CurveId::Ristretto255,
                 ShuffleProofSystem::RistrettoAirV1,
                 TranscriptId::Poseidon252,
@@ -407,6 +418,11 @@ impl ReconstructionVerifyRequest {
         match (self.curve, self.proof_system, self.transcript) {
             (
                 CurveId::Bls12381G1 | CurveId::Bls12377G1,
+                ReconstructionProofSystem::BayerGrothOrderedV2,
+                TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
+            ) => {}
+            (
+                CurveId::StarkCurve,
                 ReconstructionProofSystem::BayerGrothOrderedV2,
                 TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
             ) => {}
@@ -555,6 +571,11 @@ impl ReconstructionV3VerifyRequest {
         match (self.curve, self.proof_system, self.transcript) {
             (
                 CurveId::Bls12381G1 | CurveId::Bls12377G1,
+                ReconstructionProofSystem::BayerGrothSlotOrV3,
+                TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
+            )
+            | (
+                CurveId::StarkCurve,
                 ReconstructionProofSystem::BayerGrothSlotOrV3,
                 TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
             )

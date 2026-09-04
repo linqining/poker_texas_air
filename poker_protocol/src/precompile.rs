@@ -1,9 +1,9 @@
-//! Native BLS12-381 reference adapters for the stable poker precompile ABI.
-//!
-//! Production STWO and chain integrations bind the canonical request bytes and
-//! may replace this backend with BLS12-377 without changing the AIR contract.
+//! Native precompile reference adapters for the stable poker precompile ABI
+//! （Plan D：Stark 曲线世界，CurveId::StarkCurve；请求字节随曲线编码变化，
+//! 不考虑与 BLS 时代兼容）。
 
-use crate::crypto::curve::{Bls12381Curve, Curve, CurvePoint, ElGamalCiphertextGeneric};
+use crate::crypto::curve::{Curve, CurvePoint, ElGamalCiphertextGeneric};
+use crate::crypto::types::DefaultCurve;
 use crate::zk_shuffle::bayer_groth::BayerGrothShuffleProof;
 use crate::zk_shuffle::reconstruction::{
     ReconstructProof, ReconstructProofV3, ReconstructionV3Statement,
@@ -21,16 +21,16 @@ pub fn build_bls12381_shuffle_request(
     context: &[u8],
     call_context: &[u8],
     transcript: TranscriptId,
-    public_key: &<Bls12381Curve as Curve>::Point,
-    input: &[ElGamalCiphertextGeneric<Bls12381Curve>],
-    output: &[ElGamalCiphertextGeneric<Bls12381Curve>],
+    public_key: &<DefaultCurve as Curve>::Point,
+    input: &[ElGamalCiphertextGeneric<DefaultCurve>],
+    output: &[ElGamalCiphertextGeneric<DefaultCurve>],
     proof: &ShuffleProof,
 ) -> Result<ShuffleVerifyRequest, NativePrecompileError> {
     let VersionedShuffleProof::BayerGrothV2(proof) = proof else {
         return Err(NativePrecompileError::LegacyProofDisabled);
     };
     let request = ShuffleVerifyRequest {
-        curve: CurveId::Bls12381G1,
+        curve: CurveId::StarkCurve,
         proof_system: ShuffleProofSystem::BayerGrothV2,
         transcript,
         context: context.to_vec(),
@@ -49,15 +49,15 @@ pub fn build_bls12381_reconstruction_request(
     context: &[u8],
     call_context: &[u8],
     transcript: TranscriptId,
-    cards: &[<Bls12381Curve as Curve>::Point],
-    output_cards: &[ElGamalCiphertextGeneric<Bls12381Curve>],
-    swap_out_cards: &[ElGamalCiphertextGeneric<Bls12381Curve>],
-    user_readable_cards: &[ElGamalCiphertextGeneric<Bls12381Curve>],
-    user_public_key: &<Bls12381Curve as Curve>::Point,
-    proof: &ReconstructProof<Bls12381Curve>,
+    cards: &[<DefaultCurve as Curve>::Point],
+    output_cards: &[ElGamalCiphertextGeneric<DefaultCurve>],
+    swap_out_cards: &[ElGamalCiphertextGeneric<DefaultCurve>],
+    user_readable_cards: &[ElGamalCiphertextGeneric<DefaultCurve>],
+    user_public_key: &<DefaultCurve as Curve>::Point,
+    proof: &ReconstructProof<DefaultCurve>,
 ) -> Result<ReconstructionVerifyRequest, NativePrecompileError> {
     let request = ReconstructionVerifyRequest {
-        curve: CurveId::Bls12381G1,
+        curve: CurveId::StarkCurve,
         proof_system: ReconstructionProofSystem::BayerGrothOrderedV2,
         transcript,
         context: context.to_vec(),
@@ -85,14 +85,14 @@ pub fn build_bls12381_reconstruction_v3_request(
     context: &[u8],
     call_context: &[u8],
     transcript: TranscriptId,
-    statement: &ReconstructionV3Statement<Bls12381Curve>,
-    proof: &ReconstructProofV3<Bls12381Curve>,
+    statement: &ReconstructionV3Statement<DefaultCurve>,
+    proof: &ReconstructProofV3<DefaultCurve>,
 ) -> Result<ReconstructionV3VerifyRequest, NativePrecompileError> {
     statement
         .validate()
         .map_err(|_| NativePrecompileError::VerificationFailed)?;
     let request = ReconstructionV3VerifyRequest {
-        curve: CurveId::Bls12381G1,
+        curve: CurveId::StarkCurve,
         proof_system: ReconstructionProofSystem::BayerGrothSlotOrV3,
         transcript,
         context: context.to_vec(),
@@ -124,7 +124,7 @@ impl ShuffleVerifier for NativeBls12381ShuffleVerifier {
 
     fn verify(&self, request: &ShuffleVerifyRequest) -> Result<(), Self::Error> {
         request.validate()?;
-        if request.curve != CurveId::Bls12381G1 {
+        if request.curve != CurveId::StarkCurve {
             return Err(NativePrecompileError::UnsupportedCurve);
         }
         if request.proof_system != ShuffleProofSystem::BayerGrothV2 {
@@ -133,7 +133,7 @@ impl ShuffleVerifier for NativeBls12381ShuffleVerifier {
         let public_key = decode_point(&request.public_key)?;
         let input = decode_ciphertexts(&request.input)?;
         let output = decode_ciphertexts(&request.output)?;
-        let proof = BayerGrothShuffleProof::<Bls12381Curve>::try_from_slice(&request.proof)
+        let proof = BayerGrothShuffleProof::<DefaultCurve>::try_from_slice(&request.proof)
             .map_err(|_| NativePrecompileError::InvalidProofEncoding)?;
         match request.transcript {
             TranscriptId::Merlin => verify_shuffle(
@@ -169,7 +169,7 @@ impl ReconstructionVerifier for NativeBls12381ReconstructionVerifier {
 
     fn verify(&self, request: &ReconstructionVerifyRequest) -> Result<(), Self::Error> {
         request.validate()?;
-        if request.curve != CurveId::Bls12381G1 {
+        if request.curve != CurveId::StarkCurve {
             return Err(NativePrecompileError::UnsupportedCurve);
         }
         if request.proof_system != ReconstructionProofSystem::BayerGrothOrderedV2 {
@@ -184,7 +184,7 @@ impl ReconstructionVerifier for NativeBls12381ReconstructionVerifier {
         let swap_out_cards = decode_ciphertexts(&request.swap_out_cards)?;
         let user_readable_cards = decode_ciphertexts(&request.user_readable_cards)?;
         let user_public_key = decode_point(&request.user_public_key)?;
-        let proof = ReconstructProof::<Bls12381Curve>::try_from_slice(&request.proof)
+        let proof = ReconstructProof::<DefaultCurve>::try_from_slice(&request.proof)
             .map_err(|_| NativePrecompileError::InvalidProofEncoding)?;
         match request.transcript {
             TranscriptId::Merlin => verify_reconstruction(
@@ -222,14 +222,14 @@ impl ReconstructionV3Verifier for NativeBls12381ReconstructionV3Verifier {
 
     fn verify(&self, request: &ReconstructionV3VerifyRequest) -> Result<(), Self::Error> {
         request.validate()?;
-        if request.curve != CurveId::Bls12381G1 {
+        if request.curve != CurveId::StarkCurve {
             return Err(NativePrecompileError::UnsupportedCurve);
         }
         if request.proof_system != ReconstructionProofSystem::BayerGrothSlotOrV3 {
             return Err(NativePrecompileError::UnsupportedProofSystem);
         }
 
-        let statement = ReconstructionV3Statement::<Bls12381Curve> {
+        let statement = ReconstructionV3Statement::<DefaultCurve> {
             version: request.statement_version,
             context_digest: request.context_digest,
             reconstruction_epoch: request.reconstruction_epoch,
@@ -247,7 +247,7 @@ impl ReconstructionV3Verifier for NativeBls12381ReconstructionV3Verifier {
         statement
             .validate()
             .map_err(|_| NativePrecompileError::VerificationFailed)?;
-        let proof = ReconstructProofV3::<Bls12381Curve>::try_from_slice(&request.proof)
+        let proof = ReconstructProofV3::<DefaultCurve>::try_from_slice(&request.proof)
             .map_err(|_| NativePrecompileError::InvalidProofEncoding)?;
 
         match request.transcript {
@@ -271,10 +271,10 @@ impl ReconstructionV3Verifier for NativeBls12381ReconstructionV3Verifier {
 }
 
 fn verify_shuffle(
-    proof: &BayerGrothShuffleProof<Bls12381Curve>,
-    input: &[ElGamalCiphertextGeneric<Bls12381Curve>],
-    output: &[ElGamalCiphertextGeneric<Bls12381Curve>],
-    public_key: &<Bls12381Curve as Curve>::Point,
+    proof: &BayerGrothShuffleProof<DefaultCurve>,
+    input: &[ElGamalCiphertextGeneric<DefaultCurve>],
+    output: &[ElGamalCiphertextGeneric<DefaultCurve>],
+    public_key: &<DefaultCurve as Curve>::Point,
     transcript: &mut impl CryptoTranscript,
 ) -> Result<(), NativePrecompileError> {
     proof
@@ -284,12 +284,12 @@ fn verify_shuffle(
 
 #[allow(clippy::too_many_arguments)]
 fn verify_reconstruction(
-    proof: &ReconstructProof<Bls12381Curve>,
-    cards: &[<Bls12381Curve as Curve>::Point],
-    output_cards: &[ElGamalCiphertextGeneric<Bls12381Curve>],
-    swap_out_cards: &[ElGamalCiphertextGeneric<Bls12381Curve>],
-    user_readable_cards: &[ElGamalCiphertextGeneric<Bls12381Curve>],
-    user_public_key: &<Bls12381Curve as Curve>::Point,
+    proof: &ReconstructProof<DefaultCurve>,
+    cards: &[<DefaultCurve as Curve>::Point],
+    output_cards: &[ElGamalCiphertextGeneric<DefaultCurve>],
+    swap_out_cards: &[ElGamalCiphertextGeneric<DefaultCurve>],
+    user_readable_cards: &[ElGamalCiphertextGeneric<DefaultCurve>],
+    user_public_key: &<DefaultCurve as Curve>::Point,
     transcript: &mut impl CryptoTranscript,
 ) -> Result<(), NativePrecompileError> {
     proof
@@ -305,8 +305,8 @@ fn verify_reconstruction(
 }
 
 fn verify_reconstruction_v3(
-    proof: &ReconstructProofV3<Bls12381Curve>,
-    statement: &ReconstructionV3Statement<Bls12381Curve>,
+    proof: &ReconstructProofV3<DefaultCurve>,
+    statement: &ReconstructionV3Statement<DefaultCurve>,
     transcript: &mut impl CryptoTranscript,
 ) -> Result<(), NativePrecompileError> {
     proof
@@ -340,7 +340,7 @@ impl std::fmt::Display for NativePrecompileError {
 impl std::error::Error for NativePrecompileError {}
 
 fn encode_ciphertexts(
-    ciphertexts: &[ElGamalCiphertextGeneric<Bls12381Curve>],
+    ciphertexts: &[ElGamalCiphertextGeneric<DefaultCurve>],
 ) -> Vec<EncodedCiphertext> {
     ciphertexts
         .iter()
@@ -353,7 +353,7 @@ fn encode_ciphertexts(
 
 fn decode_ciphertexts(
     ciphertexts: &[EncodedCiphertext],
-) -> Result<Vec<ElGamalCiphertextGeneric<Bls12381Curve>>, NativePrecompileError> {
+) -> Result<Vec<ElGamalCiphertextGeneric<DefaultCurve>>, NativePrecompileError> {
     ciphertexts
         .iter()
         .map(|ciphertext| {
@@ -365,8 +365,8 @@ fn decode_ciphertexts(
         .collect()
 }
 
-fn decode_point(encoded: &[u8]) -> Result<<Bls12381Curve as Curve>::Point, NativePrecompileError> {
-    <<Bls12381Curve as Curve>::Point as CurvePoint>::from_compressed(encoded)
+fn decode_point(encoded: &[u8]) -> Result<<DefaultCurve as Curve>::Point, NativePrecompileError> {
+    <<DefaultCurve as Curve>::Point as CurvePoint>::from_compressed(encoded)
         .ok_or(NativePrecompileError::InvalidPointEncoding)
 }
 
@@ -374,7 +374,7 @@ fn decode_point(encoded: &[u8]) -> Result<<Bls12381Curve as Curve>::Point, Nativ
 mod tests {
     use super::*;
     use crate::crypto::curve::CurveScalar;
-    use crate::precompile_abi::RISTRETTO_AIR_DECK_SIZE;
+    use poker_protocol_abi::RISTRETTO_AIR_DECK_SIZE;
     use rand_core::OsRng;
 
     #[test]
@@ -407,19 +407,19 @@ mod tests {
     #[test]
     fn abi_roundtrip_matches_native_shuffle_verification() {
         let n = 8;
-        let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-        let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+        let secret_key = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
+        let public_key = <DefaultCurve as Curve>::base_g() * secret_key;
         let input: Vec<_> = (0..n)
             .map(|i| {
                 let message =
-                    Bls12381Curve::hash_to_curve(format!("precompile/test/card/{i}").as_bytes());
-                let randomness = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+                    DefaultCurve::hash_to_curve(format!("precompile/test/card/{i}").as_bytes());
+                let randomness = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
                 ElGamalCiphertextGeneric::encrypt(&message, &public_key, &randomness)
             })
             .collect();
         let permutation = vec![3, 0, 7, 1, 6, 2, 5, 4];
         let rerandomizers: Vec<_> = (0..n)
-            .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
+            .map(|_| <DefaultCurve as Curve>::Scalar::random(&mut OsRng))
             .collect();
         let output: Vec<_> = (0..n)
             .map(|i| input[permutation[i]].re_encrypt(&public_key, &rerandomizers[i]))
@@ -476,11 +476,11 @@ mod tests {
         use crate::zk_shuffle::reconstruction::{reconstruct_deck, RECONSTRUCTION_PROOF_LABEL};
 
         let n = 8;
-        let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-        let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+        let secret_key = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
+        let public_key = <DefaultCurve as Curve>::base_g() * secret_key;
         let cards: Vec<_> = (0..n)
             .map(|i| {
-                Bls12381Curve::hash_to_curve(format!("precompile/reconstruct/card/{i}").as_bytes())
+                DefaultCurve::hash_to_curve(format!("precompile/reconstruct/card/{i}").as_bytes())
             })
             .collect();
         let user_readable_cards: Vec<_> = [1usize, 6]
@@ -489,12 +489,12 @@ mod tests {
                 ElGamalCiphertextGeneric::encrypt(
                     &cards[i],
                     &public_key,
-                    &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                    &<DefaultCurve as Curve>::Scalar::random(&mut OsRng),
                 )
             })
             .collect();
-        let coefficient = <Bls12381Curve as Curve>::Scalar::from_u64(7);
-        let (s_vec, output_cards, indexed_swap_cards) = reconstruct_deck::<Bls12381Curve>(
+        let coefficient = <DefaultCurve as Curve>::Scalar::from_u64(7);
+        let (s_vec, output_cards, indexed_swap_cards) = reconstruct_deck::<DefaultCurve>(
             &cards,
             &user_readable_cards,
             &secret_key,
@@ -542,15 +542,15 @@ mod tests {
         use crate::zk_shuffle::reconstruction::RECONSTRUCTION_V3_PROOF_LABEL;
 
         let n = 8;
-        let owner_sk = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-        let owner_pk = <Bls12381Curve as Curve>::base_g() * owner_sk;
+        let owner_sk = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
+        let owner_pk = <DefaultCurve as Curve>::base_g() * owner_sk;
         // A distinct aggregate key exercises the cross-key relation rather
         // than accidentally reducing the test to a same-key DLEQ proof.
-        let aggregate_sk = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-        let aggregate_pk = <Bls12381Curve as Curve>::base_g() * aggregate_sk;
+        let aggregate_sk = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
+        let aggregate_pk = <DefaultCurve as Curve>::base_g() * aggregate_sk;
         let cards: Vec<_> = (0..n)
             .map(|i| {
-                Bls12381Curve::hash_to_curve(
+                DefaultCurve::hash_to_curve(
                     format!("precompile/reconstruct-v3/card/{i}").as_bytes(),
                 )
             })
@@ -561,7 +561,7 @@ mod tests {
                 ElGamalCiphertextGeneric::encrypt(
                     &cards[i],
                     &owner_pk,
-                    &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                    &<DefaultCurve as Curve>::Scalar::random(&mut OsRng),
                 )
             })
             .collect();

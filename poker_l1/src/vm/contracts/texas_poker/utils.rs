@@ -3,9 +3,9 @@
 //! 本模块在删除 `crypto/` 目录后，提供以下能力：
 //!
 //! - **G1/Scalar 自由函数**：`parse_g1`/`serialize_g1`/`g1_add`/`g1_sub`/`g1_mul`/`hash_to_scalar`
-//!   等（blstrs 包装，与原 `crypto::bls_scalar` API 一致），最小化 `state_machine.rs` 改动
+//!   等（curve-generic 门面，`DefaultCurve` = StarkCurve——Plan D，blst 已移除）
 //! - **ElGamal 操作**：`encrypt`/`decrypt`/`gen_reveal_token`/`remask`/`add_pk_to_c2` 等
-//!   包装 `poker_protocol::crypto::curve::ElGamalCiphertextGeneric::<Bls12381Curve>` 方法
+//!   包装 `ElGamalCiphertextGeneric<DefaultCurve>` 方法
 //! - **Transcript 工厂**：shuffle V2、legacy reconstruction 与 production reconstruction V3
 //!   使用各自固定的 Move-compatible SHA3 transcript domain
 //! - **ZK skip 回退**：`verify_or_skip` 保留 dev chain 友好的跳过逻辑
@@ -15,29 +15,24 @@
 //!
 //! # 字节序约定
 //!
-//! - G1 compressed：48 字节（blstrs `to_compressed` / `from_compressed`）
-//! - Scalar：32 字节大端序（blstrs `Scalar::to_bytes_be`）
-//! - SHA3-256 输出为大端序字节流，清高 2 位即 `h[0] & 0x3F`（M-P18）
+//! - 曲线点压缩：32 字节（Stark 曲线，`CurvePoint::compress`）
+//! - Scalar：32 字节大端序（`CurveScalar::as_bytes`，仅接受 canonical 值）
+//! - `hash_to_scalar`/`hash_to_curve` 委托 core Stark 后端（Poseidon 域）
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
-use blstrs::{G1Projective, Scalar as BlsScalar};
-use ff::Field;
-use group::Group;
-use sha3::{Digest, Sha3_256};
-use subtle::CtOption;
+use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar};
 
-// 注：移除 CurvePoint / CurveScalar 导入 —— 它们与 group::Group / ff::Field 在
-// G1Projective / BlsScalar 上提供同名方法（identity / is_identity / invert），
-// 导致 E0034 多义性。统一使用 group::Group + ff::Field 即可覆盖所有调用点。
-use poker_protocol::crypto::types::ElGamalCiphertext;
+use poker_protocol::crypto::types::{DefaultCurve, ElGamalCiphertext};
+
+// Plan D（2026-09-05）：曲线类型统一收敛到 `DefaultCurve`（= StarkCurve）。
+// 保留历史别名 `G1Projective`/`BlsScalar` 以最小化移植面——实际为 Stark 点/标量。
+pub type G1Projective = <DefaultCurve as Curve>::Point;
+pub type BlsScalar = <DefaultCurve as Curve>::Scalar;
 use poker_protocol::zk_shuffle::transcript_ext::{
     CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
 };
 
-/// RFC 9380 hash-to-curve DST（原 `crypto_precompiles::bls::BLS_G1_DST`，
-/// Phase 1 收缩后内联：变更即换域，等价换协议——勿改）。
-pub const BLS_G1_DST: &[u8] = b"POKER_L1_BLS12381G1_XMD:SHA-256_SSWU_RO_";
 use crate::error::{PokerL1Error, PokerL1Result};
 
 /// Whether crate-internal unit tests may bypass expensive Mental Poker verification.
@@ -52,24 +47,14 @@ pub const fn test_only_crypto_skip() -> bool {
 
 // ========== 常量 ==========
 
-/// G1 compressed bytes 长度（48 字节）。
-pub const G1_COMPRESSED_SIZE: usize = 48;
+/// 曲线点压缩字节长度（Stark 曲线，32 字节）。
+pub const G1_COMPRESSED_SIZE: usize = 32;
 
 /// Scalar bytes 长度（32 字节，大端序）。
 pub const SCALAR_SIZE: usize = 32;
 
 /// 扑克牌数量。
 pub const N_CARDS: usize = 52;
-
-// ========== 内部辅助 ==========
-
-fn ct_opt_to_opt<T>(ct: CtOption<T>) -> Option<T> {
-    if bool::from(ct.is_some()) {
-        Some(ct.unwrap())
-    } else {
-        None
-    }
-}
 
 // ========== Transcript 工厂 ==========
 
@@ -140,7 +125,7 @@ pub fn reconstruction_v3_context_digest(table: &super::types::TexasPokerTable) -
     material.extend_from_slice(b"zchain.texas_poker.reconstruction_v3.context.v1");
     material.extend_from_slice(&table.id.to_bytes());
     material.extend_from_slice(&table.hand_id.to_le_bytes());
-    material.extend_from_slice(b"bls12-381-g1");
+    material.extend_from_slice(b"stark-curve-v1");
     blake2b_256(&material)
 }
 
@@ -170,11 +155,11 @@ pub fn reconstruction_v3_prior_state_digest(
         )
     })?;
     material.extend_from_slice(&reconstruct_epoch_ms.to_le_bytes());
-    material.extend_from_slice(&aggregate_pk.0.to_compressed());
+    material.extend_from_slice(aggregate_pk.0.compress().as_ref());
     let plaintext_cards = generate_plaintext_cards();
     material.extend_from_slice(&(plaintext_cards.len() as u32).to_le_bytes());
     for card in &plaintext_cards {
-        material.extend_from_slice(&card.to_compressed());
+        material.extend_from_slice(card.compress().as_ref());
     }
 
     let readable_records = table
@@ -192,8 +177,8 @@ pub fn reconstruction_v3_prior_state_digest(
         material.push(card_slot);
         material.push(card.encrypted_card_index);
         let ciphertext = &card.ciphertext;
-        material.extend_from_slice(&ciphertext.c1.to_compressed());
-        material.extend_from_slice(&ciphertext.c2.to_compressed());
+        material.extend_from_slice(ciphertext.c1.compress().as_ref());
+        material.extend_from_slice(ciphertext.c2.compress().as_ref());
     }
     Ok(blake2b_256(&material))
 }
@@ -225,31 +210,30 @@ where
 
 // ========== G1/Scalar 序列化与反序列化 ==========
 
-/// 反序列化 G1 compressed bytes（48 字节），含子群检查。
+/// 反序列化压缩曲线点（32 字节，Stark）。
 pub fn parse_g1(bytes: &[u8]) -> PokerL1Result<G1Projective> {
     if bytes.len() != G1_COMPRESSED_SIZE {
-        return Err(PokerL1Error::InvalidBlsPoint(format!(
-            "G1 compressed size mismatch: {} != {}",
+        return Err(PokerL1Error::InvalidCurvePoint(format!(
+            "compressed point size mismatch: {} != {}",
             bytes.len(),
             G1_COMPRESSED_SIZE
         )));
     }
-    let mut arr = [0u8; G1_COMPRESSED_SIZE];
-    arr.copy_from_slice(bytes);
-    ct_opt_to_opt(G1Projective::from_compressed(&arr)).ok_or(PokerL1Error::InvalidSubgroup(
-        "G1 point failed subgroup check or not on curve",
-    ))
+    CurvePoint::from_compressed(bytes)
+        .ok_or(PokerL1Error::InvalidCurvePoint("point not on curve".into()))
 }
 
-/// 序列化 G1 点为 compressed bytes（48 字节）。
+/// 序列化曲线点为压缩字节（32 字节）。
 pub fn serialize_g1(point: &G1Projective) -> [u8; G1_COMPRESSED_SIZE] {
-    point.to_compressed()
+    let mut out = [0u8; G1_COMPRESSED_SIZE];
+    out.copy_from_slice(CurvePoint::compress(point).as_ref());
+    out
 }
 
 /// 反序列化 Scalar（32 字节，大端序）。
 pub fn parse_scalar(bytes: &[u8]) -> PokerL1Result<BlsScalar> {
     if bytes.len() != SCALAR_SIZE {
-        return Err(PokerL1Error::InvalidBlsScalar(format!(
+        return Err(PokerL1Error::InvalidCurveScalar(format!(
             "scalar size mismatch: {} != {}",
             bytes.len(),
             SCALAR_SIZE
@@ -257,30 +241,32 @@ pub fn parse_scalar(bytes: &[u8]) -> PokerL1Result<BlsScalar> {
     }
     let mut arr = [0u8; SCALAR_SIZE];
     arr.copy_from_slice(bytes);
-    ct_opt_to_opt(BlsScalar::from_bytes_be(&arr))
-        .ok_or_else(|| PokerL1Error::InvalidBlsScalar("scalar reduction failed".to_string()))
+    <BlsScalar as CurveScalar>::from_canonical_bytes(&arr)
+        .ok_or_else(|| PokerL1Error::InvalidCurveScalar("non-canonical scalar".to_string()))
 }
 
 /// 序列化 Scalar 为 32 字节大端序。
 pub fn serialize_scalar(s: &BlsScalar) -> [u8; SCALAR_SIZE] {
-    s.to_bytes_be()
+    let mut out = [0u8; SCALAR_SIZE];
+    out.copy_from_slice(&CurveScalar::as_bytes(s));
+    out
 }
 
 // ========== 标量构造与运算 ==========
 
 /// 标量零元。
 pub fn scalar_zero() -> BlsScalar {
-    BlsScalar::ZERO
+    <BlsScalar as CurveScalar>::zero()
 }
 
 /// 标量单位元。
 pub fn scalar_one() -> BlsScalar {
-    BlsScalar::ONE
+    <BlsScalar as CurveScalar>::one()
 }
 
 /// 从 u64 构造标量。
 pub fn scalar_from_u64(x: u64) -> BlsScalar {
-    BlsScalar::from(x)
+    <BlsScalar as CurveScalar>::from_u64(x)
 }
 
 /// 标量加法。
@@ -305,37 +291,24 @@ pub fn scalar_neg(a: &BlsScalar) -> BlsScalar {
 
 /// 标量求逆（若为零返回零）。
 pub fn scalar_inv(a: &BlsScalar) -> BlsScalar {
-    let ct = a.invert();
-    if bool::from(ct.is_some()) {
-        ct.unwrap()
-    } else {
-        BlsScalar::ZERO
-    }
+    // core StarkScalar::invert 对零值返回零（非 CtOption）。
+    CurveScalar::invert(a)
 }
 
 // ========== 哈希到标量 / Hash-to-curve ==========
 
-/// 将任意数据哈希为 BLS12-381 标量。
+/// 将任意数据哈希为曲线标量。
 ///
-/// 算法（M-P18）：
-/// 1. SHA3-256(data) → 32 字节大端序 h
-/// 2. 清除 h[0] 高 2 位（`h[0] &= 0x3F`），确保值 < 2^254 < BLS12-381 曲线阶
-/// 3. Scalar::from_bytes_be(h)
+/// Plan D：委托 `DefaultCurve::hash_to_scalar`（Stark 曲线 = Poseidon 归约，
+/// 与 z_poker 客户端同源——挑战派生逐字节一致的前提）。
 pub fn hash_to_scalar(data: &[u8]) -> PokerL1Result<BlsScalar> {
-    let mut hasher = Sha3_256::new();
-    Digest::update(&mut hasher, data);
-    let mut h = hasher.finalize();
-    h[0] &= 0x3F; // M-P18: 大端序下 h[0] 是 MSB，清高 2 位
-    let mut arr = [0u8; SCALAR_SIZE];
-    arr.copy_from_slice(&h);
-    ct_opt_to_opt(BlsScalar::from_bytes_be(&arr)).ok_or_else(|| {
-        PokerL1Error::InvalidBlsScalar("hash_to_scalar reduction failed".to_string())
-    })
+    Ok(<DefaultCurve as Curve>::hash_to_scalar(data))
 }
 
-/// RFC 9380 hash to G1（DST 固定为 [`BLS_G1_DST`]）。
+/// Hash-to-curve（Stark 曲线 = Poseidon try-and-increment，与 z_poker
+/// `new_plain_text` 同一域：`texas_poker/card/{i}` 明文牌派生同源）。
 pub fn hash_to_g1(msg: &[u8]) -> G1Projective {
-    G1Projective::hash_to_curve(msg, BLS_G1_DST, &[])
+    <DefaultCurve as Curve>::hash_to_curve(msg)
 }
 
 /// 生成 52 张确定性明文牌点。
@@ -381,12 +354,12 @@ pub fn derive_scalar_from_card_and_pk(c1: &[u8], c2: &[u8], pk: &[u8]) -> PokerL
 
 /// G1 生成元。
 pub fn g1_generator() -> G1Projective {
-    G1Projective::generator()
+    <DefaultCurve as Curve>::base_g()
 }
 
 /// G1 单位元。
 pub fn g1_identity() -> G1Projective {
-    G1Projective::identity()
+    <G1Projective as CurvePoint>::identity()
 }
 
 /// G1 点相等比较。
@@ -547,7 +520,8 @@ pub fn create_pk_ownership_proof(
     secret_key: &BlsScalar,
     nonce: &BlsScalar,
 ) -> PokerL1Result<Vec<u8>> {
-    if bool::from(secret_key.is_zero()) || bool::from(nonce.is_zero()) {
+    let zero = <BlsScalar as CurveScalar>::zero();
+    if *secret_key == zero || *nonce == zero {
         return Err(PokerL1Error::Serialization(
             "PK ownership secret key and nonce must be non-zero".into(),
         ));
@@ -558,13 +532,13 @@ pub fn create_pk_ownership_proof(
     let generator_bytes = serialize_g1(&generator);
     let pk_bytes = serialize_g1(&pk);
     let commitment_bytes = serialize_g1(&commitment);
-    let mut challenge_input = Vec::with_capacity(48 * 3);
+    let mut challenge_input = Vec::with_capacity(G1_COMPRESSED_SIZE * 3);
     challenge_input.extend_from_slice(&generator_bytes);
     challenge_input.extend_from_slice(&pk_bytes);
     challenge_input.extend_from_slice(&commitment_bytes);
     let challenge = hash_to_scalar(&challenge_input)?;
     let response = nonce + challenge * secret_key;
-    let mut proof = Vec::with_capacity(80);
+    let mut proof = Vec::with_capacity(G1_COMPRESSED_SIZE + SCALAR_SIZE);
     proof.extend_from_slice(&commitment_bytes);
     proof.extend_from_slice(&serialize_scalar(&response));
     Ok(proof)
@@ -572,7 +546,7 @@ pub fn create_pk_ownership_proof(
 
 /// 验证 PK 所有权证明（Schnorr proof of knowledge of sk where pk = G · sk）。
 ///
-/// `proof_bytes` 格式：commitment (48 bytes G1) + response (32 bytes scalar) = 80 bytes
+/// `proof_bytes` 格式：commitment (32 bytes point) + response (32 bytes scalar) = 64 bytes
 ///
 /// 挑战派生：`challenge = hash_to_scalar(G_bytes || pk_bytes || commitment_bytes)`
 /// （M-D12 修复：使用 `hash_to_scalar` 替代原始 SHA2-256，清除高位确保 < 曲线阶）
@@ -583,8 +557,8 @@ pub fn verify_pk_ownership(pk: &G1Projective, proof_bytes: &[u8]) -> bool {
     if g1_is_identity(pk) {
         return false;
     }
-    // 检查长度: 48 (commitment) + 32 (response) = 80
-    if proof_bytes.len() != 80 {
+    // 检查长度: 32 (commitment) + 32 (response) = 64
+    if proof_bytes.len() != G1_COMPRESSED_SIZE + SCALAR_SIZE {
         return false;
     }
 
@@ -593,8 +567,8 @@ pub fn verify_pk_ownership(pk: &G1Projective, proof_bytes: &[u8]) -> bool {
     let g_bytes = serialize_g1(&g);
 
     // 反序列化 commitment 和 response
-    let commitment_bytes = &proof_bytes[0..48];
-    let response_bytes = &proof_bytes[48..80];
+    let commitment_bytes = &proof_bytes[0..G1_COMPRESSED_SIZE];
+    let response_bytes = &proof_bytes[G1_COMPRESSED_SIZE..];
 
     let commitment = match parse_g1(commitment_bytes) {
         Ok(p) => p,
@@ -812,7 +786,7 @@ mod tests {
         let g = g1_generator();
 
         // 链下构造 proof: commitment = G · omega, response = omega + challenge · sk
-        let omega = BlsScalar::random(&mut rng);
+        let omega = <BlsScalar as CurveScalar>::random(&mut rng);
         let commitment = g * omega;
 
         // challenge = hash_to_scalar(G || pk || commitment)

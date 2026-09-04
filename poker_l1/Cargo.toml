@@ -26,7 +26,6 @@ rand = { workspace = true }
 secp256k1 = { workspace = true }
 ed25519-dalek = { workspace = true }
 subtle = { workspace = true }
-blstrs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha3 = { workspace = true }

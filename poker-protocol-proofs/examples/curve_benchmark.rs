@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use poker_protocol_bg::BayerGrothShuffleProof;
 use poker_protocol_core::{
-    Bls12381Curve, CryptoTranscript, Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric,
+    StarkCurve, CryptoTranscript, Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric,
     RistrettoCurve,
 };
 use poker_protocol_proofs::{
@@ -200,5 +200,5 @@ fn main() {
     black_box(OsRng.next_u64());
     println!("curve\tencoding");
     run::<RistrettoCurve>("Ristretto255");
-    run::<Bls12381Curve>("BLS12-381-G1");
+    run::<StarkCurve>("BLS12-381-G1");
 }
