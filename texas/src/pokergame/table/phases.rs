@@ -23,6 +23,9 @@ impl Table {
             return;
         }
 
+        // #18：标记本手动作日志窗口起点（审计摘要只覆盖本手）。
+        self.hand_log_start = self.action_log.len();
+
         // move_button
         self.move_button();
 

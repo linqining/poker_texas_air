@@ -774,22 +774,18 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
                         return None;
                     }
                     let pk_hex = seat.player.as_ref().map(|p| p.pk_hex.clone())?;
-                    // 超时自动行动按游戏规则决定（不按 socket 连接状态——
-                    // 网络可能抖动）：可 check 时绝不弃牌；普通跟注（盲注级
-                    // 别）自动跟注；只有面对超出大盲的 raise/all-in 才 fold。
                     let call_amount = table.summary.call_amount.unwrap_or(0);
                     let my_bet = seat.bet;
                     // 大盲 = 2×min_bet（summary.meta.big_blind 是陈旧值 2，会把盲注
                     // 跟注误判为 raise 而自动弃牌）
                     let big_blind = table.summary.min_bet.saturating_mul(2);
-                    if call_amount == 0 || my_bet >= call_amount {
-                        Some(AutoAction::Check(pk_hex.to_string()))
-                    } else if call_amount - my_bet <= big_blind as u64 {
-                        // 普通跟注（盲注级别差额），自动跟注保住手牌
-                        Some(AutoAction::Call(pk_hex.to_string()))
-                    } else {
-                        // 面对超过大盲的加注：fold
-                        Some(AutoAction::Fold(pk_hex.to_string()))
+                    // 规则源：legal_auto_action（#18 纯函数，与未来 §8.2 电路
+                    // 合法性表达式共用同一规则——改规则先改这里与测试）。
+                    use crate::pokergame::actions::{legal_auto_action, AutoActionKind};
+                    match legal_auto_action(call_amount, my_bet, big_blind)? {
+                        AutoActionKind::Check => Some(AutoAction::Check(pk_hex.to_string())),
+                        AutoActionKind::Call => Some(AutoAction::Call(pk_hex.to_string())),
+                        AutoActionKind::Fold => Some(AutoAction::Fold(pk_hex.to_string())),
                     }
                 })
             } else {

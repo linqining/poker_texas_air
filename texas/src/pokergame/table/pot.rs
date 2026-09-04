@@ -146,7 +146,26 @@ impl Table {
         self.transition_to(RoundState::Waiting);
         self.set_hand_complete_at(now_ms());
         self.sit_out_felted_players();
-        // 终局记录入看板存储（P0-2）
+        // #18 审计输出：本手动作日志摘要（含超时 auto 代打标记）。
+        // auto 占比过半显式告警——服务器代打折叠任意玩家的审计钩子；
+        // §8.2 电路吸收（动作日志哈希作为第 37 入参）启用后即为其输入源。
+        let window = &self.action_log[self.hand_log_start.min(self.action_log.len())..];
+        let auto_count = window.iter().filter(|e| e.auto).count();
+        let digest_hex = crate::pokergame::actions::action_log_digest_hex(window);
+        if !window.is_empty() {
+            if auto_count * 2 > window.len() {
+                tracing::warn!(
+                    "[#18] table {} hand audit: AUTO actions {auto_count}/{} — 服务器代打占比过半，digest={digest_hex}",
+                    self.summary.id,
+                    window.len()
+                );
+            }
+            tracing::info!(
+                "[#18] table {} hand complete: action_log digest={digest_hex} (actions={}, auto={auto_count})",
+                self.summary.id,
+                window.len()
+            );
+        }
         self.record_hand_history();
 
         // Starknet 结算：镜像手牌 prove → outer aggregate → register/settle 上链

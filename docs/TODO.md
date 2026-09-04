@@ -311,9 +311,24 @@
     （accepted/autoAccepted/rejected+reason）签收据，ACTION_RECEIPT 广播
     全桌（`receipts.rs`，3 单测：签验回路/篡改拒绝/密钥持久化）。客户端
     留存回执 + acceptedSeqs 向量即可举证审查。
-- [ ] **18. auto 默认动作签名化**：服务器代打标 `(auto, server_sig)`；
-  **电路必须校验"合法默认"（零下注才可 auto-check，面对下注只能 auto-fold）后才可上线**
-  ——否则服务器可借代打折叠任意玩家。
+- [ ] **18. auto 默认动作签名化**（Phase A 服务端完成 2026-09-04；Phase B 电路待做）：
+  - ✅ **Phase A（服务端，全部测试锁定）**：
+    ① 规则源收敛为纯函数 `pokergame::actions::legal_auto_action(call_amount,
+    my_bet, big_blind)`——零下注 Check / 差额≤BB Call / 超BB Fold；
+    `handle_auto_fold` 改为消费该函数（原内联逻辑删除）；
+    ② 回执签名绑定 auto：operator 签名覆盖 `decision="autoAccepted"`（经
+    receipt_msg_bytes），客户端可本地验签"这是服务器代打 + 是 operator 承认的"；
+    ③ 动作日志哈希：`action_log_digest_hex`（starknet_keccak 链式吸收
+    seat/seq/action/amount/auto/sig_ok），`finish_showdown` 按本手窗口
+    （`hand_log_start` 边界）输出 digest + auto 占比审计（>50% WARN）；
+    ④ 测试 4+7 例（规则边界/日志哈希敏感性/full_hand 回归）全绿。
+  - ⬜ **Phase B（电路，§8.2 预留启用）**：把 `action_log_digest` 作为
+    settlement_private 电路第 37 入参追加进吸收链（wire 无重排）→ 公开段
+    追加该哈希 → v2 合约 SETTLEMENT_SEGMENT_LEN 14→15 + register_aggregate
+    增加 action_log 承诺入参 → **需要一批合约重部署**（declare/dual v3.x）。
+    上线门槛（原文）：电路校验"合法默认"（零下注才可 auto-check）后才可
+    上线主网——服务器可借代打折叠任意玩家的风险在 Phase B 落地前由
+    ①的审计日志 + #33 锁定共同缓解。
 - [ ] **19. 实施前确认 4 个开放问题**：seq 持久化粒度（per-table / per-hand）；
   电路内验签 vs 链下预验签；replayer 最小数据集；双通道备用端点选型。
 

@@ -194,6 +194,10 @@ pub struct Table {
     /// #16/#17：本手动作日志（含超时 auto 代打标记），新手牌开始清空。
     #[serde(skip)]
     pub action_log: Vec<crate::pokergame::actions::ActionLogEntry>,
+    /// #18：本手在 `action_log` 中的起始下标（start_hand 设置）。日志本体
+    /// 跨手累积便于追溯，审计摘要只覆盖本手窗口。
+    #[serde(skip)]
+    pub hand_log_start: usize,
 }
 
 impl Table {
@@ -492,6 +496,7 @@ impl Table {
             last_synced_at: None,
             accepted_seq: HashMap::new(),
             action_log: Vec::new(),
+            hand_log_start: 0,
         }
     }
 
