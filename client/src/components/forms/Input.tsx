@@ -1,7 +1,8 @@
 import styled from 'styled-components';
 
 export const Input = styled.input`
-  height: 40px;
+  /* 44px 触控目标（Apple HIG）；移动端布局按此基线设计 */
+  height: 44px;
   overflow: hidden;
   padding: 0.5rem 1rem;
   text-align: left;

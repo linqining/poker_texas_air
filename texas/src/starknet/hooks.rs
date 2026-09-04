@@ -181,7 +181,12 @@ async fn settle_hand_from_log(input: super::prove_log::HandSettleInput) {
     // 完整钱包 felt 记账：参与者映射来自本手记录（无全局截断重映射表）。
     let wallet_map = hand_wallet_map(&start);
 
-    let settlement = match super::submit::settle_hand(&mirror, rake_recipient, &wallet_map) {
+    // #18 Phase B：game 层产出的本手动作日志哈希进 settlement digest 尾词。
+    let action_log_digest = starknet_ff::FieldElement::from_bytes_be(&input.action_log_digest)
+        .expect("action log digest is a canonical felt");
+    let settlement =
+        match super::submit::settle_hand(&mirror, rake_recipient, &wallet_map, action_log_digest)
+        {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("[starknet-settle] table {table_id} hand {hand_id} settlement build failed: {e}");

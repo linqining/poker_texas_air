@@ -28,9 +28,24 @@ const HandRow = styled.li`
   border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
   border-radius: ${({ theme }) => theme.radius.md};
   padding: 0.6rem 0.75rem;
-  cursor: pointer;
   background: transparent;
+`;
+
+/* 展开交互放在真 <button> 上（此前是 li onClick，键盘无法触达） */
+const RowToggle = styled.button`
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: ${({ theme }) => theme.radius.xs};
   transition: background 0.15s ease;
+
   &:hover {
     background: rgba(255, 255, 255, 0.04);
   }
@@ -172,7 +187,7 @@ const HandHistoryPanel: React.FC<HandHistoryPanelProps> = ({ tableId, visible, o
           <Button variant="secondary" small onClick={() => void load()} disabled={loading}>
             {labels.refresh}
           </Button>
-          <Button variant="secondary" small onClick={onClose}>
+          <Button variant="secondary" small onClick={onClose} aria-label="Close">
             ✕
           </Button>
         </div>
@@ -188,22 +203,25 @@ const HandHistoryPanel: React.FC<HandHistoryPanelProps> = ({ tableId, visible, o
         {records.map((r) => {
           const isOpen = expanded === r.handSeq;
           return (
-            <HandRow
-              key={r.handSeq}
-              onClick={() => setExpanded(isOpen ? null : r.handSeq)}
-            >
-              <HandRowHeader>
-                <span>
-                  {labels.hand} #{r.handSeq} · {labels.pot} {formatChips(r.grossPot)}
-                  {r.rakeCollected > 0 && ` · ${labels.rake} ${formatChips(r.rakeCollected)}`}
-                </span>
-                <span style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                  <HandMeta>{formatTime(r.handOverAt, lang)}</HandMeta>
-                  <Badge $showdown={r.wentToShowdown}>
-                    {r.wentToShowdown ? labels.showdown : labels.fold}
-                  </Badge>
-                </span>
-              </HandRowHeader>
+            <HandRow key={r.handSeq}>
+              <RowToggle
+                type="button"
+                onClick={() => setExpanded(isOpen ? null : r.handSeq)}
+                aria-expanded={isOpen}
+              >
+                <HandRowHeader>
+                  <span>
+                    {labels.hand} #{r.handSeq} · {labels.pot} {formatChips(r.grossPot)}
+                    {r.rakeCollected > 0 && ` · ${labels.rake} ${formatChips(r.rakeCollected)}`}
+                  </span>
+                  <span style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <HandMeta>{formatTime(r.handOverAt, lang)}</HandMeta>
+                    <Badge $showdown={r.wentToShowdown}>
+                      {r.wentToShowdown ? labels.showdown : labels.fold}
+                    </Badge>
+                  </span>
+                </HandRowHeader>
+              </RowToggle>
               {r.winMessages.slice(0, isOpen ? undefined : 1).map((m, i) => (
                 <WinLine key={i}>{m}</WinLine>
               ))}

@@ -4,7 +4,7 @@
 协议（与 texas/src/starknet/settlement_prover.rs::HttpSettlementProver 对齐）：
   GET  /          -> {"ok": true, "service": ..., "program": ...}
   POST /          -> body {"circuit": "settlement_private", "hand_id": N,
-                           "inputs": ["0x..", ...]}（36 个 felt，序同 Cairo main）
+                           "inputs": ["0x..", ...]}（37 个 felt，序同 Cairo main；第 37 = 动作日志哈希，#18 Phase B）
                    -> {"ok": true, "output": [hex...], "program_hash": "0x.."}
                     （电路断言失败/证明失败 → 非 200 + {"ok": false, "error": ..}）
 

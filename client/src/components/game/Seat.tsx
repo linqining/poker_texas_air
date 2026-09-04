@@ -8,6 +8,7 @@ import { ButtonGroup } from '../forms/ButtonGroup';
 import { Form } from '../forms/Form';
 import { FormGroup } from '../forms/FormGroup';
 import { Input } from '../forms/Input';
+import { Label } from '../forms/Label';
 import gameContext from '../../context/game/gameContext';
 import { PositionedUISlot } from './PositionedUISlot';
 import { InfoPill } from './InfoPill';
@@ -288,6 +289,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
                 <ExchangeRate>{getLocalizedString('seat_exchange-rate-label').replace('{rate}', CHIPS_PER_STRK.toLocaleString())}</ExchangeRate>
               </BuyinInfo>
               <FormGroup>
+                <Label htmlFor="amount">{getLocalizedString('seat_buyin-amount-label')}</Label>
                 <Input
                   id="amount"
                   type="number"
@@ -406,6 +408,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
                           <ExchangeRate>{getLocalizedString('seat_exchange-rate-label').replace('{rate}', CHIPS_PER_STRK.toLocaleString())}</ExchangeRate>
                         </BuyinInfo>
                         <FormGroup>
+                          <Label htmlFor="amount">{getLocalizedString('seat_buyin-amount-label')}</Label>
                           <Input
                             id="amount"
                             type="number"

@@ -13,7 +13,9 @@ import { useTheme } from 'styled-components';
 import Text from '../typography/Text';
 import Button from '../buttons/Button';
 import { Input } from '../forms/Input';
+import { Label } from '../forms/Label';
 import authContext from '../../context/auth/authContext';
+import contentContext from '../../context/content/contentContext';
 import { PlayerContext as playerContext } from '../../context/player/PlayerContext';
 import { logger } from '../../helpers/logger';
 
@@ -38,21 +40,25 @@ const ModeTag = styled.span<{ $mode: string }>`
     $mode === 'passphrase' ? '#16a34a' : $mode === 'random' ? '#4da2ff' : '#94a3b8'};
 `;
 
-const MODE_LABEL: Record<string, string> = {
-  random: '随机密钥',
-  passphrase: '口令派生',
-  legacy: '旧版钱包派生',
-};
-
 const PlayerKeyPanel: React.FC = () => {
   const theme = useTheme();
   const { isLoggedIn } = useContext(authContext)!;
+  const { getLocalizedString: t } = useContext(contentContext)!;
   const { pkHex, keyMode, switchToPassphraseKey, switchToRandomKey } = useContext(playerContext)!;
   const [pass, setPass] = useState('');
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
   if (!isLoggedIn) return null;
+
+  const modeLabel = (mode: string): string =>
+    mode === 'passphrase'
+      ? t('playerkey-mode-passphrase')
+      : mode === 'random'
+        ? t('playerkey-mode-random')
+        : mode === 'legacy'
+          ? t('playerkey-mode-legacy')
+          : mode;
 
   const handleSwitch = (kind: 'passphrase' | 'random') => {
     setBusy(true);
@@ -66,15 +72,15 @@ const PlayerKeyPanel: React.FC = () => {
           ok: true,
           text:
             kind === 'passphrase'
-              ? '身份已切换为口令派生：请牢记口令，凭它可在任何设备恢复本身份'
-              : '身份已切换为随机密钥（无跨设备恢复）',
+              ? t('playerkey-msg-switched-passphrase')
+              : t('playerkey-msg-switched-random'),
         });
       } else {
-        setMsg({ ok: false, text: res.error || '切换失败' });
+        setMsg({ ok: false, text: res.error || t('playerkey-msg-failed') });
       }
     } catch (e) {
       logger.error('[PlayerKeyPanel] switch failed:', e);
-      setMsg({ ok: false, text: '切换失败（见控制台）' });
+      setMsg({ ok: false, text: t('playerkey-msg-failed-console') });
     } finally {
       setBusy(false);
     }
@@ -83,19 +89,24 @@ const PlayerKeyPanel: React.FC = () => {
   return (
     <Panel>
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-        <Text style={{ fontWeight: 700, margin: 0 }}>牌桌身份密钥</Text>
-        {keyMode && <ModeTag $mode={keyMode}>{MODE_LABEL[keyMode] ?? keyMode}</ModeTag>}
+        <Text style={{ fontWeight: 700, margin: 0 }}>{t('playerkey-title')}</Text>
+        {keyMode && <ModeTag $mode={keyMode}>{modeLabel(keyMode)}</ModeTag>}
       </div>
       <Text style={{ fontSize: '0.72rem', margin: 0, wordBreak: 'break-all' }}>
-        当前 pk：{pkHex ? `${pkHex.slice(0, 18)}…` : '未生成'}
+        {t('playerkey-current-pk')}
+        {pkHex ? `${pkHex.slice(0, 18)}…` : t('playerkey-no-key')}
       </Text>
-      <Input
-        type="password"
-        placeholder="恢复口令（≥8 字符；勿用钱包助记词）"
-        value={pass}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPass(e.target.value)}
-        disabled={busy}
-      />
+      <div>
+        <Label htmlFor="playerkey-passphrase">{t('playerkey-passphrase-label')}</Label>
+        <Input
+          id="playerkey-passphrase"
+          type="password"
+          placeholder={t('playerkey-passphrase-placeholder')}
+          value={pass}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPass(e.target.value)}
+          disabled={busy}
+        />
+      </div>
       <div style={{ display: 'flex', gap: '0.5rem' }}>
         <Button
           small
@@ -103,9 +114,9 @@ const PlayerKeyPanel: React.FC = () => {
           type="button"
           disabled={busy || pass.length < 8}
           onClick={() => handleSwitch('passphrase')}
-          title="同一口令在任何设备派生同一身份；忘记口令无法找回"
+          title={t('playerkey-tip-passphrase')}
         >
-          用口令生成/恢复
+          {t('playerkey-btn-passphrase')}
         </Button>
         <Button
           small
@@ -113,9 +124,9 @@ const PlayerKeyPanel: React.FC = () => {
           type="button"
           disabled={busy}
           onClick={() => handleSwitch('random')}
-          title="生成全新随机身份（放弃口令可恢复性）"
+          title={t('playerkey-tip-random')}
         >
-          换随机密钥
+          {t('playerkey-btn-random')}
         </Button>
       </div>
       {msg && (
@@ -131,7 +142,7 @@ const PlayerKeyPanel: React.FC = () => {
         </Text>
       )}
       <Text style={{ fontSize: '0.68rem', margin: 0, color: theme.colors.mutedText }}>
-        牌局进行中切换身份会使当前座位的义务失效（走超时/踢出降级），建议牌局间歇操作。
+        {t('playerkey-warning')}
       </Text>
     </Panel>
   );

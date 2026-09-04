@@ -38,10 +38,14 @@ pub trait IPokerSettlement<TContractState> {
     );
 
     /// Settle chips for one hand, using a registered aggregate.
+    /// `action_log_digest` (#18 Phase B) is the hand's action-log hash —
+    /// recomputed into the settlement commitment so it must match the
+    /// registered root exactly.
     fn settle_hand(
         ref self: TContractState,
         aggregate_digest: (felt252, felt252),
         hand_id: u64,
+        action_log_digest: felt252,
         players: Span<ContractAddress>,
         deltas: Span<i128>,
     );
@@ -221,6 +225,7 @@ pub mod PokerSettlement {
             ref self: ContractState,
             aggregate_digest: (felt252, felt252),
             hand_id: u64,
+            action_log_digest: felt252,
             players: Span<ContractAddress>,
             deltas: Span<i128>,
         ) {
@@ -256,6 +261,8 @@ pub mod PokerSettlement {
                 };
                 i += 1;
             }
+            // #18 Phase B：动作日志哈希为承诺尾词（与 register root 同公式）。
+            felements.append(action_log_digest);
             let computed = poseidon_hash_span(felements.span());
 
             // Require exact match with the root committed at registration.

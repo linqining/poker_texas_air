@@ -27,7 +27,8 @@ const IconWrapper = styled.label`
   height: 30px;
   z-index: 5;
   left: 5px;
-  top: 5px;
+  /* Input 基线 44px 后垂直居中 */
+  top: 7px;
 `;
 
 const ChipsAmountPill: React.FC<ChipsAmountPillProps> = ({ chipsAmount, style }) => {

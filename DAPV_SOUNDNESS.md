@@ -1,7 +1,15 @@
 # DAPV 密码学 Soundness 分析 与 手牌实例 × STARK 绑定方案
 
-状态：分析报告 v1.1（2026-08-29）。对应 `DUAL_PROOF_PROTOCOL.md` v2.8 中
-DAPV 研究方向的形式化与实验验证。
+状态：分析报告 v1.2（2026-09-05 修订）。对应 `DUAL_PROOF_PROTOCOL.md` 的
+DAPV 方向形式化与实验验证。
+
+**v1.2 修订（现状对齐）**：定理 1/2、引理 8、四层绑定方案仍是生产
+`dual/hand_batch_stark.cairo` 的可靠性依据；但曲线实例化已变——生产 =
+**Stark 曲线（EC_OP）+ Poseidon 挑战/ρ**（Plan D 2026-09-05），正文中的
+secp256k1 决策、BN254 记号与配对讨论仅作理论载体；§10 算法的现行签名为
+`verify_and_settle_dapv_stark(hand_binding, hand_id_bytes, hand_id,
+action_log_digest, players, deltas, p_batch)`，digest 断言含动作日志尾词
+（#18 Phase B）；§14 第 1 条（L2 挑战绑定缺口）已闭合。
 
 **v1.1 变更（链上落地决策——"L==O 决策"）**：配对在 DAPV 中自始至终只做
 "L 是否为零点"的判定，而群本身免费提供该判定（一次坐标比较）。两个版本

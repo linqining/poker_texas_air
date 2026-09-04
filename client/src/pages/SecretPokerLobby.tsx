@@ -87,12 +87,16 @@ const MenuGrid = styled.div`
   }
 `;
 
-const MenuCard = styled.div`
+/* button 而非 div onClick：键盘/读屏用户也能进入游戏（WCAG 2.1.1）。
+   reset 浏览器默认按钮样式以保持原视觉。 */
+const MenuCard = styled.button`
+  appearance: none;
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
   align-items: center;
   text-align: center;
+  font-family: inherit;
   cursor: pointer;
   background: rgba(255, 255, 255, 0.85);
   border: 1px solid rgba(226, 232, 240, 0.9);
@@ -134,6 +138,7 @@ const MenuCard = styled.div`
     margin: 1rem;
     width: 75%;
     max-width: 170px;
+    height: auto;
     opacity: 0.9;
   }
 
@@ -195,21 +200,22 @@ export default function Lobby() {
       <UnclaimedFundsBanner />
       <WelcomeHeading>
         {getLocalizedString('main_page-salutation')}{' '}
-        <span><PlayerName name={userName} />!</span>
+        <span><PlayerName name={userName ?? getLocalizedString('main_page-guest-name')} />!</span>
       </WelcomeHeading>
 
       <MenuGrid>
-        <MenuCard onClick={requireAuthAndNavigate}>
-          <img src={kingImg} alt={getLocalizedString('lobby_join-table-alt')} />
+        <MenuCard type="button" onClick={requireAuthAndNavigate}>
+          <img src={kingImg} alt={getLocalizedString('lobby_join-table-alt')} width={196} height={210} loading="lazy" />
           <h3>{getLocalizedString('main_page-join_table').toUpperCase()}</h3>
         </MenuCard>
 
-        <MenuCard onClick={requireAuthAndNavigate}>
-          <img src={queen2Img} alt={getLocalizedString('lobby_quick-game-alt')} />
+        <MenuCard type="button" onClick={requireAuthAndNavigate}>
+          <img src={queen2Img} alt={getLocalizedString('lobby_quick-game-alt')} width={196} height={206} loading="lazy" />
           <h3>{getLocalizedString('main_page-quick_game').toUpperCase()}</h3>
         </MenuCard>
 
         <MenuCard
+          type="button"
           onClick={() => {
             openModal(
               () => (
@@ -226,8 +232,8 @@ export default function Lobby() {
           <h3>{getLocalizedString('main_page-open_shop').toUpperCase()}</h3>
         </MenuCard>
 
-        <MenuCard onClick={() => navigate('/game-rules')}>
-          <img src={queenImg} alt={getLocalizedString('lobby_rules-alt')} />
+        <MenuCard type="button" onClick={() => navigate('/game-rules')}>
+          <img src={queenImg} alt={getLocalizedString('lobby_rules-alt')} width={196} height={206} loading="lazy" />
           <h3>{getLocalizedString('main_page-open_rules').toUpperCase()}</h3>
         </MenuCard>
       </MenuGrid>

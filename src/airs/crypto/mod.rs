@@ -31,7 +31,7 @@
 //! receipt; it does not place Bayer--Groth, DLEQ or Chaum--Pedersen equations
 //! in the STARK. The replacement must use versioned Ristretto crypto AIR
 //! components with state-opening/public-statement binding, as specified in
-//! `HOST_ZERO_RISTRETTO_AIR.md`.
+//! `docs/archive/HOST_ZERO_RISTRETTO_AIR.md`（历史路线）.
 //!
 //! ## AIR 列布局
 //!

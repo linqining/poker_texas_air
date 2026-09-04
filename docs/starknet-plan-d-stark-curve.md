@@ -8,6 +8,12 @@
 > 前序：资金隐私见 [starknet-plan-b-anonymizer.md](starknet-plan-b-anonymizer.md)，
 > 提交抗审查见 [starknet-plan-c-execution.md](starknet-plan-c-execution.md)。
 > 本计划取代此前"迁移 secp256k1"的口头结论。
+>
+> ✅ **计划已全部执行完毕（2026-09-05 终态）**：§6c 表全 ✅；blst/BLS12-381
+> 已从 workspace **全量移除**（非门控共存——legacy-bls feature 与 BLS 后端
+> 物理删除，Stark 曲线唯一世界）；wasm blocker 随之消项；§6b 的 cash-out
+> 合约（withdraw_to + CashoutUnshieldHelper）已实现并随 v3 批次部署 sepolia。
+> 本文 §1 选型论证与 §5 禁止事项作为长期政策保留；性能终态见 plan_d_perf.md。
 
 ## 0. 核实结论（2026-08 代码核对，凭据可溯）
 

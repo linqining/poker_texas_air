@@ -73,7 +73,7 @@ verifier: a STWO proof that only commits a native verifier receipt still trusts
 the party that issued that receipt. The Ristretto255 host-zero migration uses
 a new versioned request/state domain and proves the cryptographic relations in
 AIR; it must not reinterpret the BLS12-381 bytes in an existing table. See
-`../HOST_ZERO_RISTRETTO_AIR.md` for the required circuit and admission gates.
+`../docs/archive/HOST_ZERO_RISTRETTO_AIR.md` for the (historical) circuit and admission gates.
 
 ## Wire compatibility
 

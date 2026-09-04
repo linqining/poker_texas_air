@@ -99,8 +99,9 @@ pub fn legal_auto_action(
 
 /// 手牌动作日志的可追溯哈希（#18/#8.2 绑定前置）：对 (seat, seq, action,
 /// amount, auto, sig_ok) 序列做 starknet_keccak。结算时随日志输出，供
-/// 运营核对；§8.2 电路吸收（第 37 入参）启用后即为其输入源。
-pub fn action_log_digest_hex(log: &[ActionLogEntry]) -> String {
+/// 运营核对；#18 Phase B 起该哈希作为 settlement digest 吸收链尾词 +
+/// v2 公开段尾词上链（空日志 = 仅域标签的确定值）。
+pub fn action_log_digest_felt(log: &[ActionLogEntry]) -> starknet::core::types::Felt {
     use starknet::core::utils::starknet_keccak;
     let mut h = starknet_keccak(b"zgame.action_log.v1");
     for e in log {
@@ -113,7 +114,12 @@ pub fn action_log_digest_hex(log: &[ActionLogEntry]) -> String {
         buf.extend_from_slice(e.action.as_bytes());
         h = starknet_keccak(&buf);
     }
-    format!("0x{}", hex_encode_starknet(h))
+    h
+}
+
+/// [`action_log_digest_felt`] 的 hex 形态（日志/看板展示用）。
+pub fn action_log_digest_hex(log: &[ActionLogEntry]) -> String {
+    hex_encode_starknet(action_log_digest_felt(log))
 }
 
 fn hex_encode_starknet(f: starknet::core::types::Felt) -> String {

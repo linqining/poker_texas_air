@@ -3,7 +3,6 @@ import ReactDOM from 'react-dom';
 import styled, { keyframes } from 'styled-components';
 import CloseButton from '../buttons/CloseButton';
 import Button from '../buttons/Button';
-import Text from '../typography/Text';
 import ModalShell from './ModalShell';
 
 const fadeIn = keyframes`
@@ -47,12 +46,6 @@ export const ModalButton = styled(Button).attrs({ variant: 'gradient' })`
   padding: 0.65rem 2rem;
 `;
 
-const ModalText = styled(Text)`
-  color: ${({ theme }) => theme.colors.mutedText};
-  font-size: 0.95rem;
-  line-height: 1.6;
-`;
-
 interface ModalProps {
   children?: React.ReactNode;
   headingText?: string;
@@ -91,20 +84,4 @@ const Modal: React.FC<ModalProps> = ({
   );
 };
 
-const initialModalData = {
-  children: () => (
-    <ModalText>
-      Lorem ipsum dolor sit amet consectetur adipisicing elit. Reiciendis rerum
-      omnis, minima perferendis, illum quasi expedita quo saepe fuga nulla
-      cupiditate. Reprehenderit fugit placeat error corrupti illo ut? Numquam
-      repellat molestias autem porro. Autem enim asperiores voluptatem itaque
-      libero aspernatur cupiditate porro atque vel. Esse numquam tempora hic
-      soluta excepturi?
-    </ModalText>
-  ),
-  headingText: 'Modal',
-  btnText: 'Button',
-};
-
 export default Modal;
-export { initialModalData };

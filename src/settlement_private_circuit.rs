@@ -3,8 +3,10 @@
 //! 语句（公开输入）：`hand_binding, hand_id, registered_digest, n_participants`
 //! 见证（私密）：`players[8], deltas[8]`（i128 → (sign, |delta| u64) 对）
 //! 约束（规格四条）：
-//! 1. `poseidon_hash_many([hand_id] ++ Σ(player, sign, |delta|)) == registered_digest`
-//!    ——与合约 `compute_settlement_digest` 及 `texas/src/starknet/submit.rs` 逐字段一致；
+//! 1. `poseidon_hash_many([hand_id] ++ Σ(player, sign, |delta|) ++ [action_log_digest])
+//!    == registered_digest`——与合约 `compute_settlement_digest` 及
+//!    `texas/src/starknet/submit.rs` 逐字段一致（#18 Phase B：动作日志哈希作为
+//!    吸收链尾词，把结算锚定到带 auto 标记的完整动作日志）；
 //! 2. `Σ sign·|delta| == 0`（零和）；
 //! 3. `n_participants == registered_count`；
 //! 4. 每赢家输出认领承诺 `cm_i = poseidon(commitment_i, hand_binding, amount_lo, amount_hi)`
@@ -23,10 +25,11 @@
 //!   **8 行 scope**（常量列每行重复 + 每行 participant 字段与 prefix 计数），AIR
 //!   将 trace 的全部语义列逐 limb 绑定到 scope，并约束 M31 原生可表达的全部关系：
 //!   sign/winner booleanity、winner⇒sign、非赢家 cm 归零、cm/player/|delta| 与
-//!   scope 相等、trace 计数与 scope 计数相等。§8.2 预留的动作签名域
-//!   （`action_domain_digest` / `action_flags` / `accepted_seq_digest`）作为 scope
-//!   常量列**在电路上强制为零**——字段位已冻结，非零语句在 M1 直接拒绝，M2
-//!   接线动作日志约束时零重排。
+//!   scope 相等、trace 计数与 scope 计数相等。§8.2 预留的三个动作域槽位中，
+//!   `action_log_digest` 已由 #18 Phase B 接线（进 digest 吸收链与公开段，
+//!   列位零重排）；`action_flags` / `accepted_seq_digest` 仍作为 scope 常量列
+//!   **在电路上强制为零**——等电路内"合法默认"（auto-check 仅当零下注）与
+//!   seq 单调约束落地（主网上线门槛）时直接替换，wire 再次零重排。
 //! - **P2-M2 待接入（显式边界，非本骨架范围）**：felt252 域 Starknet-Poseidon
 //!   component（digest 吸收链与 claim_cms 的原生推导）与多 limb 零和累加。
 //!   M1 的 digest/零和/claim_cms 关系由 host 参考函数承担，沿用本仓库 G 层
@@ -176,11 +179,13 @@ pub struct SettlementPrivateStatement {
     pub signed_deltas: [i128; MAX_PARTICIPANTS],
     /// 非 0 变动参与者数（规格约束 3）。
     pub n_participants: u32,
-    /// §8.2 预留：动作签名域 digest（M1 强制为零，M2 接线）。
-    pub action_domain_digest: FeltBytes,
-    /// §8.2 预留：auto/accepted-seq 标志位（M1 强制为零）。
+    /// §8.2 预留槽位（#18 Phase B 已接线）：本手动作日志哈希
+    /// （game 层 `pokergame::actions::action_log_digest` 的 starknet_keccak 链）。
+    /// 进 digest 吸收链尾词 + 公开段第 15 词；空日志 = 仅域标签的确定值。
+    pub action_log_digest: FeltBytes,
+    /// §8.2 预留：auto/accepted-seq 标志位（强制为零，等电路内合法默认约束）。
     pub action_flags: u32,
-    /// §8.2 预留：accepted-seq 向量承诺（M1 强制为零）。
+    /// §8.2 预留：accepted-seq 向量承诺（强制为零，同上）。
     pub accepted_seq_digest: FeltBytes,
 }
 
@@ -192,22 +197,23 @@ pub struct SettlementPrivateWitness {
 }
 
 impl SettlementPrivateStatement {
-    /// 证明/验证入口的 fail-closed 门禁（规格约束 2/3 + §8.2 预留零化）。
+    /// 证明/验证入口的 fail-closed 门禁（规格约束 2/3 + §8.2 剩余预留零化）。
     pub fn validate(&self) -> Result<(), TexasAirError> {
         felt_from_bytes(self.hand_binding)?;
         felt_from_bytes(self.registered_digest)?;
-        felt_from_bytes(self.action_domain_digest)?;
+        felt_from_bytes(self.action_log_digest)?;
         felt_from_bytes(self.accepted_seq_digest)?;
-        if self.action_domain_digest != ZERO_FELT || self.accepted_seq_digest != ZERO_FELT {
+        if self.accepted_seq_digest != ZERO_FELT {
             return Err(TexasAirError::ConstraintUnsatisfied(
-                "action-signature domain reserved fields must be zero until P2-M2 wires the \
-                 action log constraints"
+                "accepted-seq reserved field must be zero until the circuit wires seq \
+                 monotonicity constraints"
                     .into(),
             ));
         }
         if self.action_flags != 0 {
             return Err(TexasAirError::ConstraintUnsatisfied(
-                "action flags reserved field must be zero until P2-M2 wires auto/accepted-seq"
+                "action flags reserved field must be zero until the circuit wires the \
+                 legal-default auto constraints"
                     .into(),
             ));
         }
@@ -272,13 +278,14 @@ impl SettlementPrivateStatement {
     }
 }
 
-/// 规格 digest 吸收序列：`[hand_id] ++ Σ(player, sign, |delta|)`。
+/// 规格 digest 吸收序列：`[hand_id] ++ Σ(player, sign, |delta|) ++ [action_log_digest]`。
 /// 与 `texas/src/starknet/submit.rs` 及合约 `compute_settlement_digest`
-/// 逐字段一致（d ≥ 0 → sign=1；d == 0 → sign=1, |delta|=0）。
+/// 逐字段一致（d ≥ 0 → sign=1；d == 0 → sign=1, |delta|=0；动作日志哈希
+/// 为吸收链尾词——#18 Phase B）。
 pub fn settlement_digest_fields(
     statement: &SettlementPrivateStatement,
 ) -> Result<Vec<FieldElement>, TexasAirError> {
-    let mut fields = Vec::with_capacity(1 + 3 * MAX_PARTICIPANTS);
+    let mut fields = Vec::with_capacity(2 + 3 * MAX_PARTICIPANTS);
     fields.push(FieldElement::from(statement.hand_id));
     for (player, delta) in statement
         .players
@@ -292,6 +299,7 @@ pub fn settlement_digest_fields(
         fields.push(FieldElement::from(if delta >= 0 { 1u64 } else { 0u64 }));
         fields.push(FieldElement::from(magnitude));
     }
+    fields.push(felt_from_bytes(statement.action_log_digest)?);
     Ok(fields)
 }
 
@@ -352,7 +360,7 @@ fn statement_scope(
         constants.push(M31::from(limb));
     }
     constants.push(M31::from(statement.n_participants));
-    for limb in limb_bytes(statement.action_domain_digest) {
+    for limb in limb_bytes(statement.action_log_digest) {
         constants.push(M31::from(limb));
     }
     constants.push(M31::from(statement.action_flags));
@@ -360,6 +368,15 @@ fn statement_scope(
         constants.push(M31::from(limb));
     }
     debug_assert_eq!(constants.len(), SCOPE_CONST_COLUMNS);
+    // 填充序与命名列位一致（action_log_digest 槽位 = §8.2 冻结位，#18 接线）。
+    debug_assert_eq!(
+        constants[scope_action_digest()..scope_action_digest() + FELT_LIMBS]
+            .iter()
+            .map(|m| m.0)
+            .collect::<Vec<_>>(),
+        limb_bytes(statement.action_log_digest).to_vec(),
+        "action_log_digest must fill the frozen §8.2 column slot"
+    );
 
     // MethodTrace 的"行"是全列宽求值点：单行包含全部 participant 列组，
     // 8 个求值点复制同一行（约束逐点生效，与 reveal-opening 同款）。
@@ -467,12 +484,11 @@ impl FrameworkEval for SettlementPrivateAir {
         let one: E::F = M31::from(1u32).into();
         let ids = settlement_ids();
 
-        // §8.2 预留域在电路上强制为零：M2 接线动作签名/auto/accepted-seq 约束时，
-        // wire 格式与列位零重排，直接把这里的零化断言替换为吸收链约束。
-        for offset in 0..FELT_LIMBS {
-            let reserved = eval.get_preprocessed_column(ids[scope_action_digest() + offset].clone());
-            eval.add_constraint(reserved);
-        }
+        // §8.2 预留槽位的电路约束（#18 Phase B 后的状态）：
+        // - `action_log_digest` 列位已接线（digest 吸收链尾词 + 公开段第 15 词），
+        //   其值经 scope 承诺根 + host digest 重算双重绑定，不再零化；
+        // - `action_flags` / `accepted_seq_digest` 仍强制为零——等电路内
+        //   "合法默认"/seq 单调约束（主网门槛）落地时替换，wire 零重排。
         let flags = eval.get_preprocessed_column(ids[scope_action_flags()].clone());
         eval.add_constraint(flags);
         for offset in 0..FELT_LIMBS {
@@ -671,7 +687,7 @@ mod tests {
             // +300 / -200 / -100，零变动 5 槽：零和成立
             signed_deltas: [300, -200, -100, 0, 0, 0, 0, 0],
             n_participants: 3,
-            action_domain_digest: ZERO_FELT,
+            action_log_digest: sample_felt(0x77),
             action_flags: 0,
             accepted_seq_digest: ZERO_FELT,
         }
@@ -694,7 +710,8 @@ mod tests {
 
     #[test]
     fn digest_fields_match_settle_calldata_formula() {
-        // 独立复刻 submit.rs 的拼装口径，逐字段比对参考实现。
+        // 独立复刻 submit.rs 的拼装口径，逐字段比对参考实现（#18 Phase B：
+        // 动作日志哈希为吸收链尾词）。
         let statement = sample_statement();
         let expected: Vec<FieldElement> = {
             let mut fields = vec![FieldElement::from(statement.hand_id)];
@@ -709,6 +726,9 @@ mod tests {
                 fields.push(FieldElement::from(if delta >= 0 { 1u64 } else { 0u64 }));
                 fields.push(FieldElement::from(magnitude));
             }
+            fields.push(
+                FieldElement::from_bytes_be(&statement.action_log_digest).expect("canonical"),
+            );
             fields
         };
         let got = settlement_digest_fields(&statement).expect("digest fields");
@@ -719,6 +739,14 @@ mod tests {
         // 参考 digest 与独立口径的 poseidon_hash_many 一致（规格约束 1）。
         let digest = compute_settlement_digest(&statement).expect("digest");
         assert_eq!(digest, starknet_crypto::poseidon_hash_many(&expected).to_bytes_be());
+        // 动作日志哈希必须真实参与吸收链（尾词改动 → digest 改动）。
+        let mut other = statement.clone();
+        other.action_log_digest = sample_felt(0x78);
+        assert_ne!(
+            compute_settlement_digest(&statement).expect("digest"),
+            compute_settlement_digest(&other).expect("digest"),
+            "action log digest must bind the settlement digest"
+        );
     }
 
     #[test]
@@ -797,17 +825,21 @@ mod tests {
     }
 
     #[test]
-    fn reserved_action_domain_must_stay_zero_until_p2_m2() {
-        // §8.2 预留：非零动作签名域在 M1 直接拒绝（wire 位已冻结）。
-        let mut statement = sample_statement();
-        statement.action_domain_digest = sample_felt(0x55);
-        assert!(statement.validate().is_err());
+    fn reserved_flags_and_seq_must_stay_zero_until_circuit_wiring() {
+        // §8.2 预留的剩余两槽（auto 标志/accepted-seq 承诺）：非零直接拒绝；
+        // action_log_digest 已接线（#18 Phase B），非零合法。
         let mut statement = sample_statement();
         statement.action_flags = 1;
         assert!(statement.validate().is_err());
         let mut statement = sample_statement();
         statement.accepted_seq_digest = sample_felt(0x56);
         assert!(statement.validate().is_err());
+        let mut statement = sample_statement();
+        statement.action_log_digest = sample_felt(0x57);
+        assert!(
+            statement.validate().is_ok(),
+            "wired action log digest accepts arbitrary canonical felts"
+        );
     }
 
     #[test]
@@ -876,7 +908,9 @@ mod tests {
             players,
             signed_deltas: [3000 * wei_chip, -2000 * wei_chip, -1000 * wei_chip, 0, 0, 0, 0, 0],
             n_participants: 3,
-            action_domain_digest: ZERO_FELT,
+            // 与 game 层 `action_log_digest` 同源的确定性样例（keccak 链略，
+            // 电路把该词当不透明 felt 吸收）。
+            action_log_digest: sample_felt(0xA7),
             action_flags: 0,
             accepted_seq_digest: ZERO_FELT,
         }
@@ -924,9 +958,12 @@ mod tests {
         for commitment in &witness.payout_commitments {
             inputs.push(hex(felt_from_bytes(*commitment).expect("canonical")));
         }
-        assert_eq!(inputs.len(), 4 + 4 * MAX_PARTICIPANTS);
+        // #18 Phase B：第 37 入参 = 动作日志哈希（吸收链尾词）。
+        inputs.push(hex(felt_from_bytes(statement.action_log_digest).expect("canonical")));
+        assert_eq!(inputs.len(), 5 + 4 * MAX_PARTICIPANTS);
 
-        // 公开段期望：[MAGIC, hand_id, digest, n, binding, cm_0..cm_7, total_winnings]
+        // 公开段期望：[MAGIC, hand_id, digest, n, binding, cm_0..cm_7,
+        // total_winnings, action_log_digest]（15 felt）
         let mut expected: Vec<String> = vec![
             hex(FieldElement::from_bytes_be(&PROVE_MAGIC).expect("canonical")),
             hex(FieldElement::from(statement.hand_id)),
@@ -943,6 +980,8 @@ mod tests {
         }
         // v2 合约托管金额来源（Σ 赢家 |delta|，电路内累加）
         expected.push(hex(FieldElement::from(total_winnings)));
+        // 公开段尾词 = 动作日志哈希（v2 合约对注册承诺逐 felt 比对）
+        expected.push(hex(felt_from_bytes(statement.action_log_digest).expect("canonical")));
 
         let out = std::path::PathBuf::from(out_dir);
         std::fs::create_dir_all(&out).expect("create fixture dir");

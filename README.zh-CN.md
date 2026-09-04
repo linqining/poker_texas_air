@@ -28,10 +28,10 @@
 ├── poker_l1/ vm-common/    # 最小 L1/VM 层与证明公共组件
 ├── hand-bench/             # 一整手牌的端到端证明基准
 ├── poker_protocol_lean/    # Lean 4 + Mathlib 形式化（重构 V2/V3）
-├── poker_contracts/        # Cairo 合约（Scarb）：Token、Vault、Anonymizer、Settlement、DualSettlement
+├── poker_contracts/        # Cairo 合约（Scarb）：Vault、Anonymizer、Settlement、DualSettlement、Swap
 ├── proving-tool/           # prove-hand CLI：Cairo1 → cairo-vm → Stwo 证明 → 验证（独立 workspace）
 ├── third_party/proving/    # vendored starkware-libs/proving（Apache-2.0，含本地补丁）
-├── docs/                   # 协议规范、信任模型、性能报告
+├── docs/                   # 协议规范、计划、性能基线（历史文档在 docs/archive/）
 └── strk20.json             # STRK20 黑客松 manifest（部署记录、证明策略）
 ```
 
@@ -136,10 +136,10 @@ export SNCAST_ACCOUNT=... SNCAST_URL=... OWNER=... PROVER=... INITIAL_SUPPLY=...
 
 - [DUAL_PROOF_PROTOCOL.md](DUAL_PROOF_PROTOCOL.md) —— 双证明结算规范（v2.3，现行）
 - [TEXAS_TAGGED_AIR.md](TEXAS_TAGGED_AIR.md) —— 直接状态转移 AIR 路径
-- [TRUST_MODEL_NO_TRANSACTION_REPLAY.md](TRUST_MODEL_NO_TRANSACTION_REPLAY.md) —— 无交易重放信任边界
+- [TRUST_MODEL_NO_TRANSACTION_REPLAY.md](docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md) —— 无交易重放信任边界(已被取代,现行见上文)
 - [docs/plan-d-*.md](docs/) —— STARK 曲线迁移计划与实测基线
 - [docs/STATUS.md](docs/STATUS.md) —— 历史技术状态叙述（过时章节已标注）
-- [CONTRIBUTING.md](CONTRIBUTING.md) · [执行计划](docs/EXECUTION_PLAN.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md) · 历史文档归档见 docs/archive/
 
 ## 路线图
 

@@ -39,17 +39,17 @@ by construction, not by trusting a host.
 ├── client/                 # React 18 + Vite web client (Ready Wallet: login, buy-in, STRK20 actions)
 ├── client-wasm/            # wasm-bindgen bridge: browser-side crypto & proof bundles
 ├── poker_protocol/         # Mental-poker protocol (ElGamal, shuffle/reveal/reconstruct)
-├── poker-protocol-core/    # Curve-generic crypto backends (secp256k1 / STARK / BN254 / BLS12-381)
+├── poker-protocol-core/    # Curve-generic crypto backends (Stark curve is the only production world — Plan D)
 ├── poker-protocol-proofs/  # Sigma proof suite (shuffle, remask, leave, reveal, DLEq, unified sigma)
 ├── poker-protocol-bg/      # Bayer–Groth shuffle argument
 ├── poker-protocol-abi/     # Stable byte ABI for proof precompiles / circuit adapters
-├── poker_l1/ vm-common/    # Minimal L1/VM layer and shared proving utilities
+├── poker_l1/ vm-common/    # Texas-poker contract library (VM semantics for proof replay) + shared utils
 ├── hand-bench/             # End-to-end proving benchmark for one complete hand
 ├── poker_protocol_lean/    # Lean 4 + Mathlib formalization (reconstruction V2/V3)
-├── poker_contracts/        # Cairo contracts (Scarb): Token, Vault, Anonymizer, Settlement, DualSettlement
+├── poker_contracts/        # Cairo contracts (Scarb): Vault, Anonymizers, Settlement, DualSettlement, Swap
 ├── proving-tool/           # prove-hand CLI: Cairo1 → cairo-vm → Stwo prove → verify (separate workspace)
 ├── third_party/proving/    # Vendored starkware-libs/proving (Apache-2.0, with local patches)
-├── docs/                   # Protocol specs, trust model, performance reports
+├── docs/                   # Protocol specs, plans, perf baselines (historical docs in docs/archive/)
 └── strk20.json             # STRK20 hackathon manifest (deployments, proof policy)
 ```
 
@@ -208,10 +208,10 @@ proven provenance, completeness, and soundness theorems
 
 - [DUAL_PROOF_PROTOCOL.md](DUAL_PROOF_PROTOCOL.md) — dual-proof settlement spec (v2.3, live)
 - [TEXAS_TAGGED_AIR.md](TEXAS_TAGGED_AIR.md) — direct state-transition AIR paths
-- [TRUST_MODEL_NO_TRANSACTION_REPLAY.md](TRUST_MODEL_NO_TRANSACTION_REPLAY.md) — replay-free trust boundary (中文)
+- [TRUST_MODEL_NO_TRANSACTION_REPLAY.md](docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md) — replay-free trust boundary (中文, superseded — 现行模型见上文)
 - [docs/plan-d-*.md](docs/) — STARK-curve migration plans and measured baselines
 - [docs/STATUS.md](docs/STATUS.md) — historical technical status narrative (superseded sections marked)
-- [CONTRIBUTING.md](CONTRIBUTING.md) · [EXECUTION_PLAN](docs/EXECUTION_PLAN.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md) · superseded docs: [docs/archive/](docs/archive/)
 
 ## Roadmap
 

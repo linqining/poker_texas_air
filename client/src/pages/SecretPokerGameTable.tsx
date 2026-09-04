@@ -115,6 +115,16 @@ export default function GameTable() {
     }
   }, [gameId, fetchState, addLog])
 
+  // Esc 关闭 ZK 抽屉（与遮罩点击等价的键盘路径）
+  useEffect(() => {
+    if (!showPanel) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowPanel(false)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [showPanel])
+
   function formatPhase(phase: string) {
     return phase.replace(/([A-Z])/g, ' $1').trim()
   }
@@ -170,7 +180,7 @@ export default function GameTable() {
           .zk-panel.is-open { transform: translateX(0); }
           .zk-drawer-btn { display: inline-flex; }
           .zk-panel-close { display: inline-flex; }
-          .zk-backdrop { display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: var(--zk-overlay-z, 150); }
+          .zk-backdrop { display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: var(--zk-overlay-z, 150); border: none; padding: 0; cursor: pointer; }
         }
       `}</style>
 
@@ -254,7 +264,14 @@ export default function GameTable() {
           </TableCard>
         </div>
 
-        {showPanel && <div className="zk-backdrop" onClick={() => setShowPanel(false)} />}
+        {showPanel && (
+        <button
+          type="button"
+          className="zk-backdrop"
+          aria-label={t('gametable_zk-panel-close')}
+          onClick={() => setShowPanel(false)}
+        />
+      )}
 
         <ZkPanel className={`zk-panel ${showPanel ? 'is-open' : ''}`}>
           <PanelInner>
@@ -364,7 +381,7 @@ export default function GameTable() {
       </RawLogSection>
 
       {error && (
-        <ErrorToast onClick={() => setError(null)}>
+        <ErrorToast type="button" onClick={() => setError(null)}>
           <AlertCircle size={16} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '0.3rem' }} />
           {error} {t('gametable_click-dismiss')}
         </ErrorToast>

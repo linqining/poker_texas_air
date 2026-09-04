@@ -1,3 +1,14 @@
+> ⚠️ **状态(2026-09-05)**:新旧基线分界见 `docs/plan_d_perf.md`(曲线切换后
+> 唯一 release 基线)。各项处置结论(2026-09-05 落档):① 专用标量乘 AIR
+> ——host 19µs/op,进 AIR 成本远超收益,**维持 oracle 保留、不实施**;
+> ② MSM 平衡树——3.4ms 不构成瓶颈,**暂缓**;③ limb backend 选型——**暂缓**;
+> ④ outer_aggregate 流式编码——**暂缓**(峰值内存实测后再定);⑤ 错误分类
+> ——**低优持续项**(docs/TODO.md #24⑤);⑥ /metrics 路由——**归上层
+> server(texas 侧)**。文中引用的
+> `ristretto_fp_program_air.rs`/`ristretto_msm_air.rs`/
+> `ristretto_point_decode_air.rs` 与 11-bit limb 后端已随 Ristretto 移除
+> 删除,相关小节仅存方法论价值。
+
 # Performance follow-ups
 
 This document records optimization candidates that require protocol-level

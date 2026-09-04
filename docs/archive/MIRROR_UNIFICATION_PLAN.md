@@ -1,3 +1,8 @@
+> ⚠️ **历史存档(2026-09-05 归档)**:双状态机改造方案已被 TODO(原 #20)Phase 2 取代——
+> 常驻 mirror 整体删除,结算改为 prove_log 记录 + settle 时一次性重建
+> (`texas/src/starknet/prove_log.rs` + `mirror::build_from_log`)。
+> B4 Sepolia e2e 证据与生产 bug 复盘仍有史料价值。
+
 # 牌局状态机统一改造清单
 
 > 背景：当前存在**两套平行的德扑状态机**，一致性靠"事件转发 + 追赶补丁"维持，

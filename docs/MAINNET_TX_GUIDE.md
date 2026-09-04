@@ -2,7 +2,7 @@
 
 > 目标：在 Starknet **主网**完成 ≥1 笔 STRK20 交易，交易哈希回填 `strk20.json`。
 > 该步骤需要**人工钱包操作**（私钥不出本机），脚本无法代办。
-> 执行前重读 `SETTLEMENT_PRIVACY_PLAN.md` §7 验证清单与 EXECUTION_PLAN §6
+> 执行前重读 `SETTLEMENT_PRIVACY_PLAN.md` §7 验证清单(历史迁移计划见 docs/archive/EXECUTION_PLAN.md)
 > 「主网最小路径」：在「直接 STRK20 转账」与「PokerVault 主网最小部署」两案中
 > **选最简者**。
 
@@ -40,14 +40,15 @@ SNCAST_ACCOUNT="<主网 deployer 账户名>"   # sncast account add 导入
 ```
 
 1. `cd poker_contracts && scarb build`；
-2. declare `PokerToken`（主网若不需要本地代币，可跳过：Vault 的 deposit 走
-   原生 STRK 时按合约当前构造为准——**执行前核对 `poker_vault.cairo` 的
-   token_address 构造参数**，当前 sepolia 部署绑定的是本地 pSTRK）；
+2. declare `PokerVault`（**无需本地代币**——vault v3 起绑定 canonical STRK：
+   sepolia 现网 `vault.token()` 即原生 STRK，本地 pSTRK 已 retired，如需
+   1:1000 兑换另有 `PokerSwap`。主网部署以同一构造为准，执行前仍建议
+   核对 `poker_vault.cairo` 的 token_address 构造参数）；
 3. deploy `PokerVault` + `deposit` + `withdraw` 各一笔（黑客松口径的最小闭环）；
 4. 全部交易哈希回填 `strk20.json`。
 
-> ⚠️ 方案 B 会把「本地测试代币」暴露到主网，评审观感弱于方案 A + 说明文字。
-> 除非时间充裕并愿意核对 Vault 的原生 STRK 适配，否则先交付方案 A。
+> ~~方案 B 会把「本地测试代币」暴露到主网~~（已不成立：vault v3 绑定
+> canonical STRK），但方案 A 仍是最简路径——先交付 A，B 仅作闭环叙事补充。
 
 ## strk20.json 回填模板
 

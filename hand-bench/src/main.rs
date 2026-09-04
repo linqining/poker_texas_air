@@ -1098,6 +1098,9 @@ fn full_hand_v3_dual() {
             }
             fields.push(FieldElement::from(delta.unsigned_abs() as u64));
         }
+        // #18 Phase B：与线上同公式——digest 吸收链尾词 = 动作日志哈希
+        //（bench 无 game 层动作日志，取固定样例词）。
+        fields.push(FieldElement::from(0xA11CEu64));
         starknet_crypto::poseidon_hash_many(&fields)
     };
     let decrypt_elapsed = started.elapsed();

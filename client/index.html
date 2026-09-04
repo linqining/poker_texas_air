@@ -2,29 +2,6 @@
 <html lang="en">
 
 <head>
-  <script>
-    // TEMP DEBUG: capture socket.io frames containing REVEAL_SUBMIT (remove after e2e)
-    (function () {
-      window.__frames = [];
-      const OrigWS = window.WebSocket;
-      window.WebSocket = function (url, protocols) {
-        const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
-        const origSend = ws.send.bind(ws);
-        ws.send = function (data) {
-          try {
-            const s = String(data);
-            if (s.indexOf('REVEAL_SUBMIT') !== -1) {
-              window.__frames.push(s.slice(0, 60000));
-            }
-          } catch (e) {}
-          return origSend(data);
-        };
-        return ws;
-      };
-      window.WebSocket.prototype = OrigWS.prototype;
-      Object.assign(window.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
-    })();
-  </script>
   <meta charset="utf-8" />
   <meta
       name="viewport"

@@ -1,3 +1,8 @@
+> ⚠️ **§1 基线表已失效（2026-09-05）**：曲线切换后的新基线见 `plan_d_perf.md`。
+> 本文仍有效的唯一权威：**§3b 主网 gas 校准与压缩实测**（合约侧 EC_OP 成本，
+> 换曲线不推翻）与 §3 stwo-cairo prover 成本模型；§2/§3 测试清单为 TODO
+> 递归协议条目的预留资产。
+
 # Plan D P3：测试用例与性能指标（交付物，不含实施）
 
 > 按执行计划：P3（Nova folding spike / 电路重执行 prototype）不实施，
@@ -256,48 +261,3 @@ reveal 语句占比 >97%——若多桌高频运营需压至此以下，即是 P
 回归：hand_batch_stark 16/16（含满手 honest×2 + tampered×2）、snforge
 全套 52/52、host parity 5/5、full_hand 2/2、e2e 2/2、leave_exclusion 5/5、
 core 35。
-
-## 4. 复现命令
-
-```bash
-# 基线（release）
-cargo test -p poker-protocol-proofs --release --test plan_d_perf -- --ignored --nocapture
-# 语句回归（12 个测试）
-cargo test -p poker-protocol-proofs --test stark_curve_regression
-# 后端单元 + oracle 测试
-cargo test -p poker-protocol-core
-```
-
-### Phase 1 本地 prover bench（2026-08-29，stwo-cairo 官方 proving 仓库实测）
-
-**管线**：Cairo 源码 → `compile_cairo1`（cairo-lang 2.19 + salsa 0.27）→ `run_and_prove`
-（stwo-cairo 1.3，Circle STARK，96-bit 安全参数，M-series 并行 6.85 核观测）。
-
-**基础设施修复记录**（影响后续复现）：
-- stwo-cairo 旧 repo（salsa 0.24 + 新 rustc = cycle panic）已迁移至
-  `starkware-libs/proving`（cairo-lang 2.19 + salsa 0.27 = 修复）；此为本会话
-  关键发现之一
-- Cairo1 Executable 路径（dev_utils）在 runner 里有一个 corelib 函数级
-  runtime 兼容问题（poseidon_hash_span 调用后跳转异常——待查，非根本障碍；
-  Cairo0 路径全通）
-
-**校准数据**（官方测试语料，本地实测 wall-clock）：
-
-| 程序 | CPU steps | EC_OP 实例 | Poseidon 实例 | 证明耗时 |
-|---|---|---|---|---|
-| trivial（return 42） | ~75 | 0 | 0 | **10.5s**（固定成本主导） |
-| test_poseidon_builtin | — | 0 | 若干 | **8.6s** |
-| test_all_opcode_components | 1,498 | 0 | 0 | **9.8s** |
-| test_all_builtins | 9,157 | 7 | 12 | **25.1s** |
-| test_poseidon_aggregator | — | 0 | ~30 链 | **7.2s** |
-
-**成本模型**：固定 ~8-10s + ~2ms/CPU-step + EC_OP/Poseidon 实例的 trace 扩张。
-
-**我们满手负载的推算**（423 方程 ≈ 1,480 EC_OP + 220 Poseidon + ~50k CPU steps）：
-- 下界（线性 CPU 步 + builtin 摊销）：~30s
-- 上界（保守 builtin 线性）：~120s
-- **结论：秒级到分钟级，远优于此前"分钟级"的粗估，满足双轨异步锚定
-  （热路径 37ms 直验放行，锚定路径延迟无关紧要）**。
-
-托管判断数据点：本地 M-series 笔记本即可跑（6.85 核并行利用）；托管
-（Atlantic/SHARP）的增益主要是运维（免维护、自动聚合到 L1），非性能必需。

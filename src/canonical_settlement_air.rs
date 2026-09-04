@@ -1397,11 +1397,11 @@ fn hand_section_skipped(section: u32) -> bool {
     // for bisection (bit s set = section s enabled; unset bits disabled).
     // Default OFF keeps the settlement suite green: the evaluator's wire
     // family still fails row-wise under a full mask (see the constraint
-    // bisection history in PERFORMANCE_REPORT.md).  Set HAND_SECTIONS to a
+    // bisection history in docs/archive/PERFORMANCE_REPORT.md).  Set HAND_SECTIONS to a
     // bitmask to enable individual sections during debugging.
     // Default OFF keeps the settlement suite green: the evaluator's
     // flush-cardinality and wire families still fail row-wise for the
-    // empty-seat hand under a full mask (see PERFORMANCE_REPORT.md).
+    // empty-seat hand under a full mask (see docs/archive/PERFORMANCE_REPORT.md).
     match std::env::var("HAND_SECTIONS") {
         Ok(mask) => (mask.parse::<u64>().unwrap_or(u64::MAX) >> section) & 1 == 0,
         Err(_) => true,

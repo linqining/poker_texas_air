@@ -1,3 +1,7 @@
+> ⚠️ **历史存档(2026-09-05 归档)**:RistrettoAirV2 协议层成本模型——全部基于
+> 已删除的 Ristretto/ZR3P/admission 工件,数字按 `docs/plan_d_perf.md` 判为失效;
+> 递归路线决策输入已迁至 `docs/TODO.md`(递归协议条目)。
+
 # RistrettoAirV2 协议层性能基准与优化点
 
 测量时间：2026-08（`refractor` 分支）。运行命令：

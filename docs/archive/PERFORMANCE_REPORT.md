@@ -1,3 +1,7 @@
+> ⚠️ **历史存档(2026-09-05 归档)**:全部数字为 Plan D 曲线切换前的旧世界基线,
+> 已被 `docs/plan_d_perf.md`(2026-09-05 重测新基线)取代;第 8-16 轮描述的
+> Ristretto/admission 代码已删除。仅存优化方法论史料价值。
+
 # poker\_texas\_air 性能报告 —— 以一手完整德州扑克为准（标准 9 座桌）
 
 日期：2026-08-23 · 主机：Apple Silicon `Mac15,7` (aarch64) · 工具链：nightly + stwo 2.3（`--release`）

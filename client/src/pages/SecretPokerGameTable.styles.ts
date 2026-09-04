@@ -383,17 +383,21 @@ export const LogEntry = styled.div`
 
 /* ===== 错误提示 toast ===== */
 
-export const ErrorToast = styled.div`
+/* button 而非 div onClick：键盘可关闭（WCAG 2.1.1） */
+export const ErrorToast = styled.button`
   position: fixed;
   bottom: 2rem;
   right: 2rem;
   background: ${({ theme }) => theme.colors.dangerAlpha95};
   color: ${({ theme }) => theme.colors.lightestBg};
+  border: none;
+  font-family: inherit;
   padding: 0.8rem 1.5rem;
   border-radius: ${({ theme }) => theme.radius.sm};
   font-size: 0.9rem;
   z-index: ${({ theme }) => theme.zIndex.toast};
   cursor: pointer;
+  text-align: left;
 `;
 
 /* ===== Layout primitives (formerly inlined in <style> tag) ===== */

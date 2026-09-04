@@ -19,6 +19,7 @@ import ModalShell from './ModalShell';
 import Text from '../typography/Text';
 import Button from '../buttons/Button';
 import authContext from '../../context/auth/authContext';
+import contentContext from '../../context/content/contentContext';
 import { WEI_PER_CHIP, starknetConfig } from '../../starknet/config';
 import {
   claimRewardsPrivate,
@@ -270,6 +271,7 @@ const SuccessRing = styled.div`
 const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onClose }) => {
   const theme = useTheme();
   const { walletAddress } = useContext(authContext)!;
+  const { getLocalizedString: t } = useContext(contentContext)!;
   const connected = useAccount();
   // 连接的钱包（Ready/Cartridge）优先，dev 直签兜底
   const account = activeAccount(connected.account);
@@ -418,7 +420,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   const handleClaim = async (kind: 'private' | 'public') => {
     if (!account || pending) return;
     if (chips <= 0) {
-      setError('无可领取筹码');
+      setError(t('claim-error-empty'));
       return;
     }
     setPending(kind);
@@ -431,7 +433,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     if (res.success) {
       setDone({ hash: res.hash, kind });
     } else {
-      setError(res.error || '领取失败');
+      setError(res.error || t('claim-error-failed'));
       logger.warn('[ClaimModal] claim failed:', res.error);
     }
   };
@@ -468,7 +470,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
       if (res.success) {
         await runChecks(false);
       } else {
-        setError(res.error || 'Shield 提交失败');
+        setError(res.error || t('claim-error-shield'));
         if (res.notRegistered) setPoolGuideOpen(true);
       }
     } catch (e) {
@@ -489,11 +491,11 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     <>
       <CheckRow>
         <StatusDot $ok={reg.payout} aria-hidden />
-        <CheckName>赔付承诺（我们合约）</CheckName>
+        <CheckName>{t('claim-payout-name')}</CheckName>
         {reg.payout === true ? (
-          <StatusText $ok>已注册 ✓</StatusText>
+          <StatusText $ok>{t('claim-status-registered')}</StatusText>
         ) : reg.payout === null ? (
-          <StatusText $ok={null}>检测中…</StatusText>
+          <StatusText $ok={null}>{t('claim-status-checking')}</StatusText>
         ) : (
           <Button
             type="button"
@@ -502,14 +504,14 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
             style={{ whiteSpace: 'nowrap' }}
             disabled={pending !== null || regPending || checking}
             onClick={() => void registerPayout()}
-            title="提交 payout commitment（一次性链上交易，任何钱包均可）"
+            title={t('claim-payout-tip')}
           >
-            {regPending ? '注册中…' : '一键注册'}
+            {regPending ? t('claim-registering') : t('claim-register-btn')}
           </Button>
         )}
       </CheckRow>
       {reg.payout === false && (
-        <CheckDetail>注册后结算奖励才能私密领取（一次性，合约内的链上登记）</CheckDetail>
+        <CheckDetail>{t('claim-payout-detail')}</CheckDetail>
       )}
     </>
   );
@@ -518,11 +520,11 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     <>
       <CheckRow>
         <StatusDot $ok={poolOk} aria-hidden />
-        <CheckName>池 viewing key（Ready 隐私系统）</CheckName>
+        <CheckName>{t('claim-pool-name')}</CheckName>
         {reg.pool === true ? (
-          <StatusText $ok>已注册 ✓</StatusText>
+          <StatusText $ok>{t('claim-status-registered')}</StatusText>
         ) : strk20Ready === false ? (
-          <StatusText $ok={false}>钱包不支持</StatusText>
+          <StatusText $ok={false}>{t('claim-status-unsupported')}</StatusText>
         ) : reg.pool === false ? (
           <Button
             type="button"
@@ -531,54 +533,51 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
             style={{ whiteSpace: 'nowrap' }}
             disabled={pending !== null || poolRegistering || checking}
             onClick={() => void registerPool()}
-            title="向隐私池小额 Shield 0.01 STRK：钱包会依次弹出 approve 与 deposit 两次确认（非重复交易），确认后自动注册 viewing key（金额留在池内余额）"
+            title={t('claim-pool-tip')}
           >
-            {poolRegistering ? '注册中…' : '一键注册'}
+            {poolRegistering ? t('claim-registering') : t('claim-register-btn')}
           </Button>
         ) : (
-          <StatusText $ok={null}>检测中…</StatusText>
+          <StatusText $ok={null}>{t('claim-status-checking')}</StatusText>
         )}
       </CheckRow>
       {reg.pool === true ? (
         shieldedText !== null && (
-          <CheckDetail>池内屏蔽余额 {shieldedText} STRK</CheckDetail>
+          <CheckDetail>{t('claim-pool-balance').replace('{balance}', shieldedText)}</CheckDetail>
         )
       ) : strk20Ready === false ? (
         <>
           <CheckDetail>
-            需支持 STRK20 Wallet API ≥ {STRK20_WALLET_API_MIN} 的钱包（如 Ready）
+            {t('claim-pool-need-api').replace('{min}', STRK20_WALLET_API_MIN)}
           </CheckDetail>
           <CheckDetail>
-            Wallet API{' '}
+            {t('claim-wallet-api-label')}{' '}
             {walletApiVersions === null
-              ? '检测中…'
+              ? t('claim-status-checking')
               : walletApiVersions.length
                 ? walletApiVersions.join(', ')
-                : '未报告（钱包不支持或版本过旧）'}
+                : t('claim-wallet-api-none')}
           </CheckDetail>
         </>
       ) : reg.pool === false ? (
         <CheckDetail>
-          从未入池：一键注册会小额 Shield 0.01 STRK，金额留在池内余额
+          {t('claim-pool-never-joined')}
         </CheckDetail>
       ) : (
-        <CheckDetail>池内屏蔽余额检测中…</CheckDetail>
+        <CheckDetail>{t('claim-pool-balance-checking')}</CheckDetail>
       )}
       {reg.pool === false && strk20Ready !== false && (
         <>
           <CardLink type="button" onClick={() => setPoolGuideOpen((v) => !v)}>
-            {poolGuideOpen ? '收起注册指引' : '注册指引（钱包内 Shield）'}
+            {poolGuideOpen ? t('claim-guide-collapse') : t('claim-guide-expand')}
           </CardLink>
           {poolGuideOpen && (
             <GuideBox>
               <GuideSteps>
-                <li>打开 Ready 钱包 → STRK 资产页「Shield / 入池」（隐私池入口）</li>
-                <li>
-                  小额 Shield 一次（如 0.01 STRK）；钱包会依次弹出 approve 与 deposit
-                  两次确认（非重复交易）
-                </li>
-                <li>首次入池时钱包自动完成池注册——viewing key 只保存在钱包里，dapp 无法代注册</li>
-                <li>回到本弹窗重新校验，本行变绿即可私密领取</li>
+                <li>{t('claim-guide-step1')}</li>
+                <li>{t('claim-guide-step2')}</li>
+                <li>{t('claim-guide-step3')}</li>
+                <li>{t('claim-guide-step4')}</li>
               </GuideSteps>
               <CardLink
                 type="button"
@@ -586,7 +585,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
                 onClick={reverify}
                 disabled={checking}
               >
-                {checking ? '校验中…' : '我已在钱包内完成 Shield，重新校验'}
+                {checking ? t('claim-reverifying') : t('claim-guide-reverify')}
               </CardLink>
             </GuideBox>
           )}
@@ -596,19 +595,19 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   );
 
   const privateBlockedReason = (() => {
-    if (strk20Ready === false) return '当前钱包不支持 STRK20 私密交易（需 Wallet API ≥ 0.10.3，如 Ready）';
+    if (strk20Ready === false) return t('claim-blocked-unsupported');
     if (walletApiVersions !== null && walletApiVersions.length > 0
         && !walletApiVersions.some((v) => compareVersions(v, STRK20_WALLET_API_MIN) >= 0)) {
-      return `钱包 Wallet API 版本（${walletApiVersions.join(', ')}）低于 0.10.3，不支持 STRK20 私密交易——请更新 Ready`;
+      return t('claim-blocked-version').replace('{versions}', walletApiVersions.join(', '));
     }
     if (reg.pool === false) {
-      return '隐私池尚未注册：点击上方「一键注册」完成池注册后再私密领取';
+      return t('claim-blocked-pool');
     }
     if (shielded !== null && shielded < amountWei) {
-      return '池内屏蔽余额不足：请先在钱包内将 STRK shield 入隐私池（私密领取要求池内余额 ≥ 领取额，执行后等额退回）';
+      return t('claim-blocked-balance');
     }
     if (lockedWei !== null && lockedWei > 0n && lockedWei >= amountWei) {
-      return '领取额全部处于在局锁定：筹码在入座时被 #33 锁定，离桌后最多 12 小时自动解锁，解锁后即可领取';
+      return t('claim-blocked-locked');
     }
     return null;
   })();
@@ -617,7 +616,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     <ModalShell
       width="md"
       role="dialog"
-      ariaLabel="领取奖励"
+      ariaLabel={t('claim-title')}
       onBackdropClick={pending ? undefined : close}
     >
       <h2
@@ -630,7 +629,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
           textAlign: 'center',
         }}
       >
-        领取奖励
+        {t('claim-title')}
       </h2>
 
       {/* Body 容器收紧弹窗内部间距（Shell 的 1rem gap 只作用在标题边界） */}
@@ -640,8 +639,8 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
             <SuccessRing aria-hidden>✓</SuccessRing>
             <Notice $kind="success">
               {done.kind === 'private'
-                ? '私密领取已提交，奖励已进入你的池内保密票据'
-                : '公开出金已提交，STRK 将直接到账钱包'}
+                ? t('claim-done-private')
+                : t('claim-done-public')}
             </Notice>
             <Text
               textAlign="center"
@@ -664,17 +663,17 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
               fullWidth
               style={{ marginTop: '0.5rem' }}
             >
-              关闭
+              {t('claim-close')}
             </Button>
           </>
         ) : (
           <>
             <Hero>
               <HeroLeft>
-                <HeroLabel>可领取</HeroLabel>
+                <HeroLabel>{t('claim-hero-label')}</HeroLabel>
                 <HeroAmount>
                   {chips.toLocaleString('en-US')}{' '}
-                  <span style={{ fontSize: '0.95rem', fontWeight: 600 }}>筹码</span>
+                  <span style={{ fontSize: '0.95rem', fontWeight: 600 }}>{t('claim-chips-unit')}</span>
                 </HeroAmount>
                 <HeroSub>≈ {strkText} STRK</HeroSub>
               </HeroLeft>
@@ -685,11 +684,11 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
               )}
             </Hero>
 
-            <CheckBlock aria-label="领取条件">
+            <CheckBlock aria-label={t('claim-check-title')}>
               <CheckHeader>
-                <CheckBlockTitle>领取条件</CheckBlockTitle>
+                <CheckBlockTitle>{t('claim-check-title')}</CheckBlockTitle>
                 <ReverifyLink type="button" onClick={reverify} disabled={checking}>
-                  {checking ? '校验中…' : '重新校验'}
+                  {checking ? t('claim-reverifying') : t('claim-reverify')}
                 </ReverifyLink>
               </CheckHeader>
               {renderPayoutRow()}
@@ -699,8 +698,10 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
             {privateBlockedReason && <Notice $kind="warn">{privateBlockedReason}</Notice>}
             {lockedWei !== null && lockedWei > 0n && (
               <Notice $kind="warn">
-                在局锁定 {(Number(lockedWei) / 1e18).toFixed(4)} STRK：入座时锁定的买入筹码，
-                离桌后最多 12 小时自动解锁；锁定部分暂不可领取或出金
+                {t('claim-locked-notice').replace(
+                  '{amount}',
+                  (Number(lockedWei) / 1e18).toFixed(4),
+                )}
               </Notice>
             )}
             {error && <Notice $kind="error">{error}</Notice>}
@@ -712,15 +713,11 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
                   fullWidth
                   disabled={pending !== null || chips <= 0 || strk20Ready !== true}
                   onClick={() => void handleClaim('private')}
-                  title={
-                    strk20Ready
-                      ? '池内两动作：烧筹码 + 产出隐藏归属的 STRK 票据'
-                      : '需要 Ready 等支持 STRK20 Wallet API 的钱包'
-                  }
+                  title={strk20Ready ? t('claim-private-tip') : t('claim-private-tip-unsupported')}
                 >
-                  {pending === 'private' ? '提交中…' : '私密领取'}
+                  {pending === 'private' ? t('claim-submitting') : t('claim-submit-private')}
                 </Button>
-                <ActionNote>归属隐藏：奖励记入只有你能扫描的池内票据</ActionNote>
+                <ActionNote>{t('claim-note-private')}</ActionNote>
               </ActionCell>
               <ActionCell>
                 <Button
@@ -729,11 +726,11 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
                   fullWidth
                   disabled={pending !== null || chips <= 0}
                   onClick={() => void handleClaim('public')}
-                  title="vault.withdraw 直提钱包地址（链上边缘公开）"
+                  title={t('claim-public-tip')}
                 >
-                  {pending === 'public' ? '提交中…' : '公开出金'}
+                  {pending === 'public' ? t('claim-submitting') : t('claim-submit-public')}
                 </Button>
-                <ActionNote>直接到钱包地址，链上任何人可查</ActionNote>
+                <ActionNote>{t('claim-note-public')}</ActionNote>
               </ActionCell>
             </ActionsGrid>
           </>

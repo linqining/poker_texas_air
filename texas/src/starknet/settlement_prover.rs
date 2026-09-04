@@ -54,6 +54,9 @@ pub struct SettlementPrivateRequest {
     pub n_participants: u32,
     /// 赢家 payout commitment；非赢家槽零。
     pub commitments: [[u8; 32]; MAX_PARTICIPANTS],
+    /// 本手动作日志哈希（#18 Phase B，32 字节大端）——digest 吸收链尾词 +
+    /// 公开段尾词（第 37 入参）。
+    pub action_log_digest: [u8; 32],
 }
 
 /// 从结算明文构建请求（digest 由同一公式重算——与 register calldata 中的
@@ -64,6 +67,7 @@ pub fn build_request(
     players: &[Ff],
     deltas_wei: &[i128],
     commitments: &[[u8; 32]; MAX_PARTICIPANTS],
+    action_log_digest: Ff,
 ) -> Result<SettlementPrivateRequest, String> {
     let mut padded_players = [[0u8; 32]; MAX_PARTICIPANTS];
     if players.len() > MAX_PARTICIPANTS || deltas_wei.len() > MAX_PARTICIPANTS {
@@ -99,15 +103,17 @@ pub fn build_request(
         }
     }
 
-    // registered_digest = poseidon_hash_many([hand_id] ++ Σ(player, sign, |delta|))
-    // （与 submit.rs / 合约 compute_settlement_digest 逐字段一致）。
-    let mut fields = Vec::with_capacity(1 + 3 * MAX_PARTICIPANTS);
+    // registered_digest = poseidon_hash_many([hand_id] ++ Σ(player, sign, |delta|)
+    // ++ [action_log_digest])（与 submit.rs / 合约 compute_settlement_digest
+    // 逐字段一致；#18 Phase B 尾词 = 动作日志哈希）。
+    let mut fields = Vec::with_capacity(2 + 3 * MAX_PARTICIPANTS);
     fields.push(Ff::from(hand_id));
     for i in 0..MAX_PARTICIPANTS {
         fields.push(Ff::from_bytes_be(&padded_players[i]).map_err(|e| e.to_string())?);
         fields.push(Ff::from(u64::from(signs[i])));
         fields.push(Ff::from(magnitudes[i]));
     }
+    fields.push(action_log_digest);
     let registered_digest = starknet_crypto::poseidon_hash_many(&fields).to_bytes_be();
 
     Ok(SettlementPrivateRequest {
@@ -119,6 +125,7 @@ pub fn build_request(
         magnitudes,
         n_participants,
         commitments: *commitments,
+        action_log_digest: action_log_digest.to_bytes_be(),
     })
 }
 
@@ -152,9 +159,10 @@ pub async fn fetch_payout_commitments(
 }
 
 impl SettlementPrivateRequest {
-    /// Cairo `main` 的 36 个入参（顺序与 settlement_private.cairo 签名一致）。
+    /// Cairo `main` 的 37 个入参（顺序与 settlement_private.cairo 签名一致；
+    /// 第 37 = 动作日志哈希，#18 Phase B）。
     pub fn inputs_felts(&self) -> Vec<Ff> {
-        let mut felts = Vec::with_capacity(4 + 4 * MAX_PARTICIPANTS);
+        let mut felts = Vec::with_capacity(5 + 4 * MAX_PARTICIPANTS);
         felts.push(Ff::from(self.hand_id));
         felts.push(Ff::from_bytes_be(&self.registered_digest).expect("canonical digest"));
         felts.push(Ff::from(self.n_participants));
@@ -171,6 +179,9 @@ impl SettlementPrivateRequest {
         for commitment in &self.commitments {
             felts.push(Ff::from_bytes_be(commitment).expect("canonical commitment"));
         }
+        felts.push(
+            Ff::from_bytes_be(&self.action_log_digest).expect("canonical action log digest"),
+        );
         felts
     }
 
@@ -208,8 +219,9 @@ impl SettlementPrivateRequest {
     }
 
     /// 期望公开段（felt 形态）：`[MAGIC, hand_id, digest, n, binding,
-    /// cm_0..cm_7, total_winnings]`——v2 合约托管金额 = total_winnings
-    /// （电路内累加）。
+    /// cm_0..cm_7, total_winnings, action_log_digest]`（15 felt）——v2 合约
+    /// 托管金额 = total_winnings（电路内累加），尾词对注册的动作日志承诺
+    /// 逐 felt 比对（#18 Phase B）。
     pub fn public_segment_felts(&self) -> Vec<Ff> {
         let mut segment = vec![
             prove_magic(),
@@ -226,6 +238,9 @@ impl SettlementPrivateRequest {
             }
         }
         segment.push(Ff::from(total_winnings));
+        segment.push(
+            Ff::from_bytes_be(&self.action_log_digest).expect("canonical action log digest"),
+        );
         segment
     }
 
@@ -279,9 +294,10 @@ pub async fn prepare_request(
     hand_binding: Ff,
     players: &[Ff],
     deltas_wei: &[i128],
+    action_log_digest: Ff,
 ) -> Result<SettlementPrivateRequest, String> {
     let commitments = fetch_payout_commitments(players, deltas_wei).await?;
-    build_request(hand_id, hand_binding, players, deltas_wei, &commitments)
+    build_request(hand_id, hand_binding, players, deltas_wei, &commitments, action_log_digest)
 }
 
 /// prover 服务返回的 attestation：digest 与 cms 已对照本地推导校验。
@@ -352,7 +368,7 @@ impl HttpSettlementProver {
             .iter()
             .position(|w| *w == magic)
             .ok_or("prover public segment missing MAGIC")?;
-        let want_len = 5 + MAX_PARTICIPANTS + 1; // MAGIC..binding + cms + total
+        let want_len = 5 + MAX_PARTICIPANTS + 2; // MAGIC..binding + cms + total + action log
         if segment.len() < start + want_len {
             return Err("prover public segment too short".into());
         }
@@ -393,14 +409,15 @@ mod tests {
         let deltas = [3_000_i128, -2_000, -1_000, 0, 0, 0, 0, 0]; // chips 口径做单测
         let mut commitments = [[0u8; 32]; MAX_PARTICIPANTS];
         commitments[0] = sample_felt_bytes(0x21);
-        build_request(42, sample_felt(0xAA), &players, &deltas, &commitments).expect("request")
+        build_request(42, sample_felt(0xAA), &players, &deltas, &commitments, sample_felt(0xA7))
+            .expect("request")
     }
 
     #[test]
     fn inputs_match_cairo_signature_order() {
         let req = sample_request();
         let felts = req.inputs_felts();
-        assert_eq!(felts.len(), 4 + 4 * MAX_PARTICIPANTS);
+        assert_eq!(felts.len(), 5 + 4 * MAX_PARTICIPANTS);
         assert_eq!(felts[0], Ff::from(42u32), "hand_id first");
         assert_eq!(felts[1], Ff::from_bytes_be(&req.registered_digest).expect("canonical"));
         assert_eq!(felts[2], Ff::from(3u32), "n_participants");
@@ -413,6 +430,8 @@ mod tests {
         assert_eq!(felts[20], Ff::from(3_000u64), "m0");
         // commitments 组
         assert_eq!(felts[28], sample_felt(0x21), "c0");
+        // 第 37 入参 = 动作日志哈希（#18 Phase B）
+        assert_eq!(felts[36], sample_felt(0xA7), "action log digest last");
     }
 
     #[test]
@@ -429,15 +448,27 @@ mod tests {
             &tampered_players,
             &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0],
             &req.commitments,
+            sample_felt(0xA7),
         )
         .expect("tampered request still buildable");
         assert_ne!(req.registered_digest, tampered.registered_digest);
+        // 动作日志哈希（吸收链尾词）改动必须改变 digest（#18 Phase B 绑定）。
+        let other_log = build_request(
+            42,
+            sample_felt(0xAA),
+            &[sample_felt(1), sample_felt(2), sample_felt(3)],
+            &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0],
+            &req.commitments,
+            sample_felt(0xA8),
+        )
+        .expect("other log request buildable");
+        assert_ne!(req.registered_digest, other_log.registered_digest);
     }
 
     #[test]
     fn zero_sum_violation_rejected() {
         let players = [sample_felt(1), sample_felt(2), sample_felt(3)];
-        let err = build_request(42, sample_felt(0xAA), &players, &[3_001, -2_000, -1_000, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS])
+        let err = build_request(42, sample_felt(0xAA), &players, &[3_001, -2_000, -1_000, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS], sample_felt(0xA7))
             .err()
             .expect("non-zero-sum must be rejected");
         assert!(err.contains("zero-sum"));
@@ -446,7 +477,7 @@ mod tests {
     #[test]
     fn winner_without_commitment_rejected() {
         let players = [sample_felt(1), sample_felt(2), sample_felt(3)];
-        let err = build_request(42, sample_felt(0xAA), &players, &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS])
+        let err = build_request(42, sample_felt(0xAA), &players, &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS], sample_felt(0xA7))
             .err()
             .expect("winner without commitment must be rejected");
         assert!(err.contains("payout commitment"));
@@ -456,7 +487,7 @@ mod tests {
     fn expected_segment_shape() {
         let req = sample_request();
         let segment = req.expected_public_segment();
-        assert_eq!(segment.len(), 6 + MAX_PARTICIPANTS);
+        assert_eq!(segment.len(), 7 + MAX_PARTICIPANTS);
         assert!(segment[0].starts_with("0x5350324d5f4f4b"), "MAGIC='SP2M_OK'");
         assert_eq!(segment[1], "0x2a", "hand_id=42");
         assert_eq!(segment[3], "0x3", "n_participants");
@@ -476,6 +507,8 @@ mod tests {
         assert_eq!(segment[5], format!("0x{expected_cm:x}"));
         // total_winnings = Σ 赢家 |delta|（chips 口径样例 = 3000）
         assert_eq!(segment[13], format!("0x{:x}", Ff::from(3_000u64)));
+        // #18 Phase B：尾词 = 动作日志哈希
+        assert_eq!(segment[14], format!("0x{:x}", sample_felt(0xA7)));
     }
 
     #[test]
@@ -499,7 +532,7 @@ mod tests {
     fn inputs_json_is_hex_array() {
         let req = sample_request();
         let parsed: Vec<String> = serde_json::from_str(&req.inputs_json()).expect("json");
-        assert_eq!(parsed.len(), 36);
+        assert_eq!(parsed.len(), 37);
         assert!(parsed.iter().all(|h| h.starts_with("0x")));
     }
 }

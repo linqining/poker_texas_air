@@ -562,7 +562,8 @@ export const StepContent = styled.div`
   flex: 1;
   padding-top: 0.25rem;
 
-  h4 {
+  /* h3：修正标题层级跳跃（h2 之后直接出现 h4 被 Lighthouse 判不合规） */
+  h3 {
     font-size: 1.1rem;
     font-weight: 600;
     margin: 0 0 0.4rem;
@@ -677,7 +678,8 @@ export const FooterTech = styled.div`
   span {
     display: block;
     font-size: 0.75rem;
-    color: ${({ theme }) => theme.colors.softText};
+    /* mutedText：浅底对比度 ≥ 6.9:1（原 softText 被 Lighthouse 判 AA 不达标） */
+    color: ${({ theme }) => theme.colors.mutedText};
     margin-bottom: 0.4rem;
   }
 `;
@@ -710,16 +712,18 @@ export const FooterRef = styled.div`
   span {
     display: block;
     font-size: 0.75rem;
-    color: ${({ theme }) => theme.colors.softText};
+    /* mutedText：对比度修复，同 FooterTech */
+    color: ${({ theme }) => theme.colors.mutedText};
     margin-bottom: 0.2rem;
   }
   a {
-    color: ${(props) => props.theme.colors.secondaryCta};
+    /* primaryCta：浅底 5.7:1+（原 secondaryCta 仅 ~3.3:1） */
+    color: ${(props) => props.theme.colors.primaryCta};
     font-size: 0.8rem;
     transition: color 0.2s ease;
 
     &:hover {
-      color: ${({ theme }) => theme.colors.infoCyan};
+      color: ${({ theme }) => theme.colors.primaryCtaDarker};
     }
   }
 `;

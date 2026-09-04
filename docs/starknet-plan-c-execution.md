@@ -93,7 +93,7 @@ sequenceDiagram
 | `client/src/starknet/rpc.ts` | 多 RPC failover provider：异步调用失败熔断 30s 并轮转下一端点 |
 | `client/src/starknet/config.ts` | `VITE_STARKNET_RPC_URLS` / paymaster 前端配置 |
 | `client/src/starknet/starknetGameActions.ts` | deposit / withdraw / approve 全部改走 `submitCalls()`；approve+deposit 合并为单笔提交 |
-| `client/src/starknet/cartridge.ts` | Cartridge 已整体移除：现为无引用死代码（待删除），approve/deposit 调用面白名单由 paymaster 中继策略承担 |
+| `client/src/starknet/cartridge.ts` | Cartridge 已整体移除（2026-09-04 物理删除，连同 starknetkit；见 TODO C5），approve/deposit 调用面白名单由 paymaster 中继策略承担 |
 
 服务端路由（`texas/src/main.rs`）：
 

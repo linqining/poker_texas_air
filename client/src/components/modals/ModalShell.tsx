@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import styled, { css } from 'styled-components';
 
 export interface ModalShellProps {
@@ -93,10 +93,17 @@ const SIZE_MAP: Record<string, string> = {
   lg: '560px',
 };
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/* 嵌套弹窗（如弹窗内再开弹窗）时只在最后一个实例关闭时恢复 body 滚动 */
+let openShellCount = 0;
+let savedBodyOverflow = '';
+
 /**
  * 统一模态容器
  * 替代 Modal.tsx 与 LoginModal.tsx 中重复的 ModalWrapper + StyledModal 容器。
- * 提供遮罩点击、ARIA、可访问的 max-height、safe-area 等行为。
+ * 提供遮罩点击、ARIA、焦点陷阱、Esc 关闭、body 滚动锁定、焦点还原。
  */
 const ModalShell: React.FC<ModalShellProps> = ({
   children,
@@ -109,6 +116,71 @@ const ModalShell: React.FC<ModalShellProps> = ({
   className,
 }) => {
   const resolvedWidth = SIZE_MAP[width] ?? width;
+  const shellRef = useRef<HTMLDivElement>(null);
+  const onBackdropClickRef = useRef(onBackdropClick);
+  onBackdropClickRef.current = onBackdropClick;
+
+  useEffect(() => {
+    const shell = shellRef.current;
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    if (openShellCount === 0) {
+      savedBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+    }
+    openShellCount += 1;
+
+    // 初始聚焦弹窗内部第一个可聚焦元素（无则聚焦 shell 本体）
+    const focusables = shell
+      ? (Array.from(shell.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)) as HTMLElement[]).filter(
+          (el) => el.offsetParent !== null || el === document.activeElement,
+        )
+      : [];
+    (focusables[0] ?? shell)?.focus();
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        // 与遮罩点击同一出口；调用方（如 pending 中）可不传即禁用
+        if (onBackdropClickRef.current) {
+          e.stopPropagation();
+          onBackdropClickRef.current();
+        }
+        return;
+      }
+      if (e.key !== 'Tab' || !shell) return;
+      // 焦点陷阱：Tab 循环限制在弹窗内
+      const items = (
+        Array.from(shell.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)) as HTMLElement[]
+      ).filter((el) => !el.hasAttribute('disabled') && el.offsetParent !== null);
+      if (items.length === 0) {
+        e.preventDefault();
+        shell.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || active === shell)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+
+    return () => {
+      document.removeEventListener('keydown', onKeyDown, true);
+      openShellCount -= 1;
+      if (openShellCount === 0) {
+        document.body.style.overflow = savedBodyOverflow;
+      }
+      previouslyFocused?.focus();
+    };
+  }, []);
+
   return (
     <Backdrop
       onClick={(e) => {
@@ -118,6 +190,7 @@ const ModalShell: React.FC<ModalShellProps> = ({
       }}
     >
       <Shell
+        ref={shellRef}
         $width={resolvedWidth}
         $fullScreen={fullScreenOnMobile}
         role={role}
@@ -125,6 +198,7 @@ const ModalShell: React.FC<ModalShellProps> = ({
         aria-label={ariaLabel}
         aria-labelledby={ariaLabelledBy}
         className={className}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
         {children}

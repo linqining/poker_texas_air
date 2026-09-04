@@ -4,6 +4,13 @@
 `poker_texas_air`, `poker_l1`, `vm-common`, and mental-poker protocol crates.
 It is a separate Cargo workspace and does not depend on `zchain` or `zgame`.
 
+> **2026-09-05 note**: `poker_l1` has been reduced to a contract library
+> (error / object_model / signature / `vm::contracts::texas_poker`); the
+> former chain machinery (node/consensus/executor/governance/rpc/storage,
+> ~77k lines) no longer exists. Downstream code depending on those modules
+> must be rewritten, not re-pointed. The production curve is the Stark curve
+> only (Plan D); BLS12-381/blst is fully removed.
+
 ## Current compatibility boundary
 
 The old copies under `zchain/` and `zgame/proving/` are intentionally retained
@@ -26,4 +33,4 @@ old `poker_l1` types.
 
 The no-transaction-replay migration is independent of this source move. Its
 required receipt, proof, and finality changes are described in
-[`TRUST_MODEL_NO_TRANSACTION_REPLAY.md`](TRUST_MODEL_NO_TRANSACTION_REPLAY.md).
+[`docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md`](docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md)(已被取代).

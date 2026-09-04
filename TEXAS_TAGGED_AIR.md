@@ -10,7 +10,7 @@ checks its commitment. `verify_tagged_texas_proof` verifies the archived proof
 from its public scope alone, without a `ProveTask`, transaction payload, or VM
 replay.
 - `src/texas_canonical_air.rs` consumes the full fixed-width
-  `CanonicalTransitionWitness` ABI for all 20 selectors. It has no dependency on
+  `CanonicalTransitionWitness` ABI for all 29 selectors. It has no dependency on
   `ProveTask`, dispatch, or native VM replay. Its current AIR proves trace shape,
   active-prefix padding, one-hot selectors, table scope, hand/sequence progression,
   adjacent state-image commitment linkage, both sides of the actor authority rule
@@ -81,7 +81,9 @@ subset of the VM:
   commitments are also constrained to remain immutable on every active row.
 
 The narrow tagged AIR uses eight one-hot action tags.  The canonical AIR uses
-20 tags and carries the mid-round betting selectors directly. Funding rows
+29 tags (`CanonicalTransitionKind` 0..=28 — AutoFold / EndWithoutShowdown /
+timeout-cascade kinds added through 2026-09) and carries the mid-round betting
+selectors directly. Funding rows
 additionally carry range-checked pending/stack/vault limbs and ripple carries;
 leave rows carry a complete canonical nine-bit mask decomposition, a one-hot seat selector,
 and the selected-bit flip relation. The legacy `texas_tagged` trace still relies
@@ -97,7 +99,7 @@ verify_tagged_texas_proof(&ArchivedTaggedTexasProof)
 
 The migration target is the fixed-width `texas_canonical` ABI. It has explicit fields for the
 phase union, lifecycle/status, acted mask, board/deck/reveal/reconstruction commitments,
-deadlines, run-it-twice, governance/rules, custody, settlement, and roots, plus all 20 dispatch
+deadlines, run-it-twice, governance/rules, custody, settlement, and roots, plus all 29 dispatch
 transition kinds. Its `validate_shape` and commitment are useful structural checks before the AIR
 families are complete; they do not claim that an opaque commitment was recomputed inside Stwo.
 
@@ -191,7 +193,7 @@ a future full transition circuit must bind these values to authenticated state
 openings and enforce every row's full state transition.
 
 The required no-replay trust-model migration is documented in
-`TRUST_MODEL_NO_TRANSACTION_REPLAY.md`: immutable transition receipts, complete
+`docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md`: immutable transition receipts, complete
 pre/post public statements, authority and manifest binding, historical
 state-root/receipt inclusion proofs, and coordinator admission from an
 `AuthenticatedTransitionReceipt`. Removing replay code before those pieces are

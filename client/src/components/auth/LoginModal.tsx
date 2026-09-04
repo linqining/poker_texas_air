@@ -115,7 +115,8 @@ const RecheckButton = styled.button`
 
 const Note = styled.div`
   font-size: 0.72rem;
-  color: #94a3b8;
+  /* softText 而非 #94a3b8：白底对比度 4.8:1，满足 WCAG AA */
+  color: ${({ theme }) => theme.colors.softText};
   text-align: center;
   margin-top: 0.25rem;
   line-height: 1.4;

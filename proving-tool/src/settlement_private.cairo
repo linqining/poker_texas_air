@@ -2,10 +2,12 @@
 //!
 //! 语句与约束见根 crate `src/settlement_private_circuit.rs` 模块头（P2-M1）。
 //! 本程序把规格四条约束真正落进证明：
-//! 1. digest：`PoseidonTrait` sponge 吸收 `[hand_id] ++ Σ(player, sign, |delta|)`
-//!    后 finalize，必须等于公开入参 `registered_digest`（与合约
-//!    `compute_settlement_digest` 的 `poseidon_hash_span` 同一 sponge：配对吸收、
-//!    余项补 1，逐字段一致）；
+//! 1. digest：`PoseidonTrait` sponge 吸收 `[hand_id] ++ Σ(player, sign, |delta|)
+//!    ++ [action_log_digest]` 后 finalize，必须等于公开入参 `registered_digest`
+//!    （与合约 `compute_settlement_digest` 的 `poseidon_hash_span` 同一 sponge：
+//!    配对吸收、余项补 1，逐字段一致）。`action_log_digest` 为 #18 Phase B
+//!    接线的第 37 入参——本手动作日志哈希（game 层 starknet_keccak 链，含
+//!    auto 代打标记），把结算锚定到完整动作日志；
 //! 2. 零和：`Σ sign·|delta| == 0`（|delta| ≤ u64 在下方强制；8 项之和
 //!    < 2^67 << felt 素数，模零 ⟺ 整数零）；
 //! 3. 人数：非零 |delta| 参与者数 == `n_expected`；
@@ -16,12 +18,14 @@
 //! 隐私模型：`(players, signs, mags, commitments)` 是 prove-hand 的程序入参
 //!（witness，不进公开段）；公开段（public_outputs.json / Stwo public memory）
 //! 只有返回数组 `[MAGIC, hand_id, registered_digest, n_expected, hand_binding,
-//! cm_0..cm_7]` —— P2-M3 的 `verify_and_settle_dapv_stark_private_v2` 合约以
-//! `registered_digest == 已登记 digest ∧ 公开段 cms == 待写 claim_cms` 消费该段。
+//! cm_0..cm_7, total_winnings, action_log_digest]`（15 felt）—— P2-M3 的
+//! `verify_and_settle_dapv_stark_private_v2` 合约以 `registered_digest ==
+//! 已登记 digest ∧ 公开段 cms == 待写 claim_cms ∧ segment[14] == 注册的
+//! action_log 承诺` 消费该段。
 //!
-//! §8.2 预留：动作签名域（action_domain / auto 合法性 / accepted-seq）不在本
-//! 程序吸收序列中——M2-后续把动作日志哈希作为第 37 个入参追加进 digest 吸收链
-//! 即可，wire 无重排（根 crate 骨架的对应预留列位同步）。
+//! §8.2 状态（#18 Phase B）：动作日志哈希已进吸收链与公开段（列位零重排）；
+//! 电路内"合法默认"校验（零下注才可 auto-check 等）与 seq 单调仍待落地
+//! ——主网上线门槛（`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §8.2）。
 
 use core::array::ArrayTrait;
 use core::poseidon::PoseidonTrait;
@@ -48,6 +52,7 @@ fn main(
     m4: felt252, m5: felt252, m6: felt252, m7: felt252,
     c0: felt252, c1: felt252, c2: felt252, c3: felt252,
     c4: felt252, c5: felt252, c6: felt252, c7: felt252,
+    action_log_digest: felt252,
 ) -> Array<felt252> {
     let players = array![p0, p1, p2, p3, p4, p5, p6, p7].span();
     let signs = array![s0, s1, s2, s3, s4, s5, s6, s7].span();
@@ -64,6 +69,8 @@ fn main(
         h = h.update(*mags.at(i));
         i += 1;
     }
+    // 吸收链尾词：本手动作日志哈希（与 register/register 侧 digest 同公式）。
+    h = h.update(action_log_digest);
     let digest = h.finalize();
     assert!(digest == registered_digest, "DIGEST_MISMATCH");
 
@@ -130,5 +137,7 @@ fn main(
         i += 1;
     }
     out.append(total_winnings);
+    // 公开段尾词（第 15 felt）：动作日志哈希——v2 合约与注册承诺逐 felt 比对。
+    out.append(action_log_digest);
     out
 }

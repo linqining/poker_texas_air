@@ -189,7 +189,7 @@ export default function SecretPokerHomePage() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8, delay: 0.4 }}
           >
-            {t('homepage_hero-desc-1')}
+            {t('homepage_hero-desc-1')}{' '}
             {t('homepage_hero-desc-2')}
           </S.HeroDesc>
 
@@ -249,7 +249,7 @@ export default function SecretPokerHomePage() {
               <S.SectionTag>{t('homepage_features-tag')}</S.SectionTag>
               <S.SectionTitle>{t('homepage_features-title')}</S.SectionTitle>
               <S.SectionSubtitle>
-                {t('homepage_features-subtitle-1')}
+                {t('homepage_features-subtitle-1')}{' '}
                 {t('homepage_features-subtitle-2')}
               </S.SectionSubtitle>
             </S.SectionHeader>
@@ -426,7 +426,7 @@ export default function SecretPokerHomePage() {
                     <S.StepIcon>{s.icon}</S.StepIcon>
                   </S.StepNumber>
                   <S.StepContent>
-                    <h4>{s.title}</h4>
+                    <h3>{s.title}</h3>
                     <p>{s.desc}</p>
                   </S.StepContent>
                   {i < 5 && <S.StepLine />}

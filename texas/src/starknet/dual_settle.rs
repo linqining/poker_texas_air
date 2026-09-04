@@ -257,6 +257,8 @@ pub struct DualSettlement {
     pub hand_binding: Ff,
     pub g_attestation: Ff,
     pub hand_id: u32,
+    /// 本手动作日志哈希（#18 Phase B）——v2 电路第 37 入参 / 公开段尾词。
+    pub action_log_digest: Ff,
     /// hand_batch 载荷（u256 字，大端 32 字节表示）。
     pub batch_words: Vec<[u8; 32]>,
     /// Linear（默认）路径 calldata：`register_hand`（含 3 个零的期望
@@ -278,12 +280,12 @@ pub struct ProvedSettlement {
     /// p_batch 词数（与承诺一起注册/比对）。
     pub p_batch_len: usize,
     /// `register_hand_proved` calldata：
-    /// [hand_binding, settlement_digest, g_attestation, commitment,
-    ///  batch_len, exp_reveal, exp_leave, exp_recon]（期望计数暂为零 =
-    /// 链上不约束，由 prover 线下校验）。
+    /// [hand_binding, settlement_digest, g_attestation, action_log_digest,
+    ///  commitment, batch_len, exp_reveal, exp_leave, exp_recon]（期望计数
+    /// 暂为零 = 链上不约束，由 prover 线下校验）。
     pub register_calldata: Vec<Felt>,
     /// `verify_and_settle_dapv_proved` calldata：
-    /// [hand_binding, 32, hand_id_bytes…, hand_id, n, players…, n,
+    /// [hand_binding, 32, hand_id_bytes…, hand_id, action_log, n, players…, n,
     /// deltas…, commitment, batch_len]——无 p_batch。
     pub settle_calldata: Vec<Felt>,
 }
@@ -578,10 +580,14 @@ fn build_dual_settlement_with(
     // register_hand(hand_binding, settlement_digest, g_attestation,
     // exp_reveal, exp_leave, exp_recon)：期望桶计数暂全零（= 链上不约束；
     // 与合约侧"零 = 无约束"的兼容语义一致）。
+    // register_hand(hand_binding, settlement_digest, g_attestation,
+    // action_log_digest, exp_reveal, exp_leave, exp_recon)：期望桶计数暂
+    // 全零（= 链上不约束）；动作日志哈希为 #18 Phase B 的注册承诺。
     let register_calldata = vec![
         hb_felt,
         ff_to_felt(settlement.settlement_digest),
         ff_to_felt(g_attestation),
+        ff_to_felt(settlement.action_log_digest),
         Felt::ZERO,
         Felt::ZERO,
         Felt::ZERO,
@@ -595,6 +601,9 @@ fn build_dual_settlement_with(
         settle_calldata.push(Felt::from(u64::from(b)));
     }
     settle_calldata.push(Felt::from(u64::from(settlement.hand_id)));
+    // #18 Phase B：verify_and_settle_dapv_stark[_private] 的动作日志哈希
+    // 标量（hand_id 之后，与合约签名一致）。
+    settle_calldata.push(ff_to_felt(settlement.action_log_digest));
     // players: Span<ContractAddress>
     settle_calldata.push(Felt::from(settlement.players_remapped.len() as u64));
     for p in &settlement.players_remapped {
@@ -632,6 +641,7 @@ fn build_dual_settlement_with(
         hb_felt,
         ff_to_felt(settlement.settlement_digest),
         ff_to_felt(g_attestation),
+        ff_to_felt(settlement.action_log_digest),
         ff_to_felt(p_batch_commitment),
         p_batch_len_felt,
         // 期望桶计数（reveal/leave/recon）：链上不校验 proved 载荷（词都
@@ -647,6 +657,7 @@ fn build_dual_settlement_with(
         proved_settle_calldata.push(Felt::from(u64::from(b)));
     }
     proved_settle_calldata.push(Felt::from(u64::from(settlement.hand_id)));
+    proved_settle_calldata.push(ff_to_felt(settlement.action_log_digest));
     proved_settle_calldata.push(Felt::from(settlement.players_remapped.len() as u64));
     for p in &settlement.players_remapped {
         proved_settle_calldata.push(ff_to_felt(*p));
@@ -672,6 +683,7 @@ fn build_dual_settlement_with(
         hand_binding,
         g_attestation,
         hand_id: settlement.hand_id,
+        action_log_digest: settlement.action_log_digest,
         batch_words,
         register_calldata,
         settle_calldata,
@@ -1224,6 +1236,7 @@ pub async fn submit_dual_settlement(
                     dual.hand_binding,
                     players_remapped,
                     deltas,
+                    dual.action_log_digest,
                 )
                 .await
                 {
@@ -2625,6 +2638,7 @@ mod settle_mode_tests {
             players_remapped: vec![Ff::from(0x1111u64), Ff::from(0x2222u64)],
             deltas: vec![100, -100],
             settlement_digest: Ff::from(123456789u64),
+            action_log_digest: Ff::from(0xA11CEu64),
             pre_state_root: [1u8; 32],
             post_state_root: [2u8; 32],
         }
@@ -2651,19 +2665,22 @@ mod settle_mode_tests {
         let settlement = synthetic_settlement();
         let hb_felt = ff_to_felt(dual.hand_binding);
 
-        // register：[binding, digest, g_attestation, 0, 0, 0]（兼容新字段）。
-        assert_eq!(dual.register_calldata.len(), 6);
+        // register：[binding, digest, g_attestation, action_log, 0, 0, 0]
+        // （#18 Phase B：动作日志承诺 + 期望桶计数尾全零）。
+        assert_eq!(dual.register_calldata.len(), 7);
         assert_eq!(dual.register_calldata[0], hb_felt);
         assert_eq!(dual.register_calldata[1], ff_to_felt(settlement.settlement_digest));
         assert_eq!(dual.register_calldata[2], ff_to_felt(dual.g_attestation));
-        for tail in &dual.register_calldata[3..6] {
+        assert_eq!(dual.register_calldata[3], ff_to_felt(settlement.action_log_digest));
+        for tail in &dual.register_calldata[4..7] {
             assert_eq!(*tail, Felt::ZERO, "expected-count tail must default to zero");
         }
 
-        // settle：binding + [32, bytes…] + hand_id + [n, players…] +
-        // [n, deltas…] + [m, felt×m]（_stark 入口的 Span<felt252> 单
-        // felt 打包；曾为 secp 入口的 (low, high) 双 felt，已修正）。
-        let expect_len = 1 + 1 + 32 + 1
+        // settle：binding + [32, bytes…] + hand_id + action_log +
+        // [n, players…] + [n, deltas…] + [m, felt×m]（_stark 入口的
+        // Span<felt252> 单 felt 打包；曾为 secp 入口的 (low, high) 双
+        // felt，已修正）。
+        let expect_len = 1 + 1 + 32 + 1 + 1
             + 1 + settlement.players_remapped.len()
             + 1 + settlement.deltas.len()
             + 1 + dual.batch_words.len();
@@ -2671,15 +2688,16 @@ mod settle_mode_tests {
         assert_eq!(dual.settle_calldata[0], hb_felt);
         assert_eq!(dual.settle_calldata[1], Felt::from(32u64));
         assert_eq!(dual.settle_calldata[34], Felt::from(u64::from(settlement.hand_id)));
+        assert_eq!(dual.settle_calldata[35], ff_to_felt(settlement.action_log_digest));
         assert_eq!(
-            dual.settle_calldata[35],
+            dual.settle_calldata[36],
             Felt::from(settlement.players_remapped.len() as u64)
         );
         assert_eq!(
-            dual.settle_calldata[35 + 1 + settlement.players_remapped.len()],
+            dual.settle_calldata[36 + 1 + settlement.players_remapped.len()],
             Felt::from(settlement.deltas.len() as u64)
         );
-        let words_len_at = 35 + 1 + settlement.players_remapped.len() + 1 + settlement.deltas.len();
+        let words_len_at = 36 + 1 + settlement.players_remapped.len() + 1 + settlement.deltas.len();
         assert_eq!(
             dual.settle_calldata[words_len_at],
             Felt::from(dual.batch_words.len() as u64)
@@ -2704,22 +2722,25 @@ mod settle_mode_tests {
         let commitment =
             compute_p_batch_commitment(dual.hand_binding, &dual.batch_words).expect("commitment");
 
-        // register_hand_proved：[binding, digest, g_att, commitment, len, 0,0,0]。
+        // register_hand_proved：[binding, digest, g_att, action_log,
+        // commitment, len, 0,0,0]（#18 Phase B）。
         let pr = &dual.proved.register_calldata;
-        assert_eq!(pr.len(), 8);
+        assert_eq!(pr.len(), 9);
         assert_eq!(pr[0], hb_felt);
         assert_eq!(pr[1], ff_to_felt(settlement.settlement_digest));
         assert_eq!(pr[2], ff_to_felt(dual.g_attestation));
-        assert_eq!(pr[3], ff_to_felt(commitment), "registered commitment");
-        assert_eq!(pr[4], Felt::from(dual.batch_words.len() as u64));
-        assert_eq!(pr[5], Felt::ZERO);
+        assert_eq!(pr[3], ff_to_felt(settlement.action_log_digest), "action log commitment");
+        assert_eq!(pr[4], ff_to_felt(commitment), "registered commitment");
+        assert_eq!(pr[5], Felt::from(dual.batch_words.len() as u64));
         assert_eq!(pr[6], Felt::ZERO);
         assert_eq!(pr[7], Felt::ZERO);
+        assert_eq!(pr[8], Felt::ZERO);
 
         // verify_and_settle_dapv_proved：与 linear 同前缀（binding、bytes、
-        // hand_id、players、deltas），尾部是 [commitment, len]——**无 p_batch**。
+        // hand_id、action_log、players、deltas），尾部是 [commitment, len]
+        // ——**无 p_batch**。
         let ps = &dual.proved.settle_calldata;
-        let prefix_len = 1 + 1 + 32 + 1
+        let prefix_len = 1 + 1 + 32 + 1 + 1
             + 1 + settlement.players_remapped.len()
             + 1 + settlement.deltas.len();
         assert_eq!(ps.len(), prefix_len + 2, "proved settle = prefix + commitment + len");

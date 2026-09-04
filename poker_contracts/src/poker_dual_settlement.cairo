@@ -23,7 +23,12 @@ pub trait IPokerDualSettlement<TContractState> {
     ///
     /// `hand_binding` — Poseidon digest over the documented §6 field order
     /// (Rust: `poker_texas_air::hand_binding`).
-    /// `settlement_digest` — the existing settlement commitment.
+    /// `settlement_digest` — the existing settlement commitment
+    /// (#18 Phase B: `poseidon([hand_id] ++ Σ(player, sign, |delta|)
+    /// ++ [action_log_digest])`).
+    /// `action_log_digest` — the hand's action-log hash (starknet_keccak chain
+    /// over the accepted/auto actions). Stored so the v2 private settle can
+    /// pin the proven public segment's action-log word to the registered one.
     /// `g_attestation` — Phase 1 registration of the host-verified G-STARK
     /// commitments (Poseidon over binding + settlement + state roots).
     /// `expected_n_reveal/leave/recon` — completeness hardening: the
@@ -38,6 +43,7 @@ pub trait IPokerDualSettlement<TContractState> {
         hand_binding: felt252,
         settlement_digest: felt252,
         g_attestation: felt252,
+        action_log_digest: felt252,
         expected_n_reveal: felt252,
         expected_n_leave: felt252,
         expected_n_recon: felt252,
@@ -49,11 +55,15 @@ pub trait IPokerDualSettlement<TContractState> {
     /// are felt252-range u256s (coordinates/scalars are < n < P and convert
     /// losslessly); challenges and rho are Poseidon (host
     /// `StarkCurve::hash_to_scalar`), transcript domain stays keccak.
+    /// `action_log_digest` (#18 Phase B) is the hand's action-log hash —
+    /// recomputed into the settlement digest and compared with the
+    /// registered root.
     fn verify_and_settle_dapv_stark(
         ref self: TContractState,
         hand_binding: felt252,
         hand_id_bytes: Span<u8>,
         hand_id: u64,
+        action_log_digest: felt252,
         players: Span<ContractAddress>,
         deltas: Span<i128>,
         p_batch: Span<felt252>,
@@ -65,6 +75,9 @@ pub trait IPokerDualSettlement<TContractState> {
     fn hand_binding(self: @TContractState, binding: felt252) -> (felt252, felt252, felt252);
     fn hand_settled(self: @TContractState, binding: felt252) -> bool;
     fn vault(self: @TContractState) -> ContractAddress;
+    /// View: the registered action-log commitment for `hand_binding`
+    /// (#18 Phase B; 0 for bindings registered before it existed).
+    fn hand_action_log(self: @TContractState, binding: felt252) -> felt252;
 
     /// Part A Phase 1（SETTLEMENT_PRIVACY_PLAN.md §4）：隐私结算入口。
     /// 与 `verify_and_settle_dapv_stark` 相同的 DAPV 校验与 digest 断言，
@@ -85,10 +98,23 @@ pub trait IPokerDualSettlement<TContractState> {
         hand_binding: felt252,
         hand_id_bytes: Span<u8>,
         hand_id: u64,
+        action_log_digest: felt252,
         players: Span<ContractAddress>,
         deltas: Span<i128>,
         p_batch: Span<felt252>,
     );
+
+    /// P2-M3（SETTLEMENT_PRIVACY_PLAN.md §4 Phase 2）：零明文结算入口。
+    /// calldata 只含 (hand_binding, hand_id, segment)，**不含 players/deltas**；
+    /// segment 是 settlement_private 电路（program_hash 钉死）的公开段：
+    /// `[MAGIC, hand_id, digest, n, binding, cm_0..cm_7, total_winnings,
+    /// action_log_digest]`（15 felt，#18 Phase B）。
+    /// 信任锚为 fact-registry：`fact = poseidon([program_hash ++ segment])`
+    /// 须已由授权 prover/owner 登记（Stwo Cairo verifier 上链前的过渡形态，
+    /// 与 G 层 host-verified 同一 residual-trust 口径）；托管金额取自公开段
+    /// total_winnings（零和由电路证明，Σ claim ≤ escrow 由 vault 余额封顶）；
+    /// segment 尾词（动作日志哈希）必须等于注册承诺——把零明文结算锚定到
+    /// 带审计日志的完整动作序列。
 
     /// P2-M3（SETTLEMENT_PRIVACY_PLAN.md §4 Phase 2）：零明文结算入口。
     /// calldata 只含 (hand_binding, hand_id, segment)，**不含 players/deltas**；
@@ -148,8 +174,9 @@ pub mod PokerDualSettlement {
 
     // P2-M3 公开段常量与 fact 公式（与 proving-tool/src/settlement_private.cairo
     // 及 texas/src/starknet/settlement_prover.rs 三方一致）。
+    // #18 Phase B：段长 14 → 15（尾词 = 动作日志哈希，对注册承诺比对）。
     const SETTLEMENT_SEGMENT_MAGIC: felt252 = 0x5350324d5f4f4b;
-    const SETTLEMENT_SEGMENT_LEN: usize = 14;
+    const SETTLEMENT_SEGMENT_LEN: usize = 15;
 
     fn fact_for_segment(program_hash: felt252, segment: Span<felt252>) -> felt252 {
         let mut h = PoseidonTrait::new();
@@ -175,12 +202,14 @@ fn bytes_to_felt(bytes: Span<u8>) -> felt252 {
 }
 
 /// Shared settlement-digest recompute (settlement_hash.cairo layout):
-/// Poseidon over [hand_id, (player, sign, |delta|)*]. Keeping ONE copy is
-/// also what keeps the contract's CASM under the Starknet bytecode limit —
-/// every settle entry must compare against the registered digest through
-/// this helper, not inline its own loop.
+/// Poseidon over [hand_id, (player, sign, |delta|)*, action_log_digest] —
+/// the tail word (#18 Phase B) binds the settlement to the hand's
+/// audited action log. Keeping ONE copy is also what keeps the contract's
+/// CASM under the Starknet bytecode limit — every settle entry must compare
+/// against the registered digest through this helper, not inline its own loop.
 fn compute_settlement_digest(
     hand_id: u64,
+    action_log_digest: felt252,
     players: Span<ContractAddress>,
     deltas: Span<i128>,
 ) -> felt252 {
@@ -201,6 +230,7 @@ fn compute_settlement_digest(
         }
         i += 1;
     }
+    felements.append(action_log_digest);
     poseidon_hash_span(felements.span())
 }
 
@@ -277,14 +307,15 @@ fn pack_expected_counts(
 }
 
 /// Shared registration write (deduplicates the dup-check, bindings tuple
-/// write, expected-counts write and event across `register_hand` and
-/// `register_hand_proved`): the FIRST registration of a binding — linear
-/// or proved — locks it.
+/// write, action-log write, expected-counts write and event across
+/// registration callers): the FIRST registration of a binding — linear or
+/// proved — locks it.
 fn write_registration(
     ref self: ContractState,
     hand_binding: felt252,
     settlement_digest: felt252,
     g_attestation: felt252,
+    action_log_digest: felt252,
     expected_n_reveal: felt252,
     expected_n_leave: felt252,
     expected_n_recon: felt252,
@@ -295,6 +326,7 @@ fn write_registration(
         "Binding already registered"
     );
     self.bindings.write(hand_binding, (settlement_digest, g_attestation, 1));
+    self.action_logs.write(hand_binding, action_log_digest);
     self.expected_packed.write(
         hand_binding,
         pack_expected_counts(expected_n_reveal, expected_n_leave, expected_n_recon),
@@ -310,6 +342,7 @@ fn dapv_prelude(
     hand_binding: felt252,
     hand_id_bytes: Span<u8>,
     hand_id: u64,
+    action_log_digest: felt252,
     players: Span<ContractAddress>,
     deltas: Span<i128>,
 ) -> felt252 {
@@ -319,7 +352,7 @@ fn dapv_prelude(
         "Batch domain not bound to hand_binding"
     );
     let registered_digest = read_registered_digest(self, hand_binding);
-    let computed = compute_settlement_digest(hand_id, players, deltas);
+    let computed = compute_settlement_digest(hand_id, action_log_digest, players, deltas);
     assert!(computed == registered_digest, "Settlement digest mismatch");
     registered_digest
 }
@@ -359,6 +392,9 @@ fn dapv_prelude(
         settlement_facts: Map<felt252, bool>,
         /// P2-M3：v2 手的金额藏在 cm 中（consume_claim 走隐藏模式）。
         amounts_hidden: Map<felt252, bool>,
+        /// #18 Phase B：注册时钉住的每手动作日志承诺
+        /// （v2 公开段尾词必须逐 felt 等于该值）。
+        action_logs: Map<felt252, felt252>,
         #[substorage(v0)]
         ownable: OwnableComponent::Storage,
     }
@@ -453,6 +489,7 @@ fn dapv_prelude(
             hand_binding: felt252,
             settlement_digest: felt252,
             g_attestation: felt252,
+            action_log_digest: felt252,
             expected_n_reveal: felt252,
             expected_n_leave: felt252,
             expected_n_recon: felt252,
@@ -465,6 +502,7 @@ fn dapv_prelude(
                 hand_binding,
                 settlement_digest,
                 g_attestation,
+                action_log_digest,
                 expected_n_reveal,
                 expected_n_leave,
                 expected_n_recon,
@@ -476,12 +514,14 @@ fn dapv_prelude(
             hand_binding: felt252,
             hand_id_bytes: Span<u8>,
             hand_id: u64,
+            action_log_digest: felt252,
             players: Span<ContractAddress>,
             deltas: Span<i128>,
             p_batch: Span<felt252>,
         ) {
-            let registered_digest =
-                dapv_prelude(@self, hand_binding, hand_id_bytes, hand_id, players, deltas);
+            let registered_digest = dapv_prelude(
+                @self, hand_binding, hand_id_bytes, hand_id, action_log_digest, players, deltas,
+            );
 
             assert!(p_batch.len() >= 1_u32, "Empty batch");
             let n_own: u32 = (*p_batch.at(0)).try_into().expect('n_own fits u32');
@@ -594,6 +634,10 @@ fn dapv_prelude(
             self.vault_address.read()
         }
 
+        fn hand_action_log(self: @ContractState, binding: felt252) -> felt252 {
+            self.action_logs.read(binding)
+        }
+
         fn set_claim_helper(ref self: ContractState, helper: ContractAddress) {
             self.ownable.assert_only_owner();
             self.claim_helper.write(helper);
@@ -607,12 +651,14 @@ fn dapv_prelude(
             hand_binding: felt252,
             hand_id_bytes: Span<u8>,
             hand_id: u64,
+            action_log_digest: felt252,
             players: Span<ContractAddress>,
             deltas: Span<i128>,
             p_batch: Span<felt252>,
         ) {
-            let registered_digest =
-                dapv_prelude(@self, hand_binding, hand_id_bytes, hand_id, players, deltas);
+            let registered_digest = dapv_prelude(
+                @self, hand_binding, hand_id_bytes, hand_id, action_log_digest, players, deltas,
+            );
 
             assert!(p_batch.len() >= 1_u32, "Empty batch");
             let n_own: u32 = (*p_batch.at(0)).try_into().expect('n_own fits u32');
@@ -768,6 +814,12 @@ fn dapv_prelude(
             // digest 取 register_aggregate 时的注册值（无明文参与比对）
             let registered_digest = read_registered_digest(@self, hand_binding);
             assert!(*segment.at(2) == registered_digest, "Segment digest mismatch");
+            // #18 Phase B：公开段尾词（动作日志哈希）必须等于注册承诺——
+            // 把零明文结算锚定到注册时刻钉住的动作日志（审计/auto 标记）。
+            assert!(
+                *segment.at(14) == self.action_logs.read(hand_binding),
+                "Segment action log mismatch"
+            );
             // fact-registry 锚：fact = poseidon([program_hash ++ segment])，
             // 由授权 prover/owner 在 prove-hand 之后登记。
             let program_hash = self.circuit_program_hash.read();
@@ -863,11 +915,13 @@ mod settlement_private_v2_tests {
         digest: felt252,
         segment: Array<felt252>,
         total: felt252,
+        /// 注册时钉住的动作日志承诺（#18 Phase B）。
+        action_log: felt252,
     }
 
     /// 部署 mock vault + dual（test 合约为 owner 与 initial_prover），
-    /// 注册 binding（digest=0x99..）、钉 program hash，构造诚实公开段并
-    /// 登记 fact。`tamper` 可选：覆盖 segment 的 digest 槽。
+    /// 注册 binding（digest=0x99..、action_log=0xA11CE）、钉 program hash，
+    /// 构造诚实公开段并登记 fact。`tamper` 可选：覆盖 segment 的 digest 槽。
     fn setup(tamper_digest: bool, with_fact: bool) -> Setup {
         let test_addr = get_contract_address();
         let vault = deploy_contract("MockVault", @array![]);
@@ -882,8 +936,9 @@ mod settlement_private_v2_tests {
         let hand_binding: felt252 = 0xBBBB;
         let hand_id: u64 = 42;
         let digest: felt252 = 0x9900;
+        let action_log: felt252 = 0xA11CE;
         // 与 register_hand 一致的注册（prover = test_addr）
-        dual.register_hand(hand_binding, digest, 0, 0, 0, 0);
+        dual.register_hand(hand_binding, digest, 0, action_log, 0, 0, 0);
 
         // 公开段：赢家 seat0（+3000），输家 seat1/2，其余零变动
         let mut cms = array![];
@@ -928,6 +983,8 @@ mod settlement_private_v2_tests {
             w += 1;
         };
         segment.append(total);
+        // #18 Phase B：公开段尾词 = 动作日志哈希（15 felt 段）。
+        segment.append(action_log);
 
         if with_fact {
             // fact = poseidon([program_hash ++ segment])（与合约公式一致）
@@ -948,12 +1005,16 @@ mod settlement_private_v2_tests {
             digest,
             segment,
             total,
+            action_log,
         }
     }
 
     #[test]
     fn v2_honest_segment_settles_without_plaintext_calldata() {
         let s = setup(false, true);
+        // 注册承诺可见（view），公开段尾词与其一致
+        assert!(s.dual.hand_action_log(s.hand_binding) == s.action_log, "action log view");
+        assert!(*s.segment.at(14) == s.action_log, "segment tail is the action log");
         // v2 calldata：只有 (hand_binding, hand_id, segment)——无 players/deltas
         s.dual
             .verify_and_settle_dapv_stark_private_v2(s.hand_binding, 42, s.segment.span());
@@ -980,6 +1041,32 @@ mod settlement_private_v2_tests {
         let s = setup(true, true);
         s.dual
             .verify_and_settle_dapv_stark_private_v2(s.hand_binding, 42, s.segment.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Segment action log mismatch")]
+    fn v2_tampered_action_log_reverts() {
+        // #18 Phase B：公开段尾词 ≠ 注册承诺 → 拒绝（绑定注册时刻的动作日志）。
+        let s = setup(false, true);
+        // 重建整段：仅把尾词换成 0xFEED。
+        let mut tampered_segment = array![];
+        let mut w: u32 = 0;
+        while w < s.segment.len() {
+            let v = if w == 14_u32 { 0xFEED } else { *s.segment.at(w) };
+            tampered_segment.append(v);
+            w += 1;
+        }
+        // fact 锚覆盖整段：换词后必须重登记 fact 才能走到 action-log 断言。
+        let mut f = PoseidonTrait::new();
+        f = f.update(PROGRAM_HASH);
+        let mut w: u32 = 0;
+        while w < tampered_segment.len() {
+            f = f.update(*tampered_segment.at(w));
+            w += 1;
+        }
+        s.dual.register_settlement_fact(f.finalize());
+        s.dual
+            .verify_and_settle_dapv_stark_private_v2(s.hand_binding, 42, tampered_segment.span());
     }
 
     #[test]

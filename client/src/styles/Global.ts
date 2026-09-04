@@ -98,6 +98,20 @@ const GlobalStyles = createGlobalStyle`
     padding-right: ${(props) => props.theme.other.safeAreaRight};
   }
 
+  /* 前庭障碍用户（WCAG 2.3.3）：系统声明减弱动态效果时，把装饰性
+     动画/过渡收敛为瞬时完成。framer-motion 部分由 Providers 里的
+     <MotionConfig reducedMotion="user"> 负责豁免 transform 动画。 */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
   hr {
     background-color: ${(props) => props.theme.colors.darkBg};
     height: 1px;

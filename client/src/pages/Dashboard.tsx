@@ -82,43 +82,9 @@ const StyledInput = styled(Input)`
   }
 `;
 
-const ActionButton = styled(Button)`
-  background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2) !important;
-  color: ${({ theme }) => theme.colors.lightestBg} !important;
-  border: none !important;
-  border-radius: 10px !important;
-  font-weight: 600 !important;
-  height: 40px;
-  box-shadow: 0 2px 12px rgba(102, 126, 234, 0.2) !important;
-  transition:
-    box-shadow 0.3s ease,
-    transform 0.3s ease !important;
-
-  &:hover:not(:disabled) {
-    box-shadow: 0 4px 20px rgba(102, 126, 234, 0.35) !important;
-    transform: translateY(-1px);
-  }
-`;
-
-const DangerButton = styled(Button)`
-  background: rgba(241, 245, 249, 0.8) !important;
-  color: #64748b !important;
-  border: 1px solid rgba(203, 213, 225, 0.8) !important;
-  border-radius: 10px !important;
-  font-weight: 500 !important;
-  height: 40px;
-  transition:
-    border-color 0.25s ease,
-    color 0.25s ease,
-    background-color 0.25s ease !important;
-
-  &:hover {
-    border-color: rgba(226, 232, 240, 0.9) !important;
-    color: #ef4444 !important;
-    background: rgba(241, 245, 249, 1) !important;
-  }
-`;
-
+/* 改昵称/改邮箱/重置密码/删除账户按钮曾在此渲染，但从未接入任何后端
+   动作（纯死按钮，删除账户甚至是危险误导）。待对应 API 落地后再以
+   Button variant 补回。 */
 const BackButton = styled(Button)`
   background: transparent !important;
   color: #64748b !important;
@@ -158,25 +124,11 @@ const Dashboard: React.FC = () => {
           <FormGroup>
             <StyledLabel>{getLocalizedString('dashboard-nickname_lbl_txt')}</StyledLabel>
             <StyledInput value={userName ?? ''} readOnly />
-            <ActionButton primary>
-              {getLocalizedString('dashboard-nickname_btn_txt')}
-            </ActionButton>
           </FormGroup>
           <FormGroup>
             <StyledLabel>{getLocalizedString('dashboard-email_lbl_txt')}</StyledLabel>
             <StyledInput type="email" value={email ?? ''} readOnly />
-            <ActionButton primary>
-              {getLocalizedString('dashboard-email_btn_txt')}
-            </ActionButton>
           </FormGroup>
-          <FullWidthGroup>
-            <ActionButton primary>
-              {getLocalizedString('dashboard-reset_pw_btn_text')}
-            </ActionButton>
-            <DangerButton>
-              {getLocalizedString('dashboard-delete_acct_btn_text')}
-            </DangerButton>
-          </FullWidthGroup>
           <FullWidthGroup>
             <BackButton as={Link} to="/">
               {getLocalizedString('static_page-back_btn_txt')}

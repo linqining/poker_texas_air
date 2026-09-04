@@ -62,6 +62,8 @@ const StyledPokerCardWrapper = styled.div.withConfig({
     width: ${({ width }) => width || '7vw'};
     max-width: ${({ maxWidth }) => maxWidth || '80px'};
     min-width: ${({ minWidth }) => minWidth || '50px'};
+    /* 配合 width/height 属性的固有宽高比，防止发牌时的布局位移 (CLS) */
+    height: auto;
     box-shadow: 10px 10px 30px rgba(0, 0, 0, 0.1);
   }
 `;
@@ -75,7 +77,7 @@ const PokerCard: React.FC<PokerCardProps> = ({ card: { suit, rank }, width, minW
       minWidth={minWidth}
       maxWidth={maxWidth}
     >
-      <img src={cards[concat]} alt={concat} />
+      <img src={cards[concat]} alt={concat} width={602} height={840} />
     </StyledPokerCardWrapper>
   );
 };

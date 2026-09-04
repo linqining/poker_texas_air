@@ -1,6 +1,6 @@
 //! Starknet 接入端到端测试（cargo test -p texas e2e_starknet）。
 //!
-//! 方案A（MIRROR_UNIFICATION_PLAN.md）对拍基线：
+//! 方案A（历史方案见 docs/archive/MIRROR_UNIFICATION_PLAN.md）对拍基线：
 //! 1. 以**游戏层真实流程**构造牌局——两个客户端用 zgame poker_protocol
 //!    （与前端 wasm 同源代码）执行 join_game_and_shuffle，deck 链由客户端洗牌驱动；
 //! 2. 游戏层发完底牌后（deck 终局），把 deck **原样注入** mirror VM
@@ -227,7 +227,9 @@ fn play_full_hand() -> Result<(), String> {
     mirror.advance_deadline().map_err(|e| format!("advance: {e}"))?;
 
     // ---- 结算：分池 + 证明 + calldata ----
-    let settlement = super::submit::settle_hand(&mirror, Some(creator), &[])
+    // #18 Phase B：动作日志哈希取一个确定样例（e2e 无 game 层动作日志）。
+    let action_log_digest = starknet_ff::FieldElement::from(0xA11CE_u64);
+    let settlement = super::submit::settle_hand(&mirror, Some(creator), &[], action_log_digest)
         .map_err(|e| format!("settlement: {e}"))?;
 
     assert_eq!(settlement.hand_id, 7, "hand_id must come from the injected counter");
@@ -254,14 +256,20 @@ fn play_full_hand() -> Result<(), String> {
         .map_err(|e| format!("dapv build: {e}"))?;
     assert_ne!(dual.hand_binding, starknet_ff::FieldElement::ZERO);
     assert_eq!(dual.batch_words.len(), 5 + 5 * settlement.players_remapped.len());
-    assert_eq!(dual.register_calldata.len(), 6);
-    let expect_len = 1 + 1 + 32 + 1
+    // #18 Phase B：register 7 felt（+动作日志承诺）、settle 前缀 +1 标量。
+    assert_eq!(dual.register_calldata.len(), 7);
+    assert_eq!(
+        dual.register_calldata[3],
+        super::submit::ff_to_felt(action_log_digest),
+        "register pins the action log commitment"
+    );
+    let expect_len = 1 + 1 + 32 + 1 + 1
         + 1 + settlement.players_remapped.len()
         + 1 + settlement.deltas.len()
         + 1 + dual.batch_words.len();
     assert_eq!(dual.settle_calldata.len(), expect_len);
     assert_ne!(dual.proved.p_batch_commitment, starknet_ff::FieldElement::ZERO);
-    assert_eq!(dual.proved.register_calldata.len(), 8);
+    assert_eq!(dual.proved.register_calldata.len(), 9);
     assert_eq!(
         dual.proved.settle_calldata.len(),
         expect_len - (1 + dual.batch_words.len()) + 2

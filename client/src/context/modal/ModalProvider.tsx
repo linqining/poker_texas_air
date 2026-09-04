@@ -1,7 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import ModalContext from './modalContext';
-import Modal, { initialModalData } from '../../components/modals/Modal';
+import Modal from '../../components/modals/Modal';
 import { ModalData, ModalContextType } from './modalContext';
+
+/* 占位初始值：仅在 showModal=false 时存在，弹窗打开前总会被 openModal 覆盖 */
+const emptyModalData: ModalData = {
+  children: () => null,
+  headingText: '',
+  btnText: '',
+  btnCallBack: () => {},
+  onCloseCallBack: () => {},
+};
 
 interface ModalProviderProps {
   children: React.ReactNode;
@@ -9,7 +18,7 @@ interface ModalProviderProps {
 
 const ModalProvider: React.FC<ModalProviderProps> = ({ children }) => {
   const [showModal, setShowModal] = useState(false);
-  const [modalData, setModalData] = useState<ModalData>(initialModalData as ModalData);
+  const [modalData, setModalData] = useState<ModalData>(emptyModalData);
 
   useEffect(() => {
     const layoutWrapper = document.getElementById('layout-wrapper');

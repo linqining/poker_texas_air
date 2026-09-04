@@ -1,3 +1,7 @@
+> ⚠️ **历史存档(2026-09-05 归档)**:仓库迁移蓝图(P0-P6)已全部执行完毕。
+> 仍存续的收尾项(主网交易 / strk20.json / demo 视频)由 `docs/TODO.md` §五接管;
+> 部署权威见 `poker_contracts/DEPLOYMENTS.md`。
+
 # STRK20 黑客松提交仓库整合执行计划（zgame → poker_texas_air）
 
 > 目标：把 `/Users/mac/projects/zgame` 中**实际使用**的代码复制到 `/Users/mac/projects/poker_texas_air`，使后者成为自包含、可独立构建、可直接提交 STRK20 Private Sprint（RFP-03 Poker）的仓库。

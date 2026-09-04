@@ -45,5 +45,5 @@ V2 才是 mental poker。**我们直接交付 V2 级引擎**（无 trusted deale
 - 游戏执行（下注/超时/evaluator）链下由服务器驱动：证明验证与
   结算锚定上链，执行层信任是现阶段边界（roadmap：结算残差全量
   进 EC_OP 批次 → 电路重执行 → 每手 STARK 聚合）；
-- 提现（unshield）合约规范已交付，实现在外部结算 workspace；
-- 过渡期双曲线共存：新表 STARK 曲线、Sui 旧表 legacy BLS 收尾。
+- 提现（unshield）合约已实现并部署 sepolia（vault `withdraw_to` + CashoutUnshieldHelper，2026-09）；
+- ~~过渡期双曲线共存~~ 已终结（Plan D，2026-09-05）：blst/BLS12-381 全量移除，Stark 曲线唯一世界；结算 digest 绑定动作日志哈希（#18 Phase B），v2 零明文私密结算合约已部署。

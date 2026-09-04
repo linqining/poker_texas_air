@@ -36,14 +36,17 @@ configuration above is present.
 
 ## Benchmarks
 
-Short Criterion benchmarks are available with:
+Performance baselines live in `docs/plan_d_perf.md` (post-Plan-D release
+numbers; the repro commands are in `poker-protocol-proofs/tests/plan_d_perf.rs`).
+Run them with:
 
 ```bash
-CARGO_TARGET_DIR=target-bench cargo +nightly bench --release -p poker_l1 \
-  --bench task36_dag_consensus -- --noplot
-CARGO_TARGET_DIR=target-bench cargo +nightly bench --release -p poker_l1 \
-  --bench task36_bls_syscall -- --noplot
+cargo +nightly test --release -p poker-protocol-proofs --test plan_d_perf -- --nocapture
 ```
+
+(The former `poker_l1` Criterion benches — `task36_dag_consensus`,
+`task36_bls_syscall` — were removed with the chain-machinery and BLS cleanup
+in 2026-09.)
 
 The full hand proving benchmark is intentionally not part of the pull-request
 check because it is long-running and hardware-sensitive:

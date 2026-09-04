@@ -1,7 +1,29 @@
 # 双证明结算架构重构方案（poker_protocol direct-sigma + 牌局过程 STARK）
 
-状态：设计稿 v2.8（2026-08-29，含实施记录）。本文档取代 admission-AIR（Path A
+状态：设计稿 v2.9（2026-09-05 修订）。本文档取代 admission-AIR（Path A
 递归信封）作为「链上可验证结算」的目标架构。
+
+**v2.9 修订（Plan D + #18 Phase B 后的现状对齐，正文旧措辞以本节为准）**：
+- **曲线世界 = Stark 曲线唯一**（Plan D 2026-09-05：blst/BLS12-381 全量移除）。
+  正文中的 secp256k1（D1/v2.2）、BN254（v2.1）、Bls12381Curve（§3.1）、
+  "48 字节压缩点"（§3.2）等曲线叙事全部作废——生产 P 层走
+  `dual::hand_batch_stark`（Cairo 原生 STARK 曲线 + EC_OP），挑战/ρ 用
+  Poseidon，压缩点 32 字节；secp/BN254 仅作理论载体与保留代码。
+- **结算 digest 公式**（§5.1/§6.3 "不动"作废）：
+  `poseidon([hand_id] ++ Σ(player, sign, |delta|) ++ [action_log_digest])`——
+  尾词为本手动作日志哈希（#18 Phase B，2026-09-05 接线：settlement_private
+  电路第 37 入参、公开段 15 felt、合约 register_hand 第 4 参承诺、
+  SETTLEMENT_SEGMENT_LEN=15）。
+- **§5.2 "canonical 状态镜像"**：常驻 mirror 已删除，改为游戏层 prove_log
+  记录 + settle 时一次性重建（`mirror::build_from_log`）。
+- **§7.1 合约签名以代码为准**：`register_hand(hand_binding, settlement_digest,
+  g_attestation, action_log_digest, exp_reveal, exp_leave, exp_recon)`；
+  生产入口 `verify_and_settle_dapv_stark(hand_binding, hand_id_bytes, hand_id,
+  action_log_digest, players, deltas, p_batch)`；legacy `PokerSettlement`
+  仅 fallback。
+- **§7.3/§12/§7.4 中 poker_l1 链上验证路线**（zk_verify/gas 表/ZkVerifierRegistry）：
+  poker_l1 已收缩为合约库，该路线前提消失，仅存档；链上验证路线以
+  `SETTLEMENT_PRIVACY_PLAN.md` 与 docs/TODO.md 为准。
 
 v2.8 变更（重构成果总结 + DAPV 方向）：**Path A admission STARK 全族移除后，
 系统证明复杂度大幅简化**。前架构的 admission STARK 需要 log-16~21 的 FRI 域

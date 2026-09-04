@@ -7,12 +7,21 @@ export const BetSliderInput = styled.input`
   width: 100%;
   background-color: transparent;
   -webkit-appearance: none;
-  /* The thumb is the touch target — bump it up to meet Apple HIG (44x44)
-     for users on touch devices. */
+  /* The thumb is the touch target — keep it as large as the track allows;
+     the visible focus ring below restores keyboard affordance. */
   cursor: pointer;
 
-  &:focus-visible {
-    outline: none;
+  /* 下注是资金操作：键盘焦点必须可见（此前的 outline:none 无替代样式） */
+  &:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.5);
+  }
+
+  &:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.5);
+  }
+
+  &:focus-visible::-ms-thumb {
+    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.5);
   }
 
   &::-webkit-slider-runnable-track {

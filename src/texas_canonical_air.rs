@@ -4,7 +4,7 @@
 //! rather than a transaction or a VM prove task. The AIR binds the fixed-width state-image links,
 //! selector, limited actor policy, sequence arithmetic, table scope, batch boundaries, and padding
 //! rows. It is intentionally not a proof of every Texas VM rule yet; see
-//! `TRUST_MODEL_NO_TRANSACTION_REPLAY.md` before using it for production admission.
+//! `docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md`（已被取代，现行模型见 README）before using it for production admission.
 #![allow(missing_docs)]
 
 use bincode::Options;

@@ -38,7 +38,8 @@ export const RotateDevicePrompt: React.FC = () => {
       <img
         src={rotateGif}
         width="140"
-        style={{ width: '140px' }}
+        height="140"
+        style={{ width: '140px', height: 'auto' }}
         alt={getLocalizedString('rotate-device_alt')}
       />
       <br />

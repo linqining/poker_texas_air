@@ -46,6 +46,9 @@ pub struct HandSettlement {
     pub deltas: Vec<i128>,
     /// 重映射后的 Poseidon 结算摘要（register root / Hand-batch 路径共用）。
     pub settlement_digest: Ff,
+    /// 本手动作日志哈希（#18 Phase B）：settlement digest 吸收链尾词，
+    /// dapv register 承诺与 v2 公开段尾词共用。
+    pub action_log_digest: Ff,
     /// G 链首 receipt 的 pre state root（hand_binding 输入）。
     pub pre_state_root: [u8; 32],
     /// G 链末 receipt 的 post state root（hand_binding 输入）。
@@ -59,6 +62,7 @@ pub fn settle_hand(
     mirror: &TableMirror,
     rake_recipient: Option<poker_l1::Address>,
     wallet_map: &[(poker_l1::Address, Ff)],
+    action_log_digest: Ff,
 ) -> Result<HandSettlement, String> {
     if mirror.tasks.is_empty() {
         return Err("mirror has no prove tasks for this hand".into());
@@ -136,8 +140,15 @@ pub fn settle_hand(
     let digest = verified.aggregate_digest();
 
     // 4. Cairo calldata。
-    let settle = SettleHandCalldata::new(digest, hand_id, settle_table, &plan, rake_recipient)
-        .map_err(|e| format!("SettleHandCalldata::new failed: {e}"))?;
+    let settle = SettleHandCalldata::new(
+        digest,
+        hand_id,
+        settle_table,
+        &plan,
+        rake_recipient,
+        action_log_digest,
+    )
+    .map_err(|e| format!("SettleHandCalldata::new failed: {e}"))?;
 
     // 4.5 参与者地址重映射：VM 座位只存钱包 felt 的低 160 位（poker_l1
     //     Address 为 20 字节），而 vault 余额以完整钱包 felt 为键。上链前把
@@ -184,6 +195,9 @@ pub fn settle_hand(
         }
         digest_fields.push(Ff::from(magnitude));
     }
+    // #18 Phase B：动作日志哈希为吸收链尾词（与合约 compute_settlement_digest
+    // 及 settlement_private 电路同公式）。
+    digest_fields.push(action_log_digest);
     let settlement_digest = starknet_crypto::poseidon_hash_many(&digest_fields);
 
     // register_aggregate：本手一个 aggregate，settlement root 取重映射后的 digest。
@@ -221,6 +235,7 @@ pub fn settle_hand(
         players_remapped,
         deltas: settle.deltas().to_vec(),
         settlement_digest,
+        action_log_digest,
         pre_state_root,
         post_state_root,
     })
@@ -238,10 +253,12 @@ fn build_settle_calldata(
     deltas_wei: &[i128],
 ) -> Vec<Felt> {
     let felts = AggregateDigestFelts::split(&digest).expect("32-byte digest always splits");
-    let mut out = Vec::with_capacity(4 + players.len() * 2);
+    let mut out = Vec::with_capacity(5 + players.len() * 2);
     out.push(scale_felt(felts.hi));
     out.push(scale_felt(felts.lo));
     out.push(Felt::from(settle.hand_id()));
+    // #18 Phase B：legacy settle_hand 的动作日志哈希标量（hand_id 之后）。
+    out.push(ff_to_felt(settle.action_log_digest()));
     out.push(Felt::from(players.len() as u64));
     out.extend(players.iter().map(|p| scale_felt(*p)));
     out.push(Felt::from(deltas_wei.len() as u64));

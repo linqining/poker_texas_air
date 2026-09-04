@@ -1,3 +1,7 @@
+> ⚠️ **历史存档(2026-09-05 归档)**:Lean 审计反例修复记录(文档头部原已自我声明
+> 为历史)。配套架构快照见同目录 `PO5_PO6_DESIGN_NOTES.md`;现行 AIR 边界见
+> `docs/STATUS.md` 与 `docs/TODO.md`(canonical AIR 缺口条目)。
+
 # poker_texas_air Soundness 修复记录
 
 > **历史记录，已被 P05/P06 审计边界取代。** 本文保留早期 AIR 加固工作的背景，

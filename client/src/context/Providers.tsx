@@ -14,6 +14,7 @@ import WebSocketProvider from './websocket/WebsocketProvider';
 import PlayerProvider from './player/PlayerContext';
 import GameState from './game/GameState';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MotionConfig } from 'framer-motion';
 import {
   StarknetConfig,
   starkscan,
@@ -65,27 +66,31 @@ const Providers: React.FC<ProvidersProps> = ({ children }) => (
         autoConnect
       >
         <ThemeProvider theme={theme}>
-          <GlobalState>
-            <LocaProvider>
-              <ContentProvider>
-                <AuthProvider>
-                  <ModalProvider>
-                    <OfflineProvider>
-                      <WebSocketProvider>
-                        <PlayerProvider>
-                          <GameState>
-                            <Normalize />
-                            <GlobalStyles />
-                            {children}
-                          </GameState>
-                        </PlayerProvider>
-                      </WebSocketProvider>
-                    </OfflineProvider>
-                  </ModalProvider>
-                </AuthProvider>
-              </ContentProvider>
-            </LocaProvider>
-          </GlobalState>
+          {/* reducedMotion="user"：跟随系统 prefers-reduced-motion，
+              framer-motion 自动只保留 opacity 类过渡、跳过 transform 动画 */}
+          <MotionConfig reducedMotion="user">
+            <GlobalState>
+              <LocaProvider>
+                <ContentProvider>
+                  <AuthProvider>
+                    <ModalProvider>
+                      <OfflineProvider>
+                        <WebSocketProvider>
+                          <PlayerProvider>
+                            <GameState>
+                              <Normalize />
+                              <GlobalStyles />
+                              {children}
+                            </GameState>
+                          </PlayerProvider>
+                        </WebSocketProvider>
+                      </OfflineProvider>
+                    </ModalProvider>
+                  </AuthProvider>
+                </ContentProvider>
+              </LocaProvider>
+            </GlobalState>
+          </MotionConfig>
         </ThemeProvider>
       </StarknetConfig>
     </QueryClientProvider>

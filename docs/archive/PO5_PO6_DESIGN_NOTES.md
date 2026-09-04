@@ -1,3 +1,8 @@
+> ⚠️ **历史存档(2026-09-05 归档)**:poker_l1 VM host-native 验证的架构快照——
+> 曲线叙事(BLS12-381/Ristretto)与链机制(consensus anchor/precompile/syscalls)
+> 已过时(Plan D + poker_l1 收缩)。"无 sound 递归聚合、验证 O(N)"的结论仍成立,
+> 由 `docs/TODO.md`(canonical AIR 缺口 / 递归协议条目)以新口径接管。
+
 # P0-5 / P0-6 当前实现与可信边界
 
 本文只描述 `poker_texas_air` 当前生产架构。`poker_zkvm` 不在 zchain workspace、依赖图或

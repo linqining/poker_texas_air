@@ -43,5 +43,5 @@ reconstruction protocol (V3) for soundness.
 - Trust posture (no prover service; browser-verifiable G layer):
   README "Trust model & proof policy"
 - Formal verification: [../poker_protocol_lean/README.md](../poker_protocol_lean/README.md)
-- Performance baselines: [plan-d-p3-metrics.md](plan-d-p3-metrics.md)
+- Performance baselines: [plan_d_perf.md（当前基线；gas 校准数据见 plan-d-p3-metrics.md §3b）](plan_d_perf.md（当前基线；gas 校准数据见 plan-d-p3-metrics.md §3b）)
 - Narrative history: [starknet-rfp-submission.md](starknet-rfp-submission.md)

@@ -43,8 +43,9 @@
 `privacy_invoke` **私密认领**成 note（owner 隐藏）。复用协议两条既有规则：
 
 - `register_hand` 已经把结算根做成 **Poseidon 承诺**（settlement_digest =
-  `poseidon_hash_many(hand_id, (player, ±, |delta|)…)`，见
-  `texas/src/starknet/submit.rs`）——登记阶段本来就没人能读出明细；
+  `poseidon_hash_many(hand_id, (player, ±, |delta|)…, action_log_digest)`，
+  尾词为本手动作日志哈希（#18 Phase B，见 `texas/src/starknet/submit.rs`））
+  ——登记阶段本来就没人能读出明细；
 - anonymizer 三明治模式：`池 withdraw → helper.privacy_invoke → approve →
   Span<OpenNoteDeposit>`（`poker_vault_anonymizer.cairo` 已验证了这套形状）。
 
@@ -732,8 +733,10 @@ viewing key 与 note 由钱包托管，relayer 提交，链上不见赢家
 ** witness（私密）**：`players[8], deltas[8]`（i128 → (sign, |delta| u64) 对）
 
 **约束（全为 Poseidon/算术，无 EC 运算）**：
-1. `poseidon_hash_span([hand_id] ++ Σ(player, sign, |delta|)) == registered_digest`
-   ——与合约 `compute_settlement_digest` 及 Rust `submit.rs` 逐字段一致；
+1. `poseidon_hash_span([hand_id] ++ Σ(player, sign, |delta|)
+   ++ [action_log_digest]) == registered_digest`——与合约
+   `compute_settlement_digest` 及 Rust `submit.rs` 逐字段一致（尾词为
+   #18 Phase B 接线的动作日志哈希）；
 2. `Σ sign·|delta| == 0`（零和）；
 3. `n_participants == registered_count`（expected buckets 沿用现约定）；
 4. 每赢家派生认领承诺：`cm_i = poseidon(commitment_i, hand_binding, amount_i)`

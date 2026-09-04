@@ -1,4 +1,4 @@
-import React, { useContext } from 'react';
+import React, { useContext, useEffect, useRef } from 'react';
 import styled from 'styled-components';
 import CloseButton from '../buttons/CloseButton';
 import Button from '../buttons/Button';
@@ -208,6 +208,48 @@ const NavMenu: React.FC<NavMenuProps> = ({
 }) => {
   const { players } = useContext(globalContext)!;
   const { getLocalizedString } = useContext(contentContext)!;
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // 抽屉是对话框：Esc 关闭、打开期间锁定 body 滚动、关闭后焦点还原
+  useEffect(() => {
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const savedOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKeyDown);
+
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = savedOverflow;
+      previouslyFocused?.focus();
+    };
+  }, [onClose]);
+
+  // Tab 循环限制在抽屉内
+  const onTabKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== 'Tab') return;
+    const menu = menuRef.current;
+    if (!menu) return;
+    const items = Array.from(
+      menu.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((el) => el.offsetParent !== null);
+    if (items.length === 0) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
 
   const openShopModal = () =>
     openModal(
@@ -229,7 +271,13 @@ const NavMenu: React.FC<NavMenuProps> = ({
         }
       }}
     >
-      <StyledNavMenu>
+      <StyledNavMenu
+        ref={menuRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={getLocalizedString('navmenu-aria_label')}
+        onKeyDown={onTabKeyDown}
+      >
         <IconWrapper>
           <CloseButton clickHandler={onClose} autoFocus />
         </IconWrapper>
@@ -237,7 +285,7 @@ const NavMenu: React.FC<NavMenuProps> = ({
           <SalutationText textAlign="left">
             {getLocalizedString('main_page-salutation')}
             <br />
-            <ColoredText><PlayerName name={userName} />!</ColoredText>
+            <ColoredText><PlayerName name={userName ?? getLocalizedString('main_page-guest-name')} />!</ColoredText>
           </SalutationText>
           {players && (
             <OnlineText textAlign="left">

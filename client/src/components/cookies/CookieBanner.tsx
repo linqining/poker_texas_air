@@ -89,7 +89,13 @@ const CookieBanner: React.FC<CookieBannerProps> = ({ clickHandler, className }) 
             <Button small primary onClick={clickHandler}>
               {getLocalizedString('cookiebanner-confirm_btn_txt')}
             </Button>
-            <Button as={Link} to="/privacy" secondary small>
+            <Button
+              as={Link}
+              to="/privacy"
+              secondary
+              small
+              aria-label={getLocalizedString('cookiebanner-info_aria')}
+            >
               {getLocalizedString('cookiebanner-info_btn_txt')}
             </Button>
           </ButtonWrapper>

@@ -320,9 +320,14 @@ pub struct SettleHandCalldata {
     /// Single-felt projection of the registered aggregate digest (low half).
     aggregate_digest: FieldElement,
     hand_id: u64,
+    /// Hand action-log digest (#18 Phase B): absorbed as the settlement
+    /// digest's tail word and carried in the settle calldata so the contract
+    /// recompute matches the registered root byte-for-byte.
+    action_log_digest: FieldElement,
     players: Vec<FieldElement>,
     deltas: Vec<i128>,
-    /// Poseidon commitment over (hand_id, address, sign, magnitude).
+    /// Poseidon commitment over (hand_id, address, sign, magnitude,
+    /// action_log_digest).
     settlement_digest: FieldElement,
 }
 
@@ -333,7 +338,9 @@ impl SettleHandCalldata {
     /// aggregate digest from a successfully verified outer aggregate. The
     /// `pre_table` must be the authenticated pre-settlement snapshot, and
     /// `plan` must be the canonical validated settlement plan derived from
-    /// the same pre-state and the showdown evidence.
+    /// the same pre-state and the showdown evidence. `action_log_digest`
+    /// (#18 Phase B) is the hand's action-log hash — absorbed as the
+    /// settlement digest's tail word.
     ///
     /// # Errors
     ///
@@ -351,6 +358,7 @@ impl SettleHandCalldata {
         pre_table: &TexasPokerTable,
         plan: &SettlementPlan,
         rake_recipient: Option<[u8; 20]>,
+        action_log_digest: FieldElement,
     ) -> TexasAirResult<Self> {
         if pre_table.hand_id != hand_id {
             return Err(TexasAirError::SpecViolation(format!(
@@ -454,11 +462,13 @@ impl SettleHandCalldata {
             deltas.push(p.delta);
         }
 
-        let settlement_digest = compute_settlement_digest(u64::from(hand_id), &participants)?;
+        let settlement_digest =
+            compute_settlement_digest(u64::from(hand_id), &participants, action_log_digest)?;
 
         Ok(Self {
             aggregate_digest: aggregate_digest_single,
             hand_id: u64::from(hand_id),
+            action_log_digest,
             players,
             deltas,
             settlement_digest,
@@ -475,6 +485,12 @@ impl SettleHandCalldata {
     #[must_use]
     pub const fn hand_id(&self) -> u64 {
         self.hand_id
+    }
+
+    /// The hand's action-log digest (#18 Phase B settlement digest tail word).
+    #[must_use]
+    pub const fn action_log_digest(&self) -> FieldElement {
+        self.action_log_digest
     }
 
     /// Participant addresses (felt252 encoding, big-endian 20-byte).
@@ -497,13 +513,14 @@ impl SettleHandCalldata {
     }
 
     /// Serialize to strict Cairo ABI calldata:
-    /// `(aggregate_digest: felt252, hand_id: u64, players: Span<ContractAddress>,
-    ///  deltas: Span<i128>)`.
+    /// `(aggregate_digest: felt252, hand_id: u64, action_log_digest: felt252,
+    /// players: Span<ContractAddress>, deltas: Span<i128>)`.
     #[must_use]
     pub fn to_felts(&self) -> Vec<FieldElement> {
-        let mut out = Vec::with_capacity(4 + self.players.len() * 2);
+        let mut out = Vec::with_capacity(5 + self.players.len() * 2);
         out.push(self.aggregate_digest);
         out.push(FieldElement::from(self.hand_id));
+        out.push(self.action_log_digest);
         out.push(FieldElement::from(self.players.len()));
         for player in &self.players {
             out.push(*player);
@@ -583,14 +600,17 @@ fn i128_to_felt(value: i128) -> FieldElement {
 
 /// Canonical Cairo-compatible Poseidon settlement commitment.
 ///
-/// The encoding matches `poker_contracts/src/settlement_hash.cairo`:
+/// The encoding matches `poker_contracts/src/poker_settlement.cairo` /
+/// `poker_dual_settlement.cairo::compute_settlement_digest`:
 /// `hand_id`, then for each ordered player: `address`, `sign` (1 non-negative,
-/// 0 negative), `magnitude` (u64).
+/// 0 negative), `magnitude` (u64), then the hand's `action_log_digest` tail
+/// word (#18 Phase B).
 fn compute_settlement_digest(
     hand_id: u64,
     participants: &[PlayerDelta],
+    action_log_digest: FieldElement,
 ) -> TexasAirResult<FieldElement> {
-    let mut fields: Vec<FieldElement> = Vec::with_capacity(1 + participants.len() * 3);
+    let mut fields: Vec<FieldElement> = Vec::with_capacity(2 + participants.len() * 3);
     fields.push(FieldElement::from(hand_id));
     for p in participants {
         fields.push(address_to_felt(p.address)?);
@@ -606,6 +626,7 @@ fn compute_settlement_digest(
             fields.push(FieldElement::from(magnitude));
         }
     }
+    fields.push(action_log_digest);
     Ok(starknet_crypto::poseidon_hash_many(&fields))
 }
 
@@ -639,6 +660,12 @@ mod tests {
     use super::*;
     use crate::state_root::StateRoot;
     use crate::verified_chain::{VerificationReceipt, VerifiedChain};
+
+    /// 测试用动作日志哈希样例（#18 Phase B 吸收链尾词；值本身不重要，
+    /// 重要的是参与 digest 吸收与 calldata 布局）。
+    fn action_log_sample() -> FieldElement {
+        FieldElement::from(0xA11CE_u64)
+    }
     use poker_l1::vm::contracts::texas_poker::utils::{g1_generator as g1_gen, g1_identity as g1_id, G1Projective};
     use group::Group;
     use poker_l1::object_model::ObjectID;
@@ -773,11 +800,12 @@ mod tests {
         let table = build_test_table(7);
         // Seat 0 wins the 100-chip pot: awards[0] = 100 (delta +50), seat 1 loses (delta -50).
         let plan = zero_rake_plan(100);
-        let calldata = SettleHandCalldata::new([1u8; 32], 7, &table, &plan, None).unwrap();
+        let calldata = SettleHandCalldata::new([1u8; 32], 7, &table, &plan, None, action_log_sample()).unwrap();
         let sum: i128 = calldata.deltas().iter().sum();
         assert_eq!(sum, 0);
         // The Poseidon digest must equal the felt computed by the contract:
-        // hand_id=7, [addr0, sign=1, mag=50, addr1, sign=0, mag=50]
+        // hand_id=7, [addr0, sign=1, mag=50, addr1, sign=0, mag=50,
+        // action_log_digest]（#18 Phase B 尾词）。
         let addr0 = address_to_felt([0x11; 20]).unwrap();
         let addr1 = address_to_felt([0x22; 20]).unwrap();
         let expected = starknet_crypto::poseidon_hash_many(&[
@@ -788,8 +816,10 @@ mod tests {
             addr1,
             FieldElement::from(0_u64),
             FieldElement::from(50_u64),
+            action_log_sample(),
         ]);
         assert_eq!(calldata.settlement_digest(), expected);
+        assert_eq!(calldata.action_log_digest(), action_log_sample());
     }
 
     #[test]
@@ -797,7 +827,7 @@ mod tests {
         let table = build_test_table(7);
         // Awards seat 0 with 200 chips when only 100 were wagered: +150/-50 ≠ 0.
         let plan = zero_rake_plan(200);
-        let err = SettleHandCalldata::new([2u8; 32], 7, &table, &plan, None).unwrap_err();
+        let err = SettleHandCalldata::new([2u8; 32], 7, &table, &plan, None, action_log_sample()).unwrap_err();
         assert!(matches!(err, TexasAirError::SpecViolation(_)));
     }
 
@@ -817,7 +847,7 @@ mod tests {
         // Rake recipient equals seat 0 (winner) → must merge.
         let winner_addr = [0x11; 20];
         let calldata =
-            SettleHandCalldata::new([3u8; 32], 7, &table, &plan, Some(winner_addr)).unwrap();
+            SettleHandCalldata::new([3u8; 32], 7, &table, &plan, Some(winner_addr), action_log_sample()).unwrap();
         assert_eq!(calldata.players().len(), 2);
         let sum: i128 = calldata.deltas().iter().sum();
         assert_eq!(sum, 0);
@@ -844,7 +874,7 @@ mod tests {
             awards: [95, 0, 0, 0, 0, 0, 0, 0, 0],
             pots: vec![],
         };
-        let err = SettleHandCalldata::new([4u8; 32], 7, &table, &plan, None).unwrap_err();
+        let err = SettleHandCalldata::new([4u8; 32], 7, &table, &plan, None, action_log_sample()).unwrap_err();
         assert!(matches!(err, TexasAirError::SpecViolation(_)));
     }
 
@@ -852,7 +882,7 @@ mod tests {
     fn settle_hand_rejects_hand_id_mismatch() {
         let table = build_test_table(7);
         let plan = zero_rake_plan(100);
-        let err = SettleHandCalldata::new([5u8; 32], 8, &table, &plan, None).unwrap_err();
+        let err = SettleHandCalldata::new([5u8; 32], 8, &table, &plan, None, action_log_sample()).unwrap_err();
         assert!(matches!(err, TexasAirError::SpecViolation(_)));
     }
 
@@ -860,20 +890,22 @@ mod tests {
     fn settle_hand_felt_layout_matches_contract_abi() {
         let table = build_test_table(7);
         let plan = zero_rake_plan(100);
-        let calldata = SettleHandCalldata::new([6u8; 32], 7, &table, &plan, None).unwrap();
+        let calldata = SettleHandCalldata::new([6u8; 32], 7, &table, &plan, None, action_log_sample()).unwrap();
         let felts = calldata.to_felts();
-        // digest + hand_id + player_len + 2 players + delta_len + 2 deltas = 8
-        assert_eq!(felts.len(), 8);
+        // digest + hand_id + action_log + player_len + 2 players + delta_len
+        // + 2 deltas = 9（#18 Phase B：action_log 插在 hand_id 之后）。
+        assert_eq!(felts.len(), 9);
         assert_eq!(felts[0], calldata.aggregate_digest());
         assert_eq!(felts[1], FieldElement::from(7_u64));
-        assert_eq!(felts[2], FieldElement::from(2_u64));
-        assert_eq!(felts[5], FieldElement::from(2_u64));
-        // Sorted: [0x11..] < [0x22..], so felts[3] is seat 0, felts[4] is seat 1.
-        assert_eq!(felts[3], address_to_felt([0x11; 20]).unwrap());
-        assert_eq!(felts[4], address_to_felt([0x22; 20]).unwrap());
+        assert_eq!(felts[2], action_log_sample(), "action log after hand_id");
+        assert_eq!(felts[3], FieldElement::from(2_u64));
+        assert_eq!(felts[6], FieldElement::from(2_u64));
+        // Sorted: [0x11..] < [0x22..], so felts[4] is seat 0, felts[5] is seat 1.
+        assert_eq!(felts[4], address_to_felt([0x11; 20]).unwrap());
+        assert_eq!(felts[5], address_to_felt([0x22; 20]).unwrap());
         // Deltas: winner +50, loser -50 (modular complement).
-        assert_eq!(felts[6], FieldElement::from(50_u64));
-        assert_eq!(felts[7], -FieldElement::from(50_u64));
+        assert_eq!(felts[7], FieldElement::from(50_u64));
+        assert_eq!(felts[8], -FieldElement::from(50_u64));
     }
 
     #[test]

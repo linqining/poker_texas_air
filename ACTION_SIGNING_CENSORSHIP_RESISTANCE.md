@@ -1,7 +1,7 @@
 # 动作签名与抗审查设计（Phase 2 hand_proved 前置分析）
 
-> 状态：**设计定稿，未实施**（供 README 架构分析与技术文档整合；实施排期归入 Phase 2-M2「证明端集成」）。
-> 关联：`SETTLEMENT_PRIVACY_PLAN.md`（Part A Phase 2 / Part B 密钥层）、`DUAL_PROOF_PROTOCOL.md` §6 绑定不变量、`TRUST_MODEL_NO_TRANSACTION_REPLAY.md`。
+> 状态：**主体已实施（2026-09-05 更新）**——动作签名 #16（客户端 wasm sign_action + 服务器验签/seq 单调）、回签收据 #17（ACTION_RECEIPT）、accepted-seq 广播、auto 代打标记 + 审计日志哈希均已在代码落地；#18 Phase B 已把动作日志哈希接进结算隐私电路（第 37 入参/公开段尾词/合约注册承诺）。**仍未落**：电路内逐条验签与"合法默认"约束（§8.2，主网上线门槛）、accepted-seq 上链事件、债券/罚没（§7.3，P3）。本文保留为该主题唯一设计文档，实施状态以 docs/TODO.md 为准。
+> 关联：`SETTLEMENT_PRIVACY_PLAN.md`（Part A Phase 2 / Part B 密钥层）、`DUAL_PROOF_PROTOCOL.md` §6 绑定不变量、`docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md`(已被取代)。
 
 ## 1. 问题陈述
 

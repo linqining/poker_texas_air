@@ -118,9 +118,10 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
     // 之后每次依赖变化（服务端 TABLE_UPDATED 广播）的 cleanup 都误发
     // STAND_UP，玩家在牌局中被服务端反复移座。effect 重新激活即视为挂载。
     isUnmountingRef.current = false;
+    // pagehide 取代已废弃的 unload（ unload 在移动端/前进后退缓存下不可靠，
+    // pagehide 是标准替代，导航与关页都会触发；'close' 并非 window 事件）
     const onUnload = () => leaveTable(false, pkHex || undefined, true);
-    window.addEventListener('unload', onUnload);
-    window.addEventListener('close', onUnload);
+    window.addEventListener('pagehide', onUnload);
 
     if (socket) {
       (window as unknown as Record<string, unknown>).__sockDebug = {
@@ -411,8 +412,7 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       });
     }
     return () => {
-      window.removeEventListener('unload', onUnload);
-      window.removeEventListener('close', onUnload);
+      window.removeEventListener('pagehide', onUnload);
       socket?.off(TABLE_UPDATED);
       socket?.off(TABLE_JOINED);
       socket?.off(TABLE_LEFT);

@@ -1,3 +1,8 @@
+> ⚠️ **历史存档(2026-09-05 归档)**:"链交易重放"信任模型已随仓库模型变更失效——
+> 现模型 = Starknet 链下 stwo 证明程序,不存在链交易重放概念;poker_l1 链机制
+> (state kernel/coordinator/authenticate_receipt_l1)已于 Phase 1 删除。
+> 现行信任边界见 `README.md` 信任模型章节与 `strk20.json` proof_policy。
+
 # 不依赖交易回放的信任模型
 
 本文针对本项目当前 STARK proving 流程，说明如何把“host
