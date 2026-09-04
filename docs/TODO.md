@@ -49,7 +49,10 @@
   - ✅ 账本：`texas/.env`（dual + claim helper）、`DEPLOYMENTS.md`、
     `strk20.json` 已回填；旧 dual/旧 helper 保留服务历史认领。当前无运行中
     服务进程，下次启动即用新 ABI。
-  - ⬜ 剩余：真实对局 dapv 结算冒烟（与 #11 剩余/#22① 同一实机依赖，见三）。
+  - ✅ **链上真实结算冒烟（2026-09-05）**：真实证明链 + 认可批次的
+    register（`0x28ab0dc7...`）+ settle（`0x1215cde0...`，SUCCEEDED）；
+    **gas 实测（2 人合成手）：l2_gas 4,313,040 + l1_data_gas 288**。冒烟
+    测试：`sepolia_settle_smoke`（`STARKNET_SEPOLIA_SMOKE=1` 触发）。
 
 - [ ] **33（剩余）. 在局锁定应用内 e2e（需 Ready 实机）**
   入座触发服务端自动 lock → 游戏中领取弹窗显示在局锁定 → 打完一手结算
@@ -63,14 +66,26 @@
   强制为零）：把 auto 动作合法性（零下注才可 auto-check 等；规则源 =
   `pokergame::actions::legal_auto_action`，与服务器代打同源）与 seq 单调
   落进 settlement_private 电路。Phase B 已把 `action_log_digest` 接进
-  digest 吸收链 / 公开段尾词 / 合约注册承诺（2026-09-05），但电路尚未校验
-  日志**内容**——服务器借代打折叠玩家的风险暂由审计日志 + #33 锁定缓解。
-- [ ] **19. 实施前确认 4 个开放问题**（随 #18 Phase C 排期）：seq 持久化
-  粒度；电路内验签 vs 链下预验签；replayer 最小数据集；双通道备用端点选型。
+  digest 吸收链 / 公开段尾词 / 合约注册承诺（2026-09-05，随 #34 上线），
+  但电路尚未校验日志**内容**——服务器借代打折叠玩家的风险暂由审计日志 +
+  #33 锁定缓解。**实施规格已定稿**（#19 → ACTION_SIGNING §9.5）：动作日志
+  哈希链 keccak→Poseidon 切换 + 每条 auto 动作 (owed,my_bet,big_blind,kind)
+  见证行与 range-check 合法性约束 + 动作条数上限 64 + flags/seq 槽位启用；
+  这是又一次 wire 变更（游戏层+电路+合约重部署），按 #34 同款流程执行。
+- [x] **19. 实施前确认 4 个开放问题**（2026-09-05 定稿，决策全文 =
+  `ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §9）：① seq = per-table 单调、
+  跨手不重置（与现行实现一致，重置窗口即重放窗口）；② 电路内验签否决——
+  现管线无 keccak/EC builtin，电路只约束日志哈希吸收 + "合法默认"规则，
+  完整验签归上链验证路线（#22/M3）；③ replayer 最小数据集 =
+  HandProofLog ∪ 本手动作日志窗口（收据为客户端可选补强）；④ 双通道 =
+  客户端多 RPC failover + 服务器端点列表化（不引入信任），争议终局走链上
+  证据（#31）。附 Phase C 实施要点：动作日志哈希链 keccak→Poseidon 切换。
 - [ ] **22. canonical AIR 缺口收口**（权威表述 = `docs/STATUS.md`，2026-09-05
   重写）：
-  ① 全残差批次 sepolia 单笔 settle 且 gas 可承受（Plan D P1.4；合约就绪，
-  并入 #34 部署后实测）；② ShuffleComplete/RevealComplete 终局转换组合；
+  ① ~~全残差批次 sepolia 单笔 settle gas 实测~~ **已完成（2026-09-05）**：
+  2 人合成手全残差批次单笔 settle 实测 l2_gas 4,313,040 + l1_data_gas 288
+  （sepolia TX `0x1215cde0...`；9 人真实手待实机联调细化，见三）；
+  ② ShuffleComplete/RevealComplete 终局转换组合；
   ③ 终端 timeout 级联（全员踢出→手终结→退款）批量证明；④ reconstruction
   终局组合解除 fail-closed（Stark 时代等式，Ristretto 叙事已废）；⑤
   state-root 重算（区别于绑定）进 AIR。

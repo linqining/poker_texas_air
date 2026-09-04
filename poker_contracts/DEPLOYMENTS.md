@@ -244,7 +244,12 @@ digest 尾词绑定动作日志哈希后的新 ABI 批次：
   `0x4f9d87f0...`（切换点）。
 - **冒烟**：`register_hand(0x736d6f6b652d3334/"smoke-34", 0xdeadbeef, 0, 0xa11c3d, 0,0,0)`
   TX `0x4f0788df...` → `hand_action_log` 读回 `0xa11c3d` ✓、registered flag=1 ✓。
-  （完整 dapv 手结算冒烟归入实机联调，见 TODO #34④。）
+- **✅ 真实 DAPV 全链路结算冒烟（2026-09-05，TODO #22①/#34④）**：
+  游戏层真实流程 → prove_log 重建 → 真实证明链 → 认可批次 → 链上
+  `register_hand`（TX `0x28ab0dc7...`）+ `verify_and_settle_dapv_stark`
+  （TX `0x1215cde0...`，SUCCEEDED）。**gas 实测（2 人合成手）：l2_gas
+  4,313,040 + l1_data_gas 288**。复现：
+  `STARKNET_SEPOLIA_SMOKE=1 cargo test -p texas --bin texas sepolia_settle_smoke -- --ignored --nocapture`。
 - **发现并修复**：此前在网的 claim helper class `0x5ec1...` 是**加 settlement
   绑定之前**的旧 2 参版（`settlement()` EntrypointNotFound、vault 还指向
   vault v2 `0x1e9f4a93...`）——本次随 v3.x 重部署为现役 3 参 class。旧 helper

@@ -84,6 +84,14 @@ fn e2e_starknet_buyin_play_settle_calldata() {
 }
 
 fn play_full_hand() -> Result<(), String> {
+    let (_mirror, _settlement, _dual) = play_full_hand_artifacts()?;
+    Ok(())
+}
+
+/// 全链路构建（游戏层真实流程 → 证明 → dapv calldata 对拍），返回中间产物
+/// 供链上冒烟（sepolia_settle_smoke）复用。
+fn play_full_hand_artifacts(
+) -> Result<(TableMirror, super::submit::HandSettlement, super::dual_settle::DualSettlement), String> {
     let creator: poker_l1::Address = [0xC0; 20];
     let p1: poker_l1::Address = [0x11; 20];
     let p2: poker_l1::Address = [0x22; 20];
@@ -294,7 +302,7 @@ fn play_full_hand() -> Result<(), String> {
         !super::dual_settle::host_fold_is_identity(&wrong, &wrong_terms),
         "cross-hand replay must fold to non-zero L"
     );
-    Ok(())
+    Ok((mirror, settlement, dual))
 }
 
 fn hex_pk(pk: &poker_protocol::crypto::EcPoint) -> String {
@@ -795,4 +803,180 @@ fn e2e_mixed_join_paths_materializes() {
             );
         }
     }
+}
+
+
+/// #22① / #34④：sepolia 真实链上 DAPV settle 冒烟 + gas 实测。
+///
+/// 默认跳过；`STARKNET_SEPOLIA_SMOKE=1` 时提交**真实交易**。运行前设置：
+///   STARKNET_SEPOLIA_SMOKE=1
+///   STARKNET_RPC_URL / STARKNET_OPERATOR_ADDRESS / STARKNET_OPERATOR_PRIVATE_KEY
+///   STARKNET_DUAL_SETTLEMENT_ADDRESS / STARKNET_VAULT_ADDRESS / STARKNET_STRK_ADDRESS
+/// （同 texas/.env 口径；operator 需有少量 STRK 支付 gas + 2 STRK 预充值）
+/// 运行：
+///   cargo test -p texas --bin texas sepolia_settle_smoke -- --ignored --nocapture
+#[tokio::test]
+#[ignore = "submits REAL sepolia txs; enable with STARKNET_SEPOLIA_SMOKE=1"]
+async fn sepolia_settle_smoke() {
+    use starknet::accounts::Account;
+    use starknet::core::types::{Call, Felt};
+    use starknet::core::utils::starknet_keccak;
+    use starknet::providers::Provider;
+        use starknet_ff::FieldElement as Ff;
+
+    if std::env::var("STARKNET_SEPOLIA_SMOKE").as_deref() != Ok("1") {
+        eprintln!("STARKNET_SEPOLIA_SMOKE != 1 — skipped (no on-chain txs)");
+        return;
+    }
+    let rpc = std::env::var("STARKNET_RPC_URL").expect("STARKNET_RPC_URL");
+    let op_addr = std::env::var("STARKNET_OPERATOR_ADDRESS").expect("STARKNET_OPERATOR_ADDRESS");
+    let op_key = std::env::var("STARKNET_OPERATOR_PRIVATE_KEY").expect("STARKNET_OPERATOR_PRIVATE_KEY");
+    let dual_addr = std::env::var("STARKNET_DUAL_SETTLEMENT_ADDRESS").expect("STARKNET_DUAL_SETTLEMENT_ADDRESS");
+    let vault_addr = std::env::var("STARKNET_VAULT_ADDRESS").expect("STARKNET_VAULT_ADDRESS");
+    let strk_addr = std::env::var("STARKNET_STRK_ADDRESS").expect("STARKNET_STRK_ADDRESS");
+    // settlement_enabled() 要求 legacy 字段非空（dapv 模式下不消费，仅门控）。
+    let legacy_addr = std::env::var("STARKNET_SETTLEMENT_ADDRESS").unwrap_or_else(|_| dual_placeholder());
+
+
+    // 1. 本地全链路构建（游戏层真实流程 → 证明 → calldata 对拍；split-pot 重试）。
+    let (mirror, _s_discard, _d_discard) = {
+        let mut got = None;
+        for attempt in 0..20 {
+            match play_full_hand_artifacts() {
+                Ok(arts) => {
+                    got = Some(arts);
+                    break;
+                }
+                Err(e) if e.contains("split pot") => {
+                    eprintln!("[attempt {attempt}] split pot, retrying");
+                }
+                Err(e) => panic!("hand play failed: {e}"),
+            }
+        }
+        got.expect("hand artifacts")
+    };
+
+    // 2. 全部参与者重映射到 operator：链上筹码净零变动，零余额账户可结算。
+    let op_felt = Felt::from_hex(&op_addr).expect("operator felt");
+    let op_ff = super::submit::felt_to_ff(&op_felt);
+    let creator: poker_l1::Address = [0xC0; 20];
+    let p1: poker_l1::Address = [0x11; 20];
+    let p2: poker_l1::Address = [0x22; 20];
+    let wallet_map = vec![(p1, op_ff), (p2, op_ff), (creator, op_ff)];
+    let action_log_digest = Ff::from(0xA11C3Du64);
+    let settlement = super::submit::settle_hand(&mirror, Some(creator), &wallet_map, action_log_digest)
+        .expect("settlement rebuild with operator remap");
+    assert!(!settlement.players_remapped.is_empty());
+
+    // 3. 初始化全局 chain（与 main.rs 同一入口；dapv/linear 模式）。
+    let config = super::config::StarknetConfig {
+        rpc_url: rpc.clone(),
+        chain_id: "SN_SEPOLIA".into(),
+        operator_address: op_addr.clone(),
+        operator_private_key: op_key.clone(),
+        strk_address: strk_addr.clone(),
+        vault_address: vault_addr.clone(),
+        settlement_address: legacy_addr,
+        dual_settlement_address: dual_addr.clone(),
+        settlement_mode: "dapv".into(),
+        settle_mode: super::config::SettleMode::Linear,
+        prover_url: None,
+        prover_work_dir: "/tmp/zgame-prover".into(),
+        auth_strict: false,
+        treasury_address: op_addr.clone(),
+        rake_bps: 500,
+        rake_cap: 1_000,
+    };
+    let chain = super::init(config);
+    let operator = chain.operator().await.expect("operator account");
+
+    // 4. 预充值 operator 筹码（2 STRK = 2000 chips），规避净负 delta 顺序回退。
+    let amount_lo = Felt::from(2_000_000_000_000_000_000u128);
+    let amount_hi = Felt::ZERO;
+    let vault_felt = Felt::from_hex(&vault_addr).expect("vault felt");
+    // vault v3 的 deposit_for 拉取的是 **canonical STRK**（vault.token()）——
+    // 授权必须打在规范 STRK 上（STARKNET_STRK_ADDRESS 可能仍指旧 pSTRK）。
+    let canonical_strk = Felt::from_hex(
+        "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+    )
+    .expect("canonical strk felt");
+    let prefund = operator
+        .execute_v3(vec![
+            Call {
+                to: canonical_strk,
+                selector: starknet_keccak(b"approve"),
+                calldata: vec![vault_felt, amount_lo, amount_hi],
+            },
+            Call {
+                to: vault_felt,
+                selector: starknet_keccak(b"deposit_for"),
+                calldata: vec![op_felt, amount_lo, amount_hi],
+            },
+        ])
+        .send()
+        .await
+        .expect("vault prefund");
+    eprintln!("prefund tx = {:?}", prefund.transaction_hash);
+
+    // 5. dapv 上链：register_hand（含 action_log 承诺）+ verify_and_settle_dapv_stark。
+    let binding = super::dual_settle::prepare_handbatch_binding(&mirror, &settlement).expect("binding");
+    let endorsements: Vec<super::dual_settle::ClientEndorsement> = settlement
+        .players_remapped
+        .iter()
+        .map(|_p| {
+            let sk = <super::dual_settle::Sc as CurveScalar>::random(&mut OsRng);
+            let pk = <poker_protocol::crypto::curve::StarkCurve as Curve>::base_g() * sk;
+            let e = super::dual_settle::mint_endorsement(&sk, &pk, &binding.hand_id_bytes);
+            super::dual_settle::ClientEndorsement { pk: e.pk, r: e.r, s: e.s }
+        })
+        .collect();
+    let dual =
+        super::dual_settle::build_dual_settlement_from_client(&mirror, &settlement, &endorsements)
+            .expect("dual build");
+    let (register_tx, settle_tx) =
+        super::dual_settle::submit_dual_settlement(
+            &dual,
+            &dual_addr,
+            &settlement.players_remapped,
+            &settlement.deltas,
+        )
+        .await
+        .expect("on-chain dapv settle");
+    eprintln!("register_tx = {register_tx}\nsettle_tx   = {settle_tx}");
+
+    // 6. settle 回执终态 + gas 实测（#22① 验收数据）。
+    use starknet::core::types::ExecutionResult;
+    let settle_felt = Felt::from_hex(&settle_tx).expect("settle tx felt");
+    let mut gas_line = String::from("gas: unavailable");
+    for _ in 0..60 {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        match provider_of(&rpc).get_transaction_receipt(settle_felt).await {
+            Ok(receipt) => {
+                let ExecutionResult::Succeeded = receipt.receipt.execution_result() else {
+                    panic!("settle not successful: {:?}", receipt.receipt.execution_result());
+                };
+                gas_line = match &receipt.receipt {
+                    starknet::core::types::TransactionReceipt::Invoke(r) => {
+                        format!("gas: {:?}", r.execution_resources)
+                    }
+                    other => format!("gas: n/a ({other:?})"),
+                };
+                break;
+            }
+            Err(_) => continue, // 尚未入块
+        }
+    }
+    eprintln!("SEPOLIA_SETTLE_SMOKE_OK hand_id={} settle_tx={settle_tx} {gas_line}", settlement.hand_id);
+    assert!(gas_line != "gas: unavailable", "settle receipt not observed in 120s");
+}
+
+/// 冒烟专用的独立 provider（不走全局 chain，避免 init 顺序耦合）。
+fn provider_of(rpc: &str) -> starknet::providers::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport> {
+    starknet::providers::JsonRpcClient::new(starknet::providers::jsonrpc::HttpTransport::new(
+        url::Url::parse(rpc).expect("rpc url"),
+    ))
+}
+
+fn dual_placeholder() -> String {
+    std::env::var("STARKNET_DUAL_SETTLEMENT_ADDRESS").unwrap_or_default()
 }
