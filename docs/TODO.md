@@ -267,6 +267,20 @@
   **前置核查（2026-09-03）**：官方 STRK20 Privacy SDK 仍未上 npm（registry 检索只有
   社区第三方包）——SDK_SEAM 继续阻塞本节全部四项；SDK 上线后按
   `docs/starknet-plan-b-anonymizer.md` §SDK_SEAM 核对 `tryComposeInvoke` 即可开工。
+  **需求前提复核（2026-09-03，strk20-by-example.org 官方文档核实）**：「STRK20 必须
+  用户主动领取」**不成立**——接收是推送制：发送方一笔 CreateEncNote 落入接收方
+  channel，接收方离线扫描即得可花费余额，**无任何认领交易**（channels-and-subchannels：
+  "no inbox"，扫描结果即 spendable private balance）。必须用户签名的只有两处：
+  ① 出池花费——nullifier 含 owner 私钥，连创建 note 的发送方也无法代花
+  （notes-and-nullifiers）；② viewing key 一次性自注册，仅本人可注册（买入用户已满足）。
+  因此「赢家必须主动认领」是当前 vault 筹码 escrow 架构的产物（赔付以 open chips
+  形态在池外，守恒腿 burn 只能用户签名），**不是协议限制**；且认领粒度是「每次出金」
+  而非「每手」——赢家可攒至局末一次认领。sidecar 的真实边际收益 = 消除出金认领
+  交易（金额/时间公开关联）+ 收款零操作；推送路线本身是官方一等路线
+  （backend holding its own keys → Privacy SDK createPrivateTransfers），协议层可行。
+  **结论：维持推迟**。解锁条件：① SDK 上 npm（#26 跟踪）；② v2 escrow 输家扣款/
+  现金出口修复并启用（当前 v2 不可启用，sidecar 无消费方）。届时若嫌常驻服务重，
+  降级为 Node CLI worker + 队列表（settle 后写队、worker 消费）。
 - [ ] **13. C3.2-M2 赔付路由**：settle 后异步队列：延迟抖动 + 批量 shield 补浮存 + 失败重试。
 - [ ] **14. C3.2-M3 通知与 UX**：加密赔付通知推送 + 领取入口 UX；赢家零操作看到 note。
 - [ ] **15. C3.2-M4 合规加固**：限额/频控/审计日志 + 运营手册。
