@@ -65,10 +65,17 @@
     锁定内取款拒绝 / 未锁定可取 / 结算先扣锁定（-900：锁定 800+未锁定 100）/
     锁定内结算不伤未锁定 / TTL 未过期拒绝 / TTL=0 禁用拒绝 / force_unlock /
     TTL 设置生效。✅ 已随 #11 部署批次上线（vault v3 `0x0629385f...`，2026-09-04）。
-  - ⬜ **剩余（服务端接入）**：① 玩家入座 → operator 调 `vault.lock(seat 筹码)`；
-    ② 每手结算/续局 → `refresh_session` 续时钟；③ 离座/结清 → `force_unlock`（或
-    等自然过期）；④ 前端展示"在局锁定额度"（可提 vs 锁定），锁定内提款给出
-    预期提示；⑤ e2e：入座锁 → 中途 withdraw 被拒 → 结算解锁（配合 #11 联调）。
+  - ✅ **服务端接入（2026-09-04，texas/src/starknet/lock.rs + 两处接线）**：
+    ① 入座买入手续校验通过后 → `vault.lock(player, amount)`（异步尽力而为，
+    失败 ERROR 级日志提示人工补锁）；② 每手结算上链成功（dapv/legacy 两路）
+    → 逐参与者 `refresh_session` 续时钟；③ 离座**不自动解锁**（安全默认：
+    结算被跳过时 force_unlock 会重开逃单窗口）——玩家 TTL（12h）后可无许可
+    `unlock_after_deadline`，operator 保留 `force_unlock` 应急（snops invoke）；
+    ④ 前端领取弹窗实时读 `locked_balance` 展示"在局锁定 X STRK"警示 +
+    锁定覆盖领取额时给出预期提示（strk20.ts getVaultLockedBalanceWei）。
+    ⑤ ⬜ 剩余：实局 e2e（入座锁 → 中途 withdraw 被拒 → 结算续钟 → 离桌
+    TTL 解锁），配合 #11 联调。触发即用的现场案例：settlement 构建失败的
+    手（镜像分叉）输家 delta 不上链——锁定使其无法提走未结资金。
 
 - [x] **1. 牌局抽水显示**（2026-09-03 完成；2026-09-04 补漏：亮牌路径漏收台费）
   - 增补：`on_reveal_complete(ShowdownReveal)` 分池前漏调

@@ -27,6 +27,7 @@ import {
   ensurePayoutCommitment,
   getRegisteredPayoutCommitment,
   getShieldedBalance,
+  getVaultLockedBalanceWei,
   getWalletApiVersions,
   shieldForPoolRegistration,
   STRK20_WALLET_API_MIN,
@@ -290,6 +291,9 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   // 未注册用户点一键注册被钱包 118 拒绝时自动展开
   const [poolGuideOpen, setPoolGuideOpen] = useState(false);
   const [checking, setChecking] = useState(false);
+  // #33 在局锁定余额（wei）：入座锁定的买入筹码，离桌后 TTL（12h）解锁；
+  // 锁定部分不可领取/出金（burn_chips/withdraw 断言 spendable）
+  const [lockedWei, setLockedWei] = useState<bigint | null>(null);
 
   const vaultAddr = starknetConfig.pokerVaultAddress || '';
   const flagsKey = `poker.claimReg:${(walletAddress || '').toLowerCase()}`;
@@ -317,6 +321,10 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   const runChecks = React.useCallback(async (useCache: boolean) => {
     if (!account) return;
     setChecking(true);
+    // #33 在局锁定余额随每手结算变化，不受注册缓存影响——每次打开实时查
+    getVaultLockedBalanceWei(account)
+      .then((wei) => setLockedWei(wei))
+      .catch(() => setLockedWei(null));
     // 缓存快路径：两份注册都已确认 → 直接显示已注册态，不发任何链上查询/弹窗
     if (useCache) {
       const cached = readFlags();
@@ -599,6 +607,9 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     if (shielded !== null && shielded < amountWei) {
       return '池内屏蔽余额不足：请先在钱包内将 STRK shield 入隐私池（私密领取要求池内余额 ≥ 领取额，执行后等额退回）';
     }
+    if (lockedWei !== null && lockedWei > 0n && lockedWei >= amountWei) {
+      return '领取额全部处于在局锁定：筹码在入座时被 #33 锁定，离桌后最多 12 小时自动解锁，解锁后即可领取';
+    }
     return null;
   })();
 
@@ -686,6 +697,12 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
             </CheckBlock>
 
             {privateBlockedReason && <Notice $kind="warn">{privateBlockedReason}</Notice>}
+            {lockedWei !== null && lockedWei > 0n && (
+              <Notice $kind="warn">
+                在局锁定 {(Number(lockedWei) / 1e18).toFixed(4)} STRK：入座时锁定的买入筹码，
+                离桌后最多 12 小时自动解锁；锁定部分暂不可领取或出金
+              </Notice>
+            )}
             {error && <Notice $kind="error">{error}</Notice>}
 
             <ActionsGrid>

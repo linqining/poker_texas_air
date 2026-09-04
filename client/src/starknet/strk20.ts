@@ -706,6 +706,35 @@ export async function claimRewardsPublic(
  * 查询玩家是否已在 vault 注册 payout commitment（链上真值）。
  * 返回 commitment 的 felt 值（0 = 未注册）。
  */
+/**
+ * #33 在局锁定：读玩家在 vault 的锁定筹码（wei，u128）。
+ * 锁定部分不可领取/出金（burn_chips/withdraw 断言 spendable），离桌后
+ * 由 operator 结算续钟、TTL（默认 12h）后可无许可自助解锁。
+ * 查询失败返回 null（调用方按 0 处理）。
+ */
+export async function getVaultLockedBalanceWei(account: unknown): Promise<bigint | null> {
+  const acct = account as { address?: string } | null;
+  if (!acct?.address) return null;
+  const { pokerVaultAddress } = starknetConfig;
+  if (!pokerVaultAddress) return null;
+  try {
+    const s = await import('starknet');
+    const provider = getProvider();
+    const selector = '0x' + s.hash.starknetKeccak('locked_balance').toString(16);
+    const res = await provider.callContract({
+      contractAddress: pokerVaultAddress,
+      entrypoint: 'locked_balance',
+      calldata: [acct.address],
+    });
+    const lo = BigInt(res[0] ?? 0);
+    const hi = BigInt(res[1] ?? 0);
+    return lo + (hi << 128n);
+  } catch (e) {
+    logger.warn('[strk20] locked_balance read failed:', e);
+    return null;
+  }
+}
+
 export async function getRegisteredPayoutCommitment(
   account: unknown,
 ): Promise<string | null> {

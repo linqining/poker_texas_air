@@ -913,6 +913,20 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 return;
             }
             tracing::info!("[SIT_DOWN_V2] STRK20 buy-in verified: user={}, amount={}, tx={}", player.id, payload.amount, deposit_tx_hash);
+            // #33 在局锁定：入座成功即锁买入筹码（owner=operator，异步尽力
+            // 而为）。player.id 形如 "wallet:0x..."，截取钱包 felt 地址。
+            match i64::try_from(payload.amount) {
+                Ok(lock_amount) => {
+                    let lock_wallet =
+                        player.id.strip_prefix("wallet:").unwrap_or(&player.id).to_string();
+                    tokio::spawn(async move {
+                        crate::starknet::lock::lock_player_chips(&lock_wallet, lock_amount).await;
+                    });
+                }
+                Err(_) => {
+                    tracing::error!("[SIT_DOWN_V2] amount too large to lock: {}", payload.amount);
+                }
+            }
         }
 
         // 2.5 Starknet 镜像：缓冲 join（poker_l1 join_table 仅允许 Waiting，

@@ -17,6 +17,7 @@ mod e2e_tests;
 pub mod config;
 pub mod dual_settle;
 pub mod hooks;
+pub mod lock;
 pub mod mirror;
 pub mod paymaster;
 pub mod settlement_prover;

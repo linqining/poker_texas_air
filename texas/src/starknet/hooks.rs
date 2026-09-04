@@ -306,6 +306,7 @@ async fn run_settle_attempt(table_id: u32) {
                             settlement.hand_id,
                             dual.hand_binding
                         );
+                        refresh_settlement_sessions(&settlement.players_remapped).await;
                         return;
                     }
                     Err(e) if is_already_settled_error(&e) => {
@@ -358,6 +359,7 @@ async fn run_settle_attempt(table_id: u32) {
                 "[starknet-settle] table {table_id} hand {} on-chain: register={register_hash} settle={settle_hash}",
                 settlement.hand_id
             );
+            refresh_settlement_sessions(&settlement.players_remapped).await;
         }
         Err(e) if is_already_settled_error(&e) => {
             let _ = settle_ok_once(table_id, settlement.hand_id);
@@ -407,6 +409,16 @@ pub async fn retry_pending_settlement(table_id: u32) {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 结算成功后续各参与者的 #33 session 时钟（owner=operator，逐人独立
+/// 交易，失败仅告警）。必须每手刷新：TTL（12h）从最后一次活动计时，
+/// 停刷即触发玩家无许可自助解锁。
+async fn refresh_settlement_sessions(players_remapped: &[starknet_ff::FieldElement]) {
+    for p in players_remapped {
+        let wallet = format!("0x{}", hex_encode(&p.to_bytes_be()));
+        super::lock::refresh_player_session(&wallet).await;
+    }
 }
 
 
