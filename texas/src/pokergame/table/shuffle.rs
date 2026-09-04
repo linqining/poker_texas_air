@@ -393,10 +393,10 @@ impl Table {
                 self.on_before_preflop_shuffle_complete();
                 self.transition_to(RoundState::PreFlop);
                 self.start_preflop_reveal_phase();
-                // 方案A：此刻发牌用 deck 已终局（全部客户端洗牌已验证）。
-                // 把这份 deck 原样注入 mirror VM 并让 VM 直接进入 DealHole，
-                // 两条 deck 链自此逐字节同源（MIRROR_UNIFICATION_PLAN 方案A）。
-                crate::starknet::hooks::mirror_begin_reveal(self);
+                // #20 Phase 2：deck 已终局（全部客户端洗牌已验证），此刻采集
+                // HandStart 快照（参与者/盲注前 stack/button/deck）——结算时
+                // 一次性重放为 ProveTask 链，无常驻镜像。
+                crate::starknet::prove_log::record_hand_start(self);
             } else {
                 // Reconstruct 完成 → 清空 reconstruct_state + reveal_token_state
                 // + 根据 round_state 启动对应 reveal

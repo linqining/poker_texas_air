@@ -685,20 +685,17 @@ impl SocketState {
             .unwrap_or_default();
         let socket_id = player.socket_id.clone();
         let pk_hex = GamePkHex::new(ecpoint_to_hex(&player_pk));
-        crate::starknet::hooks::register_seat_wallet(&pk_hex.0, &player.wallet_address.0);
         let player_wallet_address = player.wallet_address.clone();
 
         let player_name = player.name.clone();
         let player_id = player.id.clone();
         let player_bankroll = player.bankroll;
 
-                // Starknet 镜像：缓冲带真实证明的 join（下一手 start_preflop_shuffle 应用）
-                crate::starknet::hooks::mirror_buffer_join_pk(
+                // #20 Phase 2：缓冲 join 证明（下一手 HandStart 消费）。
+                crate::starknet::prove_log::record_join(
                     table_id,
                     &player_wallet_address,
                     pk_hex.clone().0.as_str(),
-                    amount,
-                    &pk_proof_json,
                     mirror_pk_proof,
                 );
 
@@ -822,8 +819,8 @@ impl SocketState {
         if let Some(table) = gs.tables.get_mut(&table_id) {
             let result = table.submit_player_reveal_tokens(pk_hex, tokens.clone());
             if result.is_ok() {
-                // Starknet 镜像：同步 reveal tokens（失败仅告警）
-                crate::starknet::hooks::mirror_sync_reveal(table_id, pk_hex, &tokens);
+                // #20 Phase 2：记录已接受的 reveal 令牌（结算时一次性重放）。
+                crate::starknet::prove_log::record_reveal(table, &pk_hex.0, &tokens);
             }
             result
         } else {

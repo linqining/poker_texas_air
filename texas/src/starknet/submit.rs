@@ -58,6 +58,7 @@ pub struct HandSettlement {
 pub fn settle_hand(
     mirror: &TableMirror,
     rake_recipient: Option<poker_l1::Address>,
+    wallet_map: &[(poker_l1::Address, Ff)],
 ) -> Result<HandSettlement, String> {
     if mirror.tasks.is_empty() {
         return Err("mirror has no prove tasks for this hand".into());
@@ -138,24 +139,21 @@ pub fn settle_hand(
     let settle = SettleHandCalldata::new(digest, hand_id, settle_table, &plan, rake_recipient)
         .map_err(|e| format!("SettleHandCalldata::new failed: {e}"))?;
 
-    // 4.5 参与者地址重映射：mirror 座位只存钱包 felt 的低 160 位（poker_l1
+    // 4.5 参与者地址重映射：VM 座位只存钱包 felt 的低 160 位（poker_l1
     //     Address 为 20 字节），而 vault 余额以完整钱包 felt 为键。上链前把
-    //     players 重映射回真实钱包地址，并按同一映射重算 settlement digest——
+    //     players 重映射回真实钱包地址（映射来自本手 HandStart 记录 + treasury，
+    //     见 hooks::hand_wallet_map），并按同一映射重算 settlement digest——
     //     合约 settle_hand 会用 calldata 的 players 重算 Poseidon 承诺并与
     //     register_aggregate 写入的 root 精确比对。
-    let remaps = super::hooks::seat_wallet_remaps();
     let remap_player = |p: Ff| -> Ff {
         let p_felt = ff_to_felt(p);
         let truncated: [u8; 20] = p_felt.to_bytes_be()[12..32]
             .try_into()
             .expect("32-byte felt tail is 20 bytes");
-        remaps
+        wallet_map
             .iter()
             .find(|(addr, _)| *addr == truncated)
-            .map(|(_, wallet)| {
-                let w = super::chain::parse_felt(wallet).unwrap_or(p_felt);
-                felt_to_ff(&w)
-            })
+            .map(|(_, wallet)| *wallet)
             .unwrap_or(p)
     };
     let players_remapped: Vec<Ff> = settle.players().iter().map(|p| remap_player(*p)).collect();

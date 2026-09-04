@@ -227,7 +227,7 @@ fn play_full_hand() -> Result<(), String> {
     mirror.advance_deadline().map_err(|e| format!("advance: {e}"))?;
 
     // ---- 结算：分池 + 证明 + calldata ----
-    let settlement = super::submit::settle_hand(&mirror, Some(creator))
+    let settlement = super::submit::settle_hand(&mirror, Some(creator), &[])
         .map_err(|e| format!("settlement: {e}"))?;
 
     assert_eq!(settlement.hand_id, 7, "hand_id must come from the injected counter");
@@ -536,23 +536,28 @@ async fn live_flow_assignments_match_mirror_targets() {
         table.advance_shuffle();
     }
 
-    hooks::mirror_registry();
     let gs = state.state.read().await;
     let table = gs.tables.get(&1).unwrap();
     assert!(table.reveal_token_state.is_active(), "preflop reveal must be active");
     let assignments = table.reveal_token_state.player_assignments.clone();
     assert_eq!(assignments.len(), 2, "two players get assignments");
 
+    // #20 Phase 2：无常驻 mirror——从本手日志零命令构建（= DealHole 窗口），
+    // 断言注入后 VM 的待揭目标与游戏层 assignment 逐字节同源。
+    let start = table
+        .hand_proof_log
+        .start
+        .clone()
+        .expect("hand start recorded at advance_shuffle");
+    let mirror = super::mirror::build_from_log(1, &start, &[], 1).expect("mirror build from log");
     for (pk_hex, _player) in &pks {
         let key = GamePkHex::new(pk_hex.clone());
         let wallet = table.players().get(&key).unwrap().0.clone();
         let addr = TableMirror::addr_from_starknet(&wallet).unwrap();
         let assignment = assignments.get(&key).expect("assignment for player");
-        let targets = hooks::mirror_registry()
-            .with_mirror(1, || TableMirror::new(1, "t", [0xC0; 20], 9, 50, 100, [0xC0; 20]), |m| {
-                let Some(seat) = m.seat_index_of(addr) else { return Err("no seat".into()) };
-                m.pending_reveal_ciphertexts(seat)
-            })
+        let seat = mirror.seat_index_of(addr).expect("mirror seat for participant");
+        let targets = mirror
+            .pending_reveal_ciphertexts(seat)
             .expect("mirror reachable");
         assert_eq!(
             targets.len(),

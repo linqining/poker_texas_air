@@ -19,14 +19,14 @@ impl Table {
         // 对齐 Move：手牌进行中使用 kick_player_internal，保留 seat 供 side pot 计算
         if self.is_playing() {
             self.kick_player_internal(pk);
-            // 方案A 单点派发：mirror 侧同步强制弃牌，保持存活玩家集合一致。
+            // #20 Phase 2：记录强制弃牌命令（结算时一次性重放）。
             if let Some(player) = self
                 .local_seats
                 .values()
                 .find_map(|s| s.player.as_ref().filter(|p| &p.pk_hex == pk))
             {
                 let wallet = player.wallet_address.0.clone();
-                crate::starknet::hooks::mirror_force_fold(self.summary.id, &wallet);
+                crate::starknet::prove_log::record_force_fold(self, &wallet);
             }
         } else {
             self.stand_player_by_pk(pk);

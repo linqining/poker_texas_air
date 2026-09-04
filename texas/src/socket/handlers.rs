@@ -929,24 +929,18 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             }
         }
 
-        // 2.5 Starknet 镜像：缓冲 join（poker_l1 join_table 仅允许 Waiting，
-        //     洗牌期入座的 join 会在下一手 mirror_begin_reveal 时重放应用）
+        // 2.5 #20 Phase 2：缓冲 join 证明（下一手 HandStart 快照消费；
+        //     join_table 会验证 pk 所有权证明）
         {
-            let gs = state.state.read().await;
-            if let Some(table) = gs.tables.get(&payload.table_id) {
-                // 缓冲带真实 pk 所有权证明的 join（mirror join_table 会验证）
-                let pk_proof_bytes = payload.pk_proof.to_proof()
-                    .map(|p| crate::relayer::proof_bytes::serialize_pk_ownership_proof(&p))
-                    .unwrap_or_default();
-                crate::starknet::hooks::mirror_buffer_join_pk(
-                    payload.table_id,
-                    &player.wallet_address.0,
-                    &payload.pk_hex.0,
-                    payload.amount,
-                    &payload.pk_proof,
-                    pk_proof_bytes,
-                );
-            }
+            let pk_proof_bytes = payload.pk_proof.to_proof()
+                .map(|p| crate::relayer::proof_bytes::serialize_pk_ownership_proof(&p))
+                .unwrap_or_default();
+            crate::starknet::prove_log::record_join(
+                payload.table_id,
+                &player.wallet_address.0,
+                &payload.pk_hex.0,
+                pk_proof_bytes,
+            );
         }
 
         // 3. Local mode: init seat and shuffle

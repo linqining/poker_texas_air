@@ -198,6 +198,11 @@ pub struct Table {
     /// 跨手累积便于追溯，审计摘要只覆盖本手窗口。
     #[serde(skip)]
     pub hand_log_start: usize,
+    /// #20 Phase 2：本手证明输入日志（HandStart 快照 + 已接受命令）。
+    /// 结算时一次性重放为 ProveTask 链（取代常驻 mirror 第二本账）。
+    /// `record_hand_start`（deck 终局时）整体重置。
+    #[serde(skip)]
+    pub hand_proof_log: crate::starknet::prove_log::HandProofLog,
 }
 
 impl Table {
@@ -496,6 +501,7 @@ impl Table {
             last_synced_at: None,
             accepted_seq: HashMap::new(),
             action_log: Vec::new(),
+            hand_proof_log: crate::starknet::prove_log::HandProofLog::default(),
             hand_log_start: 0,
         }
     }

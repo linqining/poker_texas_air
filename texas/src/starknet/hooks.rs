@@ -1,25 +1,17 @@
-//! 服务器接线钩子：把牌局事件桥接到 Starknet mirror 与链上结算。
+//! 服务器接线钩子：把牌局事件桥接到 Starknet 结算（#20 Phase 2）。
 //!
-//! 方案A（MIRROR_UNIFICATION_PLAN.md）：poker_l1 VM 成为唯一可证明状态机。
-//! - [`mirror_begin_reveal`]：游戏层洗牌完成、底牌发出（deck 终局）时，
-//!   把已验证 deck 原样注入全新 TableMirror，VM 直接进入 DealHole——
-//!   两条 deck 链逐字节同源，无需任何事后追赶（fill/replay/autoplay）。
-//! - [`mirror_sync_reveal`] / [`mirror_betting`] / [`mirror_force_fold`]：
-//!   在游戏层**接受动作的同一条代码路径**上单点派发到 VM。
-//! - [`on_hand_complete`]：showdown 后从 VM 的 ProveTask 链构建结算并上链
-//!   （register_aggregate + settle_hand），失败由 game_loop tick 有界重试。
+//! 常驻 mirror（第二本账）已移除。游戏层在接受动作的同一条代码路径上把
+//! 已验证输入记录进 `prove_log::HandProofLog`；[`on_hand_complete`] 在锁外
+//! 用日志**一次性**重放出 ProveTask 链与 pre-payout 快照（`mirror::build_from_log`），
+//! 与游戏层终局事实强制对账后构建 register_aggregate/settle_hand 上链，
+//! 失败由 game_loop tick 有界重试。
 //!
-//! 禁止事项（防止回到老路）：不再新增"事后追赶"型同步补丁；不引入第二套
-//! 密文派生（deck 必须同源）；不为绕过验证失败放宽 VM 证明校验。
+//! 禁止事项（防止回到老路）：不再引入常驻镜像/实时同步；不新增"事后追赶"
+//! 型补丁；不引入第二套密文派生（deck 必须同源）；不为绕过验证失败放宽
+//! VM 证明校验；对账不一致宁可不结算，绝不带分歧状态上链。
 
 use std::sync::OnceLock;
-use super::mirror::{MirrorRegistry, TableMirror};
-
-static REGISTRY: OnceLock<MirrorRegistry> = OnceLock::new();
-
-pub fn mirror_registry() -> &'static MirrorRegistry {
-    REGISTRY.get_or_init(MirrorRegistry::new)
-}
+use super::mirror::{seat_player_addr, TableMirror};
 
 /// 把 vault 的 settlement 绑定切到指定结算合约（operator 必须是 vault owner）。
 async fn rebind_vault_settlement(vault_address: &str, settlement_address: &str) -> Result<(), String> {
@@ -111,14 +103,53 @@ fn is_already_settled_error(e: &str) -> bool {
         || e.contains("Digest already registered")
 }
 
-pub fn on_hand_complete(table_id: u32) {
-    // 阶段 1（快速，锁内只读+克隆）：此函数在 game_loop 的 state 写锁内被
-    // finish_showdown 调用——任何重活（证明/构建 calldata）都必须移出，
-    // 否则写锁被阻塞数十秒，bot 与所有 WS 处理器全部停摆。
+pub fn on_hand_complete(table: &Table) {
+    // 阶段 1（快速，锁内只克隆）：提取本手证明输入日志 + 游戏层终局事实。
+    // 日志重放（验证 EC 证明）与证明生成都是重活，必须全部移出写锁。
+    let table_id = table.summary.id;
     if PENDING_SETTLE.lock().ok().map(|g| g.contains_key(&table_id)).unwrap_or(false) {
         // 上一手结算仍在重投队列：保留它（链上 hand_id 单调，两不冲突），
         // 新手结算不再入队以免覆盖。正常节奏下不会发生。
         tracing::warn!("[starknet-settle] table {table_id} previous settle still pending — skipped");
+        return;
+    }
+    let Some(input) = super::prove_log::take_settle_input(table) else {
+        return; // 本手未记录（未开局/缺 join 证明）——无可证明结算
+    };
+    tokio::spawn(async move {
+        settle_hand_from_log(input).await;
+    });
+}
+
+/// 锁外结算：日志一次性重放 → 强制对账 → 证明 → 入队上链。
+async fn settle_hand_from_log(input: super::prove_log::HandSettleInput) {
+    let table_id = input.table_id;
+    let Some(start) = input.log.start.clone() else { return };
+    let hand_id = next_hand_id(table_id);
+
+    // 一次性构建（取代常驻 mirror）：按记录序重放已接受命令，产出
+    // ProveTask 链 + pre-payout 快照。重放输入与游戏层接受输入逐字节相同，
+    // 失败 = 记录/时序异常——显式放弃该手，绝不带着分歧状态结算。
+    let mirror = match super::mirror::build_from_log(table_id, &start, &input.log.commands, hand_id) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                "[starknet-settle] table {table_id} hand {hand_id} build failed: {e} — hand not settled"
+            );
+            return;
+        }
+    };
+    if settle_ok_already(table_id, hand_id) {
+        return; // 本手已成功上链（幂等）
+    }
+    if settle_attempts_bumped_max(table_id, hand_id) {
+        return; // 重试上限：记录与游戏层永久分歧
+    }
+    // 强制对账（游戏层 = 唯一真相）：per-wallet total_bet 与公共牌数逐分一致。
+    if let Err(e) = cross_check_snapshot(&mirror, &input) {
+        tracing::error!(
+            "[starknet-settle] table {table_id} hand {hand_id} cross-check FAILED: {e} — settlement refused"
+        );
         return;
     }
 
@@ -126,114 +157,151 @@ pub fn on_hand_complete(table_id: u32) {
         .map(|c| (c.config.try_dapv(), c.config.dual_settlement_address.clone()))
         .unwrap_or((false, String::new()));
 
-    let result = mirror_registry().with_mirror(
-        table_id,
-        || TableMirror::new(u64::from(table_id), "table", [0xC0; 20], 9, 10, 20, [0xC0; 20]),
-        |mirror| {
-            if !mirror.has_provable_activity() {
-                return Ok(None);
-            }
-            if settle_ok_already(table_id, mirror.table.hand_id) {
-                return Ok(None); // 本手已成功上链（幂等）
-            }
-            if settle_attempts_bumped_max(table_id, mirror.table.hand_id) {
-                return Ok(None); // 重试上限：mirror 状态与游戏永久分歧
-            }
-            // lockstep 下游戏 finish_showdown 时 mirror 必已进入
-            // ShowdownDisplay——此刻打派奖前快照（board=5/pot/total_bet 完整）。
-            if matches!(
-                mirror.table.hand_phase,
-                poker_l1::vm::contracts::texas_poker::types::HandPhase::ShowdownDisplay { .. }
-            ) {
-                mirror.mark_pre_settlement();
-            }
-            Ok(Some(mirror.clone()))
-        },
-    );
-    let mirror_snapshot = match result {
-        Ok(Some(m)) => m,
-        Ok(None) => return, // 无可证明活动 / 已结算 / 超出重试上限
-        Err(e) => {
-            tracing::warn!("[starknet-settle] table {table_id} mirror snapshot failed: {e}");
-            return;
+    // 台费接收方：平台 treasury 地址（STARKNET_TREASURY_ADDRESS），
+    // 未配置时缺省 operator（#27 遗留注释已实现，2026-09-04 清理）。
+    let rake_recipient = {
+        let cfg_treasury = super::chain()
+            .map(|c| c.config.treasury_address.clone())
+            .unwrap_or_default();
+        let treasury_full = if cfg_treasury.trim().is_empty() {
+            super::chain()
+                .map(|c| c.config.operator_address.clone())
+                .unwrap_or_default()
+        } else {
+            cfg_treasury
+        };
+        if treasury_full.trim().is_empty() {
+            None
+        } else {
+            register_treasury_wallet(&treasury_full);
+            TableMirror::addr_from_starknet(&treasury_full)
         }
     };
 
-    // 阶段 2（异步）：证明 + calldata 构建 + 认可收集 + 上链，全部离开锁。
-    tokio::spawn(async move {
-        let (try_dapv, dual_addr) = super::chain()
-            .map(|c| (c.config.try_dapv(), c.config.dual_settlement_address.clone()))
-            .unwrap_or((false, String::new()));
+    // 完整钱包 felt 记账：参与者映射来自本手记录（无全局截断重映射表）。
+    let wallet_map = hand_wallet_map(&start);
 
-        // 台费接收方：平台 treasury 地址（STARKNET_TREASURY_ADDRESS），
-        // 未配置时缺省 operator（#27 遗留注释已实现，2026-09-04 清理）。
-        let rake_recipient = {
-            let cfg_treasury = super::chain()
-                .map(|c| c.config.treasury_address.clone())
-                .unwrap_or_default();
-            let treasury_full = if cfg_treasury.trim().is_empty() {
-                super::chain()
-                    .map(|c| c.config.operator_address.clone())
-                    .unwrap_or_default()
-            } else {
-                cfg_treasury
-            };
-            if treasury_full.trim().is_empty() {
-                None
-            } else {
-                register_treasury_wallet(&treasury_full);
-                TableMirror::addr_from_starknet(&treasury_full)
-            }
-        };
-
-        let settlement = match super::submit::settle_hand(&mirror_snapshot, rake_recipient) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("[starknet-settle] table {table_id} settlement build failed: {e}");
-                return;
-            }
-        };
-        tracing::info!(
-            "[starknet-settle] table {table_id} hand {} settled: aggregate={}",
-            settlement.hand_id,
-            hex_encode(&settlement.aggregate_digest)
+    let settlement = match super::submit::settle_hand(&mirror, rake_recipient, &wallet_map) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[starknet-settle] table {table_id} hand {hand_id} settlement build failed: {e}");
+            return;
+        }
+    };
+    // 对账 2：抽水必须与游戏层同分（前端筹码 / 牌史 / 链上三本账的锚）。
+    if settlement.plan.rake != input.rake_collected {
+        tracing::error!(
+            "[starknet-settle] table {table_id} hand {hand_id} rake mismatch: plan {} vs game {} — settlement refused",
+            settlement.plan.rake,
+            input.rake_collected
         );
+        return;
+    }
+    tracing::info!(
+        "[starknet-settle] table {table_id} hand {} settled: aggregate={}",
+        settlement.hand_id,
+        hex_encode(&settlement.aggregate_digest)
+    );
 
-        let binding = if try_dapv {
-            match super::dual_settle::prepare_handbatch_binding(&mirror_snapshot, &settlement) {
-                Ok(b) => {
-                    // bot 认可由服务器代铸；真实客户端经 ENDORSEMENT_REQUEST 铸造。
-                    mint_bot_endorsements(&b.hand_id_bytes, settlement.hand_id, &settlement.players_remapped);
-                    if let Some(io) = crate::socket::get_socket_io() {
-                        let request = crate::socket::EndorsementRequestPayload {
-                            table_id,
-                            hand_id: settlement.hand_id,
-                            hand_binding_hex: hex_encode(&b.hand_id_bytes),
-                        };
-                        let room = crate::socket::table_room_name(table_id);
-                        let _ = io.to(room).emit(crate::pokergame::actions::ENDORSEMENT_REQUEST, &request).await;
-                        tracing::info!(
-                            "[starknet-settle] table {table_id} hand {} endorsement request broadcast",
-                            settlement.hand_id
-                        );
-                    }
-                    Some(b)
+    let binding = if try_dapv {
+        match super::dual_settle::prepare_handbatch_binding(&mirror, &settlement) {
+            Ok(b) => {
+                // bot 认可由服务器代铸；真实客户端经 ENDORSEMENT_REQUEST 铸造。
+                mint_bot_endorsements(&b.hand_id_bytes, settlement.hand_id, &settlement.players_remapped);
+                if let Some(io) = crate::socket::get_socket_io() {
+                    let request = crate::socket::EndorsementRequestPayload {
+                        table_id,
+                        hand_id: settlement.hand_id,
+                        hand_binding_hex: hex_encode(&b.hand_id_bytes),
+                    };
+                    let room = crate::socket::table_room_name(table_id);
+                    let _ = io.to(room).emit(crate::pokergame::actions::ENDORSEMENT_REQUEST, &request).await;
+                    tracing::info!(
+                        "[starknet-settle] table {table_id} hand {} endorsement request broadcast",
+                        settlement.hand_id
+                    );
                 }
-                Err(e) => {
-                    tracing::warn!("[starknet-settle] table {table_id} hand {} dapv binding prepare failed: {e}", settlement.hand_id);
-                    None
+                Some(b)
+            }
+            Err(e) => {
+                tracing::warn!("[starknet-settle] table {table_id} hand {} dapv binding prepare failed: {e}", settlement.hand_id);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    PENDING_SETTLE
+        .lock()
+        .map(|mut g| g.insert(table_id, PendingSettle { settlement, binding, mirror, attempts: 0 }))
+        .ok();
+    run_settle_attempt(table_id).await;
+}
+
+/// 强制对账：VM 快照与游戏层终局事实逐分比对（total_bet / 公共牌数 /
+/// 参与者集合）。任何不一致都拒绝结算——输赢金额以游戏层为准，
+/// 证明工件必须为其背书，否则宁可不结算。
+fn cross_check_snapshot(
+    mirror: &TableMirror,
+    input: &super::prove_log::HandSettleInput,
+) -> Result<(), String> {
+    let snap = mirror.pre_settlement.as_ref().unwrap_or(&mirror.table);
+    let vm_board = snap.community_cards.len();
+    if vm_board != input.board_len {
+        return Err(format!("board mismatch: vm {vm_board} vs game {}", input.board_len));
+    }
+    for (wallet, bet) in &input.total_bets {
+        let Some(addr) = TableMirror::addr_from_starknet(wallet) else {
+            continue;
+        };
+        let vm_bet = snap
+            .seats
+            .iter()
+            .find(|s| seat_player_addr(s) == Some(addr))
+            .map(|s| s.total_bet());
+        match vm_bet {
+            None => {
+                if *bet != 0 {
+                    return Err(format!(
+                        "participant missing in vm snapshot: {wallet} (game total_bet {bet})"
+                    ));
                 }
             }
-        } else {
-            None
-        };
+            Some(v) if v != *bet => {
+                return Err(format!("total_bet mismatch: {wallet} vm {v} vs game {bet}"));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
 
-        PENDING_SETTLE
-            .lock()
-            .map(|mut g| g.insert(table_id, PendingSettle { settlement, binding, mirror: mirror_snapshot, attempts: 0 }))
-            .ok();
-        run_settle_attempt(table_id).await;
-    });
+/// 本手完整钱包映射：参与者（来自 HandStart 记录）+ treasury，
+/// 供 settle_hand 把 20 字节座位地址重映射回全精度 felt 记账。
+fn hand_wallet_map(start: &super::prove_log::HandStartData) -> Vec<(poker_l1::Address, starknet_ff::FieldElement)> {
+    let mut out: Vec<(poker_l1::Address, starknet_ff::FieldElement)> = start
+        .participants
+        .iter()
+        .filter_map(|p| {
+            let addr = TableMirror::addr_from_starknet(&p.wallet)?;
+            let felt = super::chain::parse_felt(&p.wallet)?;
+            Some((addr, super::submit::felt_to_ff(&felt)))
+        })
+        .collect();
+    if let Ok(set) = TREASURY_WALLETS.lock() {
+        for w in set.iter() {
+            if let (Some(a), Some(f)) = (
+                TableMirror::addr_from_starknet(w),
+                super::chain::parse_felt(w),
+            ) {
+                out.push((a, super::submit::felt_to_ff(&f)));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
 }
 
 /// 一次投递尝试：DAPV 优先（认可等待 3s），失败/不可用回退 legacy（按模式）。
@@ -423,331 +491,7 @@ async fn refresh_settlement_sessions(players_remapped: &[starknet_ff::FieldEleme
 }
 
 
-// ---------------------------------------------------------------------------
-// 运行时镜像同步：把 WS 牌局操作在游戏层接受点上单点派发到 TableMirror
-// ---------------------------------------------------------------------------
-
-use crate::pokergame::player::GamePkHex;
 use crate::pokergame::table::Table;
-use std::collections::HashMap;
-
-/// 每桌"最新 join 快照"：addr → (addr, buy_in, pk, proof)。
-/// mirror 开局（mirror_begin_reveal）据此把游戏层座位重放进 VM。
-type JoinEntry = (poker_l1::Address, u64, super::mirror::PtxECPoint, Vec<u8>);
-static LAST_JOINS: OnceLock<std::sync::Mutex<HashMap<u32, HashMap<poker_l1::Address, JoinEntry>>>> = OnceLock::new();
-
-fn last_joins_for(table_id: u32) -> Option<std::collections::HashMap<poker_l1::Address, JoinEntry>> {
-    LAST_JOINS
-        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-        .lock()
-        .ok()
-        .and_then(|map| map.get(&table_id).cloned())
-}
-
-fn record_join(table_id: u32, addr: poker_l1::Address, buy_in: u64, pk: super::mirror::PtxECPoint, proof: Vec<u8>) {
-    let m = LAST_JOINS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    if let Ok(mut g) = m.lock() {
-        g.entry(table_id).or_default().insert(addr, (addr, buy_in, pk, proof));
-    }
-}
-
-/// SIT_DOWN_V2 成功后调用：记录玩家 join（pk + 80 字节所有权证明），
-/// 下一手 mirror_begin_reveal 时按游戏座位计划重放进 VM。
-pub fn mirror_buffer_join_pk(
-    table_id: u32,
-    wallet_addr: &str,
-    pk_hex: &str,
-    buy_in: u64,
-    _pk_proof: &crate::pokergame::game_state::PkProofJson,
-    proof_bytes: Vec<u8>,
-) -> Result<(), String> {
-    let Some(addr) = TableMirror::addr_from_starknet(wallet_addr) else { return Err("bad wallet".into()) };
-    // pk_hex → ptx ECPoint：poker_protocol 的 z_poker::convert::hex_to_ecpoint 返回
-    // zgame EcPoint(G1Projective)，直接取内点再包为 ptx ECPoint
-    let zp = poker_protocol::z_poker::convert::hex_to_ecpoint(pk_hex)
-        .map_err(|e| format!("pk hex: {e}"))?;
-    let pk = crate::starknet::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(zp))
-        .map_err(|e| format!("pk conv: {e}"))?;
-    record_join(table_id, addr, buy_in, pk, proof_bytes);
-    Ok(())
-}
-
-/// 方案A 注入式开局：游戏层 `advance_shuffle`（BeforePreflop 完成）时调用。
-///
-/// 此刻 deck 已终局（全部客户端洗牌已验证、deal_preflop 已发底牌）。把这份
-/// deck 原样注入全新 TableMirror，按游戏座位升序重放 join，VM 直接进入
-/// DealHole。任何失败都只放弃本手 mirror（该手无可证明结算），绝不阻塞
-/// 游戏层，也绝不做状态追赶。
-pub fn mirror_begin_reveal(table: &Table) {
-    let table_id = table.summary.id;
-
-    // 参与座位计划：与 deal_preflop 同一参与谓词（occupied && !sitting_out），
-    // 按游戏座位号升序 → 与 VM DealHole 的升序座位规范逐一对齐。
-    let mut joins_snapshot = last_joins_for(table_id).unwrap_or_default();
-    let mut plan: Vec<(u32, poker_l1::Address, u64, super::mirror::PtxECPoint, Vec<u8>)> = Vec::new();
-    for (seat_id, seat) in table.seats() {
-        let Some(player) = seat.player.as_ref() else { continue };
-        if seat.sitting_out || seat.is_waiting {
-            continue;
-        }
-        let Some(addr) = TableMirror::addr_from_starknet(&player.wallet_address.0) else { continue };
-        let Some((_, buy_in, pk, proof)) = joins_snapshot.remove(&addr) else {
-            tracing::warn!(
-                "[mirror] table {table_id} seat {seat_id} has no buffered join pk/proof — mirror hand skipped"
-            );
-            return;
-        };
-        plan.push((seat_id, addr, buy_in, pk, proof));
-    }
-    plan.sort_by_key(|(seat_id, ..)| *seat_id);
-    if plan.len() < 2 {
-        return; // 不足 2 人不开 mirror 手（与游戏 MIN_START_NUM 一致）
-    }
-    let button_rank = table
-        .button()
-        .and_then(|b| plan.iter().position(|(seat_id, ..)| *seat_id == b))
-        .unwrap_or(0) as u8;
-    let plan_tuples: Vec<(poker_l1::Address, u64, super::mirror::PtxECPoint, Vec<u8>)> = plan
-        .into_iter()
-        .map(|(_, addr, buy_in, pk, proof)| (addr, buy_in, pk, proof))
-        .collect();
-
-    let deck = match super::mirror::conv::ciphertexts(&table.mental_poker_game.deck_encrypted) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("[mirror] table {table_id} deck conv failed: {e} — mirror hand skipped");
-            return;
-        }
-    };
-    let hand_id = next_hand_id(table_id);
-    // 盲注与游戏层对齐（VM post_blinds 据此Posting，保证 bet/total_bet 一致）。
-    let sb = table.summary.min_bet.max(1);
-    let bb = sb.saturating_mul(2);
-
-    let build = || {
-        let mut mirror = new_mirror_with_blinds(table_id, sb, bb);
-        mirror
-            .begin_reveal_hand(deck.clone(), &plan_tuples, button_rank, hand_id)
-            .map(|_| mirror)
-    };
-    match build() {
-        Ok(mirror) => {
-            mirror_registry().install(table_id, mirror);
-            tracing::info!(
-                "[mirror] table {table_id} hand {hand_id} opened: {} seats, deck injected ({} bytes), button_rank={button_rank}",
-                plan_tuples.len(),
-                deck.len()
-            );
-        }
-        Err(e) => {
-            tracing::warn!("[mirror] table {table_id} hand {hand_id} begin_reveal failed: {e} — hand proceeds without mirror settlement");
-        }
-    }
-}
-
-/// reveal 提交接受点（SocketState::submit_reveal_tokens_for_pk）：把客户端
-/// 已验证的 reveal token 重排成 VM canonical 顺序后单点派发到 mirror。
-pub fn mirror_sync_reveal(
-    table_id: u32,
-    pk_hex: &GamePkHex,
-    tokens: &[poker_protocol::z_poker::protocol::RevealToken],
-) {
-    let Some(wallet) = mirror_seat_wallet_by_pk(table_id, pk_hex) else { return };
-    let Some(addr) = TableMirror::addr_from_starknet(&wallet) else { return };
-    // 预转换客户端 token（转换失败 = 协议不一致，直接放弃本批同步）
-    let mut converted: Vec<(super::mirror::PtxECPoint, super::mirror::PtxRevealTokenProof<super::mirror::PtxCurve>)> = Vec::new();
-    let mut cards: Vec<poker_protocol::crypto::ElGamalCiphertext> = Vec::new();
-    for t in tokens {
-        let (Ok(tok), Ok(proof)) = (
-            crate::starknet::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(
-                t.reveal_token.clone(),
-            )),
-            crate::starknet::mirror::conv::reveal_token_proof(&t.proof),
-        ) else {
-            tracing::warn!("[mirror] reveal token conv failed — batch dropped");
-            return;
-        };
-        converted.push((tok, proof));
-        cards.push(t.encrypted_card.clone());
-    }
-    let result = mirror_registry().with_mirror(table_id, || new_mirror(table_id), |m| {
-        let Some(seat) = m.seat_index_of(addr) else { return Ok(()) };
-        let targets = m.pending_reveal_ciphertexts(seat)?;
-        if targets.len() != converted.len() {
-            return Err(format!(
-                "reveal set size mismatch: vm expects {}, client submitted {}",
-                targets.len(),
-                converted.len()
-            ));
-        }
-        // canonical 重排：VM 要求 token 覆盖全部 pending assignment 且按
-        // assignment 顺序（全有或全无）。按密文逐字节匹配客户端 token。
-        let mut ordered: Vec<Option<usize>> = vec![None; targets.len()];
-        for (ti, card) in cards.iter().enumerate() {
-            for (pos, target) in targets.iter().enumerate() {
-                if target.c1 == card.c1 && target.c2 == card.c2 {
-                    ordered[pos] = Some(ti);
-                    break;
-                }
-            }
-        }
-        if ordered.iter().any(|o| o.is_none()) {
-            return Err("reveal set does not cover vm assignments byte-wise".into());
-        }
-        let mut pt_tokens = Vec::with_capacity(targets.len());
-        let mut proofs = Vec::with_capacity(targets.len());
-        for pos in 0..targets.len() {
-            let ti = ordered[pos].expect("checked complete above");
-            let (tok, proof) = converted[ti].clone();
-            pt_tokens.push(tok);
-            proofs.push(proof);
-        }
-        m.submit_reveal_tokens(seat, pt_tokens, proofs)
-    });
-    if let Err(e) = result {
-        tracing::warn!("[mirror] reveal sync failed: {e}");
-    }
-}
-
-/// 下注动作接受点（betting.rs 各 handle_* 成功后）：单点派发到 mirror。
-/// 派发失败仅告警（该手结算将以镜像侧真实状态为准；不做缓冲追赶）。
-pub fn mirror_betting(table: &Table, pk_hex: &GamePkHex, action: &str, total_bet: Option<u64>) {
-    let table_id = table.summary.id;
-    let Some(seat) = mirror_seat_of(table, pk_hex) else { return };
-    let result = mirror_registry().with_mirror(table_id, || new_mirror(table_id), |m| {
-        apply_mirror_bet(m, seat, action, total_bet)
-    });
-    if let Err(e) = result {
-        tracing::warn!("[mirror] betting sync failed ({action} seat {seat}): {e}");
-    }
-}
-
-/// 手牌进行中玩家被移除（超时踢出/离桌）的接受点：mirror 侧强制弃牌，
-/// 使 VM 与游戏层的存活玩家集合保持一致。
-pub fn mirror_force_fold(table_id: u32, wallet_addr: &str) {
-    let Some(addr) = TableMirror::addr_from_starknet(wallet_addr) else { return };
-    let result = mirror_registry().with_mirror(table_id, || new_mirror(table_id), |m| {
-        let Some(seat) = m.seat_index_of(addr) else { return Ok(()) };
-        // 踢人强制弃牌同样可能终结手牌：派奖前快照 + 记录待应用的终局
-        // 弃牌座位（与 apply_mirror_bet 的 fold 分支同款——否则被踢者的
-        // fold-win 手牌永远无法构建结算）。
-        let unfolded_others = m
-            .table
-            .seats
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != seat as usize)
-            .filter(|(_, s)| s.is_occupied() && !s.is_folded() && !s.is_waiting())
-            .count();
-        if unfolded_others == 1 {
-            m.mark_pre_settlement();
-            m.pre_settlement_final_fold = Some(seat);
-        }
-        let args = borsh::to_vec(&poker_l1::vm::contracts::texas_poker::dispatch::SeatIndexArgs {
-            seat_index: seat,
-        })
-        .map_err(|e| e.to_string())?;
-        m.apply([0xC0; 20], &poker_l1::vm::contracts::texas_poker::dispatch::selectors::force_fold(), args)
-    });
-    if let Err(e) = result {
-        tracing::warn!("[mirror] force_fold sync failed: {e}");
-    }
-}
-
-/// game loop tick 的 mirror 驱动（方案A 收缩版）：仅在 mirror 处于
-/// ShowdownDisplay 时推进 deadline（VM 派奖 + 复位，为下一手腾出
-/// Waiting 状态）。洗牌/reveal/下注阶段的推进完全由游戏层接受点驱动，
-/// 不允许 VM 自行超时产生与游戏层的分歧。
-pub fn mirror_advance_showdown_display(table_id: u32) {
-    let _ = mirror_registry().with_mirror(table_id, || new_mirror(table_id), |m| {
-        if matches!(
-            m.table.hand_phase,
-            poker_l1::vm::contracts::texas_poker::types::HandPhase::ShowdownDisplay { .. }
-        ) {
-            m.mark_pre_settlement();
-            m.advance_deadline()?;
-        }
-        Ok(())
-    });
-}
-
-fn apply_mirror_bet(m: &mut TableMirror, seat: u8, action: &str, total_bet: Option<u64>) -> Result<(), String> {
-    match action {
-        "fold" => {
-            // 终局 fold 检测：本次弃牌后只剩 1 名未弃牌玩家时，VM 会在同一
-            // 次 fold 转换里直接派奖并 reset（pot 清零、回 Waiting）。而
-            // settle_hand 需要派奖前状态（pot/total_bet/folded 完整）——
-            // 派奖前先打 pre_settlement 快照，弃牌获胜手牌才有可证明结算。
-            // 快照打在 fold 应用之前：记录待应用的终局弃牌座位，结算派发
-            // 时先在快照副本上落这记弃牌（derive_fold_win_plan 需要
-            // "恰好一名未弃牌"的终局形态）。
-            let unfolded_others = m
-                .table
-                .seats
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != seat as usize)
-                .filter(|(_, s)| s.is_occupied() && !s.is_folded() && !s.is_waiting())
-                .count();
-            if unfolded_others == 1 {
-                m.mark_pre_settlement();
-                m.pre_settlement_final_fold = Some(seat);
-            }
-            m.fold(seat)
-        }
-        "check" => m.check(seat),
-        "call" => m.call(seat),
-        "raise" => match total_bet {
-            Some(tb) => m.raise(seat, tb),
-            None => Err("raise requires total_bet".into()),
-        },
-        other => Err(format!("unknown betting action {other}")),
-    }
-}
-
-fn mirror_seat_of(table: &Table, pk_hex: &GamePkHex) -> Option<u8> {
-    let wallet = table
-        .local_seats
-        .values()
-        .find(|s| s.player.as_ref().map(|p| p.pk_hex.0 == pk_hex.0).unwrap_or(false))?
-        .player
-        .as_ref()?
-        .wallet_address
-        .0
-        .clone();
-    let addr = TableMirror::addr_from_starknet(&wallet)?;
-    mirror_registry()
-        .with_mirror(table.summary.id, || new_mirror(table.summary.id), |m| {
-            Ok(m.seat_index_of(addr))
-        })
-        .ok()
-        .flatten()
-}
-
-fn new_mirror(table_id: u32) -> TableMirror {
-    TableMirror::new(u64::from(table_id), "table", [0xC0; 20], 9, 10, 20, [0xC0; 20])
-}
-
-fn new_mirror_with_blinds(table_id: u32, small_blind: u64, big_blind: u64) -> TableMirror {
-    TableMirror::new(u64::from(table_id), "table", [0xC0; 20], 9, small_blind, big_blind, [0xC0; 20])
-}
-
-/// 通过 pk_hex 查座位里的钱包地址（server 座位表）。
-fn mirror_seat_wallet_by_pk(table_id: u32, pk_hex: &GamePkHex) -> Option<String> {
-    let _ = table_id;
-    SEAT_WALLETS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-        .lock().ok()
-        .and_then(|map| map.get(&pk_hex.0).cloned())
-}
-
-static SEAT_WALLETS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
-
-pub fn register_seat_wallet(pk_hex: &str, wallet: &str) {
-    let m = SEAT_WALLETS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    if let Ok(mut map) = m.lock() {
-        map.insert(pk_hex.to_string(), wallet.to_string());
-    }
-}
 
 /// 进程内 bot 的通知（endorsement）私钥注册表：wallet → StarkCurve sk。
 /// bot 是服务器自己的测试玩家，认可私钥托管在服务器（与真实客户端把私钥
@@ -824,46 +568,12 @@ pub fn register_treasury_wallet(wallet: &str) {
     }
 }
 
-/// 钱包重映射表：poker_l1 座位地址（钱包 felt 的低 160 位截断）→ 真实钱包 felt。
-/// mirror 座位只存 20 字节截断地址，而 vault 余额以完整钱包 felt 为键，
-/// settle_hand 上链前据此把参与者地址重映射回真实钱包。
-pub fn seat_wallet_remaps() -> Vec<(poker_l1::Address, String)> {
-    let Some(map) = SEAT_WALLETS
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-        .lock()
-        .ok()
-    else {
-        return Vec::new();
-    };
-    let mut out: Vec<(poker_l1::Address, String)> = map
-        .values()
-        .filter_map(|w| super::mirror::TableMirror::addr_from_starknet(w).map(|a| (a, w.clone())))
-        .collect();
-    if let Ok(set) = TREASURY_WALLETS.lock() {
-        for w in set.iter() {
-            if let Some(a) = super::mirror::TableMirror::addr_from_starknet(w) {
-                out.push((a, w.clone()));
-            }
-        }
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out.dedup_by(|a, b| a.0 == b.0);
-    out
-}
-
-/// 直接记录 join（bot 进程内路径：wallet + pk 点 + 80 字节证明）。
+/// 直接记录 join（bot 进程内路径：wallet + pk hex + 80 字节证明）。
 pub fn mirror_buffer_join_raw(
     table_id: u32,
     wallet: &str,
     pk_hex: &str,
     proof: Vec<u8>,
 ) {
-    let Some(addr) = TableMirror::addr_from_starknet(wallet) else { return };
-    // pk_hex → zgame EcPoint（裸 G1Projective）→ ptx ECPoint（borsh 桥）
-    let Ok(pk_zg) = poker_protocol::z_poker::convert::hex_to_ecpoint(pk_hex) else { return };
-    let pk_ptx = match crate::starknet::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(pk_zg)) {
-        Ok(p) => p,
-        Err(e) => { eprintln!("[mirror] pk conv: {e}"); return; }
-    };
-    record_join(table_id, addr, 1000, pk_ptx, proof);
+    super::prove_log::record_join(table_id, wallet, pk_hex, proof);
 }

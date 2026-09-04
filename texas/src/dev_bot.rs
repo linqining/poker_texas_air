@@ -17,7 +17,6 @@ use crate::models::{Database, User};
 use crate::pokergame::player::{GamePkHex, Player, WalletAddress};
 use crate::pokergame::game_state::{ElGamalCiphertextJson, MaskAndShuffleRoundJson, PkProofJson, ShuffleProofJson};
 use crate::socket::SocketState;
-use crate::starknet::hooks;
 
 use poker_protocol::crypto::{hash_to_scalar, ElGamalCiphertext};
 

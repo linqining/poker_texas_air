@@ -40,9 +40,10 @@
 //!   曲线（EC_OP 原生，是全残差批次唯一可负担的路线）；secp256k1 保留
 //!   为 EVM ecrecover 互操作备选。当前批次仍承载每座位的 hand-bound
 //!   所有权认可（secp256k1）。
-//! - 认可密钥目前由服务器在入座时生成托管（bot 路径与 WS 路径都汇入
-//!   `register_seat_wallet`）。生产形态：认可私钥由玩家钱包/客户端
-//!   持有，结算时经签名请求铸造（与游戏密钥同分布）。
+//! - 认可密钥目前由服务器在入座时生成托管（bot 路径经
+//!   `hooks::register_bot_endorsement_key`；dev 钱包经
+//!   `register_dev_endorsement_wallets`）。生产形态：认可私钥由玩家
+//!   钱包/客户端持有，结算时经签名请求铸造（与游戏密钥同分布）。
 
 use poker_protocol_core::{Curve, CurvePoint, CurveScalar, StarkCurve};
 use starknet::accounts::{Account, ExecutionEncoding};

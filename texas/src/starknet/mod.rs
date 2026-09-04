@@ -20,6 +20,7 @@ pub mod hooks;
 pub mod lock;
 pub mod mirror;
 pub mod paymaster;
+pub mod prove_log;
 pub mod settlement_prover;
 pub mod submit;
 

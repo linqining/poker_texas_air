@@ -1,9 +1,11 @@
-//! 牌局镜像：把 WS 牌局操作同步 dispatch 到 poker_l1 的 TexasPokerTable VM，
-//! 收集每手牌的 ProveTask，供结算时生成证明链与 Starknet calldata。
+//! 手牌证明构建器（Phase 2，TODO #20）：把游戏层记录的手牌日志
+//! （`prove_log::HandProofLog`）**一次性**重放进 poker_l1 的 TexasPokerTable
+//! VM，产出该手的 ProveTask 链与 pre-payout 快照，供结算生成证明与 calldata。
 //!
-//! 镜像是**从动副本**：权威状态仍由 pokergame/ 的本地状态机维护（驱动 WS 广播），
-//! 镜像只把等价操作喂给 poker_l1 VM。两者输入相同（前端提交的证明与动作），
-//! 因此结算时镜像表的 seats/total_bet/pot 与真实牌局一致。
+//! 权威状态只有游戏层一本账；本类型不再常驻、不再被接受点实时同步——
+//! `hooks::on_hand_complete` 在锁外用克隆的日志构建即弃。重放输入与游戏层
+//! 接受的输入逐字节相同，构建失败 = 记录异常，显式放弃该手上链（绝不带着
+//! 分歧状态结算）。
 //!
 //! 类型桥接：服务端现有代码把前端 JSON 解析为 zgame poker_protocol（0.2.0）类型；
 //! poker_l1 使用 poker_texas_air 内的 poker_protocol（0.1.0）类型。两份副本的
@@ -417,6 +419,214 @@ impl TableMirror {
         let bytes = felt.to_bytes_be();
         Some(bytes[12..32].try_into().expect("20 bytes"))
     }
+
+    /// 应用一条记录的 reveal 令牌命令（移植原 `mirror_sync_reveal` 锁内逻辑：
+    /// 客户端令牌按密文逐字节匹配重排成 VM canonical 顺序后提交）。
+    pub fn apply_recorded_reveal(
+        &mut self,
+        seat_index: u8,
+        tokens: &[poker_protocol::z_poker::protocol::RevealToken],
+    ) -> Result<(), String> {
+        let mut converted: Vec<(PtxECPoint, PtxRevealTokenProof<PtxCurve>)> = Vec::new();
+        let mut cards: Vec<poker_protocol::crypto::ElGamalCiphertext> = Vec::new();
+        for t in tokens {
+            let (Ok(tok), Ok(proof)) = (
+                conv::ec_point(&poker_protocol::crypto::types::ECPoint(t.reveal_token.clone())),
+                conv::reveal_token_proof(&t.proof),
+            ) else {
+                return Err("reveal token conv failed".into());
+            };
+            converted.push((tok, proof));
+            cards.push(t.encrypted_card.clone());
+        }
+        let targets = self.pending_reveal_ciphertexts(seat_index)?;
+        if targets.len() != converted.len() {
+            return Err(format!(
+                "reveal set size mismatch: vm expects {}, client submitted {}",
+                targets.len(),
+                converted.len()
+            ));
+        }
+        // canonical 重排：VM 要求 token 覆盖全部 pending assignment 且按
+        // assignment 顺序（全有或全无）。按密文逐字节匹配客户端 token。
+        let mut ordered: Vec<Option<usize>> = vec![None; targets.len()];
+        for (ti, card) in cards.iter().enumerate() {
+            for (pos, target) in targets.iter().enumerate() {
+                if target.c1 == card.c1 && target.c2 == card.c2 {
+                    ordered[pos] = Some(ti);
+                    break;
+                }
+            }
+        }
+        if ordered.iter().any(|o| o.is_none()) {
+            return Err("reveal set does not cover vm assignments byte-wise".into());
+        }
+        let mut pt_tokens = Vec::with_capacity(targets.len());
+        let mut proofs = Vec::with_capacity(targets.len());
+        for pos in 0..targets.len() {
+            let ti = ordered[pos].expect("checked complete above");
+            let (tok, proof) = converted[ti].clone();
+            pt_tokens.push(tok);
+            proofs.push(proof);
+        }
+        self.submit_reveal_tokens(seat_index, pt_tokens, proofs)
+    }
+
+    /// 应用一条记录的下注命令（移植原 `apply_mirror_bet`：终局 fold 先打
+    /// pre-payout 快照并记录待应用弃牌座位）。
+    pub fn apply_recorded_bet(
+        &mut self,
+        seat_index: u8,
+        action: &str,
+        total_bet: Option<u64>,
+    ) -> Result<(), String> {
+        match action {
+            "fold" => {
+                // 终局 fold 检测：本次弃牌后只剩 1 名未弃牌玩家时，VM 会在同
+                // 一次 fold 转换里直接派奖并 reset——先打快照（快照打在 fold
+                // 应用之前，结算派发时先在快照副本上落这记弃牌）。
+                let unfolded_others = self
+                    .table
+                    .seats
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != seat_index as usize)
+                    .filter(|(_, s)| s.is_occupied() && !s.is_folded() && !s.is_waiting())
+                    .count();
+                if unfolded_others == 1 {
+                    self.mark_pre_settlement();
+                    self.pre_settlement_final_fold = Some(seat_index);
+                }
+                self.fold(seat_index)
+            }
+            "check" => self.check(seat_index),
+            "call" => self.call(seat_index),
+            "raise" => match total_bet {
+                Some(tb) => self.raise(seat_index, tb),
+                None => Err("raise requires total_bet".into()),
+            },
+            other => Err(format!("unknown betting action {other}")),
+        }
+    }
+
+    /// 应用一条记录的强制弃牌（移植原 `mirror_force_fold`：VM 拒绝不致命——
+    /// 与旧同步路径语义一致，状态不变仅跳过，不影响本手可证明性）。
+    pub fn apply_recorded_force_fold(&mut self, seat_index: u8) {
+        // 仅当座位可弃牌时派发（已弃牌/等待中/离局的手牌阶段下为无操作）。
+        let applicable = self
+            .table
+            .seats
+            .get(seat_index as usize)
+            .map(|s| s.is_occupied() && !s.is_folded() && !s.is_waiting())
+            .unwrap_or(false);
+        let unfolded_others = self
+            .table
+            .seats
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != seat_index as usize)
+            .filter(|(_, s)| s.is_occupied() && !s.is_folded() && !s.is_waiting())
+            .count();
+        if applicable && unfolded_others == 1 {
+            self.mark_pre_settlement();
+            self.pre_settlement_final_fold = Some(seat_index);
+        }
+        if !applicable {
+            return;
+        }
+        let args = match borsh::to_vec(&texas_dispatch::SeatIndexArgs { seat_index }) {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        let _ = self.apply([0xC0; 20], &texas_dispatch::selectors::force_fold(), args);
+    }
+}
+
+/// 从记录的手牌日志构建本手证明工件（一次性；构建即弃，无常驻状态）。
+///
+/// `hand_id` 由调用方（hooks 的单调序列）分配，满足链上 register_aggregate
+/// 的 first_hand_id 严格递增校验。
+pub fn build_from_log(
+    table_id: u32,
+    start: &super::prove_log::HandStartData,
+    commands: &[super::prove_log::HandCommand],
+    hand_id: u32,
+) -> Result<TableMirror, String> {
+    let bb = start.small_blind.saturating_mul(2);
+    let mut mirror = TableMirror::new(
+        u64::from(table_id),
+        "table",
+        [0xC0; 20],
+        9,
+        start.small_blind,
+        bb,
+        [0xC0; 20],
+    );
+    let mut plan: Vec<(poker_l1::Address, u64, PtxECPoint, Vec<u8>)> = Vec::new();
+    let mut by_pk: std::collections::HashMap<&str, poker_l1::Address> = std::collections::HashMap::new();
+    let mut by_wallet: std::collections::HashMap<&str, poker_l1::Address> = std::collections::HashMap::new();
+    for p in &start.participants {
+        let addr = TableMirror::addr_from_starknet(&p.wallet)
+            .ok_or_else(|| format!("bad wallet felt: {}", p.wallet))?;
+        by_pk.insert(p.pk_hex.as_str(), addr);
+        by_wallet.insert(p.wallet.as_str(), addr);
+        plan.push((addr, p.stack, p.pk.clone(), p.pk_ownership_proof.clone()));
+    }
+    mirror
+        .begin_reveal_hand(start.deck.clone(), &plan, start.button_rank, hand_id)
+        .map_err(|e| format!("begin_reveal: {e}"))?;
+
+    for cmd in commands {
+        match cmd {
+            super::prove_log::HandCommand::RevealTokens { pk_hex, tokens } => {
+                let Some(addr) = by_pk.get(pk_hex.as_str()) else {
+                    return Err(format!("reveal from unknown pk {pk_hex}"));
+                };
+                let Some(seat) = mirror.seat_index_of(*addr) else {
+                    return Err(format!("reveal from non-participant pk {pk_hex}"));
+                };
+                mirror
+                    .apply_recorded_reveal(seat, tokens)
+                    .map_err(|e| format!("reveal replay (seat {seat}): {e}"))?;
+            }
+            super::prove_log::HandCommand::Bet { pk_hex, action, total_bet } => {
+                let Some(addr) = by_pk.get(pk_hex.as_str()) else {
+                    return Err(format!("bet from unknown pk {pk_hex}"));
+                };
+                let Some(seat) = mirror.seat_index_of(*addr) else {
+                    return Err(format!("bet from non-participant pk {pk_hex}"));
+                };
+                mirror
+                    .apply_recorded_bet(seat, action, *total_bet)
+                    .map_err(|e| format!("bet replay ({action} seat {seat}): {e}"))?;
+            }
+            super::prove_log::HandCommand::ForceFold { wallet } => {
+                let Some(addr) = by_wallet.get(wallet.as_str()) else {
+                    continue; // 非本手参与者（跨手残留命令）：跳过
+                };
+                if let Some(seat) = mirror.seat_index_of(*addr) {
+                    mirror.apply_recorded_force_fold(seat);
+                }
+            }
+        }
+    }
+
+    // 摊牌展示期 → 派奖前快照 + 推进 VM 复位（与旧 game_loop tick 的
+    // mirror_advance_showdown_display 等价；fold-win 快照已在终局 fold 命令
+    // 中打好，此处 no-op）。
+    if matches!(
+        mirror.table.hand_phase,
+        poker_l1::vm::contracts::texas_poker::types::HandPhase::ShowdownDisplay { .. }
+    ) {
+        mirror.mark_pre_settlement();
+        mirror
+            .advance_deadline()
+            .map_err(|e| format!("payout advance: {e}"))?;
+    }
+    if !mirror.has_provable_activity() {
+        return Err("hand has no prove tasks".into());
+    }
+    Ok(mirror)
 }
 
 /// 从座位提取玩家地址（settle_hand 参与者来源）。
@@ -473,41 +683,4 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-/// 全局镜像注册表：table_id → TableMirror。
-/// SocketState 持有；所有访问都短暂持锁（dispatch 是同步 CPU 操作）。
-#[derive(Default)]
-pub struct MirrorRegistry {
-    mirrors: std::sync::Mutex<std::collections::HashMap<u32, TableMirror>>,
-}
-
-impl MirrorRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 获取或创建桌镜像。`create` 仅在首次访问时调用；`f` 在持锁状态下执行。
-    pub fn with_mirror<F, R>(
-        &self,
-        table_id: u32,
-        create: impl FnOnce() -> TableMirror,
-        f: F,
-    ) -> Result<R, String>
-    where
-        F: FnOnce(&mut TableMirror) -> Result<R, String>,
-    {
-        let mut guards = self.mirrors.lock().map_err(|e| e.to_string())?;
-        let mirror = guards.entry(table_id).or_insert_with(create);
-        f(mirror)
-    }
-
-    /// 用新构造的 mirror 替换该桌现有实例（仅限手牌边界的
-    /// mirror_begin_reveal 调用；手牌进行中禁止替换）。
-    pub fn install(&self, table_id: u32, mirror: TableMirror) {
-        if let Ok(mut guards) = self.mirrors.lock() {
-            guards.insert(table_id, mirror);
-        }
-    }
-
 }

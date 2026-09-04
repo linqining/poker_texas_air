@@ -392,16 +392,30 @@
     texas 边界过滤集 15/15（submit/rake/mirror）✅、workspace cargo check ✅。
     ⚠️ 遗留：`fuzz/` 在 workspace exclude 外引用已删模块，构建会失败——随
     Phase 2 一并处理；poker_l1 326 条 missing_docs 风格警告为存量，不阻塞。
-  - **Phase 2（架构对齐，"直接应用程序"）**：移除 mirror.rs 重放——结算直接从
-    游戏层真相构造：plan 从游戏层 winners/rake 派生（pot.rs/lifecycle.rs 已算，
-    settlement.rs 是重复实现），MethodBatchV2 命令从游戏事件 + 已验证客户端
-    证明直接组装，玩家直接以完整钱包 felt 记账（顺带消除 20 字节截断重映射）；
-    保 register_aggregate/settle_hand/DAPV hand_binding ABI 不变。需解决：
-    receipt 链 state-root 连续性——不再全量重放后，须在命令边界从游戏态合成
-    canonical 表状态，或放宽为手级锚定（settle_hand 本就只取首 pre/末 post）。
-    附带收益：原 #20 目标（deck/stack/reveal 时序失步类 bug，含 2026-09-04
-    hand 2 未结算的 insufficient-stack 根因：mirror 每手用原始 buy_in 重建而
-    游戏 stack 跨手结转）随第二本账一并消失。
+  - **Phase 2（架构对齐，"直接应用程序"）✅ 完成（2026-09-05）**：常驻 mirror
+    （第二本账）移除，结算改为"游戏层记录 → 结算时一次性纯函数重建"：
+    - **记录**（新 `texas/src/starknet/prove_log.rs`）：游戏层在接受动作的同一
+      代码路径上写每手 `HandProofLog`——join 证明缓冲（SIT_DOWN/socket 双入口
+      汇聚）→ `record_hand_start`（deck 终局时采集 HandStart 快照：参与者/
+      **盲注前 stack**/button/deck）→ reveal 令牌（(pk,令牌集) 去重，客户端
+      幂等重试不重复）→ 下注动作（auto 代打同路径天然覆盖）→ 强制弃牌。
+    - **重建**（`mirror::build_from_log`，TableMirror 转为一次性构建器）：
+      on_hand_complete 锁内只克隆日志，锁外按记录序重放（DeckHole 注入 →
+      reveal/下注/force-fold → ShowdownDisplay 快照+派奖推进），产出
+      ProveTask 链 + pre-payout 快照。Bet/Reveal 重放失败 = 记录异常 → 显式
+      放弃该手（绝不带分歧状态结算）；ForceFold 沿用旧"失败仅跳过"语义。
+    - **强制对账**（游戏层 = 唯一真相）：构建后比对 per-wallet total_bet 与
+      公共牌数；settle_hand 派生 plan 后再比对 rake——任一不一致拒绝上链。
+      顺带根治 hand 2 类 bug：join buy_in 改用 seat.stack（跨手结转），
+      stack/reveal 失步整类消失。
+    - **完整钱包 felt 记账**：参与者映射来自本手记录（`hand_wallet_map`），
+      删 `SEAT_WALLETS`/`seat_wallet_remaps`/`LAST_JOINS`/`MirrorRegistry`
+      及全部实时同步钩子（mirror_betting/sync_reveal/force_fold/
+      advance_showdown_display/begin_reveal）；game_loop tick 只留有界重投。
+    - 链上 ABI（register_aggregate/settle_hand/DAPV hand_binding）不变；
+      20 字节截断重映射保留（VM Address 宽度属 AIR/序列化表面，Phase 2 不动）。
+    - **回归**：workspace 编译 ✅；`starknet::` 测试集（submit 逻辑 + 全链路
+      e2e：join→洗牌→reveal→下注→settle_hand 真实证明链→calldata 对拍）通过。
   - **Phase 3（可选，需单独拍板）**：v1 链上仅验 digest 注册 + delta 应用，
     可评估证明内容暂缩为 digest 承诺直至上链验证路线启用——改变安全模型。
 - [ ] **21. Phase 3：独立 prover 服务**：`STARKNET_PROVER_URL` 从 stub 变真实端点，

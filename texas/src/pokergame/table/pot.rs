@@ -170,7 +170,7 @@ impl Table {
 
         // Starknet 结算：镜像手牌 prove → outer aggregate → register/settle 上链
         // （dev 模式只生成 calldata 并记日志）。失败不影响链下记账。
-        crate::starknet::hooks::on_hand_complete(self.summary.id);
+        crate::starknet::hooks::on_hand_complete(self);
     }
 
     /// 镜像 Move settle_hand：Showdown 展示超时后分配底池并重置牌桌。
