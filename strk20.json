@@ -16,15 +16,15 @@
       ]
     },
     "poker_vault": {
-      "address": "0x3e73e675e5738e64f3fa54a921426eeb48aa72dec56745198f7a869ee0de25f",
+      "address": "0x0629385f1e3b43684828cf46488fbd0ef2b1ec0dc27c7827ecbe6b2f15c7fa13",
       "class_name": "PokerVault",
-      "class_hash": "0x49329b14ddb42aa3f68477bef30f2abd4fad30644d8ff2b2655d52346fd77df",
+      "class_hash": "0x2c829f5c61f0f2206d96223121d354f38857c2a423a45206545704ee9d22feb",
       "constructor": [
         "owner",
         "token_address",
         "settlement_contract"
       ],
-      "note": "2026-09-01 v2 redeploy (Part A Phase 1): + register_payout_key/payout_key + settlement_fund_escrow (settlement_contract gated). settlement_contract=dual_v2."
+      "note": "2026-09-04 v3 live (sepolia): #33 in-hand lock (lock/refresh_session/unlock_after_deadline 12h TTL/force_unlock), withdraw_to + unshield gate, assert_spendable on all debit paths. authorized_helper=anonymizer v3 0x6fd4be6e..., unshield_helper=CashoutUnshieldHelper 0x1c35d808..., settlement=dual v3. Old vault v2 0x3e73e6... retired (no balance migration, testnet)."
     },
     "poker_settlement": {
       "address": "0x76a0b49a40c706d438c5f8675165d462de5a0a7d5183183e8b4746b955b5194",
@@ -37,15 +37,15 @@
       ]
     },
     "poker_dual_settlement": {
-      "address": "0x283008305b515ead456b621d41f232d1c650c882c550d465b3fc5c83eee98e4",
+      "address": "0x516b8289a8b154644b5098e4d4301f2f0c9cf1fd67cdac0516b439094d35f61",
       "class_name": "PokerDualSettlement",
-      "class_hash": "0x8cd910853b8e2dee83506bda76fe6e1df5f59e0c21b7cc09d9032a963e8ff3",
+      "class_hash": "0x2e039e95a4b11b2219e19e445016ee55c5382dc3e074c4426f2f62194288c08",
       "constructor": [
         "owner",
         "vault_address",
         "initial_prover"
       ],
-      "note": "2026-09-01 v2 redeploy (Part A Phase 1): + verify_and_settle_dapv_stark_private (claim commitments + escrow funding + public loser debits), set_claim_helper, consume_claim. Claim helper=0x4642cca8...c1d5."
+      "note": "2026-09-04 v3 live (sepolia): verify_and_settle_dapv_stark_private_v2 zero-plaintext settle (Stwo public segment, fact-registry trust anchor), #16/#17 action-signature reserves. claim_helper=SettlementPayoutAnonymizer 0x393fb6f9..., circuit_program_hash=0x2ad181fc... Live-verified: multiple dapv settles SUCCEEDED (2026-09-04)."
     },
     "poker_swap": {
       "address": "0x45a5d045fad8ba092e7919e26b34fa9e901b3ebc93b42120262dbade6cbcee9",
@@ -58,34 +58,45 @@
       "note": "Bidirectional fixed-rate STRK<->pSTRK swap (1:1000). Declared+deployed on Sepolia 2026-08-31 via deploy_sepolia_full.sh; reserves: 100,000 pSTRK + 15 STRK."
     },
     "poker_vault_anonymizer": {
-      "address": "0x600dd19f284e0bcff46f466e701ed8a389d1f601d7f6441fe32b6d022c51db1",
+      "address": "0x6fd4be6e7af47f15b5c801623f49801e00610673fb42f6d7519d9119991b8f5",
       "class_name": "PokerVaultAnonymizer",
-      "class_hash": "0x5ec1eef0681aca7ff0f4c0f64a2eab2ad7b2d3c461832e99f90850a80315c94",
+      "class_hash": "0x405327310fad98fc864d63282a97495fd9373e28987577ad4c54e8d900ec561",
       "constructor": [
+        "owner",
         "vault",
         "pool"
       ],
-      "note": "2026-09-01 v2 redeploy bound to vault v2. authorized_helper set (tx 0x4bfa87c2...59af3)."
+      "note": "2026-09-04 v3 (owner-gated set_vault; owner explicit ctor arg — UDC deploy pitfall). vault=0x0629385f...(v3), pool=0x0254a6b2...d91. Deploy tx 0x228575a2...; vault v3 set_authorized_helper tx 0x286ae4f3..."
     },
     "settlement_payout_anonymizer": {
-      "address": "0x4642cca837f0fb1f9b903516bcd6f99101bad27cbb458fba79875b5056cc1d5",
+      "address": "0x393fb6f9964b1e91e9b141567180689fac4d93215d33ccc807ac35f6746a43f",
       "class_name": "SettlementPayoutAnonymizer",
-      "class_hash": "0x6ac2db9dccf8ee55be70ae3208783506c402b523fd2b76d2b23dd9baea8021f",
+      "class_hash": "0x5ec1eef0681aca7ff0f4c0f64a2eab2ad7b2d3c461832e99f90850a80315c94",
       "constructor": [
         "vault",
         "pool",
         "settlement"
       ],
-      "note": "2026-09-01 deployed (Part A Phase 1): STRK20 pool calls privacy_claim(player, hand_binding, seat, amount, note_id, secret); verifies payout-commitment preimage, single-use consume, credits open note."
+      "note": "Active claim helper (wired into dual v3 set_claim_helper). Earlier instance 0x4642cca8...c1d5 (2026-09-01) superseded by redeploy bound to same vault/pool lineage; keep for lineage only."
+    },
+    "cashout_unshield_helper": {
+      "address": "0x1c35d8083e25c166bfa033d77009541a2a3a79a5beeca58e7a0a9134a06aaf1",
+      "class_name": "CashoutUnshieldHelper",
+      "class_hash": "0x7493319a24ee40df26a96fc73b7b9c3b4585d5b56042fe3e0978ac3d6f97066",
+      "constructor": [
+        "vault",
+        "pool"
+      ],
+      "note": "2026-09-04 (#25 cashout): chip_to_note unshield withdraw channel; authorized on vault v3 via set_unshield_helper (tx in DEPLOYMENTS.md)."
     }
   },
   "token": {
     "symbol": "STRK",
     "decimals": 18,
-    "mode": "local_test_token",
+    "mode": "canonical_sepolia_strk",
     "mainnet_address": "",
-    "sepolia_address": "",
-    "note": "Fill sepolia_address with the canonical Sepolia STRK token before production; PokerToken is only a local test token."
+    "sepolia_address": "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+    "note": "Sepolia = canonical STRK (vault v3 token()). mainnet_address pending #28 (first mainnet STRK20 tx). PokerToken entry kept for lineage only — local test token, retired."
   },
   "proof_policy": {
     "on_chain_verification": "sigma_p_equations_on_chain_secp256k1_ecop__g_registered_attestation_phase1",
@@ -97,7 +108,7 @@
     "off_chain_trust": "operator_must_verify_stwo_outer_aggregate_before_register_aggregate",
     "replay_protection": "hand_binding_unique_and_settled_map",
     "prover_service": "not deployed for this submission: G-STARK generated and verified host-side by the operator (proving-tool); browser-verifiable via client-wasm proof bundles; on-chain G verifier is Phase 2",
-    "settlement_mode": "linear (PokerSettlement); dual-proof settlement is Phase 2"
+    "settlement_mode": "dapv v2 (zero-plaintext private settle, live on sepolia since 2026-09-04); legacy linear PokerSettlement retained as configured fallback"
   },
   "abi_notes": {
     "aggregate_digest_encoding": "(felt252, felt252) dual felt; hi = be bytes[0..16], lo = be bytes[16..32]; rust: starknet_settlement::AggregateDigestFelts::split/merge",
