@@ -165,7 +165,8 @@ pub fn on_hand_complete(table_id: u32) {
             .map(|c| (c.config.try_dapv(), c.config.dual_settlement_address.clone()))
             .unwrap_or((false, String::new()));
 
-        // TODO(结算参数)：rake 接收方取平台 treasury 地址（env 配置），缺省 operator。
+        // 台费接收方：平台 treasury 地址（STARKNET_TREASURY_ADDRESS），
+        // 未配置时缺省 operator（#27 遗留注释已实现，2026-09-04 清理）。
         let rake_recipient = {
             let cfg_treasury = super::chain()
                 .map(|c| c.config.treasury_address.clone())

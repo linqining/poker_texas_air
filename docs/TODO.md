@@ -271,7 +271,12 @@
 
 - [ ] Ready 实机端到端：登录 → 买入 → 对局 → 私密领取（剩余人工钱包弹窗点击这一步，
   步骤见 `SETTLEMENT_PRIVACY_PLAN.md` §实机端到端剩余一步）。
-- [ ] starknet-react / starknetkit 与 starknet.js 10.6.8 兼容矩阵。
+- [x] starknet-react / starknetkit 与 starknet.js 10.6.8 兼容矩阵
+  （2026-09-04 收口：starknet.js 10.6.8 + starknet-react 5.0.3 + get-starknet-discovery 6.x
+  组合已在 sepolia 实局端到端验证（dapv register/settle 多手 SUCCEEDED）；
+  starknetkit 已作为死代码移除（见上条），不再参与矩阵。服务端
+  starknet.rs 0.17 / starknet-ff 0.3 / starknet-types-core 0.2 与客户端
+  10.6.8 的 felt/u256 编码经链上 calldata 交叉验证一致。
 - [ ] 池费 `get_fee_amount` 运行时读取（不硬编码）；赔付额 ≥ 池费的边界处理。
   （2026-09-03 核查：客户端/服务端现状**无**池费硬编码——该项是 #12 C3.2 sidecar
   构建时的前置要求，非独立任务，随 sidecar 一并交付。）
@@ -342,7 +347,8 @@
     生产部署归入下一轮 vault/合约重部署批次。
 - [ ] **26. STRK20 官方 SDK 跟踪**：SDK 上 npm 后核对 `tryComposeInvoke` 接口
   （当前运行时探测 + 公开路径回退）。
-- [ ] **27. 杂项**：`texas/src/starknet/hooks.rs:168` 滞后 TODO 注释清理。
+- [x] **27. 杂项**：`hooks.rs` 结算参数 TODO 注释清理（2026-09-04：该参数
+  已实现为 STARKNET_TREASURY_ADDRESS env + operator 兜底，注释转正）。
 
 ---
 
