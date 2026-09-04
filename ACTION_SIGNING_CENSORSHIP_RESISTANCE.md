@@ -153,3 +153,63 @@ sig = Sign_sk( poseidon(table_id, hand_id, seq, H(action‖payload)) )
 - 抗审查 = **动作签名（game SK）+ seq 绑定 + 收据/accepted-seq 上链 + 电路消费签名序列**；
 - session key（Cartridge/Ready）与钱包每动作签名都不是本问题的解——前者是 UX 工具且引入覆盖层/依赖问题，后者高频动作不可行且暴露钱包链接；
 - 所有"后实现"项，只要按本节的字段预留与电路约束编写，后续启用都不需要破坏性变更。
+
+---
+
+## 9. 实施决策定稿（2026-09-05，原"实施前确认的 4 个开放问题"，TODO #19）
+
+> 逐项给出决策、依据（现行代码事实）与影响面。Phase C（TODO #18 电路内
+> "合法默认"约束）按本节执行，不再重新讨论。
+
+### 9.1 seq 持久化粒度：**per-table 单调、跨手不重置**
+
+- 现状即此口径：客户端 seq 按桌持久化（`actionSigning.ts` localStorage 单调），
+  服务端 `accepted_seq: HashMap<seat, u64>` 桌级单调，跨手不重置；动作日志用
+  `hand_log_start` 截窗，不回退 seq。
+- 理由：① 重置窗口 = 重放窗口——per-hand 重置会让"上一手末尾的高 seq"在
+  新手变合法，需要额外边界证明；② 证据向量按手截窗（每手 accepted-seq
+  子序列）即可满足 settle 举证，不需要重置；③ 与现行实现零迁移。
+- 代价：seq 增长跨手累积（u64，实际不可耗尽）；服务器快照持久化需包含
+  accepted_seq（重启不得回退，回退即拒绝有效动作）。
+
+### 9.2 电路内验签 vs 链下预验签：**链下预验签（现行）+ 电路只约束日志哈希吸收与"合法默认"规则**
+
+- 依据：settlement_private 证明管线（prove-hand → Stwo）当前 builtin 只有
+  Poseidon/range-check/bitwise/output，**无 keccak/EC**——电路内逐条
+  StarkCurve 验签需要换管线（加 EC 组件或走 #22 上链验证路线），成本与
+  主网门槛不成比例。
+- 玩家自签动作的可举证性已由两层承载：客户端留存 (seq, r, s) + operator
+  回签收据（ACTION_RECEIPT）；电路只把 `action_log_digest` 吸收进结算
+  （#18 Phase B 已落地），Phase C 在此之上加"合法默认"规则约束（见 9.5）。
+- 完整电路内验签归入上链验证路线（#22/M3，EC_OP 或递归），不在 Phase C。
+
+### 9.3 replayer 最小数据集：**HandProofLog ∪ 本手动作日志窗口（+可选客户端留存的收据）**
+
+- 最小集 = `HandProofLog`（join 所有权证明缓冲 → HandStart 快照
+  [参与者/盲注前 stack/button/deck] → reveal 令牌 → 下注命令 → 强制弃牌）
+  ∪ `action_log[hand_log_start..]`（seat/seq/action/amount/auto/sig_ok）。
+  前者重建牌面与派奖，后者重建决策序列与代打审计。
+- ACTION_RECEIPT 回执是客户端侧**可选补强**证据（服务器作恶场景），不进
+  replayer 必需集——replayer 只需要确定性重放所需的服务器已接受输入。
+
+### 9.4 双通道备用端点选型：**客户端多 RPC failover（已有）+ 服务器主/备端点列表；最终出路是链上证据而非第二台可信服务器**
+
+- 执行层已有 `VITE_STARKNET_RPC_URLS` 多 RPC failover（plan-c）——保留为
+  通道 1（提交/读取）。
+- 通道 2：socket/HTTP 服务器端点列表化（客户端按序重连备用部署），仅解决
+  可用性，**不引入信任**——备用服务器同样可能审查。
+- 争议终局不依赖任何游戏服务器：签名动作 + 收据 + accepted-seq 向量由
+  客户端留存，P3 债券/罚没合约（#31）落地后作为链上举证出口。
+
+### 9.5 Phase C 实施要点（由 9.2 派生的规格补充）
+
+- 动作日志哈希链需从 starknet_keccak 切到 **Poseidon sponge**（现管线无
+  keccak builtin，切 Poseidon 后电路可用 poseidon_builtin 重算整链）——这是
+  又一次 wire 变更（digest 公式/游戏层/game 层与电路对齐 + 合约重部署），
+  与 #34 同批执行。
+- 电路新增见证输入：每条 auto 动作一行 (owed, my_bet, big_blind, kind)，
+  约束 `legal_auto_action` 规则（owed==0 ⇒ check；0 < owed−my_bet ≤
+  big_blind ⇒ call；owed−my_bet > big_blind ⇒ fold），range-check 有界；
+  非零变动参与者上限不变（8），动作条数上限固定（建议 64）并在语句里钉死。
+- `action_flags` / `accepted_seq_digest` 两个 §8.2 预留槽位在 Phase C 启用：
+  auto 标记位图进 flags，seq 连续性（单调 +1）由摘要吸收约束。

@@ -62,16 +62,19 @@
 ## 二、功能开发（P1）
 
 - [ ] **18（Phase C）. 电路内"合法默认"约束（主网上线门槛）**
-  §8.2 剩余两槽（`action_flags` / `accepted_seq_digest`：列位已冻结、电路
-  强制为零）：把 auto 动作合法性（零下注才可 auto-check 等；规则源 =
-  `pokergame::actions::legal_auto_action`，与服务器代打同源）与 seq 单调
-  落进 settlement_private 电路。Phase B 已把 `action_log_digest` 接进
-  digest 吸收链 / 公开段尾词 / 合约注册承诺（2026-09-05，随 #34 上线），
-  但电路尚未校验日志**内容**——服务器借代打折叠玩家的风险暂由审计日志 +
-  #33 锁定缓解。**实施规格已定稿**（#19 → ACTION_SIGNING §9.5）：动作日志
-  哈希链 keccak→Poseidon 切换 + 每条 auto 动作 (owed,my_bet,big_blind,kind)
-  见证行与 range-check 合法性约束 + 动作条数上限 64 + flags/seq 槽位启用；
-  这是又一次 wire 变更（游戏层+电路+合约重部署），按 #34 同款流程执行。
+  **✅ 切片 1（2026-09-05 完成）**：动作日志哈希链 keccak→Poseidon——
+  游戏层 `action_log_digest_felt` 改 Poseidon sponge（单 felt 打包词
+  `action(40)|flags(2)@40|amount(64)@42|seq(64)@106|seat(32)@170`，词条上限
+  60 = 电路 main 100 参数预算实测）；电路增加词条区（1 计数 + 60 词）用
+  poseidon_builtin **重放整链**并断言链根 == settlement digest 中的动作日志
+  哈希；补零槽 canonical + 词值域 < 2^202；prove-settlement 端到端跨语言
+  对齐 ✓；新 program hash `0x5b993db5...` 已上链并视图验证 ✓。
+  **⬜ 切片 2（剩余）**："合法默认"约束本体——打包词解包（u256 low/high
+  位域拆解）+ 每条 auto 动作的 (owed, my_bet, big_blind) 见证与 range-check
+  合法性（规则源 `legal_auto_action`）；动作词条字段级校验（flags ∈ {0..3}、
+  action 白名单）随解包一并落。
+  Phase B 已把链根接进 digest 吸收链/公开段尾词/合约注册承诺；切片 2 前的
+  代打风险由审计日志 + #33 锁定缓解（§8.2 主网门槛条款不变）。
 - [x] **19. 实施前确认 4 个开放问题**（2026-09-05 定稿，决策全文 =
   `ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §9）：① seq = per-table 单调、
   跨手不重置（与现行实现一致，重置窗口即重放窗口）；② 电路内验签否决——

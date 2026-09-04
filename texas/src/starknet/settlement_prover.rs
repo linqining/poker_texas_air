@@ -57,6 +57,9 @@ pub struct SettlementPrivateRequest {
     /// 本手动作日志哈希（#18 Phase B，32 字节大端）——digest 吸收链尾词 +
     /// 公开段尾词（第 37 入参）。
     pub action_log_digest: [u8; 32],
+    /// 本手动作日志打包词（每条 1 felt，#18 Phase C 切片 1：电路按 60 槽
+    /// 重放整链；空 = 无动作日志）。32 字节大端。
+    pub action_entries: Vec<[u8; 32]>,
 }
 
 /// 从结算明文构建请求（digest 由同一公式重算——与 register calldata 中的
@@ -68,7 +71,15 @@ pub fn build_request(
     deltas_wei: &[i128],
     commitments: &[[u8; 32]; MAX_PARTICIPANTS],
     action_log_digest: Ff,
+    action_entries: &[Ff],
 ) -> Result<SettlementPrivateRequest, String> {
+    use crate::pokergame::actions::ACTION_LOG_MAX_ENTRIES;
+    if action_entries.len() > ACTION_LOG_MAX_ENTRIES {
+        return Err(format!(
+            "action log has {} entries, exceeds circuit maximum {ACTION_LOG_MAX_ENTRIES}",
+            action_entries.len()
+        ));
+    }
     let mut padded_players = [[0u8; 32]; MAX_PARTICIPANTS];
     if players.len() > MAX_PARTICIPANTS || deltas_wei.len() > MAX_PARTICIPANTS {
         return Err("participants exceed circuit maximum of 8".into());
@@ -126,6 +137,7 @@ pub fn build_request(
         n_participants,
         commitments: *commitments,
         action_log_digest: action_log_digest.to_bytes_be(),
+        action_entries: action_entries.iter().map(|w| w.to_bytes_be()).collect(),
     })
 }
 
@@ -182,6 +194,15 @@ impl SettlementPrivateRequest {
         felts.push(
             Ff::from_bytes_be(&self.action_log_digest).expect("canonical action log digest"),
         );
+        // #18 Phase C 切片 1：词条区 = [count] ++ 60×1 打包词（不足补零）——
+        // 与 Cairo 电路 main 签名逐位对齐（main 参数上限 100 实测）。
+        use crate::pokergame::actions::ACTION_LOG_MAX_ENTRIES;
+        let count = self.action_entries.len();
+        felts.push(Ff::from(count as u64));
+        for slot in 0..ACTION_LOG_MAX_ENTRIES {
+            let word = self.action_entries.get(slot).copied().unwrap_or([0u8; 32]);
+            felts.push(Ff::from_bytes_be(&word).expect("canonical action word"));
+        }
         felts
     }
 
@@ -295,9 +316,18 @@ pub async fn prepare_request(
     players: &[Ff],
     deltas_wei: &[i128],
     action_log_digest: Ff,
+    action_entries: &[Ff],
 ) -> Result<SettlementPrivateRequest, String> {
     let commitments = fetch_payout_commitments(players, deltas_wei).await?;
-    build_request(hand_id, hand_binding, players, deltas_wei, &commitments, action_log_digest)
+    build_request(
+        hand_id,
+        hand_binding,
+        players,
+        deltas_wei,
+        &commitments,
+        action_log_digest,
+        action_entries,
+    )
 }
 
 /// prover 服务返回的 attestation：digest 与 cms 已对照本地推导校验。
@@ -404,20 +434,33 @@ mod tests {
         sample_felt(seed).to_bytes_be()
     }
 
+    fn sample_entries() -> Vec<Ff> {
+        vec![sample_felt(0xB1), sample_felt(0xB2)]
+    }
+
     fn sample_request() -> SettlementPrivateRequest {
         let players = [sample_felt(1), sample_felt(2), sample_felt(3)];
         let deltas = [3_000_i128, -2_000, -1_000, 0, 0, 0, 0, 0]; // chips 口径做单测
         let mut commitments = [[0u8; 32]; MAX_PARTICIPANTS];
         commitments[0] = sample_felt_bytes(0x21);
-        build_request(42, sample_felt(0xAA), &players, &deltas, &commitments, sample_felt(0xA7))
-            .expect("request")
+        build_request(
+            42,
+            sample_felt(0xAA),
+            &players,
+            &deltas,
+            &commitments,
+            sample_felt(0xA7),
+            &sample_entries(),
+        )
+        .expect("request")
     }
 
     #[test]
     fn inputs_match_cairo_signature_order() {
         let req = sample_request();
         let felts = req.inputs_felts();
-        assert_eq!(felts.len(), 5 + 4 * MAX_PARTICIPANTS);
+        // 37 标量 + 1 计数 + 60×1 词条槽（#18 Phase C 切片 1）。
+        assert_eq!(felts.len(), 38 + 60);
         assert_eq!(felts[0], Ff::from(42u32), "hand_id first");
         assert_eq!(felts[1], Ff::from_bytes_be(&req.registered_digest).expect("canonical"));
         assert_eq!(felts[2], Ff::from(3u32), "n_participants");
@@ -432,6 +475,12 @@ mod tests {
         assert_eq!(felts[28], sample_felt(0x21), "c0");
         // 第 37 入参 = 动作日志哈希（#18 Phase B）
         assert_eq!(felts[36], sample_felt(0xA7), "action log digest last");
+        // 词条区：count=2 + 槽 0/1 有词 + 槽 2..60 补零
+        assert_eq!(felts[37], Ff::from(2u64), "action count");
+        assert_eq!(felts[38], sample_felt(0xB1), "entry0");
+        assert_eq!(felts[39], sample_felt(0xB2), "entry1");
+        assert_eq!(felts[40], Ff::ZERO, "padding slot starts");
+        assert_eq!(felts[37 + 60], Ff::ZERO, "last padding slot");
     }
 
     #[test]
@@ -449,6 +498,7 @@ mod tests {
             &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0],
             &req.commitments,
             sample_felt(0xA7),
+            &sample_entries(),
         )
         .expect("tampered request still buildable");
         assert_ne!(req.registered_digest, tampered.registered_digest);
@@ -460,6 +510,7 @@ mod tests {
             &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0],
             &req.commitments,
             sample_felt(0xA8),
+            &sample_entries(),
         )
         .expect("other log request buildable");
         assert_ne!(req.registered_digest, other_log.registered_digest);
@@ -468,7 +519,7 @@ mod tests {
     #[test]
     fn zero_sum_violation_rejected() {
         let players = [sample_felt(1), sample_felt(2), sample_felt(3)];
-        let err = build_request(42, sample_felt(0xAA), &players, &[3_001, -2_000, -1_000, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS], sample_felt(0xA7))
+        let err = build_request(42, sample_felt(0xAA), &players, &[3_001, -2_000, -1_000, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS], sample_felt(0xA7), &sample_entries())
             .err()
             .expect("non-zero-sum must be rejected");
         assert!(err.contains("zero-sum"));
@@ -477,7 +528,7 @@ mod tests {
     #[test]
     fn winner_without_commitment_rejected() {
         let players = [sample_felt(1), sample_felt(2), sample_felt(3)];
-        let err = build_request(42, sample_felt(0xAA), &players, &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS], sample_felt(0xA7))
+        let err = build_request(42, sample_felt(0xAA), &players, &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS], sample_felt(0xA7), &sample_entries())
             .err()
             .expect("winner without commitment must be rejected");
         assert!(err.contains("payout commitment"));
@@ -532,7 +583,7 @@ mod tests {
     fn inputs_json_is_hex_array() {
         let req = sample_request();
         let parsed: Vec<String> = serde_json::from_str(&req.inputs_json()).expect("json");
-        assert_eq!(parsed.len(), 37);
+        assert_eq!(parsed.len(), 38 + 60);
         assert!(parsed.iter().all(|h| h.starts_with("0x")));
     }
 }

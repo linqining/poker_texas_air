@@ -38,6 +38,16 @@ const MAGIC: felt252 = 0x5350324d5f4f4b;
 /// 参与者上限（与根 crate MAX_PARTICIPANTS 一致）。
 const N_PLAYERS: usize = 8;
 
+/// 动作日志 Poseidon 吸收链域标签（starknet_keccak(b"zgame.action_log.v1")
+/// 的数值，与 texas `action_log_domain()` 同一冻结字面量）——
+/// #18 Phase C 切片 1。
+const DOMAIN: felt252 = 0x11b4269299cbd19c8d701730e13001ca46cbdd2d7a74ba25d7b30be4258fa6e;
+/// 动作名白名单（大端 ASCII felt）。
+const W_FOLD: felt252 = 0x464F4C44;
+const W_CHECK: felt252 = 0x434845434B;
+const W_CALL: felt252 = 0x43414C4C;
+const W_RAISE: felt252 = 0x5241495345;
+
 #[executable]
 fn main(
     hand_id: felt252,
@@ -53,6 +63,67 @@ fn main(
     c0: felt252, c1: felt252, c2: felt252, c3: felt252,
     c4: felt252, c5: felt252, c6: felt252, c7: felt252,
     action_log_digest: felt252,
+    action_count: felt252,
+    w0: felt252,
+    w1: felt252,
+    w2: felt252,
+    w3: felt252,
+    w4: felt252,
+    w5: felt252,
+    w6: felt252,
+    w7: felt252,
+    w8: felt252,
+    w9: felt252,
+    w10: felt252,
+    w11: felt252,
+    w12: felt252,
+    w13: felt252,
+    w14: felt252,
+    w15: felt252,
+    w16: felt252,
+    w17: felt252,
+    w18: felt252,
+    w19: felt252,
+    w20: felt252,
+    w21: felt252,
+    w22: felt252,
+    w23: felt252,
+    w24: felt252,
+    w25: felt252,
+    w26: felt252,
+    w27: felt252,
+    w28: felt252,
+    w29: felt252,
+    w30: felt252,
+    w31: felt252,
+    w32: felt252,
+    w33: felt252,
+    w34: felt252,
+    w35: felt252,
+    w36: felt252,
+    w37: felt252,
+    w38: felt252,
+    w39: felt252,
+    w40: felt252,
+    w41: felt252,
+    w42: felt252,
+    w43: felt252,
+    w44: felt252,
+    w45: felt252,
+    w46: felt252,
+    w47: felt252,
+    w48: felt252,
+    w49: felt252,
+    w50: felt252,
+    w51: felt252,
+    w52: felt252,
+    w53: felt252,
+    w54: felt252,
+    w55: felt252,
+    w56: felt252,
+    w57: felt252,
+    w58: felt252,
+    w59: felt252,
 ) -> Array<felt252> {
     let players = array![p0, p1, p2, p3, p4, p5, p6, p7].span();
     let signs = array![s0, s1, s2, s3, s4, s5, s6, s7].span();
@@ -74,6 +145,46 @@ fn main(
     let digest = h.finalize();
     assert!(digest == registered_digest, "DIGEST_MISMATCH");
 
+    // --- #18 Phase C 切片 1：动作日志整链重放（poseidon_builtin） ---
+    // 语句钉死 60 槽上限（§9.5；main 参数上限 100 实测 → 37 标量 + count
+    // + 60 槽 = 98）；词条为单 felt 打包词（低 → 高）：
+    // `action(40) | flags(2)@40 | amount(64)@42 | seq(64)@106 | seat(32)@170`
+    // 总宽 202 位。词序与游戏层 action_log_digest_felt 逐字段一致：
+    // [DOMAIN] ++ Σ packed_word。
+    let count_us: usize = action_count.try_into().expect('COUNT_NOT_USIZE');
+    assert!(count_us <= 60, "COUNT_OVER_60");
+
+    let words: Array<felt252> = array![
+        w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15,
+        w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26, w27, w28, w29,
+        w30, w31, w32, w33, w34, w35, w36, w37, w38, w39, w40, w41, w42, w43,
+        w44, w45, w46, w47, w48, w49, w50, w51, w52, w53, w54, w55, w56, w57,
+        w58, w59,
+    ];
+
+    let mut ah = PoseidonTrait::new();
+    ah = ah.update(DOMAIN);
+
+    // 打包词值域上限 2^202（= u256 高 128 位段 < 2^74）。
+    const WORD_MAX_HIGH: u128 = 0x400000000000000000000; // 2^74
+
+    let mut i: usize = 0;
+    while i < 60 {
+        let word = *words.at(i);
+        let w: u256 = word.try_into().expect('WORD_NOT_U256');
+        assert!(w.high < WORD_MAX_HIGH, "WORD_OVER_202BIT");
+        if i < count_us {
+            ah = ah.update(word);
+        } else {
+            assert!(word == 0, "PADDING_NOT_ZERO");
+        }
+        i += 1;
+    }
+
+    let chain_root = ah.finalize();
+    // 链根必须等于吸收进 settlement digest 的动作日志哈希——电路内重算的
+    // 整链与游戏层 digest 锚定一致。
+    assert!(chain_root == action_log_digest, "ACTION_CHAIN_MISMATCH");
     // --- 见证良构：sign ∈ {0,1}，|delta| ≤ u64（规格分解的值域） ---
     let mut i: usize = 0;
     while i < N_PLAYERS {

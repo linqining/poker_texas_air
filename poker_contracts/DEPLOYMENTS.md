@@ -239,7 +239,7 @@ digest 尾词绑定动作日志哈希后的新 ABI 批次：
   `settle_hand` 同步 +1 标量。新增 `hand_action_log(binding)` 视图。
 - **接线**（全部 SUCCEEDED/ACCEPTED_ON_L2）：dual deploy TX `0x420fccb7...` →
   `set_claim_helper(0x60a4c474...)` TX `0x7a9e0eac...` →
-  `set_circuit_program_hash(0x25d81d2c...)`（新电路，prove 实测 15.5s/2048 步）
+  `set_circuit_program_hash(0x25d81d2c...)`（Phase B 电路，15.5s/2048 步）
   TX `0x70bf41c8...` → vault v3 `set_settlement_contract(0x55784c90...)` TX
   `0x4f9d87f0...`（切换点）。
 - **冒烟**：`register_hand(0x736d6f6b652d3334/"smoke-34", 0xdeadbeef, 0, 0xa11c3d, 0,0,0)`
@@ -256,6 +256,16 @@ digest 尾词绑定动作日志哈希后的新 ABI 批次：
   `0x393fb6f9...` 的历史托管原地保留，服务旧 dual 的历史认领。
 - **env 切换**：`texas/.env` 已指向 dual v3.x + 新 helper（当前无运行中的
   服务进程，下次 `cargo run` 即生效）。
+
+### ✅ #18 Phase C 切片 1：动作日志哈希链 keccak→Poseidon（2026-09-05）
+
+电路 main 增加动作日志词条区（1 计数 + 60×1 打包词，`action(40)|flags(2)@40|
+amount(64)@42|seq(64)@106|seat(32)@170`，202 位），用 poseidon_builtin 重放
+整链并断言链根 == 吸收进 settlement digest 的动作日志哈希；补零槽 canonical。
+游戏层 `action_log_digest_felt` 从 starknet_keccak 链切到同一 Poseidon sponge。
+新 program hash `0x5b993db5...`（prove 实测 7.5s），已 owner 上链
+`set_circuit_program_hash` TX `0x31401a6e...` 并视图验证 ✓。
+为切片 2（"合法默认"约束：解包 flags/action + owed/my_bet/big_blind 见证）铺路。
 
 ## PokerVaultAnonymizer v3（2026-09-04，绑定 vault v3 + set_vault 维护口）
 

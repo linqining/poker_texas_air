@@ -247,9 +247,12 @@ pub struct HandSettleInput {
     pub total_bets: Vec<(String, u64)>,
     /// 已亮公共牌数。
     pub board_len: usize,
-    /// 本手动作日志哈希（#18 Phase B，game 层 starknet_keccak 链，
+    /// 本手动作日志哈希（#18 Phase C 切片 1 起 = Poseidon 吸收链根，
     /// 32 字节大端）——settlement digest 吸收链尾词 + v2 公开段尾词。
     pub action_log_digest: [u8; 32],
+    /// 本手动作日志词条（Phase C 切片 1）：电路按 64 槽 × 5 词重放整链的
+    /// 见证输入；超上限的日志在结算构建时拒绝。
+    pub action_log: Vec<crate::pokergame::actions::ActionLogEntry>,
 }
 
 /// on_hand_complete 时从游戏层提取结算输入（锁内仅克隆，重活全部在锁外）。
@@ -269,6 +272,7 @@ pub fn take_settle_input(table: &Table) -> Option<HandSettleInput> {
     // 与 pot.rs 审计日志同窗口（hand_log_start 起的本手动作）。
     let window = &table.action_log[table.hand_log_start.min(table.action_log.len())..];
     let action_log_digest = crate::pokergame::actions::action_log_digest_felt(window).to_bytes_be();
+    let action_log = window.to_vec();
     Some(HandSettleInput {
         table_id: table.summary.id,
         log: table.hand_proof_log.clone(),
@@ -276,6 +280,7 @@ pub fn take_settle_input(table: &Table) -> Option<HandSettleInput> {
         total_bets,
         board_len: table.mental_poker_game.list_revealed_community_cards().len(),
         action_log_digest,
+        action_log,
     })
 }
 

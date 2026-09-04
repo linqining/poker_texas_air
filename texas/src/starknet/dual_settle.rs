@@ -259,6 +259,8 @@ pub struct DualSettlement {
     pub hand_id: u32,
     /// 本手动作日志哈希（#18 Phase B）——v2 电路第 37 入参 / 公开段尾词。
     pub action_log_digest: Ff,
+    /// 本手动作日志打包词（每条 1 felt，#18 Phase C 切片 1：电路重放见证）。
+    pub action_entries: Vec<Ff>,
     /// hand_batch 载荷（u256 字，大端 32 字节表示）。
     pub batch_words: Vec<[u8; 32]>,
     /// Linear（默认）路径 calldata：`register_hand`（含 3 个零的期望
@@ -684,6 +686,7 @@ fn build_dual_settlement_with(
         g_attestation,
         hand_id: settlement.hand_id,
         action_log_digest: settlement.action_log_digest,
+        action_entries: settlement.action_entries.clone(),
         batch_words,
         register_calldata,
         settle_calldata,
@@ -1237,6 +1240,7 @@ pub async fn submit_dual_settlement(
                     players_remapped,
                     deltas,
                     dual.action_log_digest,
+                    &dual.action_entries,
                 )
                 .await
                 {
@@ -2639,6 +2643,7 @@ mod settle_mode_tests {
             deltas: vec![100, -100],
             settlement_digest: Ff::from(123456789u64),
             action_log_digest: Ff::from(0xA11CEu64),
+            action_entries: Vec::new(),
             pre_state_root: [1u8; 32],
             post_state_root: [2u8; 32],
         }

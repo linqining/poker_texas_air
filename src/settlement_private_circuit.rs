@@ -893,7 +893,7 @@ mod tests {
 
     /// 真实量级的样例手牌：wei 记账（+3000/-2000/-1000 chips × 1e14），
     /// 零变动 5 槽（sign=1, |delta|=0，与 submit.rs 的 d≥0→1 口径一致）。
-    fn prove_sample_statement() -> SettlementPrivateStatement {
+    fn prove_sample_statement(action_log_digest: FeltBytes) -> SettlementPrivateStatement {
         let wei_chip: i128 = 100_000_000_000_000;
         let mut players = [ZERO_FELT; MAX_PARTICIPANTS];
         for (index, player) in players.iter_mut().enumerate() {
@@ -908,9 +908,8 @@ mod tests {
             players,
             signed_deltas: [3000 * wei_chip, -2000 * wei_chip, -1000 * wei_chip, 0, 0, 0, 0, 0],
             n_participants: 3,
-            // 与 game 层 `action_log_digest` 同源的确定性样例（keccak 链略，
-            // 电路把该词当不透明 felt 吸收）。
-            action_log_digest: sample_felt(0xA7),
+            // game 层动作日志 Poseidon 链根（#18 Phase C 切片 1）。
+            action_log_digest,
             action_flags: 0,
             accepted_seq_digest: ZERO_FELT,
         }
@@ -918,6 +917,53 @@ mod tests {
 
     fn hex(felt: FieldElement) -> String {
         format!("0x{felt:x}")
+    }
+
+    /// 动作名 → 大端 ASCII felt（与 texas pokergame::actions::action_word 一致）。
+    fn game_action_word(action: &str) -> FieldElement {
+        let mut acc: u64 = 0;
+        for b in action.as_bytes() {
+            acc = (acc << 8) + u64::from(*b);
+        }
+        FieldElement::from(acc)
+    }
+
+    /// 样例动作日志（3 条，含 auto 代打）：单 felt 打包词（低 → 高）
+    /// `action(40) | flags(2)@40 | amount(64)@42 | seq(64)@106 | seat(32)@170`，
+    /// 与 game 层 `action_entry_word` 逐字段一致。
+    fn sample_action_entries() -> Vec<FieldElement> {
+        const P2_40: &str = "0x10000000000";
+        const P2_42: &str = "0x40000000000";
+        const P2_106: &str = "0x400000000000000000000000000";
+        const P2_170: &str = "0x4000000000000000000000000000000000000000000";
+        let p = |hex: &str| FieldElement::from_hex_be(hex).expect("pow2");
+        let (p2_40, p2_42, p2_106, p2_170) = (p(P2_40), p(P2_42), p(P2_106), p(P2_170));
+        let entry = |seat: u32, seq: u64, amount: u64, auto: bool, action: &str| {
+            game_action_word(action)
+                + FieldElement::from(u8::from(auto) + 2) * p2_40
+                + FieldElement::from(amount) * p2_42
+                + FieldElement::from(seq) * p2_106
+                + FieldElement::from(seat) * p2_170
+        };
+        vec![
+            entry(0, 1, 20, false, "CALL"),
+            entry(1, 2, 0, true, "FOLD"),
+            entry(0, 3, 60, false, "RAISE"),
+        ]
+    }
+
+    /// game 层动作日志 Poseidon 链根（#18 Phase C 切片 1）：
+    /// `poseidon_hash_many([DOMAIN] ++ Σ packed_word)`，DOMAIN =
+    /// starknet_keccak(b"zgame.action_log.v1") 的数值（与 texas
+    /// `action_log_domain()` 同一冻结字面量）。
+    fn game_layer_action_log_digest(entries: &[FieldElement]) -> FeltBytes {
+        let domain = FieldElement::from_hex_be(
+            "0x11b4269299cbd19c8d701730e13001ca46cbdd2d7a74ba25d7b30be4258fa6e",
+        )
+        .expect("canonical domain");
+        let mut fields = vec![domain];
+        fields.extend(entries.iter().copied());
+        starknet_crypto::poseidon_hash_many(&fields).to_bytes_be()
     }
 
     /// 生成 prove-hand 夹具（inputs.json / expected_outputs.json）。
@@ -931,7 +977,9 @@ mod tests {
         let Some(out_dir) = std::env::var_os("SETTLEMENT_PROVE_FIXTURES_OUT") else {
             return;
         };
-        let statement = prove_sample_statement();
+        let entries = sample_action_entries();
+        let chain_root = game_layer_action_log_digest(&entries);
+        let statement = prove_sample_statement(chain_root);
         let mut witness = SettlementPrivateWitness {
             payout_commitments: [ZERO_FELT; MAX_PARTICIPANTS],
         };
@@ -960,7 +1008,14 @@ mod tests {
         }
         // #18 Phase B：第 37 入参 = 动作日志哈希（吸收链尾词）。
         inputs.push(hex(felt_from_bytes(statement.action_log_digest).expect("canonical")));
-        assert_eq!(inputs.len(), 5 + 4 * MAX_PARTICIPANTS);
+        // #18 Phase C 切片 1：词条区 = [count] ++ 60×1 打包词（不足补零）——
+        // 电路重放整链并约束补零槽 canonical。
+        inputs.push(hex(FieldElement::from(entries.len() as u64)));
+        for slot in 0..60usize {
+            let word = entries.get(slot).copied().unwrap_or(FieldElement::ZERO);
+            inputs.push(hex(word));
+        }
+        assert_eq!(inputs.len(), 38 + 60);
 
         // 公开段期望：[MAGIC, hand_id, digest, n, binding, cm_0..cm_7,
         // total_winnings, action_log_digest]（15 felt）

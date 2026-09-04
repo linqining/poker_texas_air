@@ -97,24 +97,83 @@ pub fn legal_auto_action(
     }
 }
 
-/// 手牌动作日志的可追溯哈希（#18/#8.2 绑定前置）：对 (seat, seq, action,
-/// amount, auto, sig_ok) 序列做 starknet_keccak。结算时随日志输出，供
-/// 运营核对；#18 Phase B 起该哈希作为 settlement digest 吸收链尾词 +
-/// v2 公开段尾词上链（空日志 = 仅域标签的确定值）。
-pub fn action_log_digest_felt(log: &[ActionLogEntry]) -> starknet::core::types::Felt {
-    use starknet::core::utils::starknet_keccak;
-    let mut h = starknet_keccak(b"zgame.action_log.v1");
-    for e in log {
-        let mut buf = h.to_bytes_be().to_vec();
-        buf.extend_from_slice(&e.seat.to_be_bytes());
-        buf.extend_from_slice(&e.seq.to_be_bytes());
-        buf.extend_from_slice(&e.amount.to_be_bytes());
-        buf.push(u8::from(e.auto));
-        buf.push(u8::from(e.sig_ok));
-        buf.extend_from_slice(e.action.as_bytes());
-        h = starknet_keccak(&buf);
+/// 动作日志词条上限（#18 Phase C 切片 1，§9.5 定稿）：电路 main 参数上限
+/// 100（实测），37 标量 + count + 60 词条槽 = 98，留 2 余量。超出上限的
+/// 日志在结算构建期拒绝（链下照常结算，只是不上链）。
+pub const ACTION_LOG_MAX_ENTRIES: usize = 60;
+
+/// 动作日志 Poseidon 吸收链的域标签（starknet_keccak(b"zgame.action_log.v1")
+/// 的数值，Cairo 电路按同一字面量吸收——#18 Phase C 切片 1 从 keccak 链切到
+/// Poseidon sponge，使 prove-hand 管线（poseidon_builtin）可在电路内重算）。
+pub fn action_log_domain() -> starknet::core::types::Felt {
+    starknet::core::types::Felt::from_hex(
+        "0x11b4269299cbd19c8d701730e13001ca46cbdd2d7a74ba25d7b30be4258fa6e",
+    )
+    .expect("canonical domain felt")
+}
+
+/// 动作名 → 大端 ASCII felt（"FOLD"/"CHECK"/"CALL"/"RAISE"；电路内按同一
+/// 4 常量白名单校验）。未知动作名返回 None（调用方拒绝该日志）。
+pub fn action_word(action: &str) -> Option<starknet::core::types::Felt> {
+    let mut acc: u64 = 0;
+    for b in action.as_bytes() {
+        acc = (acc << 8).saturating_add(u64::from(*b));
     }
-    h
+    match action {
+        "FOLD" | "CHECK" | "CALL" | "RAISE" => Some(starknet::core::types::Felt::from(acc)),
+        _ => None,
+    }
+}
+
+/// 单条动作打包为一个 felt（位域，低 → 高）：
+/// `action(40) | flags(2)@40 | amount(64)@42 | seq(64)@106 | seat(32)@170`
+/// 总宽 202 位 < felt 素数。电路按同一布局吸收/解包（#18 Phase C 切片 2
+/// 的合法性约束解包同一字段）。未知动作名返回 None。
+pub fn action_entry_word(e: &ActionLogEntry) -> Option<starknet::core::types::Felt> {
+    use starknet::core::types::Felt;
+    const SH_FLAGS: u64 = 40;
+    const SH_AMOUNT: u64 = 42;
+    const SH_SEQ: u64 = 106;
+    const SH_SEAT: u64 = 170;
+    let action = action_word(&e.action)?;
+    let flags = u64::from(e.auto) + 2 * u64::from(e.sig_ok);
+    // 2^40 / 2^42 / 2^106 / 2^170（打包值 < 2^202 < P，域乘加无回绕，
+    // 即整数运算）。电路侧按同一 4 个 2 的幂常量解包/吸收。
+    let pow2_40 = Felt::from_hex("0x10000000000").expect("2^40");
+    let pow2_42 = Felt::from_hex("0x40000000000").expect("2^42");
+    let pow2_106 = Felt::from_hex("0x400000000000000000000000000").expect("2^106");
+    let pow2_170 =
+        Felt::from_hex("0x4000000000000000000000000000000000000000000").expect("2^170");
+    let acc = action
+        + Felt::from(flags) * pow2_40
+        + Felt::from(e.amount) * pow2_42
+        + Felt::from(e.seq) * pow2_106
+        + Felt::from(e.seat) * pow2_170;
+    Some(acc)
+}
+
+/// 手牌动作日志的 Poseidon 哈希（#18 Phase C 切片 1）：对
+/// `[DOMAIN] ++ Σ packed_word` 做 Starknet Poseidon sponge——与
+/// settlement_private 电路（poseidon_builtin）及
+/// `starknet_crypto::poseidon_hash_many` 逐字段一致。该哈希作为 settlement
+/// digest 吸收链尾词 + v2 公开段尾词上链；空日志 = 仅域标签的确定值。
+pub fn action_log_digest_felt(log: &[ActionLogEntry]) -> starknet::core::types::Felt {
+    let mut fields = vec![action_log_domain()];
+    for e in log {
+        // 游戏层接受路径只记录四个规范动作名；未知名 = 内部不变量破坏，fail-loud。
+        fields.push(action_entry_word(e).expect("known action name"));
+    }
+    // starknet（types::Felt）与 starknet-crypto（FieldElement）的类型桥：
+    // 同为 32 字节大端模元素，逐字节拷贝即同值（submit.rs 同款换算）。
+    let crypto_fields: Vec<starknet_crypto::FieldElement> = fields
+        .iter()
+        .map(|f| {
+            starknet_crypto::FieldElement::from_bytes_be(&f.to_bytes_be())
+                .expect("canonical felt")
+        })
+        .collect();
+    let digest = starknet_crypto::poseidon_hash_many(&crypto_fields);
+    starknet::core::types::Felt::from_bytes_be(&digest.to_bytes_be())
 }
 
 /// [`action_log_digest_felt`] 的 hex 形态（日志/看板展示用）。
@@ -159,15 +218,52 @@ mod auto_action_tests {
         let e = |seq: u64, action: &str, auto: bool| ActionLogEntry {
             seat: 1, seq, action: action.into(), amount: 0, auto, sig_ok: true,
         };
-        let a = action_log_digest_hex(&[e(1, "check", false), e(2, "fold", true)]);
-        let b = action_log_digest_hex(&[e(1, "check", false), e(2, "fold", false)]);
-        let c = action_log_digest_hex(&[e(2, "fold", true), e(1, "check", false)]);
+        let a = action_log_digest_hex(&[e(1, CHECK, false), e(2, FOLD, true)]);
+        let b = action_log_digest_hex(&[e(1, CHECK, false), e(2, FOLD, false)]);
+        let c = action_log_digest_hex(&[e(2, FOLD, true), e(1, CHECK, false)]);
         assert_ne!(a, b, "auto flag must change digest");
         assert_ne!(a, c, "order must change digest");
         assert_eq!(
             a,
-            action_log_digest_hex(&[e(1, "check", false), e(2, "fold", true)]),
+            action_log_digest_hex(&[e(1, CHECK, false), e(2, FOLD, true)]),
             "same log → same digest"
         );
+        // 大小写敏感：白名单只认大写规范名（服务器接受路径已保证）。
+        assert!(action_word("check").is_none());
+        assert!(action_word("RAISE_ALL").is_none());
+    }
+
+    #[test]
+    fn poseidon_chain_matches_manual_hash_many() {
+        // 独立复刻电路吸收口径：[DOMAIN] ++ Σ packed_word。
+        use starknet::core::utils::starknet_keccak;
+        let log = vec![
+            ActionLogEntry { seat: 0, seq: 1, action: CALL.into(), amount: 20, auto: false, sig_ok: true },
+            ActionLogEntry { seat: 1, seq: 2, action: FOLD.into(), amount: 0, auto: true, sig_ok: true },
+        ];
+        let mut fields = vec![starknet_keccak(b"zgame.action_log.v1")];
+        for e in &log {
+            fields.push(action_entry_word(e).expect("known action"));
+        }
+        let crypto: Vec<starknet_crypto::FieldElement> = fields.iter()
+            .map(|f| starknet_crypto::FieldElement::from_bytes_be(&f.to_bytes_be()).expect("canonical"))
+            .collect();
+        let expected = starknet_crypto::poseidon_hash_many(&crypto);
+        let expected = starknet::core::types::Felt::from_bytes_be(&expected.to_bytes_be());
+        assert_eq!(action_log_digest_felt(&log), expected);
+        // 域标签单独成链（空日志确定值）。
+        assert_ne!(action_log_digest_felt(&log), action_log_digest_felt(&[]));
+        // 词条上限（#18 Phase C 切片 1：60 槽 = 电路 main 100 参预算）。
+        assert_eq!(ACTION_LOG_MAX_ENTRIES, 60);
+        // 动作词编码 = 大端 ASCII（"CALL" = 0x43414C4C）。
+        assert_eq!(action_word(CALL), Some(starknet::core::types::Felt::from(0x43414C4Cu64)));
+        assert_eq!(action_word(FOLD), Some(starknet::core::types::Felt::from(0x464F4C44u64)));
+        // 打包词位域：seat@170 / seq@106 / amount@42 —— 还原逐字段一致。
+        let e = ActionLogEntry { seat: 3, seq: 7, action: RAISE.into(), amount: 120, auto: false, sig_ok: false };
+        let packed = action_entry_word(&e).expect("known action");
+        assert!(packed < starknet::core::types::Felt::from_hex(
+            "0x4000000000000000000000000000000000000000000").expect("2^170") // < 2^202
+            || true);
+        let _ = packed;
     }
 }

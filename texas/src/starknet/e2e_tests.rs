@@ -239,8 +239,9 @@ fn play_full_hand_artifacts(
     // ---- 结算：分池 + 证明 + calldata ----
     // #18 Phase B：动作日志哈希取一个确定样例（e2e 无 game 层动作日志）。
     let action_log_digest = starknet_ff::FieldElement::from(0xA11CE_u64);
-    let settlement = super::submit::settle_hand(&mirror, Some(creator), &[], action_log_digest)
-        .map_err(|e| format!("settlement: {e}"))?;
+    let settlement =
+        super::submit::settle_hand(&mirror, Some(creator), &[], action_log_digest, &[])
+            .map_err(|e| format!("settlement: {e}"))?;
 
     assert_eq!(settlement.hand_id, 7, "hand_id must come from the injected counter");
     assert!(!settlement.register_calldata.is_empty());
@@ -864,8 +865,9 @@ async fn sepolia_settle_smoke() {
     let p2: poker_l1::Address = [0x22; 20];
     let wallet_map = vec![(p1, op_ff), (p2, op_ff), (creator, op_ff)];
     let action_log_digest = Ff::from(0xA11C3Du64);
-    let settlement = super::submit::settle_hand(&mirror, Some(creator), &wallet_map, action_log_digest)
-        .expect("settlement rebuild with operator remap");
+    let settlement =
+        super::submit::settle_hand(&mirror, Some(creator), &wallet_map, action_log_digest, &[])
+            .expect("settlement rebuild with operator remap");
     assert!(!settlement.players_remapped.is_empty());
 
     // 3. 初始化全局 chain（与 main.rs 同一入口；dapv/linear 模式）。
