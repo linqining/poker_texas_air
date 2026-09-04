@@ -28,6 +28,7 @@
 //! ——主网上线门槛（`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §8.2）。
 
 use core::array::ArrayTrait;
+use core::num::traits::DivRem;
 use core::poseidon::PoseidonTrait;
 use core::hash::HashStateTrait;
 use core::traits::TryInto;
@@ -47,6 +48,17 @@ const W_FOLD: felt252 = 0x464F4C44;
 const W_CHECK: felt252 = 0x434845434B;
 const W_CALL: felt252 = 0x43414C4C;
 const W_RAISE: felt252 = 0x5241495345;
+
+/// 词条解包/规则常量（u256）。
+const P2_1: u256 = 2;
+const P2_2: u256 = 4;
+const P2_4: u256 = 16;
+const P2_40: u256 = 1099511627776; // 2^40
+const P2_64: u256 = 0x10000000000000000; // 2^64
+/// 打包日志词值域上限 2^202（u256 高 128 位段 < 2^74）。
+const LOG_MAX_HIGH: u128 = 0x400000000000000000000;
+/// 合法性词值域上限 2^194（u256 高 128 位段 < 2^66）。
+const LEG_MAX_HIGH: u128 = 0x40000000000000000;
 
 #[executable]
 fn main(
@@ -146,13 +158,16 @@ fn main(
     assert!(digest == registered_digest, "DIGEST_MISMATCH");
 
     // --- #18 Phase C 切片 1：动作日志整链重放（poseidon_builtin） ---
-    // 语句钉死 60 槽上限（§9.5；main 参数上限 100 实测 → 37 标量 + count
-    // + 60 槽 = 98）；词条为单 felt 打包词（低 → 高）：
+    // 语句钉死 30 槽上限（§9.5；main 参数上限 100 实测 → 37 标量 + count
+    // + 30×2 = 98）；每词条 2 词：[日志打包词, 合法性词]。日志词为单 felt
+    // 打包（低 → 高）：
     // `action(40) | flags(2)@40 | amount(64)@42 | seq(64)@106 | seat(32)@170`
-    // 总宽 202 位。词序与游戏层 action_log_digest_felt 逐字段一致：
-    // [DOMAIN] ++ Σ packed_word。
+    // 总宽 202 位；词序与游戏层 action_log_digest_felt 逐字段一致：
+    // [DOMAIN] ++ Σ packed_word。合法性词
+    // `kind(2) | owed(64)@2 | my_bet(64)@66 | big_blind(64)@130`（194 位）
+    // 只作规则见证、不进吸收链；非 auto 词条 canonical 为 0。
     let count_us: usize = action_count.try_into().expect('COUNT_NOT_USIZE');
-    assert!(count_us <= 60, "COUNT_OVER_60");
+    assert!(count_us <= 30, "COUNT_OVER_30");
 
     let words: Array<felt252> = array![
         w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15,
@@ -166,17 +181,59 @@ fn main(
     ah = ah.update(DOMAIN);
 
     // 打包词值域上限 2^202（= u256 高 128 位段 < 2^74）。
-    const WORD_MAX_HIGH: u128 = 0x400000000000000000000; // 2^74
-
     let mut i: usize = 0;
-    while i < 60 {
-        let word = *words.at(i);
-        let w: u256 = word.try_into().expect('WORD_NOT_U256');
-        assert!(w.high < WORD_MAX_HIGH, "WORD_OVER_202BIT");
+    while i < 30 {
+        let log_w = *words.at(i * 2);
+        let leg_w = *words.at(i * 2 + 1);
+        let log_u: u256 = log_w.try_into().expect('LOG_NOT_U256');
+        assert!(log_u.high < LOG_MAX_HIGH, "LOG_OVER_202BIT");
         if i < count_us {
-            ah = ah.update(word);
+            // 解包（div_rem 返回 (商, 余数)——低位字段在余数侧）：日志词
+            // action(40) 低 40 位 | flags(2)@40 | amount(64)@42 |
+            // seq(64)@106 | seat(32)@170。
+            let (rest, action) = log_u.div_rem(P2_40.try_into().unwrap());
+            let (_amount_hi, flags) = rest.div_rem(P2_4.try_into().unwrap());
+            // flags = auto | sig_ok<<1：auto = flags 低位。
+            let (_sig_ok, auto) = flags.div_rem(P2_1.try_into().unwrap());
+            // 动作白名单（大端 ASCII 规范名）。action < 2^40，转 felt 无损。
+            let action_felt: felt252 = action.try_into().expect('ACTION_NOT_FELT');
+            assert!(
+                action_felt == W_FOLD
+                    || action_felt == W_CHECK
+                    || action_felt == W_CALL
+                    || action_felt == W_RAISE,
+                "BAD_ACTION"
+            );
+            if auto == 1 {
+                // "合法默认"规则（规则源 = legal_auto_action，§8.2 主网门槛）：
+                // owed==0 或 my_bet≥owed ⇒ Check(0)；差额≤大盲 ⇒ Call(1)；
+                // 差额>大盲 ⇒ Fold(2)。Raise(3) 不是合法默认。合法性词：
+                // kind(2) 低 2 位 | owed(64)@2 | my_bet(64)@66 | big_blind(64)@130。
+                let leg_u: u256 = leg_w.try_into().expect('LEG_NOT_U256');
+                assert!(leg_u.high < LEG_MAX_HIGH, "LEG_OVER_194BIT");
+                let (_q1, kind) = leg_u.div_rem(P2_4.try_into().unwrap());
+                let (q2, owed) = _q1.div_rem(P2_64.try_into().unwrap());
+                let (big_blind, my_bet) = q2.div_rem(P2_64.try_into().unwrap());
+                assert!(kind != 3, "BAD_AUTO_KIND");
+                if owed == 0 || my_bet >= owed {
+                    assert!(kind == 0, "AUTO_CHECK_REQUIRED");
+                } else {
+                    let diff = owed - my_bet;
+                    if diff <= big_blind {
+                        assert!(kind == 1, "AUTO_CALL_REQUIRED");
+                    } else {
+                        assert!(kind == 2, "AUTO_FOLD_REQUIRED");
+                    }
+                }
+            } else {
+                // 非 auto 词条 canonical 为 0（游戏层合法性词打包约定）。
+                assert!(leg_w == 0, "NON_AUTO_LEGALITY_ZERO");
+            }
+            // 吸收链只收日志打包词（与游戏层 digest 同链）。
+            ah = ah.update(log_w);
         } else {
-            assert!(word == 0, "PADDING_NOT_ZERO");
+            assert!(log_w == 0, "PADDING_NOT_ZERO");
+            assert!(leg_w == 0, "PADDING_NOT_ZERO");
         }
         i += 1;
     }

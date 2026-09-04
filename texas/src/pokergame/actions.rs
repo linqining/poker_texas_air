@@ -59,6 +59,12 @@ pub struct ActionLogEntry {
     pub amount: u64,
     pub auto: bool,
     pub sig_ok: bool,
+    /// #18 Phase C 切片 2：记录时刻的下注语境（电路"合法默认"约束的见证）。
+    /// owed = 本轮需跟注总额（`summary.call_amount`），my_bet = 该座位已投入，
+    /// big_blind = 2×min_bet（与 handle_auto_fold 的推导逐字段同源）。
+    pub owed: u64,
+    pub my_bet: u64,
+    pub big_blind: u64,
 }
 pub const ACTION_RECEIPT: &str = "ACTION_RECEIPT";
 
@@ -97,10 +103,10 @@ pub fn legal_auto_action(
     }
 }
 
-/// 动作日志词条上限（#18 Phase C 切片 1，§9.5 定稿）：电路 main 参数上限
-/// 100（实测），37 标量 + count + 60 词条槽 = 98，留 2 余量。超出上限的
-/// 日志在结算构建期拒绝（链下照常结算，只是不上链）。
-pub const ACTION_LOG_MAX_ENTRIES: usize = 60;
+/// 动作日志词条上限（#18 Phase C 切片 2）：电路 main 参数上限 100（实测），
+/// 37 标量 + count + 30×2 词条槽 = 98，留 2 余量。每词条 2 词 = 日志打包词
+/// + 合法性词。超出上限的日志在结算构建期拒绝（链下照常结算，不上链）。
+pub const ACTION_LOG_MAX_ENTRIES: usize = 30;
 
 /// 动作日志 Poseidon 吸收链的域标签（starknet_keccak(b"zgame.action_log.v1")
 /// 的数值，Cairo 电路按同一字面量吸收——#18 Phase C 切片 1 从 keccak 链切到
@@ -150,6 +156,38 @@ pub fn action_entry_word(e: &ActionLogEntry) -> Option<starknet::core::types::Fe
         + Felt::from(e.seq) * pow2_106
         + Felt::from(e.seat) * pow2_170;
     Some(acc)
+}
+
+/// 观测动作的 kind 编码（合法性词低 2 位）：Check=0 / Call=1 / Fold=2 /
+/// 其它（Raise 等）=3。与电路规则分支的期望值一致。
+pub fn action_kind_code(action: &str) -> u64 {
+    match action {
+        CHECK => 0,
+        CALL => 1,
+        FOLD => 2,
+        _ => 3,
+    }
+}
+
+/// 合法性词（#18 Phase C 切片 2，单 felt，低 → 高）：
+/// `kind(2) | owed(64)@2 | my_bet(64)@66 | big_blind(64)@130`（194 位）。
+/// auto 动作携带观测语境（电路按 `legal_auto_action` 规则校验）；非 auto
+/// 词条 canonical 为 0（电路强制）。
+pub fn legality_word(e: &ActionLogEntry) -> Option<starknet::core::types::Felt> {
+    use starknet::core::types::Felt;
+    if !e.auto {
+        return Some(Felt::ZERO);
+    }
+    // 2^2 / 2^66 / 2^130（值 < 2^194 < P，域乘加无回绕）。
+    let pow2_2 = Felt::from_hex("0x4").expect("2^2");
+    let pow2_66 = Felt::from_hex("0x40000000000000000").expect("2^66");
+    let pow2_130 = Felt::from_hex("0x400000000000000000000000000000000").expect("2^130");
+    Some(
+        Felt::from(action_kind_code(&e.action))
+            + Felt::from(e.owed) * pow2_2
+            + Felt::from(e.my_bet) * pow2_66
+            + Felt::from(e.big_blind) * pow2_130,
+    )
 }
 
 /// 手牌动作日志的 Poseidon 哈希（#18 Phase C 切片 1）：对
@@ -217,6 +255,7 @@ mod auto_action_tests {
     fn action_log_digest_is_order_and_flag_sensitive() {
         let e = |seq: u64, action: &str, auto: bool| ActionLogEntry {
             seat: 1, seq, action: action.into(), amount: 0, auto, sig_ok: true,
+            owed: 0, my_bet: 0, big_blind: 20,
         };
         let a = action_log_digest_hex(&[e(1, CHECK, false), e(2, FOLD, true)]);
         let b = action_log_digest_hex(&[e(1, CHECK, false), e(2, FOLD, false)]);
@@ -238,8 +277,8 @@ mod auto_action_tests {
         // 独立复刻电路吸收口径：[DOMAIN] ++ Σ packed_word。
         use starknet::core::utils::starknet_keccak;
         let log = vec![
-            ActionLogEntry { seat: 0, seq: 1, action: CALL.into(), amount: 20, auto: false, sig_ok: true },
-            ActionLogEntry { seat: 1, seq: 2, action: FOLD.into(), amount: 0, auto: true, sig_ok: true },
+            ActionLogEntry { seat: 0, seq: 1, action: CALL.into(), amount: 20, auto: false, sig_ok: true, owed: 20, my_bet: 0, big_blind: 20 },
+            ActionLogEntry { seat: 1, seq: 2, action: FOLD.into(), amount: 0, auto: true, sig_ok: true, owed: 500, my_bet: 20, big_blind: 20 },
         ];
         let mut fields = vec![starknet_keccak(b"zgame.action_log.v1")];
         for e in &log {
@@ -253,13 +292,23 @@ mod auto_action_tests {
         assert_eq!(action_log_digest_felt(&log), expected);
         // 域标签单独成链（空日志确定值）。
         assert_ne!(action_log_digest_felt(&log), action_log_digest_felt(&[]));
-        // 词条上限（#18 Phase C 切片 1：60 槽 = 电路 main 100 参预算）。
-        assert_eq!(ACTION_LOG_MAX_ENTRIES, 60);
+        // 词条上限（#18 Phase C 切片 2：30 槽 × 2 词 = main 参数预算 98）。
+        assert_eq!(ACTION_LOG_MAX_ENTRIES, 30);
         // 动作词编码 = 大端 ASCII（"CALL" = 0x43414C4C）。
         assert_eq!(action_word(CALL), Some(starknet::core::types::Felt::from(0x43414C4Cu64)));
         assert_eq!(action_word(FOLD), Some(starknet::core::types::Felt::from(0x464F4C44u64)));
+        // 合法性词（切片 2）：非 auto canonical 0；auto 按位域还原逐字段一致。
+        let non_auto = ActionLogEntry { seat: 0, seq: 1, action: CALL.into(), amount: 20, auto: false, sig_ok: true, owed: 20, my_bet: 0, big_blind: 20 };
+        assert_eq!(legality_word(&non_auto), Some(starknet::core::types::Felt::ZERO));
+        let auto_fold = ActionLogEntry { seat: 1, seq: 2, action: FOLD.into(), amount: 0, auto: true, sig_ok: true, owed: 500, my_bet: 20, big_blind: 20 };
+        let leg = legality_word(&auto_fold).expect("legality word");
+        // 194 位值无法用 u128 还原——位域正确性由电路端到端（跨语言对齐）
+        // 校验；此处验证确定性 + 不同 owed 产生不同词。
+        assert_eq!(leg, legality_word(&auto_fold).expect("auto entry has legality word"));
+        let owed_differs = ActionLogEntry { owed: 501, ..auto_fold.clone() };
+        assert_ne!(leg, legality_word(&owed_differs).expect("legality"));
         // 打包词位域：seat@170 / seq@106 / amount@42 —— 还原逐字段一致。
-        let e = ActionLogEntry { seat: 3, seq: 7, action: RAISE.into(), amount: 120, auto: false, sig_ok: false };
+        let e = ActionLogEntry { seat: 3, seq: 7, action: RAISE.into(), amount: 120, auto: false, sig_ok: false, owed: 20, my_bet: 20, big_blind: 20 };
         let packed = action_entry_word(&e).expect("known action");
         assert!(packed < starknet::core::types::Felt::from_hex(
             "0x4000000000000000000000000000000000000000000").expect("2^170") // < 2^202

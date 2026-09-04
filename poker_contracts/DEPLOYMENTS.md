@@ -257,6 +257,15 @@ digest 尾词绑定动作日志哈希后的新 ABI 批次：
 - **env 切换**：`texas/.env` 已指向 dual v3.x + 新 helper（当前无运行中的
   服务进程，下次 `cargo run` 即生效）。
 
+### ✅ #18 Phase C 切片 2："合法默认"约束（2026-09-05）
+
+电路词条区改 2 词 × 30 槽（日志打包词 + 合法性词），解包校验 action 白名单
+与 flags，对 auto 词条强制 `legal_auto_action` 规则（§8.2 主网门槛达成）；
+e2e 含非法默认负例（auto FOLD 谎称 Check → 中止 ✓）。新 program hash
+`0x744d16d382e7940b7b93c0a069ab0df04704c5b28d6476d23cca6c2370a7ad4`
+（prove 7.8s）已上链 `set_circuit_program_hash` TX `0x55f9297b...` 并视图验证 ✓。
+无合约 ABI / 公开段变化（仍 15 felt），仅电路内部 + hash 指针。
+
 ### ✅ #18 Phase C 切片 1：动作日志哈希链 keccak→Poseidon（2026-09-05）
 
 电路 main 增加动作日志词条区（1 计数 + 60×1 打包词，`action(40)|flags(2)@40|

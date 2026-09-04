@@ -57,8 +57,8 @@ pub struct SettlementPrivateRequest {
     /// 本手动作日志哈希（#18 Phase B，32 字节大端）——digest 吸收链尾词 +
     /// 公开段尾词（第 37 入参）。
     pub action_log_digest: [u8; 32],
-    /// 本手动作日志打包词（每条 1 felt，#18 Phase C 切片 1：电路按 60 槽
-    /// 重放整链；空 = 无动作日志）。32 字节大端。
+    /// 本手动作日志词条对（每条 2 felt：[日志词, 合法性词]，切片 2：电路按
+    /// 30 槽重放 + "合法默认"校验；空 = 无动作日志）。32 字节大端。
     pub action_entries: Vec<[u8; 32]>,
 }
 
@@ -71,7 +71,7 @@ pub fn build_request(
     deltas_wei: &[i128],
     commitments: &[[u8; 32]; MAX_PARTICIPANTS],
     action_log_digest: Ff,
-    action_entries: &[Ff],
+    action_entries: &[[Ff; 2]],
 ) -> Result<SettlementPrivateRequest, String> {
     use crate::pokergame::actions::ACTION_LOG_MAX_ENTRIES;
     if action_entries.len() > ACTION_LOG_MAX_ENTRIES {
@@ -137,7 +137,10 @@ pub fn build_request(
         n_participants,
         commitments: *commitments,
         action_log_digest: action_log_digest.to_bytes_be(),
-        action_entries: action_entries.iter().map(|w| w.to_bytes_be()).collect(),
+        action_entries: action_entries
+            .iter()
+            .flat_map(|pair| pair.iter().map(|w| w.to_bytes_be()))
+            .collect(),
     })
 }
 
@@ -194,14 +197,19 @@ impl SettlementPrivateRequest {
         felts.push(
             Ff::from_bytes_be(&self.action_log_digest).expect("canonical action log digest"),
         );
-        // #18 Phase C 切片 1：词条区 = [count] ++ 60×1 打包词（不足补零）——
-        // 与 Cairo 电路 main 签名逐位对齐（main 参数上限 100 实测）。
+        // #18 Phase C 切片 2：词条区 = [count] ++ 30×[日志词, 合法性词]
+        // （不足补零）——与 Cairo 电路 main 签名逐位对齐（参数上限 100 实测）。
         use crate::pokergame::actions::ACTION_LOG_MAX_ENTRIES;
-        let count = self.action_entries.len();
+        let count = self.action_entries.len() / 2; // 扁平存储：2 词/词条
         felts.push(Ff::from(count as u64));
         for slot in 0..ACTION_LOG_MAX_ENTRIES {
-            let word = self.action_entries.get(slot).copied().unwrap_or([0u8; 32]);
-            felts.push(Ff::from_bytes_be(&word).expect("canonical action word"));
+            let pair = match self.action_entries.get(slot * 2..slot * 2 + 2) {
+                Some(pair) => [pair[0], pair[1]],
+                None => [[0u8; 32]; 2],
+            };
+            for word in pair {
+                felts.push(Ff::from_bytes_be(&word).expect("canonical action word"));
+            }
         }
         felts
     }
@@ -316,7 +324,7 @@ pub async fn prepare_request(
     players: &[Ff],
     deltas_wei: &[i128],
     action_log_digest: Ff,
-    action_entries: &[Ff],
+    action_entries: &[[Ff; 2]],
 ) -> Result<SettlementPrivateRequest, String> {
     let commitments = fetch_payout_commitments(players, deltas_wei).await?;
     build_request(
@@ -434,8 +442,8 @@ mod tests {
         sample_felt(seed).to_bytes_be()
     }
 
-    fn sample_entries() -> Vec<Ff> {
-        vec![sample_felt(0xB1), sample_felt(0xB2)]
+    fn sample_entries() -> Vec<[Ff; 2]> {
+        vec![[sample_felt(0xB1), Ff::ZERO], [sample_felt(0xB2), sample_felt(0xB3)]]
     }
 
     fn sample_request() -> SettlementPrivateRequest {
@@ -459,7 +467,7 @@ mod tests {
     fn inputs_match_cairo_signature_order() {
         let req = sample_request();
         let felts = req.inputs_felts();
-        // 37 标量 + 1 计数 + 60×1 词条槽（#18 Phase C 切片 1）。
+        // 37 标量 + 1 计数 + 30×2 词条槽（#18 Phase C 切片 2）。
         assert_eq!(felts.len(), 38 + 60);
         assert_eq!(felts[0], Ff::from(42u32), "hand_id first");
         assert_eq!(felts[1], Ff::from_bytes_be(&req.registered_digest).expect("canonical"));
@@ -475,11 +483,13 @@ mod tests {
         assert_eq!(felts[28], sample_felt(0x21), "c0");
         // 第 37 入参 = 动作日志哈希（#18 Phase B）
         assert_eq!(felts[36], sample_felt(0xA7), "action log digest last");
-        // 词条区：count=2 + 槽 0/1 有词 + 槽 2..60 补零
+        // 词条区：count=2 + 槽 0 = [日志, 0]（非 auto）+ 槽 1 = [日志, 合法性]。
         assert_eq!(felts[37], Ff::from(2u64), "action count");
-        assert_eq!(felts[38], sample_felt(0xB1), "entry0");
-        assert_eq!(felts[39], sample_felt(0xB2), "entry1");
-        assert_eq!(felts[40], Ff::ZERO, "padding slot starts");
+        assert_eq!(felts[38], sample_felt(0xB1), "entry0 log");
+        assert_eq!(felts[39], Ff::ZERO, "entry0 legality (non-auto)");
+        assert_eq!(felts[40], sample_felt(0xB2), "entry1 log");
+        assert_eq!(felts[41], sample_felt(0xB3), "entry1 legality");
+        assert_eq!(felts[42], Ff::ZERO, "padding slot starts");
         assert_eq!(felts[37 + 60], Ff::ZERO, "last padding slot");
     }
 

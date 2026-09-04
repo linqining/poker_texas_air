@@ -49,4 +49,25 @@ if "$ROOT/proving-tool/prove-hand.sh" \
     exit 1
 fi
 echo "OK: tampered digest rejected (run aborted, no proof)"
+
+echo "[4b/4] 负例：非法默认动作（auto FOLD 篡改为 Check）必须中止——#18 Phase C 切片 2"
+python3 - "$OUT_FIXTURES/settlement_inputs.json" <<'PYEOF'
+import json, sys
+inputs = json.load(open(sys.argv[1]))
+# 词条区起点 = 38；槽 1 = auto FOLD 的合法性词（kind=2 | owed=500·4 | …）。
+# 把 kind 位（低 2 位）从 2 改成 0（声称 Check）→ 电路规则必须拒绝。
+idx = 38 + 3  # 槽 1 的合法性词（38=log0, 39=leg0, 40=log1, 41=leg1）
+leg = int(inputs[idx], 16)
+assert leg % 4 == 2, f"fixture leg kind expected 2 (FOLD), got {leg % 4}"
+inputs[idx] = hex(leg - 2)  # kind: 2 → 0（谎称 Check）
+json.dump(inputs, open(sys.argv[1] + ".illegal", "w"))
+PYEOF
+if "$ROOT/proving-tool/prove-hand.sh" \
+    --program "$ROOT/proving-tool/src/settlement_private.cairo" \
+    --inputs "$OUT_FIXTURES/settlement_inputs.json.illegal" \
+    --out-dir "$OUT_PROVE.illegal" > /dev/null 2>&1; then
+    echo "FAIL: illegal auto action produced a proof" >&2
+    exit 1
+fi
+echo "OK: illegal default action rejected (legal-default constraint live)"
 echo "ALL PASS ✔"

@@ -259,8 +259,8 @@ pub struct DualSettlement {
     pub hand_id: u32,
     /// 本手动作日志哈希（#18 Phase B）——v2 电路第 37 入参 / 公开段尾词。
     pub action_log_digest: Ff,
-    /// 本手动作日志打包词（每条 1 felt，#18 Phase C 切片 1：电路重放见证）。
-    pub action_entries: Vec<Ff>,
+    /// 本手动作日志词条对（每条 2 felt：[日志词, 合法性词]，切片 2）。
+    pub action_entries: Vec<[Ff; 2]>,
     /// hand_batch 载荷（u256 字，大端 32 字节表示）。
     pub batch_words: Vec<[u8; 32]>,
     /// Linear（默认）路径 calldata：`register_hand`（含 3 个零的期望

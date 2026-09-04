@@ -49,9 +49,9 @@ pub struct HandSettlement {
     /// 本手动作日志哈希（#18 Phase C 切片 1 = Poseidon 吸收链根）：
     /// settlement digest 吸收链尾词，dapv register 承诺与 v2 公开段尾词共用。
     pub action_log_digest: Ff,
-    /// 本手动作日志打包词（每条 1 felt：action(40)|flags(2)@40|amount@42|
-    /// seq@106|seat@170，#18 Phase C 切片 1）——电路 60 槽重放见证。
-    pub action_entries: Vec<Ff>,
+    /// 本手动作日志词条对（每条 2 felt：[日志打包词, 合法性词]，切片 2）——
+    /// 电路 30 槽重放 + "合法默认"校验的见证。
+    pub action_entries: Vec<[Ff; 2]>,
     /// G 链首 receipt 的 pre state root（hand_binding 输入）。
     pub pre_state_root: [u8; 32],
     /// G 链末 receipt 的 post state root（hand_binding 输入）。
@@ -69,7 +69,7 @@ pub fn settle_hand(
     action_log: &[crate::pokergame::actions::ActionLogEntry],
 ) -> Result<HandSettlement, String> {
     // #18 Phase C 切片 1：词条 → 电路见证词组；未知动作名/超上限在构建期拒绝。
-    use crate::pokergame::actions::{action_entry_word, ACTION_LOG_MAX_ENTRIES};
+    use crate::pokergame::actions::{action_entry_word, legality_word, ACTION_LOG_MAX_ENTRIES};
     if action_log.len() > ACTION_LOG_MAX_ENTRIES {
         return Err(format!(
             "action log has {} entries, exceeds circuit maximum {ACTION_LOG_MAX_ENTRIES}",
@@ -80,7 +80,9 @@ pub fn settle_hand(
     for entry in action_log {
         let word = action_entry_word(entry)
             .ok_or_else(|| format!("unknown action name {:?} in action log", entry.action))?;
-        action_entries.push(felt_to_ff(&word));
+        let legality = legality_word(entry)
+            .ok_or_else(|| format!("unknown action name {:?} in action log", entry.action))?;
+        action_entries.push([felt_to_ff(&word), felt_to_ff(&legality)]);
     }
     if mirror.tasks.is_empty() {
         return Err("mirror has no prove tasks for this hand".into());

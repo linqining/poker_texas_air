@@ -928,27 +928,52 @@ mod tests {
         FieldElement::from(acc)
     }
 
-    /// 样例动作日志（3 条，含 auto 代打）：单 felt 打包词（低 → 高）
-    /// `action(40) | flags(2)@40 | amount(64)@42 | seq(64)@106 | seat(32)@170`，
-    /// 与 game 层 `action_entry_word` 逐字段一致。
-    fn sample_action_entries() -> Vec<FieldElement> {
+    /// 样例动作日志（3 条，含 auto 代打）：词条对 = [日志打包词, 合法性词]。
+    /// 日志词（低 → 高）`action(40)|flags(2)@40|amount(64)@42|seq(64)@106|
+    /// seat(32)@170`；合法性词 `kind(2)|owed(64)@2|my_bet(64)@66|
+    /// big_blind(64)@130`（非 auto = 0）——与 game 层 `action_entry_word` /
+    /// `legality_word` 逐字段一致。
+    fn sample_action_entries() -> Vec<[FieldElement; 2]> {
         const P2_40: &str = "0x10000000000";
         const P2_42: &str = "0x40000000000";
         const P2_106: &str = "0x400000000000000000000000000";
         const P2_170: &str = "0x4000000000000000000000000000000000000000000";
+        const P2_2: &str = "0x4";
+        const P2_66: &str = "0x40000000000000000";
+        const P2_130: &str = "0x400000000000000000000000000000000";
         let p = |hex: &str| FieldElement::from_hex_be(hex).expect("pow2");
         let (p2_40, p2_42, p2_106, p2_170) = (p(P2_40), p(P2_42), p(P2_106), p(P2_170));
-        let entry = |seat: u32, seq: u64, amount: u64, auto: bool, action: &str| {
+        let (p2_2, p2_66, p2_130) = (p(P2_2), p(P2_66), p(P2_130));
+        let log_word = |seat: u32, seq: u64, amount: u64, auto: bool, action: &str| {
             game_action_word(action)
                 + FieldElement::from(u8::from(auto) + 2) * p2_40
                 + FieldElement::from(amount) * p2_42
                 + FieldElement::from(seq) * p2_106
                 + FieldElement::from(seat) * p2_170
         };
+        // kind 编码：Check=0 / Call=1 / Fold=2 / 其它=3。
+        let kind_code = |action: &str| match action {
+            "CHECK" => 2_u32 - 2, // 0
+            "CALL" => 1,
+            "FOLD" => 2,
+            _ => 3,
+        };
+        let legality_word = |kind: u64, owed: u64, my_bet: u64, big_blind: u64| {
+            FieldElement::from(kind)
+                + FieldElement::from(owed) * p2_2
+                + FieldElement::from(my_bet) * p2_66
+                + FieldElement::from(big_blind) * p2_130
+        };
         vec![
-            entry(0, 1, 20, false, "CALL"),
-            entry(1, 2, 0, true, "FOLD"),
-            entry(0, 3, 60, false, "RAISE"),
+            // 非 auto：合法词 canonical 0。
+            [log_word(0, 1, 20, false, "CALL"), FieldElement::ZERO],
+            // auto FOLD：owed=500 / my_bet=20 / big_blind=20 → 差额 480 > 20 ⇒ Fold ✓
+            [
+                log_word(1, 2, 0, true, "FOLD"),
+                legality_word(2, 500, 20, 20),
+            ],
+            // 非 auto：canonical 0。
+            [log_word(0, 3, 60, false, "RAISE"), FieldElement::ZERO],
         ]
     }
 
@@ -956,13 +981,16 @@ mod tests {
     /// `poseidon_hash_many([DOMAIN] ++ Σ packed_word)`，DOMAIN =
     /// starknet_keccak(b"zgame.action_log.v1") 的数值（与 texas
     /// `action_log_domain()` 同一冻结字面量）。
-    fn game_layer_action_log_digest(entries: &[FieldElement]) -> FeltBytes {
+    fn game_layer_action_log_digest(entries: &[[FieldElement; 2]]) -> FeltBytes {
         let domain = FieldElement::from_hex_be(
             "0x11b4269299cbd19c8d701730e13001ca46cbdd2d7a74ba25d7b30be4258fa6e",
         )
         .expect("canonical domain");
         let mut fields = vec![domain];
-        fields.extend(entries.iter().copied());
+        for pair in entries {
+            // 吸收链只收日志打包词（合法性词不进 digest）。
+            fields.push(pair[0]);
+        }
         starknet_crypto::poseidon_hash_many(&fields).to_bytes_be()
     }
 
@@ -1011,9 +1039,12 @@ mod tests {
         // #18 Phase C 切片 1：词条区 = [count] ++ 60×1 打包词（不足补零）——
         // 电路重放整链并约束补零槽 canonical。
         inputs.push(hex(FieldElement::from(entries.len() as u64)));
-        for slot in 0..60usize {
-            let word = entries.get(slot).copied().unwrap_or(FieldElement::ZERO);
-            inputs.push(hex(word));
+        for slot in 0..30usize {
+            let pair: [FieldElement; 2] =
+                entries.get(slot).copied().unwrap_or([FieldElement::ZERO; 2]);
+            for word in pair {
+                inputs.push(hex(word));
+            }
         }
         assert_eq!(inputs.len(), 38 + 60);
 

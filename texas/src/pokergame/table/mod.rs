@@ -339,6 +339,12 @@ impl Table {
         auto: bool,
         sig_ok: bool,
     ) {
+        // #18 Phase C 切片 2：记录时刻的下注语境（与 handle_auto_fold 的
+        // 推导逐字段同源：owed = summary.call_amount、my_bet = seat.bet、
+        // big_blind = 2×min_bet）——电路"合法默认"约束的见证。
+        let owed = self.summary.call_amount.unwrap_or(0);
+        let my_bet = self.local_seats.get(&seat).map(|s| s.bet).unwrap_or(0);
+        let big_blind = self.summary.min_bet.saturating_mul(2);
         self.accepted_seq.insert(seat, seq);
         self.action_log.push(crate::pokergame::actions::ActionLogEntry {
             seat,
@@ -347,6 +353,9 @@ impl Table {
             amount,
             auto,
             sig_ok,
+            owed,
+            my_bet,
+            big_blind,
         });
     }
 

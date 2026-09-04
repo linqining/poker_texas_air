@@ -61,25 +61,24 @@
 
 ## 二、功能开发（P1）
 
-- [ ] **18（Phase C）. 电路内"合法默认"约束（主网上线门槛）**
-  **✅ 切片 1（2026-09-05 完成）**：动作日志哈希链 keccak→Poseidon——
-  游戏层 `action_log_digest_felt` 改 Poseidon sponge（单 felt 打包词
-  `action(40)|flags(2)@40|amount(64)@42|seq(64)@106|seat(32)@170`，词条上限
-  60 = 电路 main 100 参数预算实测）；电路增加词条区（1 计数 + 60 词）用
-  poseidon_builtin **重放整链**并断言链根 == settlement digest 中的动作日志
-  哈希；补零槽 canonical + 词值域 < 2^202；prove-settlement 端到端跨语言
-  对齐 ✓；新 program hash `0x5b993db5...` 已上链并视图验证 ✓。
-  **⬜ 切片 2（剩余，设计已按实测约束修订）**："合法默认"约束本体。
-  实测电路 main 参数上限 100（当前 37 标量 + count + 60 词 = 98，仅 2 余量）
-  → 切片 2 布局改为**每词条 2 词**（日志打包词 + 合法性词
-  `owed(64)|my_bet(64)|big_blind(64)|kind(2)`，194 位）× 30 槽
-  （37+1+60 = 98 不变）；游戏层 ActionLogEntry 扩展 owed/my_bet/big_blind
-  （accept 路径的桌状态可取）；电路解包日志词（u256 low/high 位域）做
-  flags ∈ {0..3} + action 白名单校验，合法性词做 range-check 规则约束
-  （`legal_auto_action`：零下注⇒check；差额≤大盲⇒call；否则 fold）。
-  无 ABI/公开段变化，仅电路内部 + program hash 更新。
-  Phase B 已把链根接进 digest 吸收链/公开段尾词/合约注册承诺；切片 2 前的
-  代打风险由审计日志 + #33 锁定缓解（§8.2 主网门槛条款不变）。
+- [x] **18（Phase C）. 电路内"合法默认"约束（主网上线门槛）——完成（2026-09-05）**
+  **✅ 切片 1**：动作日志哈希链 keccak→Poseidon——游戏层 `action_log_digest_felt`
+  改 Poseidon sponge；电路增加词条区用 poseidon_builtin 重放整链并断言链根
+  == settlement digest 中的动作日志哈希；program hash 已上链。
+  **✅ 切片 2（同日）**："合法默认"约束本体——`ActionLogEntry` 扩展下注语境
+  （owed/my_bet/big_blind，`record_action` 单一收口点从桌状态派生，与
+  `handle_auto_fold` 逐字段同源）；词条布局 2 词 × 30 槽（日志打包词 +
+  合法性词 `kind(2)|owed(64)@2|my_bet(64)@66|big_blind(64)@130`，总参数
+  98/100）；电路解包日志词做 action 白名单（FOLD/CHECK/CALL/RAISE）+
+  flags 拆位，对 auto 词条强制 `legal_auto_action` 规则（零下注⇒Check、
+  差额≤大盲⇒Call、差额>大盲⇒Fold，Raise/非法 kind 拒绝），非 auto 词条
+  合法性词 canonical 0。验证：prove-settlement e2e 全通 + **非法默认负例**
+  （auto FOLD 谎称 Check → 电路中止 ✓）——§8.2 主网门槛条款达成；
+  新 program hash `0x744d16d3...` 已上链（TX `0x55f9297b...`）并视图验证 ✓。
+  回归：根 crate 电路 11/11、texas starknet 快速集 35/35、auto_action 5/5。
+  说明：accepted-seq 单调约束（`accepted_seq_digest` 槽）仍保留为零，作为
+  Phase C 后续可选加固（当前 seq 校验在服务端 + 收据举证）。
+
 - [x] **19. 实施前确认 4 个开放问题**（2026-09-05 定稿，决策全文 =
   `ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §9）：① seq = per-table 单调、
   跨手不重置（与现行实现一致，重置窗口即重放窗口）；② 电路内验签否决——
