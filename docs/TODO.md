@@ -440,14 +440,52 @@
   移除 host attestation。见 README Roadmap。（2026-09-05 评估：暂不动——
   当前 host 证明路径已实测可用且不是阻塞项；独立 prover 服务引入运维面，
   等上链验证路线（#23/M3）需要第三方可复现证明时再做。）
-- [ ] **22. canonical AIR 缺口**：reveal/reconstruction 密码学、final shuffle/reveal
-  阶段切换、完整 timeout/terminal 级联、settlement、state-root 重算仍在 AIR 之外。
-  见 `docs/STATUS.md`。
-- [ ] **23. Layer 3 递归协议**：Texas 自有递归协议尚未实现（生产验证入口保持关闭）；
-  无 sound 递归/简洁聚合证明，验证成本仍 O(N)。见 `src/lib.rs:12`、`docs/PO5_PO6_DESIGN_NOTES.md`。
-- [ ] **24. 性能 followups**（需 release 基准 + soundness 矩阵后实施）：
-  专用标量乘 AIR、MSM 平衡树、limb backend 选型、outer_aggregate 流式编码、
-  错误分类、`/metrics` 路由。见 `PERFORMANCE_FOLLOWUPS.md`。
+- [ ] **22. canonical AIR 缺口**（2026-09-05 盘点修订；原五项声明部分过时）：
+  **已入 AIR/组件**：23 selector 的 fixed 关系（Call/Raise/Bet/funding/join/leave/
+  force/kick/SetLeaveAfterHand/AdvanceRound/timebank/AutoFold 后缀/AdvanceDeadline
+  微步）✅；showdown settlement 代数 AIR（`canonical_settlement_air`，16 行域+
+  borrow/carry 分解）✅；rake opening（`canonical_rake_opening`，结算终端消费）✅；
+  reveal-assignment ledger opening（`canonical_reveal_opening`）✅；非终端 reveal
+  timeout 级联 scope（`reveal_timeout_cascade`，含 pending-union 升序走桌）✅；
+  state-root 绑定（`state_root_binding`，Flock 证明替代 host 重算）✅；结算隐私
+  电路骨架（`settlement_private_circuit`，P2-M1）✅。**仍在 AIR 之外（真实缺口，
+  含 Plan D 后的重新定界）**：
+  ① shuffle/reveal/reconstruct 的**曲线密码学等式不进 AIR**——Plan D 定界为
+     原生 verify（host + 链上 EC_OP `hand_batch_stark`）路线，不再追求电路组合；
+     验收 = 全残差批次 sepolia 单笔 settle 且 gas 可承受（Plan D P1.4 验收，合约
+     侧已就绪待实测）；
+  ② final shuffle/reveal **阶段切换**仍 fail-closed——验收：canonical AIR 组合
+     ShuffleComplete/RevealComplete 终局转换的完整关系；
+  ③ **完整 timeout/terminal 级联**——现有 cascade scope 只覆盖非终端走桌，
+     验收：终端（全员踢出→手终结→退款）级联的批量证明；
+  ④ reconstruction 终局组合（STATUS "not yet composed"：deck/reveal 承诺重算 +
+     Ristretto→现 Stark 时代等式）——验收：reconstruct 提交解除 fail-closed；
+  ⑤ state-root **重算**（区别于绑定）进 AIR——验收：AIR 内独立重算并比对
+     `state_root_binding` 锚点。
+  权威表述源：`docs/STATUS.md`（§canonical AIR）。
+- [ ] **23. Layer 3 递归协议**（长期演进项，与 #21 同类——本 session 不实施，
+  2026-09-05 标注范围与验收）：Texas 自有递归协议尚未实现（生产验证入口保持
+  关闭）；无 sound 递归/简洁聚合证明，验证成本仍 O(N）。见 `src/lib.rs:12`、
+  `docs/PO5_PO6_DESIGN_NOTES.md`。
+  **范围**：① sound 递归聚合（MethodBatch/outer aggregate 的 O(1) 压缩——现
+  Aggregator 为 descriptor-only PoC）；② 简洁上链验证证明（衔接 Plan D P1.4 的
+  EC_OP 批次输出）；③ 前置依赖 = #22 的缺口收口（ AIR 面）与 #21（独立 prover，
+  递归证明生成需要持续算力服务）。
+  **验收标准**：a) 递归证明 soundness 矩阵（诚实链/篡改命令/换序/跨手拼接）
+  全绿；b) 9 人桌一手 O(N)→O(1) 验证成本实测报告（对照 `docs/plan_d_perf.md`
+  基线）；c) 生产验证入口开关在合约+宿主两侧 fail-closed 保持。
+- [ ] **24. 性能 followups**（2026-09-05：曲线切换后 release 基准已重测——
+  **新基线见 `docs/plan_d_perf.md`**：标量乘 19µs/op、52 项 MSM 中位 3.4ms、
+  52 卡洗牌 prove/verify 44/23ms、9 人桌全残差 host 折叠 2ms 等 7 项）。
+  各项处置（host 端均无迫切瓶颈，按"净收益"门槛逐项决策）：
+  ① 专用标量乘 AIR——host 19µs/op，进 AIR 成本远超收益，**维持 oracle 保留、
+    不实施**；② MSM 平衡树——3.4ms 不构成瓶颈，**暂缓**（若实施需 N=2..52
+    release 矩阵 + 非 2 幂 padding/sibling 篡改测试）；③ limb backend 选型——
+    **暂缓**（需 rows×操作混合 release 矩阵，verifier 禁止本地启发式）；
+  ④ outer_aggregate 流式编码——**暂缓**（峰值内存实测后再定）；
+  ⑤ 错误分类（error.rs 字符串→稳定类别）——**低优持续项**，外部输入边界先行；
+  ⑥ `/metrics` 路由——**归上层 server**（texas 侧），传输层不做。
+  权威门槛文档：`PERFORMANCE_FOLLOWUPS.md`（pinned nightly + `--release`）。
 - [x] **25. 全链路私密提现**（2026-09-03 合约完成，snforge 77/77 ✅）：
   - vault `withdraw_to(player, recipient, amount)`：helper 门控（独立
     `unshield_helper` 信任门 + `set_unshield_helper` owner 设置），烧筹码并把
