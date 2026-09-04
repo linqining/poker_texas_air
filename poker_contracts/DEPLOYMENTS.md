@@ -222,6 +222,36 @@ dual v3 `set_claim_helper(0x393f...)` + `set_circuit_program_hash(0x2ad1...)`。
 相关 TX：vault declare `0x14fb018a...`、dual declare `0x1d5aa149...`（类 `0x2e039e95`）、
 helper declare `0x5d751a8e...`、接线 TX 均 ACCEPTED_ON_L2（见各 `set_*` 调用）。
 
+## Dual v3.x + 新 claim helper（#18 Phase B，2026-09-05 已部署 sepolia）
+
+digest 尾词绑定动作日志哈希后的新 ABI 批次：
+
+| 合约 | 地址 | class hash |
+| --- | --- | --- |
+| Dual v3.x | `0x55784c90b20b2727baec6482192d4600808e9c40c61bc31281350dd5c4de63f` | `0x6db1ea08f1e6759cc5c70e07ed6845ad7d756b226ecd9686c55acb1045b85f0`（declare TX `0x6039a54b...`） |
+| SettlementPayoutAnonymizer（新） | `0x60a4c47416de31056cdca968001df0c199d663842c9372e0409d4c60b397871` | `0x5c28571f61d0ff937208e94b6e948a8b93367766a18b6cd448b701300f0d0ee`（declare TX `0x33f765a5...`） |
+
+- **wire 变化**（与 #18 Phase B 代码一致，服务端源码 `8481aa6` 起匹配本 ABI）：
+  `register_hand(hand_binding, settlement_digest, g_attestation, action_log_digest,
+  exp_reveal, exp_leave, exp_recon)`；`verify_and_settle_dapv_stark[_private]`
+  在 `hand_id` 后 +`action_log_digest` 标量；`SETTLEMENT_SEGMENT_LEN=15`
+  （公开段尾词 = 动作日志哈希，对注册承诺逐 felt 比对）；legacy
+  `settle_hand` 同步 +1 标量。新增 `hand_action_log(binding)` 视图。
+- **接线**（全部 SUCCEEDED/ACCEPTED_ON_L2）：dual deploy TX `0x420fccb7...` →
+  `set_claim_helper(0x60a4c474...)` TX `0x7a9e0eac...` →
+  `set_circuit_program_hash(0x25d81d2c...)`（新电路，prove 实测 15.5s/2048 步）
+  TX `0x70bf41c8...` → vault v3 `set_settlement_contract(0x55784c90...)` TX
+  `0x4f9d87f0...`（切换点）。
+- **冒烟**：`register_hand(0x736d6f6b652d3334/"smoke-34", 0xdeadbeef, 0, 0xa11c3d, 0,0,0)`
+  TX `0x4f0788df...` → `hand_action_log` 读回 `0xa11c3d` ✓、registered flag=1 ✓。
+  （完整 dapv 手结算冒烟归入实机联调，见 TODO #34④。）
+- **发现并修复**：此前在网的 claim helper class `0x5ec1...` 是**加 settlement
+  绑定之前**的旧 2 参版（`settlement()` EntrypointNotFound、vault 还指向
+  vault v2 `0x1e9f4a93...`）——本次随 v3.x 重部署为现役 3 参 class。旧 helper
+  `0x393fb6f9...` 的历史托管原地保留，服务旧 dual 的历史认领。
+- **env 切换**：`texas/.env` 已指向 dual v3.x + 新 helper（当前无运行中的
+  服务进程，下次 `cargo run` 即生效）。
+
 ## PokerVaultAnonymizer v3（2026-09-04，绑定 vault v3 + set_vault 维护口）
 
 随 v3 切换重部署的私密买入/领取 helper（`privacy_invoke` operation 分流：0=买入

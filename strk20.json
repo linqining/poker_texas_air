@@ -37,15 +37,15 @@
       ]
     },
     "poker_dual_settlement": {
-      "address": "0x516b8289a8b154644b5098e4d4301f2f0c9cf1fd67cdac0516b439094d35f61",
+      "address": "0x55784c90b20b2727baec6482192d4600808e9c40c61bc31281350dd5c4de63f",
       "class_name": "PokerDualSettlement",
-      "class_hash": "0x2e039e95a4b11b2219e19e445016ee55c5382dc3e074c4426f2f62194288c08",
+      "class_hash": "0x6db1ea08f1e6759cc5c70e07ed6845ad7d756b226ecd9686c55acb1045b85f0",
       "constructor": [
         "owner",
         "vault_address",
         "initial_prover"
       ],
-      "note": "2026-09-04 v3 live (sepolia): verify_and_settle_dapv_stark_private_v2 zero-plaintext settle (Stwo public segment, fact-registry trust anchor), #16/#17 action-signature reserves. claim_helper=SettlementPayoutAnonymizer 0x393fb6f9..., circuit_program_hash=0x2ad181fc... Live-verified: multiple dapv settles SUCCEEDED (2026-09-04)."
+      "note": "2026-09-05 v3.x live (sepolia): #18 Phase B — settlement digest binds action_log_digest (37th circuit input, 15-felt public segment, register_hand 4th arg action_log commitment, SETTLEMENT_SEGMENT_LEN=15); program_hash 0x25d81d2c...; claim_helper = new SettlementPayoutAnonymizer 0x60a4c474... (bound to this dual + vault v3 + pool). Old dual v3 0x516b8289... + old helper 0x393fb6f9... kept for historical hand claims."
     },
     "poker_swap": {
       "address": "0x45a5d045fad8ba092e7919e26b34fa9e901b3ebc93b42120262dbade6cbcee9",
@@ -69,15 +69,15 @@
       "note": "2026-09-04 v3 (owner-gated set_vault; owner explicit ctor arg — UDC deploy pitfall). vault=0x0629385f...(v3), pool=0x0254a6b2...d91. Deploy tx 0x228575a2...; vault v3 set_authorized_helper tx 0x286ae4f3..."
     },
     "settlement_payout_anonymizer": {
-      "address": "0x393fb6f9964b1e91e9b141567180689fac4d93215d33ccc807ac35f6746a43f",
+      "address": "0x60a4c47416de31056cdca968001df0c199d663842c9372e0409d4c60b397871",
       "class_name": "SettlementPayoutAnonymizer",
-      "class_hash": "0x5ec1eef0681aca7ff0f4c0f64a2eab2ad7b2d3c461832e99f90850a80315c94",
+      "class_hash": "0x5c28571f61d0ff937208e94b6e948a8b93367766a18b6cd448b701300f0d0ee",
       "constructor": [
         "vault",
         "pool",
         "settlement"
       ],
-      "note": "Active claim helper (wired into dual v3 set_claim_helper). Earlier instance 0x4642cca8...c1d5 (2026-09-01) superseded by redeploy bound to same vault/pool lineage; keep for lineage only."
+      "note": "Active claim helper (2026-09-05): class redeployed with settlement binding (3-arg ctor vault/pool/settlement + amounts_hidden branch) — previous on-chain class 0x5ec1... was the pre-P2-M3 2-arg version; new instance bound to vault v3 + pool + dual v3.x 0x55784c90.... Old helper 0x393fb6f9... retains escrow for historical claims on old duals."
     },
     "cashout_unshield_helper": {
       "address": "0x1c35d8083e25c166bfa033d77009541a2a3a79a5beeca58e7a0a9134a06aaf1",

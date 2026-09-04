@@ -38,24 +38,18 @@
 
 ## 一、立即行动（P0）
 
-- [ ] **34. dual v3.x 合约重部署 + 服务端切换（#18 Phase B 收尾，阻塞服务端发版）**
-  > #18 Phase B（2026-09-05，代码已全部落地并测试绿）改了 wire：
-  > settlement digest 尾词 = 动作日志哈希、`register_hand` 第 4 参
-  > `action_log_digest`、`verify_and_settle_dapv_stark[_private]` 在 hand_id
-  > 后 +1 标量、`SETTLEMENT_SEGMENT_LEN` 14→15、legacy `settle_hand` +1 标量。
-  > **当前源码构建的服务端与 sepolia 在网的 dual v3（旧 ABI）不兼容**——
-  > 服务端下次重启/发版前必须完成本项；在跑的旧二进制（09:45）+ 旧合约
-  > 可继续工作到切换为止。
-  - 步骤：① `poker_contracts` scarb build（已验证 ✅）→ declare/deploy 新
-    dual class（复用 `deploy_sepolia_v3.sh` 的 dual 段；地址记入
-    DEPLOYMENTS.md）；② owner 接线：`set_claim_helper` +
-    `set_circuit_program_hash`（**电路变了，program hash 重算**——新电路
-    实测 hash `0x25d81d2c1d8b086d...`，见 prove-settlement.sh 输出）+
-    `vault.set_settlement_contract(新 dual)`；③ `texas/.env` 切新 dual 地址 →
-    重启服务端；④ 冒烟：一手 dapv 结算上链（register 含 action_log 承诺、
-    settle digest 与牌史一致）。
-  - 注意：vault/anonymizer/cashout helper 不受影响（本轮未动）；测试网不做
-    余额迁移；部署后可顺带做 #22①（全残差批次单笔 settle gas 实测）。
+- [x] **34. dual v3.x 合约重部署 + 服务端切换（2026-09-05 完成）**
+  - ✅ 部署：Dual v3.x `0x55784c90...`（class `0x6db1ea08...`）、新 claim helper
+    `0x60a4c474...`（class `0x5c28571f...`，3 参构造 vault/pool/settlement——
+    发现旧在网 class `0x5ec1...` 是无 settlement 绑定的 2 参旧版，一并修复）。
+  - ✅ 接线（全部 SUCCEEDED）：`set_claim_helper` → `set_circuit_program_hash(
+    0x25d81d2c...)`（新电路）→ vault v3 `set_settlement_contract(新 dual)`
+    （切换点）。冒烟：`register_hand` 新 7 参 ABI 上链成功，
+    `hand_action_log` 读回动作日志承诺 ✓（TX `0x4f0788df...`）。
+  - ✅ 账本：`texas/.env`（dual + claim helper）、`DEPLOYMENTS.md`、
+    `strk20.json` 已回填；旧 dual/旧 helper 保留服务历史认领。当前无运行中
+    服务进程，下次启动即用新 ABI。
+  - ⬜ 剩余：真实对局 dapv 结算冒烟（与 #11 剩余/#22① 同一实机依赖，见三）。
 
 - [ ] **33（剩余）. 在局锁定应用内 e2e（需 Ready 实机）**
   入座触发服务端自动 lock → 游戏中领取弹窗显示在局锁定 → 打完一手结算
