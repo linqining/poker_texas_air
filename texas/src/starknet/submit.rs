@@ -46,9 +46,12 @@ pub struct HandSettlement {
     pub deltas: Vec<i128>,
     /// 重映射后的 Poseidon 结算摘要（register root / Hand-batch 路径共用）。
     pub settlement_digest: Ff,
-    /// 本手动作日志哈希（#18 Phase B）：settlement digest 吸收链尾词，
-    /// dapv register 承诺与 v2 公开段尾词共用。
+    /// 本手动作日志哈希（#18 Phase C 切片 1 = Poseidon 吸收链根）：
+    /// settlement digest 吸收链尾词，dapv register 承诺与 v2 公开段尾词共用。
     pub action_log_digest: Ff,
+    /// 本手动作日志打包词（每条 1 felt：action(40)|flags(2)@40|amount@42|
+    /// seq@106|seat@170，#18 Phase C 切片 1）——电路 60 槽重放见证。
+    pub action_entries: Vec<Ff>,
     /// G 链首 receipt 的 pre state root（hand_binding 输入）。
     pub pre_state_root: [u8; 32],
     /// G 链末 receipt 的 post state root（hand_binding 输入）。
@@ -63,7 +66,22 @@ pub fn settle_hand(
     rake_recipient: Option<poker_l1::Address>,
     wallet_map: &[(poker_l1::Address, Ff)],
     action_log_digest: Ff,
+    action_log: &[crate::pokergame::actions::ActionLogEntry],
 ) -> Result<HandSettlement, String> {
+    // #18 Phase C 切片 1：词条 → 电路见证词组；未知动作名/超上限在构建期拒绝。
+    use crate::pokergame::actions::{action_entry_word, ACTION_LOG_MAX_ENTRIES};
+    if action_log.len() > ACTION_LOG_MAX_ENTRIES {
+        return Err(format!(
+            "action log has {} entries, exceeds circuit maximum {ACTION_LOG_MAX_ENTRIES}",
+            action_log.len()
+        ));
+    }
+    let mut action_entries = Vec::with_capacity(action_log.len());
+    for entry in action_log {
+        let word = action_entry_word(entry)
+            .ok_or_else(|| format!("unknown action name {:?} in action log", entry.action))?;
+        action_entries.push(felt_to_ff(&word));
+    }
     if mirror.tasks.is_empty() {
         return Err("mirror has no prove tasks for this hand".into());
     }
@@ -129,14 +147,18 @@ pub fn settle_hand(
     };
 
     // 2. 证明链（receipt chain）。
-    let _chain = Orchestrator::prove_and_verify_chain(tasks)
-        .map_err(|e| format!("prove_and_verify_chain failed: {e}"))?;
+    let _chain = Orchestrator::prove_and_verify_chain(tasks).map_err(|e| {
+        format!("prove_and_verify_chain failed [{:?}]: {e}", e.category())
+    })?;
 
     // 3. outer aggregate：证明 + 验证，产出可信任的聚合工件。
-    let bundle = prove_outer_aggregate(tasks)
-        .map_err(|e| format!("prove_outer_aggregate failed: {e}"))?;
-    let verified: VerifiedOuterAggregate = verify_outer_aggregate(tasks, &bundle)
-        .map_err(|e| format!("verify_outer_aggregate failed: {e}"))?;
+    let bundle =
+        prove_outer_aggregate(tasks).map_err(|e| {
+            format!("prove_outer_aggregate failed [{:?}]: {e}", e.category())
+        })?;
+    let verified: VerifiedOuterAggregate = verify_outer_aggregate(tasks, &bundle).map_err(|e| {
+        format!("verify_outer_aggregate failed [{:?}]: {e}", e.category())
+    })?;
     let digest = verified.aggregate_digest();
 
     // 4. Cairo calldata。
@@ -148,7 +170,10 @@ pub fn settle_hand(
         rake_recipient,
         action_log_digest,
     )
-    .map_err(|e| format!("SettleHandCalldata::new failed: {e}"))?;
+    .map_err(|e| {
+        // #24⑤：稳定错误类别进运维日志（telemetry 可按类别告警/重试）。
+        format!("SettleHandCalldata::new failed [{:?}]: {e}", e.category())
+    })?;
 
     // 4.5 参与者地址重映射：VM 座位只存钱包 felt 的低 160 位（poker_l1
     //     Address 为 20 字节），而 vault 余额以完整钱包 felt 为键。上链前把
@@ -236,6 +261,7 @@ pub fn settle_hand(
         deltas: settle.deltas().to_vec(),
         settlement_digest,
         action_log_digest,
+        action_entries,
         pre_state_root,
         post_state_root,
     })

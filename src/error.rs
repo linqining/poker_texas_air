@@ -109,3 +109,46 @@ impl TexasAirError {
 
 /// 主 Result 类型别名。
 pub type TexasAirResult<T> = Result<T, TexasAirError>;
+
+#[cfg(test)]
+mod category_tests {
+    use super::*;
+
+    /// #24⑤ 稳定类别锁：每个变体的归类是 API 的一部分（telemetry/RPC 映射
+    /// 依赖其稳定）。match 无通配臂——新增变体必须在此 consciously 归类，
+    /// 本测试锁住既有归类不被悄悄改动。
+    #[test]
+    fn category_mapping_is_stable_and_exhaustive() {
+        let cases: &[(TexasAirError, ErrorCategory)] = &[
+            (TexasAirError::SpecViolation("x".into()), ErrorCategory::ClientInput),
+            (
+                TexasAirError::UnsupportedBettingTransition("x".into()),
+                ErrorCategory::ClientInput,
+            ),
+            (TexasAirError::SerializationError("x".into()), ErrorCategory::ClientInput),
+            (TexasAirError::UntrustedAggregationDisabled, ErrorCategory::ClientInput),
+            (TexasAirError::ConstraintUnsatisfied("x".into()), ErrorCategory::ProofRejection),
+            (TexasAirError::ConsensusAnchor("x".into()), ErrorCategory::ProofRejection),
+            (
+                TexasAirError::HostZeroAdmissionIncomplete("x".into()),
+                ErrorCategory::ProofRejection,
+            ),
+            (TexasAirError::StateRootError("x".into()), ErrorCategory::Retryable),
+            (TexasAirError::MerkleError("x".into()), ErrorCategory::Retryable),
+            (TexasAirError::StwoProverError("x".into()), ErrorCategory::Retryable),
+            (TexasAirError::TraceGenError("x".into()), ErrorCategory::Internal),
+            (TexasAirError::RecursionError("x".into()), ErrorCategory::Internal),
+            (TexasAirError::NotImplemented("x".into()), ErrorCategory::Internal),
+        ];
+        for (error, want) in cases {
+            assert_eq!(error.category(), *want, "variant drifted: {error}");
+        }
+        // retryable 标志与类别一致（单一事实来源）。
+        for (error, _) in cases {
+            assert_eq!(
+                error.is_retryable(),
+                matches!(error.category(), ErrorCategory::Retryable),
+            );
+        }
+    }
+}
