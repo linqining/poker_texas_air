@@ -73,9 +73,13 @@
     `unlock_after_deadline`，operator 保留 `force_unlock` 应急（snops invoke）；
     ④ 前端领取弹窗实时读 `locked_balance` 展示"在局锁定 X STRK"警示 +
     锁定覆盖领取额时给出预期提示（strk20.ts getVaultLockedBalanceWei）。
-    ⑤ ⬜ 剩余：实局 e2e（入座锁 → 中途 withdraw 被拒 → 结算续钟 → 离桌
-    TTL 解锁），配合 #11 联调。触发即用的现场案例：settlement 构建失败的
-    手（镜像分叉）输家 delta 不上链——锁定使其无法提走未结资金。
+    ⑤ ✅ 链上强制已实测（2026-09-04，operator 冒烟）：lock 10 chips →
+    locked_balance=10/session_active=1 → withdraw 10（≤可花 18.8）合法放行 →
+    withdraw 20（28.8−20=8.8 < 锁定 10）被精确回滚
+    `"Insufficient unlocked balance (in-hand lock)"` → force_unlock 还原。
+    ⬜ 剩余：应用内 e2e（Ready 实机：入座触发服务端自动 lock → 游戏中
+    领取弹窗显示在局锁定 → 打完一手结算续钟 → 离桌 TTL 解锁），配合
+    #11 联调；服务端自动 lock 接线已在 09:45 二进制中。
 
 - [x] **1. 牌局抽水显示**（2026-09-03 完成；2026-09-04 补漏：亮牌路径漏收台费）
   - 增补：`on_reveal_complete(ShowdownReveal)` 分池前漏调
