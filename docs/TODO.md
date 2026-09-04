@@ -57,12 +57,6 @@
   - 注意：vault/anonymizer/cashout helper 不受影响（本轮未动）；测试网不做
     余额迁移；部署后可顺带做 #22①（全残差批次单笔 settle gas 实测）。
 
-- [ ] **35. fuzz/ 修复（#20 Phase 1 遗留）**
-  `fuzz/` 在 workspace exclude 之外，两个 target 引用已删模块
-  （`poker_texas_air::ristretto_reconstruction_proof_wire`、
-  `poker_l1::transaction`）→ 单独构建必失败。重定向到现存 decode 表面
-  （如 settlement 语句 borsh、DAPV batch 解析）或删除死 target。
-
 - [ ] **33（剩余）. 在局锁定应用内 e2e（需 Ready 实机）**
   入座触发服务端自动 lock → 游戏中领取弹窗显示在局锁定 → 打完一手结算
   续钟 → 离桌 TTL 解锁。链上强制已实测（2026-09-04 冒烟通过：lock→精确
@@ -147,3 +141,4 @@
 | 30 | paymaster 生产加固（SNIP-12 本地验签，`STARKNET_PAYMASTER_SIG_REQUIRED`） | 2026-09-03 |
 | 33 | 在局锁定：vault v3（locked/session/TTL/force_unlock）+ 服务端接线 + 链上强制实测（剩应用内 e2e → 一） | 2026-09-03/04 |
 | — | 文档治理：8 份历史文档归档 docs/archive/、10+ 份头注/内容修订、STATUS.md 重写、本 TODO 重梳 | 2026-09-05 |
+| 35 | 旧测试清理：删除根 `tests/`（11 个 BLS precompile/链机制时代集成测试，Phase 1 起编译不过、拖红 CI `cargo test -p poker_texas_air --tests`）；fuzz/ 两个死 target（proof_wire/tx_decode 引用已删模块）重写为 settlement_statement/digest_felts 现役解析面，fuzz.yml 同步 | 2026-09-05 |

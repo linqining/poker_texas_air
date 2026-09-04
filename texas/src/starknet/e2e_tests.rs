@@ -1,6 +1,6 @@
 //! Starknet 接入端到端测试（cargo test -p texas e2e_starknet）。
 //!
-//! 方案A（历史方案见 docs/archive/MIRROR_UNIFICATION_PLAN.md）对拍基线：
+//! 全链路结算对拍基线（双状态机历史方案见 docs/archive/MIRROR_UNIFICATION_PLAN.md）：
 //! 1. 以**游戏层真实流程**构造牌局——两个客户端用 zgame poker_protocol
 //!    （与前端 wasm 同源代码）执行 join_game_and_shuffle，deck 链由客户端洗牌驱动；
 //! 2. 游戏层发完底牌后（deck 终局），把 deck **原样注入** mirror VM
@@ -11,7 +11,7 @@
 //!    证明（Orchestrator + outer aggregate）→ Starknet calldata
 //!    （register_aggregate / settle_hand）。
 //!
-//! 洗牌在 VM 中不再重放（方案A：deck 同源注入），因此证明链由
+//! 洗牌在 VM 中不再重放（deck 同源注入，#20 Phase 2），因此证明链由
 //! reveal-token 任务构成——这正是玩家实际参与的那副牌。
 
 use poker_l1::signature::TaggedPubkey;
@@ -113,7 +113,9 @@ fn play_full_hand() -> Result<(), String> {
     // 此刻 deck 终局（后续 street 不再改写整副 deck）
     let game_deck: Vec<ZgCt> = game.deck_encrypted.clone();
 
-    // ---- 方案A：deck 原样注入全新 mirror VM，VM 直接进入 DealHole ----
+    // ---- 结算构建（#20 Phase 2 现行架构）：TableMirror 是 settle 时
+    // 一次性重建器（非常驻 VM/第二本账）——从本手证明日志注入 deck，
+    // 产出 ProveTask 链 + pre-payout 快照，供 dapv calldata 对拍 ----
     use poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof;
     let zpk1 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client1.pk)).unwrap();
     let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
@@ -135,7 +137,7 @@ fn play_full_hand() -> Result<(), String> {
         )
         .map_err(|e| format!("begin_reveal_hand: {e}"))?;
 
-    // 对拍断言（B0 核心）：注入后 mirror deck 与游戏层 deck 逐字节一致。
+    // 对拍断言：重建器 deck 与游戏层 deck 逐字节一致。
     assert_eq!(
         mirror.deck(),
         super::mirror::conv::ciphertexts(&game_deck).unwrap(),

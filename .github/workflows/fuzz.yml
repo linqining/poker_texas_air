@@ -15,9 +15,9 @@ jobs:
         with:
           toolchain: nightly-2026-04-15
       - run: cargo +nightly install cargo-fuzz
-      - run: cargo +nightly fuzz run proof_wire --release -runs=10000
+      - run: cargo +nightly fuzz run settlement_statement --release -runs=10000
         working-directory: fuzz
-      - run: cargo +nightly fuzz run tx_decode --release -runs=10000
+      - run: cargo +nightly fuzz run digest_felts --release -runs=10000
         working-directory: fuzz
       - uses: actions/upload-artifact@v4
         with:
