@@ -7,9 +7,8 @@
 //! big-integer layer, the chain statement spec with its deterministic
 //! pow-2 layout, and the honest witness builder.
 //!
-//! The AIR component, interaction traces, and the prove/verify drivers live
-//! in [`crate::poseidon252_air_component`]; the module docs there describe
-//! the constraint system and its binding/soundness argument.
+//! The AIR components, interaction traces, and the prove/verify drivers live
+//! in the v2 component decomposition ([`crate::poseidon252_v2`]).
 //!
 //! # What this module proves (with its component half)
 //!
@@ -1149,18 +1148,16 @@ pub fn build_chain_trace(spec: &Poseidon252ChainSpec) -> TexasAirResult<Poseidon
     let rows = layout.rows;
     let initial = spec.initial_limbs();
     let anchor_limbs: Vec<[u16; LIMBS]> = spec.anchor_state().iter().map(felt_to_limbs).collect();
-    // The leftover rows apply `leftover` rounds of the (zero-absorb)
-    // permutation to the anchor state; the void tuple pins that final state.
+    // After the final real permutation the trace continues with `n_pad`
+    // complete zero-absorb permutations and then `leftover` truncated
+    // rounds; the void tuple pins the terminal state of that whole padding
+    // walk, so the multiset chain closes across every padded row.
     let mut evolved = spec.anchor_state();
-    for _ in 0..layout.leftover {
-        apply_round(&mut evolved, 0);
-        evolved = {
-            // re-index rounds: the leftover rows walk pos 0..leftover
-            evolved
-        };
+    for _ in 0..layout.n_pad {
+        for pos in 0..ROUND_COUNT {
+            apply_round(&mut evolved, pos);
+        }
     }
-    // (recompute properly below with the correct round sequence)
-    let mut evolved = spec.anchor_state();
     for pos in 0..layout.leftover {
         apply_round(&mut evolved, pos);
     }

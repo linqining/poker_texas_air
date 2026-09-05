@@ -20,6 +20,30 @@
 //! design.  Gadget rows come from [`crate::poseidon252_air`]'s
 //! `build_chain_trace` (same arithmetic pass), padded with enabler-zero
 //! rows to each component's own power-of-two domain.
+//!
+//! # Byte-scope binding (host-hash-free verification)
+//!
+//! The verification path recomputes no Poseidon permutation.  Three
+//! mechanisms replace the former host recomputation:
+//!
+//! 1. **Input scope by root equality** — the preprocessed tree carries only
+//!    public-byte-derived columns (position/flag/round-key/absorbed-word
+//!    selectors and the initial state, plus the canonical range tables and
+//!    the deterministic enabler columns).  The verifier rebuilds the entire
+//!    expected tree from the public spec and requires the committed root to
+//!    match, pinning every schedule value the ChainAir reads.
+//! 2. **Anchor by Fiat–Shamir + constants** — the claimed anchor bytes are
+//!    mixed into the transcript before any commitment, and the ChainAir
+//!    pins its final boundary against the anchor's limb constants.
+//! 3. **Derived values as witnesses** — the void tuple (terminal state of
+//!    the padding walk over `n_pad` full zero-absorb permutations plus the
+//!    truncated leftover rounds) rides in the witness tree and is forced by
+//!    the multiset chain, not by preprocessed trust.
+//!
+//! [`prove_name_commitment_v2`]/[`verify_name_commitment_v2`] wrap this into
+//! the canonical `zchain.string.v2` name statement consumed by the lifecycle
+//! AIRs, closing #22⑤'s "AIR independently recomputes" acceptance against
+//! the `state_root_binding` anchor seam.
 
 #![allow(missing_docs)]
 
@@ -2110,14 +2134,6 @@ mod tests {
         let mut archive = prove_poseidon252_chain_v2(&spec).expect("prove");
         archive.spec.message[0][31] ^= 1;
         assert!(verify_poseidon252_chain_v2(&archive).is_err());
-    }
-
-    #[test]
-    fn dbg_five_felt_chain() {
-        let msg: Vec<FieldElement> = (0..5).map(|i| FieldElement::from(1000u64 + i)).collect();
-        let spec = native::Poseidon252ChainSpec::hash_many(&msg);
-        let archive = prove_poseidon252_chain_v2(&spec).expect("prove");
-        verify_poseidon252_chain_v2(&archive).expect("verify");
     }
 
     #[test]

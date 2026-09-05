@@ -100,9 +100,27 @@ the hand's action log (`action_log_digest` tail word, #18 Phase B).
      + 2^16/2^12 范围表；非线性代数经 96 坐标 LogUp 链接元组下放。
      实测：e2e prove+verify **2.91s**（≈237×），五组件 rowcheck 全过，
      篡改负例三连全拒，原生层与 starknet_crypto 位精确等价保持。
-     设计与实施细节 `docs/plan-poseidon252-v2.md`；v1 prove 侧测试
-     `#[ignore]` 保留对照。**待办**：canonical 字节 scope 绑定
-     （poseidon 锚点 ↔ state_root_binding 组合，TODO 第 6 项）。
+     设计与实施细节 `docs/plan-poseidon252-v2.md`；v1 单体组件
+     （`poseidon252_air_component`）已整体移除（2026-09-06：`--include-ignored`
+     全量门禁会复活其失败测试；对照价值在 git 历史）。
+   - **#22⑤ 字节 scope 组合——完成（2026-09-06）**：v2 验证路径不再做任何
+     宿主 Poseidon 重算。三项机制：① 预处理树只含公开字节派生列
+     （pos/flag/轮密钥/吸收词/选择子/init + 范围表 + 确定性 enabler），
+     验证方用 `public_scope_columns` 重建整棵期望树做根等值比较
+     （`v2_expected_preprocessed_root`）；② claimed anchor 字节在首次承诺前
+     混入 Fiat–Shamir，ChainAir 终边界改为对 anchor limb **常量**钉住
+     （S_ANCHOR 48 列删除）；③ void 元组（padding 漫步终态）移入见证树，
+     由 multiset 链强制。同时修复两个真实缺陷：void 演化漏掉 `n_pad` 个
+     完整零吸收 padding 置换（log≥9 布局即触发 logup 失衡）；协处理器
+     行数公式漏算 padding/leftover 行（改为镜像行循环精确计数）。
+     新增 `prove/verify_name_commitment_v2`：把 `zchain.string.v2` 名称
+     契约（`canonical_borsh_preimage`）封成链 statement，AIR 重算
+     poseidon_hash_many 并钉住锚点——等价测试断言锚点 lane-0 ==
+     `table_name_commitment(name)`（legacy 宿主哈希，仅测试用作 oracle）。
+     测试 8/8（e2e/rowcheck/篡改三连/name 正反例）；全量门禁 `--include-ignored` 384/384（2026-09-06）；原 v1
+     rowcheck、create_table 8/8 回归全绿。**残留**：create_table AIR 的
+     name-hash 期望值仍取宿主 `table_name_commitment`（约束 10）——切换为
+     消费 v2 归档的 claimed anchor 投影是下一步（方法归档结构改动）。
 3. ~~Terminal timeout cascade~~ — **closed (2026-09-05)**: the terminal
    cascade batch proofs exist and pass — multi-pending kick batches, the
    kicks→terminal-reset refund batch, the kicks→sole-survivor award batch

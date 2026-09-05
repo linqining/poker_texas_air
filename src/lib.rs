@@ -59,7 +59,6 @@ pub mod public_inputs;
 pub mod poseidon252_air;
 /// Poseidon252 chain AIR component: constraints, range tables, interaction
 /// traces, and the prove/verify drivers.
-pub mod poseidon252_air_component;
 /// Poseidon252 v2: cairo-air-style component decomposition (chain linker +
 /// mul/reduce coprocessors + range tables).
 pub mod poseidon252_v2;
