@@ -92,9 +92,22 @@ the hand's action log (`action_log_digest` tail word, #18 Phase B).
    cascade batch proofs exist and pass — multi-pending kick batches, the
    kicks→terminal-reset refund batch, the kicks→sole-survivor award batch
    and its raked variant (schedule tamper negatives included).
-4. **Reconstruction final composition** (deck/reveal commitment recomputation;
-   Ristretto-era equations are obsolete in the Stark world) — acceptance:
-   reconstruct submission leaves fail-closed.
+4. **Reconstruction final composition** — acceptance: reconstruct submission
+   leaves fail-closed.
+   **实施就绪设计（2026-09-05，与 #22② 同模式）**：reconstruct completion 的
+   规范化约束已在 AIR（:5311-5360）；剩余 = (a) 非最终 reconstruct 提交行的
+   **全字段冻结集**——turn=NO_SEAT、current_bet/min_raise、pot/chip_pool、
+   acted_mask、leave_after_hand_mask、button/max_players、9 座位全像
+   （status/acted/stack/bet/total_bet/addon/time_bank/三个承诺）、非轮转承诺
+   （board/reveal/rules/governance/settlement/custody/rit）——全部 gate 在
+   `is_protocol_submit`（度数 1，冻结约束 ≤3 ✓）；(b) **deck/reconstruction
+   承诺轮转** = native/EC_OP 通道残留（与 ② shuffle 同一口径：opening/端点
+   锚定 + Plan D ④）；(c) **准入翻转**：`validate_direct_batch` 对
+   SubmitShuffle/SubmitReconstruct 放行（完成 opening 行 + 非最终行），
+   SubmitReveal/FoldWithProof 维持拒绝；(d) 测试：两 completion + 非最终行
+   的 prove/verify 正例与逐字段篡改负例。残留信任：deck/reconstruction
+   承诺轮转由 native 验证 + 链上批次背书（既有信任模型），canonical AIR
+   只证状态机规范化。
 5. **State-root recomputation** (as opposed to binding) inside the AIR —
    acceptance: AIR independently recomputes and matches the
    `state_root_binding` anchor.
