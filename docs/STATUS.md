@@ -88,9 +88,10 @@ the hand's action log (`action_log_digest` tail word, #18 Phase B).
      活跃座，heads-up 特例）与盲注派生 current_bet，二者在 canonical 空间
      无可锚定的 opening 源（rules_commitment 不透明）；需要先设计盲注/规则
      opening 才能无损组合——单独排期。
-3. **Terminal timeout cascade** (all players kicked → hand ends → refunds) —
-   acceptance: batch proof for the terminal cascade (current cascade scope
-   covers non-terminal walk only).
+3. ~~Terminal timeout cascade~~ — **closed (2026-09-05)**: the terminal
+   cascade batch proofs exist and pass — multi-pending kick batches, the
+   kicks→terminal-reset refund batch, the kicks→sole-survivor award batch
+   and its raked variant (schedule tamper negatives included).
 4. **Reconstruction final composition** (deck/reveal commitment recomputation;
    Ristretto-era equations are obsolete in the Stark world) — acceptance:
    reconstruct submission leaves fail-closed.
