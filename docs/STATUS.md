@@ -88,6 +88,10 @@ the hand's action log (`action_log_digest` tail word, #18 Phase B).
      活跃座，heads-up 特例）与盲注派生 current_bet，二者在 canonical 空间
      无可锚定的 opening 源（rules_commitment 不透明）；需要先设计盲注/规则
      opening 才能无损组合——单独排期。
+   - **#22④ 准入翻转（2026-09-05）**：`validate_direct_batch` 对
+     SubmitShuffle/SubmitReconstruct 放行；协议行全字段冻结集进 AIR
+     （turn 双端 NO_SEAT、资金/参数/掩码/hand_id/timeout 配置/9 座位全像/
+     非轮转承诺逐 limb 冻结）。canonical 147/147、全量 367/367。
 3. ~~Terminal timeout cascade~~ — **closed (2026-09-05)**: the terminal
    cascade batch proofs exist and pass — multi-pending kick batches, the
    kicks→terminal-reset refund batch, the kicks→sole-survivor award batch
