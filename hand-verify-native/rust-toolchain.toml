@@ -1,0 +1,7 @@
+[toolchain]
+# Same pinned nightly as the root workspace (already installed there), so no
+# extra toolchain download is needed; keeping a local file stops this
+# standalone workspace from accidentally building with whatever default
+# toolchain the environment has.
+channel = "nightly-2026-04-15"
+profile = "minimal"

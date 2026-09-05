@@ -3955,6 +3955,7 @@ mod tests {
         }
     }
 
+    #[ignore = "slow prove (~18s); full gate runs `--include-ignored`"]
     #[test]
     fn three_seat_ladder_proves_and_verifies() {
         let projection = projection_of(&three_seat_ladder());
@@ -3963,6 +3964,7 @@ mod tests {
         verify_canonical_settlement(&archive).expect("verify");
     }
 
+    #[ignore = "slow prove (~25s); full gate runs `--include-ignored`"]
     #[test]
     fn nine_seat_ladder_proves_and_verifies() {
         let projection = projection_of(&nine_seat_ladder());
@@ -3970,6 +3972,7 @@ mod tests {
         verify_canonical_settlement(&archive).expect("verify");
     }
 
+    #[ignore = "slow prove (~95s); full gate runs `--include-ignored`"]
     #[test]
     fn raked_odd_chip_proves_and_verifies() {
         let projection = projection_of(&raked_odd_chip_split());
@@ -3977,6 +3980,7 @@ mod tests {
         verify_canonical_settlement(&archive).expect("verify");
     }
 
+    #[ignore = "slow prove (~99s); full gate runs `--include-ignored`"]
     #[test]
     fn run_it_twice_proves_and_verifies() {
         let projection = projection_of(&run_it_twice_split_winners());
@@ -3984,6 +3988,7 @@ mod tests {
         verify_canonical_settlement(&archive).expect("verify");
     }
 
+    #[ignore = "slow prove (~79s); full gate runs `--include-ignored`"]
     #[test]
     fn tampered_cards_break_evaluation() {
         let mut projection = projection_of(&three_seat_ladder());
@@ -3993,6 +3998,7 @@ mod tests {
         assert!(prove_canonical_settlement(&projection).is_err());
     }
 
+    #[ignore = "slow prove (~75s); full gate runs `--include-ignored`"]
     #[test]
     fn tampered_rank_breaks_winner_consistency() {
         let mut projection = projection_of(&three_seat_ladder());
@@ -4004,6 +4010,7 @@ mod tests {
         assert!(prove_canonical_settlement(&projection).is_err());
     }
 
+    #[ignore = "slow prove (~19s); full gate runs `--include-ignored`"]
     #[test]
     fn tampered_total_rake_breaks_the_formula_chain() {
         let mut projection = projection_of(&raked_odd_chip_split());
@@ -4015,6 +4022,7 @@ mod tests {
         assert!(prove_canonical_settlement(&projection).is_err());
     }
 
+    #[ignore = "slow prove (~19s); full gate runs `--include-ignored`"]
     #[test]
     fn tampered_bet_breaks_slice_derivation() {
         let mut projection = projection_of(&three_seat_ladder());
@@ -4024,6 +4032,7 @@ mod tests {
         assert!(prove_canonical_settlement(&projection).is_err());
     }
 
+    #[ignore = "slow prove (~18s); full gate runs `--include-ignored`"]
     #[test]
     fn tampered_projection_fails_to_prove() {
         let mut projection = projection_of(&three_seat_ladder());

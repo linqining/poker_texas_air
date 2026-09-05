@@ -111,8 +111,9 @@
   reveal/reconstruction 不变——全部 gate 在度数 1 的 is_protocol_submit）；
   测试：4 组 prove/verify 正例 + 篡改负例，canonical 147/147、全量 367/367 ✓；
   残留信任：deck/reconstruction 承诺**轮转**绑定 = native/链上 EC_OP 通道
-  （Plan D ④）；⑤ state-root 重算（区别于绑定）进 AIR——需 canonical AIR
-  内的 Poseidon252 组件，最大型构建，独立排期。
+  （Plan D ④）；⑤ state-root 重算（区别于绑定）进 AIR——**v2 组件分解已落地
+  （2026-09-05，`poseidon252_v2`，e2e 2.91s + 负例全拒）**；剩：与
+  state_root_binding 锚点的字节 scope 组合（第 6 项）。
 - [ ] **5（遗留）. `set_authorized_helper` owner 单点**：冷存储 / 时间锁
   （运维动作，随下一轮合约运维窗口）。
 - [ ] **24⑤. 错误分类**：error.rs 字符串→稳定类别（低优持续项，外部输入

@@ -1,0 +1,7 @@
+# Local test layering (mirrors CONTRIBUTING.md "Test layering"):
+# - `cargo test`            fast dev loop; slow prove roundtrips are #[ignore]d
+# - `cargo test-fast`       same, but skips vendored flock's own unit tests
+# - `cargo test-all`        full gate: everything incl. the ignored prove tests
+[alias]
+test-fast = "test -p poker_texas_air -p poker_l1 -p vm-common -p poker_protocol -p poker-protocol-core -p poker-protocol-proofs -p poker-protocol-abi -p poker-protocol-bg -p texas -p poker-hand-bench"
+test-all = "test --workspace -- --include-ignored"

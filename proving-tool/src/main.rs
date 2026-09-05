@@ -87,6 +87,8 @@ fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .with_target(false)
         .with_max_level(level)
+        // 段关闭时打印 busy time（ms）——用于 prove 内部相位分解。
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .init();
 
     let args = Args::parse();

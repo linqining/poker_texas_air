@@ -261,6 +261,7 @@ mod tests {
         }
     }
 
+    #[ignore = "slow prove (~12s); full gate runs `--include-ignored`"]
     #[test]
     fn byte_xor_logup_table_proves_and_rejects_a_modified_relation() {
         let witness = XorWitness::new();

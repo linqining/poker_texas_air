@@ -1176,6 +1176,7 @@ mod tests {
         }
     }
 
+    #[ignore = "slow prove (~6s); full gate runs `--include-ignored`"]
     #[test]
     fn archive_roundtrip_preserves_canonical_stage_order() {
         let bundle = envelope();
@@ -1184,6 +1185,7 @@ mod tests {
         assert_eq!(decoded, bundle);
     }
 
+    #[ignore = "slow prove (~6s); full gate runs `--include-ignored`"]
     #[test]
     fn archive_rejects_reordered_or_duplicated_stages() {
         let mut bundle = envelope();

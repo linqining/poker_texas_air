@@ -2997,6 +2997,7 @@ mod tests {
         assert!(orch.verify_chain().is_ok());
     }
 
+    #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_prove_fold() {
         let mut pre = make_table("pre");
@@ -3022,6 +3023,7 @@ mod tests {
     /// `DispatchContext`, not a prover-controlled clock or the former zero
     /// placeholder.  A stale timer makes the real VM dispatch valid; proving
     /// the task therefore exercises the full dispatch → task → AIR route.
+    #[ignore = "slow prove (~11s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_advance_deadline_auto_fold_with_consensus_timestamp() {
         let mut pre = make_table("auto-fold-consensus-time");
@@ -3087,6 +3089,7 @@ mod tests {
             .expect("terminal administrator fold method and component archives should reverify");
     }
 
+    #[ignore = "slow prove (~8s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_terminal_advance_deadline_settlement_and_archive() {
         let pre = terminal_admin_fold_table("terminal-advance-deadline");
@@ -3100,6 +3103,7 @@ mod tests {
         assert_terminal_admin_fold_archive(&task, &post);
     }
 
+    #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_terminal_force_fold_settlement_and_archive() {
         let pre = terminal_admin_fold_table("terminal-force-fold");
@@ -3115,6 +3119,7 @@ mod tests {
         assert_terminal_admin_fold_archive(&task, &post);
     }
 
+    #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_terminal_tick_settlement_and_archive() {
         let pre = terminal_admin_fold_table("terminal-advance-deadline-fold");
@@ -3177,6 +3182,7 @@ mod tests {
         assert!(output.prove_task.is_none());
     }
 
+    #[ignore = "slow prove (~54s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_addon_ripple_carry() {
         let mut pre = make_table("addon-ripple-carry");
@@ -3224,6 +3230,7 @@ mod tests {
             .expect("native replay and AIR must accept rebuy carry");
     }
 
+    #[ignore = "slow prove (~2s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_kick_player_pot_ripple_carry() {
         let mut pre = make_table("kick-ripple-carry");
@@ -3250,6 +3257,7 @@ mod tests {
             .expect("native replay and AIR must accept kick pot carry");
     }
 
+    #[ignore = "slow prove (~41s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_binds_force_fold_creator_authorization_receipt() {
         let mut pre = make_table("force-fold-admin-binding");
@@ -3276,6 +3284,7 @@ mod tests {
             .expect("creator-authorized force_fold should prove and verify");
     }
 
+    #[ignore = "slow prove (~5s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_binds_start_hand_creator_authorization_receipt() {
         let mut pre = make_table("start-hand-admin-binding");
@@ -3355,6 +3364,7 @@ mod tests {
     }
 
     /// P06 回归：真实 VM 的非零 mid-round call 不收池，且可完成 prove+verify。
+    #[ignore = "slow prove (~52s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_nonzero_mid_round_call() {
         let mut pre = make_table("mid-round-call");
@@ -3386,6 +3396,7 @@ mod tests {
 
     /// A final call collects every live bet, clears seat bets, and starts the
     /// next reveal phase while preserving the acting seat's money delta.
+    #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_end_round_call_collection() {
         let mut pre = make_table("end-round-call");
@@ -3426,6 +3437,7 @@ mod tests {
     }
 
     /// A final all-in raise collects every live bet and advances the round.
+    #[ignore = "slow prove (~2s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_end_round_raise_collection() {
         let mut pre = make_table("end-round-raise");
@@ -3468,6 +3480,7 @@ mod tests {
     }
 
     /// P06 回归：完整加注更新 current_bet/min_raise，但 mid-round 不收池。
+    #[ignore = "slow prove (~49s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_normal_mid_round_raise() {
         let mut pre = make_table("normal-mid-round-raise");
@@ -3507,6 +3520,7 @@ mod tests {
     }
 
     /// P06 回归：短 all-in 合法，但不能降低/重设既有 min_raise。
+    #[ignore = "slow prove (~26s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_short_all_in_raise_without_reopening() {
         let mut pre = make_table("short-all-in-raise");
@@ -3559,6 +3573,7 @@ mod tests {
     }
 
     /// P06 回归：bet 只覆盖 postflop 无既有下注的 mid-round 开注。
+    #[ignore = "slow prove (~2s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_postflop_mid_round_bet() {
         let mut pre = make_table("postflop-bet");
@@ -3595,6 +3610,7 @@ mod tests {
     }
 
     /// A final all-in postflop bet uses the shared collection proof.
+    #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_end_round_bet_collection() {
         let mut pre = make_table("end-round-bet");
@@ -3632,6 +3648,7 @@ mod tests {
     }
 
     /// 最后一个对手 fold 会收集 live bets、结算并重置，且可由 terminal AIR 证明。
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_last_opponent_fold_settlement() {
         let mut pre = make_table("fold-settlement");
@@ -3703,6 +3720,7 @@ mod tests {
 
     /// 回归：heads-up 最后一个 check 会收池并推进到公共牌揭示阶段。该阶段没有
     /// `current_turn`，但 canonical VM replay 与 sentinel trace encoding 必须一致。
+    #[ignore = "slow prove (~17s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_heads_up_end_round_check() {
         let mut pre = make_table("end-round-check");
@@ -3735,6 +3753,7 @@ mod tests {
     }
 
     /// A WAITING-state kick internally resets the table and is composed with a reset proof.
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_kick_that_triggers_nested_reset() {
         let mut pre = make_table("kick-nested-reset");
@@ -3757,6 +3776,7 @@ mod tests {
 
     /// An active heads-up kick of the current player immediately collects that seat's bet,
     /// collects the remaining live bet, awards the sole survivor, and resets in one dispatch.
+    #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_active_kick_settlement_cascade() {
         let mut pre = make_table("kick-active-settlement");
@@ -3841,6 +3861,7 @@ mod tests {
     ///
     /// 之前 Check 是"未实现"的代表；当前 19 个 MethodKind 接线后，此测试确认 Check
     /// 走完了 trace 构造路径（成功或返回非 NotImplemented 的业务错误均算通过）。
+    #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_check_is_now_supported() {
         let mut pre = make_table("pre");
@@ -3909,6 +3930,7 @@ mod tests {
     /// 且第二个任务的 pre_state_root == 第一个任务的 post_state_root。
     ///
     /// 使用两个真实、连续的 mid-round dispatch，避免手工拼接无效 create-table 状态。
+    #[ignore = "slow prove (~11s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_chain_two_tasks() {
         let mut pre = make_table("two-real-dispatches");
@@ -3954,6 +3976,7 @@ mod tests {
         orch.verify_chain().expect("state_root 链应衔接");
     }
 
+    #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn tagged_stage_batch_v4_mixes_zero_stage_and_composite_method_rows() {
         let mut pre = make_table("tagged-stage-batch-v4");
@@ -4069,6 +4092,7 @@ mod tests {
 
     /// P05-H-core 回归：完整 VM replay + native verify 产出的链可由精确范围 anchor
     /// 约束。测试中的 anchor 为了夹具方便从 task 计算；生产中必须来自已认证 block/receipt。
+    #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_chain_matches_exact_external_anchor_shape() {
         let mut pre = make_table("anchored-two-dispatches");

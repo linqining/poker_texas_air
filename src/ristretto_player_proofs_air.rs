@@ -1298,6 +1298,7 @@ mod tests {
         assert!(verify_pk_ownership(&pk, b"table7-hand3", &tampered, &proof).is_err());
     }
 
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn reveal_token_roundtrip_and_tamper() {
         let mut rng = test_rng();

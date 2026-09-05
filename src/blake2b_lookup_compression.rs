@@ -1920,6 +1920,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~27s); full gate runs `--include-ignored`"]
     #[test]
     fn multi_block_hash_proof_roundtrip_rejects_a_second_half_chain_mutation() {
         let message: Vec<u8> = (0..=128).map(|value| value as u8).collect();
@@ -1971,6 +1972,7 @@ mod tests {
         assert!(validate_hash_batch_abi(&archive).is_err());
     }
 
+    #[ignore = "slow prove (~27s); full gate runs `--include-ignored`"]
     #[test]
     fn independent_hash_batch_proof_roundtrip_rejects_a_statement_splice() {
         let messages = vec![b"abc".to_vec(), b"def".to_vec()];
@@ -2032,6 +2034,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~20s); full gate runs `--include-ignored`"]
     #[test]
     fn scheduler_stark_proof_roundtrip() {
         let block = Blake2bSmtSingleBlock::leaf([0x11; 32], [0x22; 32]);
@@ -2058,6 +2061,7 @@ mod tests {
         .unwrap();
     }
 
+    #[ignore = "slow prove (~5s); full gate runs `--include-ignored`"]
     #[test]
     fn scheduler_component_proves_without_the_lookup_table_component() {
         // This isolates the scheduler's trace/LogUp ordering from the larger
@@ -2135,6 +2139,7 @@ mod tests {
         .expect("scheduler component should prove on its native domain");
     }
 
+    #[ignore = "slow prove (~90s); full gate runs `--include-ignored`"]
     #[test]
     fn compression_proof_roundtrip_binds_digest() {
         let block = Blake2bSmtSingleBlock::leaf([0x11; 32], [0x22; 32]);

@@ -54,6 +54,18 @@ pub mod proof_archive;
 pub mod prove_timing;
 mod prover_context;
 pub mod public_inputs;
+/// Poseidon252 (Starknet Hades-3) chain statement — native layer and honest
+/// witness builder for the in-AIR state-root recomputation (#22⑤).
+pub mod poseidon252_air;
+/// Poseidon252 chain AIR component: constraints, range tables, interaction
+/// traces, and the prove/verify drivers.
+pub mod poseidon252_air_component;
+/// Poseidon252 v2: cairo-air-style component decomposition (chain linker +
+/// mul/reduce coprocessors + range tables).
+pub mod poseidon252_v2;
+/// Raw Starknet Poseidon round keys (pathfinder parameter set) backing the
+/// Poseidon252 AIR constants.
+pub mod poseidon252_round_keys;
 pub mod settlement_binding;
 /// Strict Cairo ABI calldata builder for the verified outer aggregate
 /// settlement path on Starknet Sepolia.

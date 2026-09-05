@@ -1159,6 +1159,7 @@ mod tests {
         assert_eq!(transcript.challenges(), verify_transcript.challenges());
     }
 
+    #[ignore = "slow prove (~5s); full gate runs `--include-ignored`"]
     #[test]
     fn proves_and_verifies_a_complete_v2_shuffle() {
         let started = std::time::Instant::now();
@@ -1348,6 +1349,7 @@ mod tests {
         assert!(ristretto_air_v2_shuffle_in_circuit_components(&other_bytes).is_err());
     }
 
+    #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn verifier_rejects_a_wrong_shuffle_relation() {
         // Prove a shuffle of the correct input deck, then submit it against a

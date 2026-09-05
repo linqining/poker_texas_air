@@ -92,6 +92,17 @@ the hand's action log (`action_log_digest` tail word, #18 Phase B).
      SubmitShuffle/SubmitReconstruct 放行；协议行全字段冻结集进 AIR
      （turn 双端 NO_SEAT、资金/参数/掩码/hand_id/timeout 配置/9 座位全像/
      非轮转承诺逐 limb 冻结）。canonical 147/147、全量 367/367。
+   - **#22⑤ state-root 重算进 AIR——v2 已落地（2026-09-05）**：放弃 v1
+     单体组件（1713 列混合布局，691s 仍 ConstraintsNotSatisfied），按
+     cairo-air 官方形态重写为五组件分解（`src/poseidon252_v2.rs`）：
+     ChainAir 链接组件（吸收/门控/mix 线性/边界/锚点 + 状态链 multiset）
+     + MulAir（32×16→48 卷积协处理器）+ ReduceAir（48=z+32q·P 协处理器）
+     + 2^16/2^12 范围表；非线性代数经 96 坐标 LogUp 链接元组下放。
+     实测：e2e prove+verify **2.91s**（≈237×），五组件 rowcheck 全过，
+     篡改负例三连全拒，原生层与 starknet_crypto 位精确等价保持。
+     设计与实施细节 `docs/plan-poseidon252-v2.md`；v1 prove 侧测试
+     `#[ignore]` 保留对照。**待办**：canonical 字节 scope 绑定
+     （poseidon 锚点 ↔ state_root_binding 组合，TODO 第 6 项）。
 3. ~~Terminal timeout cascade~~ — **closed (2026-09-05)**: the terminal
    cascade batch proofs exist and pass — multi-pending kick batches, the
    kicks→terminal-reset refund batch, the kicks→sole-survivor award batch

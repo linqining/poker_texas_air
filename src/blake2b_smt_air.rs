@@ -1122,6 +1122,7 @@ mod tests {
         assert_blocks_trace_satisfies_air(&blocks, &digests, LOG_SIZE);
     }
 
+    #[ignore = "slow prove (~14s); full gate runs `--include-ignored`"]
     #[test]
     fn fixed_leaf_compression_proves_and_verifies_in_air() {
         let block = Blake2bSmtSingleBlock::leaf([0x11; 32], [0x22; 32]);
@@ -1132,6 +1133,7 @@ mod tests {
             .expect("valid fixed leaf compression verification");
     }
 
+    #[ignore = "slow prove (~16s); full gate runs `--include-ignored`"]
     #[test]
     fn incorrect_public_digest_cannot_be_proved() {
         let block = Blake2bSmtSingleBlock::leaf([0x11; 32], [0x22; 32]);
@@ -1140,6 +1142,7 @@ mod tests {
         assert!(prove_blake2b_smt_single_block(&block, digest).is_err());
     }
 
+    #[ignore = "slow prove (~15s); full gate runs `--include-ignored`"]
     #[test]
     fn two_compressions_share_one_batched_stark() {
         let leaf = Blake2bSmtSingleBlock::leaf([0x11; 32], [0x22; 32]);
@@ -1156,6 +1159,7 @@ mod tests {
             .expect("two-compression batch verification");
     }
 
+    #[ignore = "slow prove (~11s); full gate runs `--include-ignored`"]
     #[test]
     fn public_digest_splice_is_rejected_by_scope_reconstruction() {
         let block = Blake2bSmtSingleBlock::internal([0x33; 32], [0x44; 32]);
@@ -1165,6 +1169,7 @@ mod tests {
         assert!(verify_blake2b_smt_single_block(&archive).is_err());
     }
 
+    #[ignore = "slow prove (~14s); full gate runs `--include-ignored`"]
     #[test]
     fn malformed_commitment_shape_is_rejected_without_panic() {
         let block = Blake2bSmtSingleBlock::leaf([0x55; 32], [0x66; 32]);

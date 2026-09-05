@@ -1010,6 +1010,7 @@ mod tests {
         assert!(value.validate().is_err());
     }
 
+    #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn pending_union_air_binds_all_assignment_masks_and_padding() {
         let value = opening();
@@ -1027,6 +1028,7 @@ mod tests {
         assert!(verify_canonical_reveal_pending_union(&value, &schedule_splice).is_err());
     }
 
+    #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn pending_union_air_rejects_structural_archive_mutations() {
         let mut value = opening();

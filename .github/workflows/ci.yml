@@ -34,7 +34,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly-2026-04-15
-      - run: cargo test --release --workspace
+      # Slow (multi-second prove roundtrip) tests are #[ignore]d locally so the
+      # default `cargo test` stays a fast dev loop; the merge gate runs them all
+      # via --include-ignored so coverage is unchanged.
+      - run: cargo test --release --workspace -- --include-ignored
 
   test-helpers:
     name: Release integration tests with test helpers

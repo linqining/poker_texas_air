@@ -15,7 +15,7 @@ jobs:
         with:
           toolchain: nightly-2026-04-15
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - run: cargo llvm-cov --release --workspace --lib --tests --lcov --output-path coverage.lcov
+      - run: cargo llvm-cov --release --workspace --lib --tests --lcov --output-path coverage.lcov -- --include-ignored
       - uses: actions/upload-artifact@v4
         with:
           name: release-coverage

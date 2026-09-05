@@ -11521,6 +11521,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~8s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_and_verifies_without_replay() {
         let witness = create_table();
@@ -11545,6 +11546,7 @@ mod tests {
         assert!(verify_canonical_tagged_proof(&wrong_epoch).is_err());
     }
 
+    #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_air_binds_state_image_bytes_to_endpoint_trace_and_fiat_shamir_scope() {
         let witness = create_table();
@@ -11638,6 +11640,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~15s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_air_constrains_lifecycle_phase_and_selected_seat_opening() {
         let cases = [
@@ -11705,6 +11708,7 @@ mod tests {
         assert_air_rejects_trace_mutation(&trace, &archive, POST_LEAVE_MASK_OFFSET);
     }
 
+    #[ignore = "slow prove (~12s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_vm_kick_refund_and_bet_collection() {
         let witness = kick_player();
@@ -11726,6 +11730,7 @@ mod tests {
         assert_air_rejects_trace_mutation(&trace, &archive, post_pending);
     }
 
+    #[ignore = "slow prove (~16s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_join_and_leave_custody_updates() {
         let witness = join_table();
@@ -11752,6 +11757,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~15s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_start_hand_button_and_participant_gate() {
         let witness = start_hand();
@@ -11768,6 +11774,7 @@ mod tests {
         assert_air_rejects_trace_mutation(&trace, &archive, OPAQUE_COMMITMENTS_OFFSET + 5 * 16);
     }
 
+    #[ignore = "slow prove (~6s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_join_join_start_hand_chain() {
         let first = join_table();
@@ -11813,6 +11820,7 @@ mod tests {
             .expect("join-join-start canonical verification");
     }
 
+    #[ignore = "slow prove (~6s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_nonfinal_submit_shuffle() {
         // #22④：非最终 shuffle 提交解除 fail-closed——状态机头冻结 +
@@ -11878,6 +11886,7 @@ mod tests {
         assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
 }
 
+    #[ignore = "slow prove (~8s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_reconstruct_completion() {
         // #22④：reconstruct 完成行解除 fail-closed——规范化约束（phase→
@@ -11918,6 +11927,7 @@ mod tests {
         assert!(trace_for(std::slice::from_ref(&tampered)).is_err());
     }
 
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_nonfinal_reconstruct() {
         // #22④：非最终 reconstruct 提交解除 fail-closed（deck/重建承诺
@@ -11933,6 +11943,7 @@ mod tests {
             .expect("non-final reconstruct verification");
     }
 
+    #[ignore = "slow prove (~9s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_nonterminal_force_fold_turn_advance() {
         let witness = force_fold();
@@ -11948,6 +11959,7 @@ mod tests {
         assert_air_rejects_trace_mutation(&trace, &archive, ACTION_AMOUNT_OFFSET);
     }
 
+    #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_rejects_set_leave_reserved_payload() {
         let witness = set_leave_after_hand();
@@ -11976,6 +11988,7 @@ mod tests {
         assert!(malformed.validate_shape().is_err());
     }
 
+    #[ignore = "slow prove (~5s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_rejects_seatless_reserved_action_payloads() {
         let witness = create_table();
@@ -12019,6 +12032,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_enforces_call_chip_conservation() {
         let witness = call();
@@ -12049,6 +12063,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_short_all_in_call() {
         let witness = short_all_in_call();
@@ -12076,6 +12091,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~9s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_unopened_round_bet() {
         let witness = bet();
@@ -12083,6 +12099,7 @@ mod tests {
         verify_canonical_tagged_batch(&[witness], &archive).expect("bet verification");
     }
 
+    #[ignore = "slow prove (~8s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_collects_every_seat_bet_before_round_advance() {
         let witness = advance_round();
@@ -12151,6 +12168,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~9s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_run_it_twice_board_schedule() {
         let mut witness = advance_round();
@@ -12174,6 +12192,7 @@ mod tests {
         verify_canonical_tagged_batch(&[witness], &archive).expect("RIT round verification");
     }
 
+    #[ignore = "slow prove (~19s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_terminal_settlement_and_reset_projection() {
         let witness = end_without_showdown();
@@ -12211,6 +12230,7 @@ mod tests {
         assert!(prove_canonical_tagged_batch(&[reset, other_table]).is_err());
     }
 
+    #[ignore = "slow prove (~15s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_vm_funding_custody_updates() {
         for kind in [
@@ -12255,6 +12275,7 @@ mod tests {
         assert_air_rejects_trace_mutation(&trace, &archive, post_seat_zero_pending_low);
     }
 
+    #[ignore = "slow prove (~18s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_raise_and_short_all_in_raise() {
         for witness in [raise(), short_all_in_raise()] {
@@ -12266,6 +12287,7 @@ mod tests {
         }
     }
 
+    #[ignore = "slow prove (~2s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_enforces_raise_reset_and_nonacting_seat_stability() {
         let witness = raise_against_acted_opponent();
@@ -12337,6 +12359,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~5s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_rejects_raise_projection_and_advice_tampering() {
         let witness = raise();
@@ -12428,6 +12451,7 @@ mod tests {
         assert!(prove_canonical_tagged_batch(&[permissionless_actor]).is_err());
     }
 
+    #[ignore = "slow prove (~5s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_accepts_betting_time_bank_extension() {
         let witness = advance_deadline();
@@ -12436,6 +12460,7 @@ mod tests {
         prove_canonical_tagged_batch(&[witness]).expect("deadline proof");
     }
 
+    #[ignore = "slow prove (~10s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_shuffle_timeout_refund_and_deck_rebuild() {
         let witness = shuffle_timeout();
@@ -12450,6 +12475,7 @@ mod tests {
         verify_canonical_tagged_batch(&[witness], &archive).expect("shuffle-timeout verification");
     }
 
+    #[ignore = "slow prove (~14s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_rejects_shuffle_timeout_trace_tampering() {
         let witness = shuffle_timeout();
@@ -12501,6 +12527,7 @@ mod tests {
         assert_air_rejects_trace_mutation(&trace, &archive, post_time);
     }
 
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_narrow_reconstruct_timeout_reset() {
         let witness = reconstruct_timeout_reset();
@@ -12516,6 +12543,7 @@ mod tests {
             .expect("reconstruct-timeout verification");
     }
 
+    #[ignore = "slow prove (~9s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_narrow_reveal_timeout_reset() {
         let witness = reveal_timeout_reset();
@@ -12542,6 +12570,7 @@ mod tests {
         assert!(prove_canonical_tagged_batch(&[invalid]).is_err());
     }
 
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_reveal_timeout_reset_rejects_state_and_action_tampering() {
         let witness = reveal_timeout_reset();
@@ -12563,6 +12592,7 @@ mod tests {
         }
     }
 
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_reveal_timeout_kick() {
         let witness = reveal_timeout_kick();
@@ -12578,6 +12608,7 @@ mod tests {
             .expect("reveal-timeout kick verification");
     }
 
+    #[ignore = "slow prove (~6s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_multi_pending_reveal_timeout_kick_batch() {
         let batch = reveal_timeout_kick_batch();
@@ -12591,6 +12622,7 @@ mod tests {
         assert!(verify_canonical_tagged_proof(&malformed).is_err());
     }
 
+    #[ignore = "slow prove (~8s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_multi_pending_reveal_timeout_terminal_reset_batch() {
         let batch = reveal_timeout_kick_reset_batch();
@@ -12615,6 +12647,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~6s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_non_contiguous_pending_reveal_timeout_terminal_reset_batch() {
         let batch = reveal_timeout_kick_reset_two_pending_batch();
@@ -12628,6 +12661,7 @@ mod tests {
         assert_eq!(&archive.reveal_timeout_cascade_schedule[..2], &[0, 2]);
     }
 
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_reveal_timeout_reconstruct() {
         let witness = reveal_timeout_reconstruct();
@@ -12643,6 +12677,7 @@ mod tests {
             .expect("reveal-timeout reconstruct verification");
     }
 
+    #[ignore = "slow prove (~8s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_multi_pending_reveal_timeout_reconstruct_batch() {
         let batch = reveal_timeout_kick_reconstruct_batch();
@@ -12672,6 +12707,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~9s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_reveal_timeout_reconstruct_rejects_state_and_action_tampering() {
         let witness = reveal_timeout_reconstruct();
@@ -12722,6 +12758,7 @@ mod tests {
         assert!(invalid.validate_shape().is_err());
     }
 
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_reveal_timeout_award() {
         let witness = reveal_timeout_award();
@@ -12737,6 +12774,7 @@ mod tests {
             .expect("reveal-timeout award verification");
     }
 
+    #[ignore = "slow prove (~9s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_multi_pending_reveal_timeout_award_batch() {
         let batch = reveal_timeout_kick_award_batch();
@@ -12763,6 +12801,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~10s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_reveal_timeout_award_rejects_state_and_action_tampering() {
         let witness = reveal_timeout_award();
@@ -12837,6 +12876,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~10s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_reveal_timeout_raked_award() {
         let witness = reveal_timeout_raked_award();
@@ -12863,6 +12903,7 @@ mod tests {
         assert!(verify_canonical_tagged_proof(&detached).is_err());
     }
 
+    #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_multi_pending_reveal_timeout_raked_award_batch() {
         let batch = reveal_timeout_kick_raked_award_batch();
@@ -12879,6 +12920,7 @@ mod tests {
         );
     }
 
+    #[ignore = "slow prove (~8s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_reveal_timeout_raked_award_rejects_arithmetic_tampering() {
         let witness = reveal_timeout_raked_award();
@@ -12976,6 +13018,7 @@ mod tests {
         assert!(invalid.validate_shape().is_err());
     }
 
+    #[ignore = "slow prove (~9s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_reconstruct_timeout_reset_rejects_refund_or_endpoint_tampering() {
         let witness = reconstruct_timeout_reset();
@@ -13044,6 +13087,7 @@ mod tests {
         assert!(prove_canonical_tagged_batch(&[invalid]).is_err());
     }
 
+    #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_uses_opened_nondefault_betting_timeout() {
         let mut extension = advance_deadline();
@@ -13077,6 +13121,7 @@ mod tests {
         assert_trace_satisfies_air(&trace, &archive);
     }
 
+    #[ignore = "slow prove (~6s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_proves_auto_fold_timeout() {
         let witness = auto_fold();
@@ -13139,6 +13184,7 @@ mod tests {
         }
     }
 
+    #[ignore = "slow prove (~6s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_rejects_auto_fold_advice_mutation() {
         let witness = auto_fold();
@@ -13159,6 +13205,7 @@ mod tests {
         }
     }
 
+    #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_direct_air_rejects_betting_time_bank_extension_tampering() {
         let witness = advance_deadline();
@@ -13196,6 +13243,7 @@ mod tests {
         assert_air_rejects_trace_mutation(&trace, &archive, 1_405);
     }
 
+    #[ignore = "slow prove (~6s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_archive_metadata_is_authenticated() {
         let archive = prove_canonical_tagged_batch(&[create_table()]).expect("canonical proof");
@@ -13216,6 +13264,7 @@ mod tests {
         assert!(verify_canonical_tagged_proof(&wrong_count).is_err());
     }
 
+    #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_archive_rejects_detached_endpoint_image_bytes() {
         let archive = prove_canonical_tagged_batch(&[create_table()]).expect("canonical proof");
@@ -13224,6 +13273,7 @@ mod tests {
         assert!(verify_canonical_tagged_proof(&tampered).is_err());
     }
 
+    #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn canonical_archive_rejects_proof_without_trace_commitment_without_panicking() {
         let archive = prove_canonical_tagged_batch(&[create_table()]).expect("canonical proof");

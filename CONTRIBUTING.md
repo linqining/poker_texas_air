@@ -14,9 +14,27 @@ Before opening a change, run the checks relevant to the code you touched:
 ```bash
 git diff --check
 cargo check --release --workspace --lib --bins
-cargo test --release --workspace
+cargo test --release --workspace -- --include-ignored
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
+
+## Test layering
+
+`cargo test` is a fast dev loop: multi-second prove roundtrip tests are marked
+`#[ignore = "slow prove (~Ns); full gate runs `--include-ignored`"]` and are
+skipped by default. Three layers:
+
+| Layer | Command | What runs |
+| --- | --- | --- |
+| Dev loop | `cargo test` | everything except the ignored slow prove tests |
+| Dev loop, this workspace only | `cargo test-fast` | same, skipping vendored flock's own unit tests |
+| Full gate (pre-merge) | `cargo test-all` (or `cargo test --workspace -- --include-ignored`) | every test, including the slow prove roundtrips |
+
+CI's `Workspace tests` job and the weekly coverage job run the full gate, so
+the ignored tests stay covered; do not delete an `#[ignore]` to "fix" a slow
+run — file the slowness instead. Tests for code under active development
+(e.g. `poseidon252_air_component`) are deliberately NOT ignored: they stay in
+the default loop so failures surface immediately.
 
 The root crate's untrusted test helpers are only used in the release
 integration-test harness below. Do not run the heavyweight proof suite in debug

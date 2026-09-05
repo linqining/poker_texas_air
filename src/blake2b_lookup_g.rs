@@ -1074,6 +1074,7 @@ mod tests {
         let _ = rotate;
     }
 
+    #[ignore = "slow prove (~20s); full gate runs `--include-ignored`"]
     #[test]
     fn g_call_known_answer_and_proof_roundtrip() {
         let call = Blake2bGCall {
