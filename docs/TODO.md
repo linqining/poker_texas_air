@@ -101,9 +101,18 @@
   负例）。**RevealComplete 仍 fail-closed**：其 post 状态含位置规则
   current_turn（BB 后首个活跃座/heads-up 特例）与盲注派生 current_bet，
   需先设计盲注/规则 opening（无 AIR 可锚定源），见 STATUS.md；
-  ③ 终端 timeout 级联（全员踢出→手终结→退款）批量证明；④ reconstruction
-  终局组合解除 fail-closed（Stark 时代等式，Ristretto 叙事已废）；⑤
-  state-root 重算（区别于绑定）进 AIR。
+  ③ ~~终端级联批量证明~~ **复核除名（2026-09-05）**：验收批量已存在并通过
+  （award/reset/raked 三套级联批量测试 + schedule 篡改负例）；
+  ④ **reconstruction 提交解除 fail-closed —— 完成（与 ShuffleComplete 同批）**：
+  `validate_direct_batch` 对 SubmitShuffle/SubmitReconstruct 放行
+  （SubmitReveal/FoldWithProof 维持拒绝）；协议行全字段冻结集进 AIR
+  （turn=NO_SEAT 双端、current_bet/min_raise/pot/chip_pool、acted/leave
+  掩码、hand_id、timeout 配置、board/rit 承诺、9 座位全像、shuffle 行的
+  reveal/reconstruction 不变——全部 gate 在度数 1 的 is_protocol_submit）；
+  测试：4 组 prove/verify 正例 + 篡改负例，canonical 147/147、全量 367/367 ✓；
+  残留信任：deck/reconstruction 承诺**轮转**绑定 = native/链上 EC_OP 通道
+  （Plan D ④）；⑤ state-root 重算（区别于绑定）进 AIR——需 canonical AIR
+  内的 Poseidon252 组件，最大型构建，独立排期。
 - [ ] **5（遗留）. `set_authorized_helper` owner 单点**：冷存储 / 时间锁
   （运维动作，随下一轮合约运维窗口）。
 - [ ] **24⑤. 错误分类**：error.rs 字符串→稳定类别（低优持续项，外部输入
