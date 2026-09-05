@@ -1060,6 +1060,88 @@ pub(crate) fn one_round_witness(
 }
 
 /// Build the honest trace of one chain statement.
+/// Rebuild the input-side scope schedule — position, round-type, round
+/// keys, absorbed words, selectors and the initial-state tuple — from the
+/// spec bytes alone, without touching the Poseidon permutation.
+///
+/// This is the verifier's side of the byte-scope binding: every column here
+/// is a deterministic arrangement of public data (message bytes plus the
+/// canonical round-constant table), so a verifier can reconstruct the whole
+/// block and compare it against the committed preprocessed tree.  The
+/// derived `S_VOID`/`S_ANCHOR` blocks are deliberately excluded — they are
+/// what the STARK establishes, not public setup.
+pub fn public_scope_columns(
+    spec: &Poseidon252ChainSpec,
+) -> TexasAirResult<Vec<Vec<M31>>> {
+    spec.validate()?;
+    let pairs = spec.absorb_pairs();
+    let layout = spec.layout();
+    let rows = layout.rows;
+    let initial = spec.initial_limbs();
+
+    let mut scope: Vec<Vec<M31>> = vec![Vec::new(); S_VOID];
+    for row in 0..rows {
+        let block = row / ROUND_COUNT;
+        let pos = row % ROUND_COUNT;
+        let is_real = block < layout.n_real;
+        let is_full = pos < N_FULL_ROUNDS / 2 || pos >= N_FULL_ROUNDS / 2 + N_PARTIAL_ROUNDS;
+        let k = round_constants(pos);
+        let w: [[u16; LIMBS]; 2] = if pos == 0 && is_real {
+            [felt_to_limbs(&pairs[block][0]), felt_to_limbs(&pairs[block][1])]
+        } else {
+            [[0u16; LIMBS]; 2]
+        };
+
+        scope[S_POS].push(M31::from(pos as u32));
+        scope[S_IS_FULL].push(M31::from(u32::from(is_full)));
+        for lane in 0..3 {
+            for (i, &limb) in k[lane].iter().enumerate() {
+                scope[S_K + lane * LIMBS + i].push(M31::from(limb as u32));
+            }
+        }
+        for lane in 0..2 {
+            for (i, &limb) in w[lane].iter().enumerate() {
+                scope[S_W + lane * LIMBS + i].push(M31::from(limb as u32));
+            }
+        }
+        let sel_init = row == 0;
+        let sel_void = row == rows - 1;
+        let sel_final = is_real && row == ROUND_COUNT * layout.n_real - 1;
+        scope[S_SEL].push(M31::from(u32::from(sel_init)));
+        scope[S_SEL + 1].push(M31::from(u32::from(sel_void)));
+        scope[S_SEL + 2].push(M31::from(u32::from(sel_final)));
+        for lane in 0..3 {
+            for (i, &limb) in initial[lane].iter().enumerate() {
+                scope[S_INIT + lane * LIMBS + i].push(M31::from(limb as u32));
+            }
+        }
+        scope[S_INIT + 3 * LIMBS].push(M31::from(0));
+    }
+    Ok(scope)
+}
+
+/// Deterministic coprocessor row counts `(mul, reduce)` for a spec: every
+/// real permutation contributes six mul and six reduce rows per full round,
+/// and two mul / four reduce rows per partial round.  Padding rows carry no
+/// algebra.  The verifier derives these from the layout alone, pinning the
+/// preprocessed enabler columns without any witness access.
+pub fn coprocessor_row_counts(spec: &Poseidon252ChainSpec) -> (usize, usize) {
+    let layout = spec.layout();
+    let mut mul = 0usize;
+    let mut reduce = 0usize;
+    for row in 0..layout.rows {
+        let pos = row % ROUND_COUNT;
+        let is_full = pos < N_FULL_ROUNDS / 2 || pos >= N_FULL_ROUNDS / 2 + N_PARTIAL_ROUNDS;
+        // lanes with a nonlinear s-box (lane 2 always, lanes 0/1 in full
+        // rounds) contribute two mul rows and one cube-reduce row each;
+        // every round contributes the three mix reductions.
+        let nonlinear_lanes = if is_full { 3 } else { 1 };
+        mul += 2 * nonlinear_lanes;
+        reduce += nonlinear_lanes + 3;
+    }
+    (mul, reduce)
+}
+
 pub fn build_chain_trace(spec: &Poseidon252ChainSpec) -> TexasAirResult<Poseidon252Trace> {
     spec.validate()?;
     let pairs = spec.absorb_pairs();

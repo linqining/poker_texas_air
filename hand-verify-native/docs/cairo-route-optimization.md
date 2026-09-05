@@ -72,11 +72,33 @@ verify 全部通过且恒定 9–10ms。**减参数 = 减 FRI 查询与 PoW 健�
 4. 收益矩阵：1 手批 −40%（13.6→8.2s）、10 手批 −21%（25.75→20.4s，叠加 fast 参数 ≈ **1.74s/手**）、批越大绝对节省越恒定；
 5. 替代方案（无需改 stwo-cairo）：**常驻证明服务**——注意仅缓存进程内 twiddles/rayon 池，preprocessed 承诺在 prove_cairo 内部仍会重建，故 daemon 只省 ~0.1s 级，**真正的 5.4s 必须走磁盘缓存或上游 API 改造**。
 
+## 追加优化（2026-09-06 二轮）：preprocessed 瘦身 + 批甜点
+
+**`preprocessed_trace` 瘦身**：程序 pedersen_builtin = 0，`Canonical` 变体
+携带的 Pedersen 预计算表（固定尺寸）是死重。切换 `canonical_small`：
+
+| 配置（+ fast FRI） | 1 手 | 10 手批 | 备注 |
+|---|---|---|---|
+| canonical（基线二轮） | 12.08s | 22.80s | preprocessed 承诺 4.12s |
+| canonical_without_pedersen | **5.24s** | — | pedersen 表（固定尺寸）移除 |
+| **canonical_small** | **3.02s** | **21.12s → 2.1s/手** | preprocessed 承诺 4.12s→**144ms（−97%）** |
+
+1 手证明 **4.5×**（vs 13.63s 基线）。健全性：LogUp 表成员性 + 编译期
+preprocessed ID 解析 + honest verify OK 共同保证（表更小只会让出界值无法
+查找——sound by construction）。
+
+**批大小悬崖（重要）**：30 手批（1.32M 步）出现超线性——interaction trace
+Extension 22.9s（3× 步数 → 15× 时间，内存带宽悬崖）；per-step 成本 48µs →
+131µs。**本机最优批 = 10 手（438k 步）**，更大批次按桌分片为多个 10 手证明
+而非加大单证明。
+
 ## 建议生产配置
 
-**批节奏 10–40 手/证明 + fast 参数 → 1.5–2.3s/手（相对 13.6s 基线 = 6–9×）**，
-比形态①（0.1s/手）仍慢 ~15–23×，但不再是 13.6s 的量级。证明延迟随批自然
-后置（"证明后到"），交易路径零影响。
+**生产配置（二轮定型）：canonical_small + fast FRI + 10 手批 → 2.1s/手
+（相对 13.6s 基线 = 6.5×）**；1 手证明 3.02s（4.5×）。比形态①（0.1s）仍慢
+~21×，但交易路径零影响，证明作为异步审计/锚定工件。原"磁盘缓存 preprocessed
+承诺"路线图已被瘦身取代：canonical_small 下该层仅 144ms，缓存收益趋零；
+仅当未来批次必须 >50 万步时才重新评估（届时先解决内存带宽悬崖）。
 
 ## 复现
 

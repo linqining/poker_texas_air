@@ -31,6 +31,7 @@ use stwo::core::fri::FriConfig;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::proof::StarkProof;
 use stwo::core::utils::bit_reverse_coset_to_circle_domain_order;
+use stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
 use stwo::core::vcs_lifted::poseidon252_merkle::{
     Poseidon252MerkleChannel, Poseidon252MerkleHasher,
 };
@@ -70,14 +71,20 @@ const _: () = assert!(native::STATE_TUPLE == 49, "state tuple arity");
 const _: () = assert!(native::MUL_TUPLE == 96, "mul tuple arity");
 const _: () = assert!(native::REDUCE_TUPLE == 96, "reduce tuple arity");
 
+/// Input-side scope columns: position/flag/keys/words/selectors/init —
+/// everything a verifier can rebuild from the public spec bytes.  The
+/// derived void/anchor blocks are excluded (they are witness/eval-constant
+/// data, the very values the STARK establishes).
+pub const PUBLIC_SCOPE_COLUMNS: usize = native::S_VOID;
+
 /// Indices into the shared preprocessed tree.
-pub const PP_TABLE16: usize = native::SCOPE_COLUMNS;
-pub const PP_TABLE12: usize = native::SCOPE_COLUMNS + 1;
-pub const PP_MUL_ENABLER: usize = native::SCOPE_COLUMNS + 2;
-pub const PP_RED_ENABLER: usize = native::SCOPE_COLUMNS + 3;
+pub const PP_TABLE16: usize = PUBLIC_SCOPE_COLUMNS;
+pub const PP_TABLE12: usize = PUBLIC_SCOPE_COLUMNS + 1;
+pub const PP_MUL_ENABLER: usize = PUBLIC_SCOPE_COLUMNS + 2;
+pub const PP_RED_ENABLER: usize = PUBLIC_SCOPE_COLUMNS + 3;
 
 fn v2_preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    let mut ids: Vec<PreProcessedColumnId> = (0..native::SCOPE_COLUMNS)
+    let mut ids: Vec<PreProcessedColumnId> = (0..PUBLIC_SCOPE_COLUMNS)
         .map(|index| PreProcessedColumnId {
             id: format!("poseidon252.v2.scope.{index}").into(),
         })
@@ -230,6 +237,11 @@ pub struct ChainAir {
     state: V2State,
     mul_link: V2MulLink,
     red_link: V2RedLink,
+    /// The public anchor limbs (from the claimed anchor bytes).  The final
+    /// boundary pins the chain's terminal state against these constants, so
+    /// the STARK itself — not a host recomputation — ties the proof to the
+    /// claimed value.
+    anchor: [[M31; native::L]; 3],
 }
 
 impl FrameworkEval for ChainAir {
@@ -278,16 +290,12 @@ impl FrameworkEval for ChainAir {
             init.push(eval.get_preprocessed_column(ids[native::S_INIT + i].clone()));
         }
         init.push(eval.get_preprocessed_column(ids[native::S_INIT + 3 * L].clone()));
-        let mut void_t = Vec::with_capacity(native::STATE_TUPLE);
-        for i in 0..3 * L {
-            void_t.push(eval.get_preprocessed_column(ids[native::S_VOID + i].clone()));
-        }
-        void_t.push(eval.get_preprocessed_column(ids[native::S_VOID + 3 * L].clone()));
-        let mut anchor_limbs = Vec::with_capacity(3 * L);
-        for i in 0..3 * L {
-            anchor_limbs
-                .push(eval.get_preprocessed_column(ids[native::S_ANCHOR + i].clone()));
-        }
+        let anchor_limbs: Vec<E::F> = self
+            .anchor
+            .iter()
+            .flat_map(|lane| lane.iter())
+            .map(|&limb| E::F::from(limb))
+            .collect();
 
         // ---- witness (chain read order) ----
         macro_rules! read_vec {
@@ -315,6 +323,10 @@ impl FrameworkEval for ChainAir {
         let mix2 = read_vec!(MIX12_WIDTH_V2);
         let pos_next = eval.next_trace_mask();
         let is_wrap = eval.next_trace_mask();
+        // The void tuple (state ‖ void_pos) is derived data — the terminal
+        // state of the padding permutation — so it rides in the witness
+        // tree, read last, after every other chain column.
+        let void_t = read_vec!(native::STATE_TUPLE);
 
         let lane_of = |flat: &[E::F], lane: usize, width: usize| -> Vec<E::F> {
             flat[lane * width..(lane + 1) * width].to_vec()
@@ -1315,6 +1327,87 @@ pub struct ArchivedPoseidon252V2Proof {
     pub stark_proof_bytes: Vec<u8>,
 }
 
+/// Decompose the claimed anchor bytes into the M31 limb constants the
+/// ChainAir pins its final boundary against.
+fn claimed_anchor_limbs(
+    claimed: &[[u8; 32]; 3],
+) -> TexasAirResult<[[M31; native::L]; 3]> {
+    let mut out = [[M31::from(0u32); native::L]; 3];
+    for (lane, bytes) in claimed.iter().enumerate() {
+        let felt = FieldElement::from_bytes_be(bytes)
+            .map_err(|_| TexasAirError::ConstraintUnsatisfied(
+                "v2 claimed anchor carries a non-canonical felt".into(),
+            ))?;
+        let limbs = native::felt_to_limbs(&felt);
+        for (i, &limb) in limbs.iter().enumerate() {
+            out[lane][i] = M31::from(limb as u32);
+        }
+    }
+    Ok(out)
+}
+
+/// Rebuild the full expected preprocessed tree from public data alone and
+/// return its root: the input-side scope schedule from the spec bytes, the
+/// two canonical range tables, and the two coprocessor enabler columns
+/// derived from the deterministic row counts.  The prover commits exactly
+/// this tree, so a root match pins every preprocessed column the ChainAir
+/// reads to the public byte scope.
+fn v2_expected_preprocessed_root(
+    spec: &native::Poseidon252ChainSpec,
+    mul_log: u32,
+    reduce_log: u32,
+) -> TexasAirResult<<Poseidon252MerkleHasher as MerkleHasherLifted>::Hash> {
+    let log_size = spec.layout().log_size;
+    let (mul_rows, red_rows) = native::coprocessor_row_counts(spec);
+
+    let mut scope = native::public_scope_columns(spec)?;
+    for col in scope.iter_mut() {
+        bit_reverse_coset_to_circle_domain_order(col);
+    }
+    let mut mul_en = vec![M31::from(0u32); 1usize << mul_log];
+    for row in mul_en.iter_mut().take(mul_rows) {
+        *row = M31::from(1u32);
+    }
+    let mut red_en = vec![M31::from(0u32); 1usize << reduce_log];
+    for row in red_en.iter_mut().take(red_rows) {
+        *row = M31::from(1u32);
+    }
+    bit_reverse_coset_to_circle_domain_order(&mut mul_en);
+    bit_reverse_coset_to_circle_domain_order(&mut red_en);
+
+    let max_log = native::TABLE16_LOG
+        .max(log_size)
+        .max(mul_log)
+        .max(reduce_log);
+    let config = v2_pcs_config();
+    let twiddles = crate::prover_context::simd_twiddles(
+        max_log + 1 + config.fri_config.log_blowup_factor,
+    );
+
+    let mut throwaway = Poseidon252Channel::default();
+    let mut scheme =
+        CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    {
+        let mut tree = scheme.tree_builder();
+        for col in &scope {
+            tree.extend_evals(vec![column_eval(log_size, col)]);
+        }
+        tree.extend_evals(vec![column_eval(
+            native::TABLE16_LOG,
+            &range_table_values(native::TABLE16_LOG),
+        )]);
+        tree.extend_evals(vec![column_eval(
+            native::TABLE12_LOG,
+            &range_table_values(native::TABLE12_LOG),
+        )]);
+        tree.extend_evals(vec![column_eval(mul_log, &mul_en)]);
+        tree.extend_evals(vec![column_eval(reduce_log, &red_en)]);
+        tree.commit(&mut throwaway);
+    }
+    Ok(scheme.roots()[0])
+}
+
 /// Prove the chain statement with the v2 component decomposition.
 pub fn prove_poseidon252_chain_v2(
     spec: &native::Poseidon252ChainSpec,
@@ -1326,9 +1419,16 @@ pub fn prove_poseidon252_chain_v2(
     let reduce_log = trace.reduce_log;
 
     // Assemble every committed column in tree order, then convert once.
+    // The chain witness block ends with the void tuple (derived data, read
+    // last by the eval), which used to live in the preprocessed tree.
     let chain_indices = chain_witness_indices();
     let mut chain_cols: Vec<Vec<M31>> =
         chain_indices.iter().map(|&c| trace.witness[c].clone()).collect();
+    chain_cols.extend(
+        trace.scope[native::S_VOID..native::S_VOID + native::STATE_TUPLE]
+            .iter()
+            .cloned(),
+    );
     for col in chain_cols.iter_mut() {
         bit_reverse_coset_to_circle_domain_order(col);
     }
@@ -1386,9 +1486,29 @@ pub fn prove_poseidon252_chain_v2(
     let twiddles =
         crate::prover_context::simd_twiddles(max_log + 1 + config.fri_config.log_blowup_factor);
 
+    let claimed_anchor: [[u8; 32]; 3] = spec
+        .anchor_state()
+        .iter()
+        .map(|f| f.to_bytes_be())
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("3 felts");
+    let anchor: [[M31; native::L]; 3] = std::array::from_fn(|lane| {
+        let felt = FieldElement::from_bytes_be(&claimed_anchor[lane])
+            .expect("anchor state is canonical");
+        let limbs = native::felt_to_limbs(&felt);
+        std::array::from_fn(|i| M31::from(limbs[i] as u32))
+    });
+
     let mut channel = Poseidon252Channel::default();
     mix_digest(&mut channel, &spec.statement_digest());
     mix_digest(&mut channel, &range_tables_digest());
+    // Bind the claimed anchor bytes into the Fiat–Shamir transcript before
+    // any commitment: the STARK's pinned constants and the public claim then
+    // live on the same challenge path.
+    for lane in &claimed_anchor {
+        mix_digest(&mut channel, lane);
+    }
 
     let mut scheme =
         CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
@@ -1396,7 +1516,7 @@ pub fn prove_poseidon252_chain_v2(
 
     {
         let mut tree = scheme.tree_builder();
-        for col in trace.scope.iter() {
+        for col in trace.scope[..PUBLIC_SCOPE_COLUMNS].iter() {
             tree.extend_evals(vec![column_eval(log_size, col)]);
         }
         tree.extend_evals(vec![column_eval(native::TABLE16_LOG, &range_table_values(native::TABLE16_LOG))]);
@@ -1483,6 +1603,7 @@ pub fn prove_poseidon252_chain_v2(
                 state: state.clone(),
                 mul_link: mul_link.clone(),
                 red_link: red_link.clone(),
+                anchor,
             },
             chain_sum,
         )),
@@ -1523,14 +1644,6 @@ pub fn prove_poseidon252_chain_v2(
     )
     .map_err(|e| TexasAirError::SpecViolation(format!("poseidon252 v2 prove failed: {e:?}")))?;
 
-    let claimed_anchor = spec
-        .anchor_state()
-        .iter()
-        .map(|f| f.to_bytes_be())
-        .collect::<Vec<_>>()
-        .try_into()
-        .expect("3 felts");
-
     Ok(ArchivedPoseidon252V2Proof {
         spec: spec.clone(),
         log_size,
@@ -1563,11 +1676,23 @@ pub fn verify_poseidon252_chain_v2(
             "v2 log size detached from the spec layout".into(),
         ));
     }
-    let native_anchor = archive.spec.anchor_state();
-    for (lane, felt) in native_anchor.iter().enumerate() {
-        if archive.claimed_anchor[lane] != felt.to_bytes_be() {
+    // No host Poseidon recomputation on this path: the anchor is pinned by
+    // the STARK's final-boundary constants, the claimed bytes are mixed into
+    // the Fiat–Shamir transcript before any commitment, and the whole input
+    // scope (keys, absorbed words, selectors, initial state) is pinned by the
+    // expected-preprocessed-root comparison below.
+    let (expected_mul, expected_red) = native::coprocessor_row_counts(&archive.spec);
+    if archive.mul_log != expected_mul.next_power_of_two().max(2).ilog2()
+        || archive.reduce_log != expected_red.next_power_of_two().max(2).ilog2()
+    {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "v2 coprocessor layouts detached from the spec".into(),
+        ));
+    }
+    for lane in archive.claimed_anchor.iter() {
+        if FieldElement::from_bytes_be(lane).is_err() {
             return Err(TexasAirError::ConstraintUnsatisfied(
-                "v2 anchor detached from the native recomputation".into(),
+                "v2 claimed anchor carries a non-canonical felt".into(),
             ));
         }
     }
@@ -1585,9 +1710,24 @@ pub fn verify_poseidon252_chain_v2(
     let mut channel = Poseidon252Channel::default();
     mix_digest(&mut channel, &archive.spec.statement_digest());
     mix_digest(&mut channel, &range_tables_digest());
+    for lane in &archive.claimed_anchor {
+        mix_digest(&mut channel, lane);
+    }
+
+    // Byte-scope binding: rebuild the entire expected preprocessed tree from
+    // public data (the input-side scope schedule, both range tables, both
+    // enabler columns) and require the committed root to match.  From here
+    // on, every scope column the ChainAir reads is public-byte-derived.
+    let expected_root =
+        v2_expected_preprocessed_root(&archive.spec, archive.mul_log, archive.reduce_log)?;
+    if expected_root != proof.commitments[0] {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "v2 preprocessed tree detached from the public byte scope".into(),
+        ));
+    }
 
     let mut verifier = CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
-    let mut pre_sizes = vec![log_size; native::SCOPE_COLUMNS];
+    let mut pre_sizes = vec![log_size; PUBLIC_SCOPE_COLUMNS];
     pre_sizes.push(native::TABLE16_LOG);
     pre_sizes.push(native::TABLE12_LOG);
     pre_sizes.push(mul_log);
@@ -1600,7 +1740,7 @@ pub fn verify_poseidon252_chain_v2(
     let mul_witness = native::MUL_A_LIMBS + native::MUL_B_LIMBS + native::MUL_C_LIMBS
         + native::GADGET_CARRY_LIMBS;
     let red_witness = native::RED_X_LIMBS + L + native::RED_Q_LIMBS + native::GADGET_CARRY_LIMBS;
-    let mut wit_sizes = vec![log_size; chain_cols];
+    let mut wit_sizes = vec![log_size; chain_cols + native::STATE_TUPLE];
     wit_sizes.extend(vec![mul_log; mul_witness]);
     wit_sizes.extend(vec![reduce_log; red_witness]);
     wit_sizes.push(native::TABLE16_LOG);
@@ -1641,6 +1781,7 @@ pub fn verify_poseidon252_chain_v2(
                 state: state.clone(),
                 mul_link: mul_link.clone(),
                 red_link: red_link.clone(),
+                anchor: claimed_anchor_limbs(&archive.claimed_anchor)?,
             },
             sums[0],
         )),
@@ -1688,6 +1829,49 @@ pub fn verify_poseidon252_chain_v2(
 // ===========================================================================
 // Tests
 // ===========================================================================
+
+// ===========================================================================
+// Canonical byte-scope composition (TODO #22⑤ item 6)
+// ===========================================================================
+
+/// The Poseidon252 statement behind [`crate::state_root::table_name_commitment`]:
+/// the exact `zchain.string.v2` borsh-chunked field preimage of the name
+/// bytes, as a chain spec.  Both sides of this seam derive the spec from the
+/// same public name, so the proven anchor and the legacy host commitment are
+/// the same value by construction — only now the value is established by the
+/// v2 STARK instead of a trusted recomputation.
+pub fn name_commitment_spec(name: &str) -> TexasAirResult<native::Poseidon252ChainSpec> {
+    let message = crate::state_root::canonical_borsh_preimage(
+        "zchain.string.v2",
+        &name.as_bytes().to_vec(),
+    )?;
+    Ok(native::Poseidon252ChainSpec::hash_many(&message))
+}
+
+/// Prove the name commitment: the AIR recomputes
+/// `poseidon_hash_many(canonical_borsh_preimage("zchain.string.v2", name))`
+/// and pins the terminal state as the claimed anchor.
+pub fn prove_name_commitment_v2(
+    name: &str,
+) -> TexasAirResult<ArchivedPoseidon252V2Proof> {
+    prove_poseidon252_chain_v2(&name_commitment_spec(name)?)
+}
+
+/// Verify a name-commitment proof against the public name bytes: the spec
+/// must match the derived one byte for byte (no scope splice), and the STARK
+/// must verify without any host Poseidon recomputation.
+pub fn verify_name_commitment_v2(
+    archive: &ArchivedPoseidon252V2Proof,
+    name: &str,
+) -> TexasAirResult<()> {
+    let expected = name_commitment_spec(name)?;
+    if archive.spec != expected {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "v2 name commitment spec detached from the public name bytes".into(),
+        ));
+    }
+    verify_poseidon252_chain_v2(archive)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1827,9 +2011,8 @@ mod tests {
         let t16_flat = unpack(&t16_i);
         let t12_flat = unpack(&t12_i);
 
-        // trees in span order
-        let preprocessed: Vec<Vec<M31>> = trace
-            .scope
+        // trees in span order (preprocessed = public scope prefix only)
+        let preprocessed: Vec<Vec<M31>> = trace.scope[..PUBLIC_SCOPE_COLUMNS]
             .iter()
             .cloned()
             .chain([range_table_values(native::TABLE16_LOG)])
@@ -1840,6 +2023,7 @@ mod tests {
         let witness: Vec<Vec<M31>> = chain_cols
             .iter()
             .cloned()
+            .chain(trace.scope[native::S_VOID..native::S_VOID + native::STATE_TUPLE].iter().cloned())
             .chain(mul_cols.iter().cloned())
             .chain(red_cols.iter().cloned())
             .chain([mult16_col.clone()])
@@ -1894,14 +2078,18 @@ mod tests {
                 println!("component {}: {}", $name, if result.is_ok() { "OK" } else { "FAILED" });
             }};
         }
-        check!("chain", ChainAir { log_size, range16: r16.clone(), range12: r12.clone(), state: st.clone(), mul_link: ml.clone(), red_link: rl.clone() }, chain_sum, log_size);
+        let anchor = claimed_anchor_limbs(
+            &spec.anchor_state().iter().map(|f| f.to_bytes_be()).collect::<Vec<_>>().try_into().unwrap(),
+        )
+        .unwrap();
+        check!("chain", ChainAir { log_size, range16: r16.clone(), range12: r12.clone(), state: st.clone(), mul_link: ml.clone(), red_link: rl.clone(), anchor }, chain_sum, log_size);
         check!("mul", MulAir { log_size: mul_log, range16: r16.clone(), link: ml.clone() }, mul_sum, mul_log);
         check!("red", ReduceAir { log_size: reduce_log, range16: r16.clone(), range12: r12.clone(), link: rl.clone() }, red_sum, reduce_log);
         check!("t16", RangeTableAir::table16(native::TABLE16_LOG, r16.clone(), r12.clone()), t16_sum, native::TABLE16_LOG);
         check!("t12", RangeTableAir::table12(native::TABLE12_LOG, r16.clone(), r12.clone()), t12_sum, native::TABLE12_LOG);
     }
 
-    #[test]
+#[test]
     fn v2_proof_roundtrip() {
         let spec = small_spec();
         let archive = prove_poseidon252_chain_v2(&spec).expect("prove");
@@ -1922,6 +2110,39 @@ mod tests {
         let mut archive = prove_poseidon252_chain_v2(&spec).expect("prove");
         archive.spec.message[0][31] ^= 1;
         assert!(verify_poseidon252_chain_v2(&archive).is_err());
+    }
+
+    #[test]
+    fn dbg_five_felt_chain() {
+        let msg: Vec<FieldElement> = (0..5).map(|i| FieldElement::from(1000u64 + i)).collect();
+        let spec = native::Poseidon252ChainSpec::hash_many(&msg);
+        let archive = prove_poseidon252_chain_v2(&spec).expect("prove");
+        verify_poseidon252_chain_v2(&archive).expect("verify");
+    }
+
+    #[test]
+    fn name_commitment_matches_legacy_host_hash() {
+        // Test-only oracle: the AIR-proven anchor lane 0 equals the legacy
+        // host commitment for the same public bytes.
+        for name in ["test", "alpha", "a much longer table name"] {
+            let archive = prove_name_commitment_v2(name).expect("prove");
+            let anchor = FieldElement::from_bytes_be(&archive.claimed_anchor[0])
+                .expect("canonical anchor");
+            assert_eq!(
+                anchor,
+                crate::state_root::table_name_commitment(name),
+                "name {name}"
+            );
+            verify_name_commitment_v2(&archive, name).expect("verify");
+        }
+    }
+
+    #[test]
+    fn name_commitment_rejects_foreign_name() {
+        let archive = prove_name_commitment_v2("test").expect("prove");
+        assert!(verify_name_commitment_v2(&archive, "tesu").is_err());
+        // The empty-string preimage differs from any real name's.
+        assert!(verify_name_commitment_v2(&archive, "").is_err());
     }
 
     #[test]

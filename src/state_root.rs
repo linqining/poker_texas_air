@@ -312,7 +312,7 @@ fn byte_chunk_to_field(chunk: &[u8]) -> TexasAirResult<FieldElement> {
 }
 
 /// Build a domain-separated, injective field preimage for a Borsh value.
-fn canonical_borsh_preimage<T: borsh::BorshSerialize>(
+pub(crate) fn canonical_borsh_preimage<T: borsh::BorshSerialize>(
     tag: &str,
     value: &T,
 ) -> TexasAirResult<Vec<FieldElement>> {
