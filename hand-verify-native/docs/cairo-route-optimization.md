@@ -50,6 +50,28 @@ verify 全部通过且恒定 9–10ms。**减参数 = 减 FRI 查询与 PoW 健�
 - `store_polynomials_coefficients` / lifting_size_policy 变体：对 prove 无感；
 - GPU（icicle/CUDA 后端）：Apple Silicon 不可用，x86 + NVIDIA 环境另测。
 
+## FRI/承诺层相位分解与缓存可行性（prove 内部 span 实测）
+
+10 手批（full，prove_cairo busy 25.0s）逐相位：
+
+| 相位 | busy | 可跨证明缓存？ |
+|---|---|---|
+| cairo run + adapt | 0.52s | 否（每批不同输入）|
+| Write Preprocessed trace | ~0s | 是（布局纯函数）|
+| Precompute Twiddles | 0.077s | **是**（域大小纯函数）|
+| **Compute preprocessed trace commitment** | **5.38s**（Extension 1.12 + Merkle 3.43） | **是（布局 × builtin 段大小决定）** |
+| Write Base trace | 3.63s | 否（witness）|
+| Compute base trace commitment | 2.56s | 否（witness）|
+| Write interaction trace + commitment | 4.03s | 否（witness）|
+| Prove STARKs（Composition 4.95 + OOD 1.05 + FRI quotients 0.42 + commit 0.13 + Grind 0.17） | 7.05s | 否（witness）|
+
+**结论**：
+1. FRI 的计算主体（折叠/查询，7.05s 内）依赖 witness 多项式——**不可缓存**；
+2. 但 **preprocessed 承诺层 5.38s + twiddles 0.08s ≈ 5.46s 是布局纯函数，完全可缓存**——且实测它随 trace 大小增长温和（1 手 4.12s → 10 手 5.38s，+30%），缓存在任何批大小下都值 ~5.4s/证明；
+3. 实现前提：需要给 stwo-cairo prover 加"外部注入 preprocessed provider"接口（当前 prove_cairo 每次内部重建），按 (program hash, trace log sizes, params) 做缓存键，序列化 Merkle 树——工程量 ~1–2 天（含序列化格式与失效逻辑），非科研风险；
+4. 收益矩阵：1 手批 −40%（13.6→8.2s）、10 手批 −21%（25.75→20.4s，叠加 fast 参数 ≈ **1.74s/手**）、批越大绝对节省越恒定；
+5. 替代方案（无需改 stwo-cairo）：**常驻证明服务**——注意仅缓存进程内 twiddles/rayon 池，preprocessed 承诺在 prove_cairo 内部仍会重建，故 daemon 只省 ~0.1s 级，**真正的 5.4s 必须走磁盘缓存或上游 API 改造**。
+
 ## 建议生产配置
 
 **批节奏 10–40 手/证明 + fast 参数 → 1.5–2.3s/手（相对 13.6s 基线 = 6–9×）**，

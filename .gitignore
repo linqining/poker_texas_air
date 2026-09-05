@@ -22,3 +22,5 @@ client/.env*
 poker_protocol_lean/.lake/
 texas/.env
 .vite
+src/airs_lean/.lake/
+hand-verify-native/target/
