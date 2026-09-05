@@ -2742,6 +2742,10 @@ impl FrameworkEval for CanonicalAir {
         // contiguous inside the tagged batch.  The state-transition relation
         // does not yet recompute Blake2b here, but a receipt can no longer
         // splice a proof to unrelated state/lifecycle/overlay/economic roots.
+        eval.add_constraint({
+            let z: E::F = M31::from(0u32).into();
+            z // S0_head
+        });
         let pre_state_root: Vec<_> = (0..16).map(|_| eval.next_trace_mask()).collect();
         let post_state_root: Vec<_> = (0..16).map(|_| eval.next_trace_mask()).collect();
         let pre_lifecycle_root: Vec<_> = (0..16).map(|_| eval.next_trace_mask()).collect();
@@ -3079,6 +3083,10 @@ impl FrameworkEval for CanonicalAir {
             std::array::from_fn(|_| eval.next_trace_mask());
         let pre_timeout_config_bits: [[E::F; 16]; TIMEOUT_CONFIG_LIMBS] =
             std::array::from_fn(|_| trace_bits16(&mut eval));
+        eval.add_constraint({
+            let z: E::F = M31::from(0u32).into();
+            z // S1_protocol_cells
+        });
         let protocol_completion_kind = eval.next_trace_mask();
         let protocol_completion_timestamp = trace_limbs(&mut eval);
         let protocol_completion_pre_cards_dealt = eval.next_trace_mask();
@@ -3356,11 +3364,12 @@ impl FrameworkEval for CanonicalAir {
             + is_submit_reveal.clone()
             + is_submit_reconstruct.clone()
             + is_fold_with_proof.clone();
-        // These selectors carry opaque crypto envelopes, but their dedicated
-        // Ristretto AIRs are not composed into this canonical state-image AIR
-        // yet.  Keep the direct verifier fail-closed instead of treating a
-        // non-zero commitment as a proof of the underlying equations.
-        eval.add_constraint(active.clone() * is_crypto.clone());
+        // #22④：SubmitShuffle/SubmitReconstruct 的状态机规范化语义已组合
+        // （协议进度、相位/截止时间、全字段冻结集），直接验证器放行；
+        // deck/重建承诺**轮转**与实际密文的绑定属 native/链上 EC_OP 通道
+        // （Plan D ④ 残留信任）。SubmitReveal/FoldWithProof 维持禁止。
+        let crypto_admitted = is_submit_shuffle.clone() + is_submit_reconstruct.clone();
+        eval.add_constraint(active.clone() * (is_crypto.clone() - crypto_admitted.clone()));
         let proof_bound = is_crypto.clone();
         // A crypto tag carries a real, fixed-width proof commitment rather
         // than a host boolean.  Every limb is range-bound before the inverse
@@ -5264,6 +5273,10 @@ impl FrameworkEval for CanonicalAir {
         let mut post_protocol_mask_from_bits: E::F = M31::from(0u32).into();
         let mut post_protocol_pending_count: E::F = M31::from(0u32).into();
         let mut selected_protocol_pre_bit: E::F = M31::from(0u32).into();
+        eval.add_constraint({
+            let z: E::F = M31::from(0u32).into();
+            z // S2_mask_region
+        });
         let mut expected_pre_protocol_participants: E::F = M31::from(0u32).into();
         let mut expected_protocol_participants: E::F = M31::from(0u32).into();
         for index in 0..MAX_CANONICAL_SEATS {
@@ -5486,6 +5499,10 @@ impl FrameworkEval for CanonicalAir {
             is_reconstruct_completion.clone()
                 * (protocol_completion_pre_cards_dealt.clone() - reconstructed_cursor),
         );
+        eval.add_constraint({
+            let z: E::F = M31::from(0u32).into();
+            z // S3_shuffle_block
+        });
         // ---- #22②：ShuffleComplete 组合约束（镜像 start_preflop_reveal_phase
         // 的规范化语义；合法性词不进吸收链，deck 轮转锚定 pre/post 端点）----
         eval.add_constraint(is_shuffle_completion.clone() * protocol_pending_post_inv.clone());
@@ -5563,6 +5580,10 @@ impl FrameworkEval for CanonicalAir {
         eval.add_constraint(
             is_shuffle_completion.clone() * protocol_completion_pre_cards_dealt.clone(),
         );
+        eval.add_constraint({
+            let z: E::F = M31::from(0u32).into();
+            z // S4_after_completion
+        });
         let non_reconstruct_completion = active.clone() - is_reconstruct_completion.clone();
         for value in protocol_completion_timestamp
             .iter()
@@ -11793,15 +11814,21 @@ mod tests {
     }
 
     #[test]
-    fn canonical_direct_air_rejects_uncomposed_submit_shuffle() {
+    fn canonical_direct_air_proves_nonfinal_submit_shuffle() {
+        // #22④：非最终 shuffle 提交解除 fail-closed——状态机头冻结 +
+        // 协议进度递减由 AIR 直接约束。
         let witness = submit_shuffle();
-        assert!(trace_for(std::slice::from_ref(&witness)).is_err());
-        assert!(witness.validate_shape().is_ok());
+        witness.validate_shape().expect("non-final shuffle shape");
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("non-final shuffle trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        let archive = prove_canonical_tagged_batch(&[witness.clone()]).expect("shuffle proof");
+        verify_canonical_tagged_batch(&[witness], &archive).expect("shuffle verification");
 
+        // 无完成 opening 的完成提交仍被拒绝（host 侧 completion 校验）。
         let mut final_submit = submit_shuffle();
         final_submit.pre.protocol_pending_mask = 0b01;
         final_submit.post.phase = CanonicalPhase::Revealing;
-        final_submit.post.street = 1;
         final_submit.post.protocol_pending_mask = 0b11;
         final_submit.seal();
         assert!(trace_for(&[final_submit]).is_err());
@@ -11849,28 +11876,61 @@ mod tests {
         tampered.protocol_completion.pre_cards_dealt = 2;
         tampered.seal();
         assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
-        // 直接 AIR 准入对 SubmitShuffle 仍关闭： admit 需要完整的字段冻结集
-        // （pot/seats/acted 等——与 reconstruct completion 同一遗留边界，
-        // 见 docs/STATUS.md #22②）。
-        assert!(trace_for(std::slice::from_ref(&witness_snapshot())).is_err());
-    }
-
-    fn witness_snapshot() -> CanonicalTransitionWitness {
-        submit_shuffle_completion()
-    }
+}
 
     #[test]
-    fn canonical_direct_air_rejects_uncomposed_reconstruct_normalization() {
+    fn canonical_direct_air_proves_reconstruct_completion() {
+        // #22④：reconstruct 完成行解除 fail-closed——规范化约束（phase→
+        // reconstruct-shuffling、pending 重置、deck/reconstruction 端点绑定、
+        // deadline 重挂、52 游标）直接由 AIR 校验。
         let witness = submit_reconstruct_completion();
-        assert!(trace_for(std::slice::from_ref(&witness)).is_err());
-        assert!(witness.validate_shape().is_ok());
+        witness.validate_shape().expect("reconstruct completion shape");
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("reconstruct completion trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        let archive = prove_canonical_tagged_batch(&[witness.clone()])
+            .expect("reconstruct completion proof");
+        verify_canonical_tagged_batch(&[witness], &archive)
+            .expect("reconstruct completion verification");
     }
 
     #[test]
-    fn canonical_direct_air_rejects_uncomposed_nonfinal_reconstruct() {
+    fn canonical_direct_air_rejects_tampered_reconstruct_completion() {
+        // 篡改目标相位。
+        let mut tampered = submit_reconstruct_completion();
+        tampered.post.phase = CanonicalPhase::Revealing;
+        tampered.seal();
+        assert!(trace_for(std::slice::from_ref(&tampered)).is_err());
+        // 篡改 pending 重置（participants → 少一位）。
+        let mut tampered = submit_reconstruct_completion();
+        tampered.post.protocol_pending_mask = 0b01;
+        tampered.seal();
+        assert!(trace_for(std::slice::from_ref(&tampered)).is_err());
+        // 篡改 deadline（shuffle_timeout 重挂不符）。
+        let mut tampered = submit_reconstruct_completion();
+        tampered.post.deadline_ms += 1;
+        tampered.seal();
+        assert!(trace_for(std::slice::from_ref(&tampered)).is_err());
+        // 篡改资金冻结（reconstruct 提交不动 chip_pool）。
+        let mut tampered = submit_reconstruct_completion();
+        tampered.post.chip_pool += 1;
+        tampered.seal();
+        assert!(trace_for(std::slice::from_ref(&tampered)).is_err());
+    }
+
+    #[test]
+    fn canonical_direct_air_proves_nonfinal_reconstruct() {
+        // #22④：非最终 reconstruct 提交解除 fail-closed（deck/重建承诺
+        // 轮转为 native 通道残留；其余状态镜像全字段冻结）。
         let witness = submit_reconstruct_nonfinal();
-        assert!(trace_for(std::slice::from_ref(&witness)).is_err());
-        assert!(witness.validate_shape().is_ok());
+        witness.validate_shape().expect("non-final reconstruct shape");
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("non-final reconstruct trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        let archive = prove_canonical_tagged_batch(&[witness.clone()])
+            .expect("non-final reconstruct proof");
+        verify_canonical_tagged_batch(&[witness], &archive)
+            .expect("non-final reconstruct verification");
     }
 
     #[test]

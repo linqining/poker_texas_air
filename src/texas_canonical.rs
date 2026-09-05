@@ -806,16 +806,19 @@ pub fn validate_batch(witnesses: &[CanonicalTransitionWitness]) -> Result<(), St
 
 /// Validate the witness envelope accepted by the canonical direct AIR.
 ///
-/// Crypto-bearing selectors retain their ABI and state-image shape checks so
-/// standalone crypto components can bind requests to a canonical transition.
-/// They are rejected here, at the direct AIR boundary, until the dedicated
-/// Ristretto relations are composed into the same verifier-visible proof.
+/// #22④：`SubmitShuffle` / `SubmitReconstruct` 已解除 fail-closed——状态机
+/// 规范化语义（协议进度、相位/截止时间、全字段冻结集）由 canonical AIR
+/// 直接约束；deck/reconstruction 承诺**轮转**与实际密文的绑定属 native
+/// 验证 + 链上 EC_OP 批次通道（Plan D ④，残留信任见 README 信任模型）。
+/// `SubmitReveal`（betting-state turn 规则与盲注派生 opening 未设计）与
+/// `FoldWithProof` 维持拒绝。
 pub fn validate_direct_batch(witnesses: &[CanonicalTransitionWitness]) -> Result<(), String> {
     validate_batch(witnesses)?;
-    if witnesses
-        .iter()
-        .any(|witness| witness.kind.carries_crypto_proof())
-    {
+    if witnesses.iter().any(|witness| {
+        witness.kind.carries_crypto_proof()
+            && witness.kind != CanonicalTransitionKind::SubmitShuffle
+            && witness.kind != CanonicalTransitionKind::SubmitReconstruct
+    }) {
         return Err(
             "canonical crypto transition is unavailable until its dedicated crypto AIR is composed"
                 .into(),
