@@ -31,6 +31,7 @@ import {
   getVaultLockedBalanceWei,
   getWalletApiVersions,
   shieldForPoolRegistration,
+  walletErrText,
   STRK20_WALLET_API_MIN,
   compareVersions,
 } from '../../starknet/strk20';
@@ -276,6 +277,20 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   // 连接的钱包（Ready/Cartridge）优先，dev 直签兜底
   const account = activeAccount(connected.account);
 
+  // 钱包网络守卫：Ready 重装/更新后默认主网，而 dapp 只在 Sepolia——主网
+  // 语境下钱包不认 Sepolia STRK，私密操作直接被拒（151 "This token is not
+  // supported for private tokens yet"）。进弹窗就明示，别等钱包给隐晦报错。
+  // dev 直签账户没有 chainId 字段时视为匹配。
+  const walletChainMismatch = (() => {
+    const cid = (account as { chainId?: string } | null)?.chainId;
+    if (!cid) return false;
+    try {
+      return BigInt(cid) !== BigInt(starknetConfig.chainId);
+    } catch {
+      return false;
+    }
+  })();
+
   const [strk20Ready, setStrk20Ready] = useState<boolean | null>(null);
   const [walletApiVersions, setWalletApiVersions] = useState<string[] | null>(null);
   const [shielded, setShielded] = useState<bigint | null>(null);
@@ -440,6 +455,10 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
 
   // 一键注册赔付承诺（我们合约的 payout commitment，一次性链上交易）
   const registerPayout = async () => {
+    if (walletChainMismatch) {
+      setError(t('claim-wrong-network'));
+      return;
+    }
     setRegPending(true);
     setError('');
     try {
@@ -460,6 +479,10 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   // viewing key 注册（金额留在池内余额，后续私密领取可全额使用）。
   // 未入池的钱包会回 118 NOT_REGISTERED——自动展开钱包内注册指引。
   const registerPool = async () => {
+    if (walletChainMismatch) {
+      setError(t('claim-wrong-network'));
+      return;
+    }
     setPoolRegistering(true);
     setError('');
     try {
@@ -474,9 +497,13 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
         if (res.notRegistered) setPoolGuideOpen(true);
       }
     } catch (e) {
-      const msg = String((e as Error)?.message || e);
+      const msg = walletErrText(e);
       setError(msg);
-      if (/NOT_REGISTERED/i.test(msg)) setPoolGuideOpen(true);
+      // 118/163（未入池）与 151（钱包网络不对/Sepolia 私密代币未开放）
+      // 都自动展开钱包内注册指引——指引路径就是这些错误的解法起点。
+      if (/NOT_REGISTERED|UNKNOWN_ERROR|TOKEN_NOT_SUPPORTED|not supported for private/i.test(msg)) {
+        setPoolGuideOpen(true);
+      }
     } finally {
       setPoolRegistering(false);
     }
@@ -685,6 +712,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
             </Hero>
 
             <CheckBlock aria-label={t('claim-check-title')}>
+              {walletChainMismatch && <Notice $kind="warn">{t('claim-wrong-network')}</Notice>}
               <CheckHeader>
                 <CheckBlockTitle>{t('claim-check-title')}</CheckBlockTitle>
                 <ReverifyLink type="button" onClick={reverify} disabled={checking}>

@@ -306,15 +306,24 @@ pub(crate) struct GameLoopEntry {
     pub _handle: tokio::task::JoinHandle<()>,
     pub action_sender: tokio::sync::mpsc::Sender<ActionRequest>,
     pub stop_sender: tokio::sync::watch::Sender<bool>,
+    /// 每次 start_game_loop 递增；watchdog 清理残留 entry 时凭它避免误删
+    /// stop+restart 产生的新一代条目。
+    pub generation: u64,
 }
 
 pub(crate) struct GameLoopRegistry {
     pub entries: HashMap<u32, GameLoopEntry>,
+    next_gen: u64,
 }
 
 impl GameLoopRegistry {
     pub fn new() -> Self {
-        Self { entries: HashMap::new() }
+        Self { entries: HashMap::new(), next_gen: 0 }
+    }
+
+    fn next_generation(&mut self) -> u64 {
+        self.next_gen = self.next_gen.wrapping_add(1);
+        self.next_gen
     }
 
     pub fn contains(&self, table_id: u32) -> bool {
@@ -420,21 +429,30 @@ impl SocketState {
     /// 2. 调用 `table.set_event_sender(tx)` 注入 sender
     /// 3. spawn `table_event_consumer` 任务消费事件并执行 socket 广播
     pub async fn init_table_event_channels(self: &Arc<Self>, io: SocketIo) {
-        let mut gs = self.state.write().await;
-        let table_ids: Vec<u32> = gs.tables.keys().copied().collect();
-        for table_id in table_ids {
-            if let Some(table) = gs.tables.get_mut(&table_id) {
-                let (tx, rx) = tokio::sync::mpsc::channel::<crate::pokergame::table::events::TableEvent>(256);
-                table.set_event_sender(tx);
-                tracing::info!("[TABLE-EVENTS] Initialized event channel for table {}", table_id);
-                // spawn 不会立即执行 consumer，它在当前任务释放锁后才调度
-                tokio::spawn(crate::socket::table_events::table_event_consumer(
-                    io.clone(),
-                    self.clone(),
-                    table_id,
-                    rx,
-                ));
+        // 写锁块内只做 channel 创建与 sender 注入，consumer 的 spawn 必须在
+        // 锁释放后进行：多线程 runtime 上 spawn 的任务可能在其他 worker
+        // 立即运行，若 consumer 将来在开头读取 state 锁，持锁 spawn 即自锁
+        // （与 39a390e 修复的持锁广播同类，tokio RwLock 不可重入）。
+        let consumers: Vec<(u32, tokio::sync::mpsc::Receiver<crate::pokergame::table::events::TableEvent>)> = {
+            let mut gs = self.state.write().await;
+            let mut consumers = Vec::new();
+            for table_id in gs.tables.keys().copied().collect::<Vec<_>>() {
+                if let Some(table) = gs.tables.get_mut(&table_id) {
+                    let (tx, rx) = tokio::sync::mpsc::channel::<crate::pokergame::table::events::TableEvent>(256);
+                    table.set_event_sender(tx);
+                    tracing::info!("[TABLE-EVENTS] Initialized event channel for table {}", table_id);
+                    consumers.push((table_id, rx));
+                }
             }
+            consumers
+        };
+        for (table_id, rx) in consumers {
+            tokio::spawn(crate::socket::table_events::table_event_consumer(
+                io.clone(),
+                self.clone(),
+                table_id,
+                rx,
+            ));
         }
     }
 
@@ -478,11 +496,32 @@ impl SocketState {
         }
         let (tx, rx) = tokio::sync::mpsc::channel::<ActionRequest>(100);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-        let handle = tokio::spawn(game_loop::game_loop_task(io, state, table_id, rx, stop_rx));
+        let generation = registry.next_generation();
+        let handle = tokio::spawn(game_loop::game_loop_task(io, state.clone(), table_id, rx, stop_rx));
+        // watchdog：game_loop_task panic 时，其结尾的 registry 清理不会执行，
+        // 残留 entry 会让本函数的 contains() 永远拒绝重启（该桌永久冻结，
+        // 动作通道也变成无人消费的死通道）。兜底：panic 可见 + 立即清理残留
+        // 条目；generation 校验防止误删 stop+restart 产生的新一代条目。
+        // 正常退出时 game_loop_task 已自行 remove，此处 handle.await 为 Ok。
+        let watchdog = tokio::spawn({
+            let supervisor = state.clone();
+            async move {
+                if let Err(join_err) = handle.await {
+                    tracing::error!(
+                        "[GAME-LOOP] task for table {table_id} failed: {join_err} — cleaning stale registry entry"
+                    );
+                    let mut registry = supervisor.game_loop_registry.write().await;
+                    if registry.entries.get(&table_id).map(|e| e.generation) == Some(generation) {
+                        registry.remove(table_id);
+                    }
+                }
+            }
+        });
         registry.insert(table_id, GameLoopEntry {
-            _handle: handle,
+            _handle: watchdog,
             action_sender: tx,
             stop_sender: stop_tx,
+            generation,
         });
     }
 
@@ -817,6 +856,22 @@ pub(crate) fn hide_opponent_cards(base: &ClientTable, wallet_address: &WalletAdd
     copy
 }
 
+/// 动作通道发送带超时。通道容量 100（见 `start_game_loop`），game loop
+/// 卡死时 `send().await` 会永久悬挂，socket handler / HTTP 请求全部冻结
+/// ——这是"无超时等待一个可能永不消费的通道"的死锁形态。超时或通道
+/// 关闭视为 game loop 无响应，调用方向客户端返回可读错误。
+pub(crate) async fn send_action_with_timeout(
+    sender: &tokio::sync::mpsc::Sender<ActionRequest>,
+    req: ActionRequest,
+) -> Result<(), &'static str> {
+    const ACTION_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    match tokio::time::timeout(ACTION_SEND_TIMEOUT, sender.send(req)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err("game loop not running"),
+        Err(_) => Err("game loop not responding (send timeout)"),
+    }
+}
+
 /// #16：带（可选）动作签名的简单动作发送。
 pub(crate) async fn send_simple_action_signed(
     socket: &SocketRef,
@@ -833,14 +888,22 @@ pub(crate) async fn send_simple_action_signed(
             .and_then(|p| gs.tables.get(&table_id).and_then(|t| t.get_pk_hex_by_wallet_address(&p.wallet_address.0)))
     };
     if let (Some(pk_hex), Some(sender)) = (pk_hex, state.get_action_sender(table_id).await) {
-        let _ = sender
-            .send(ActionRequest {
-                pk_hex,
-                action: action.to_string(),
-                amount: None,
-                seq,
-                sig: sig.map(|s| crate::pokergame::actions::ActionSig { r_hex: s.r_hex, s_hex: s.s_hex }),
-            })
-            .await;
+        let req = ActionRequest {
+            pk_hex,
+            action: action.to_string(),
+            amount: None,
+            seq,
+            sig: sig.map(|s| crate::pokergame::actions::ActionSig { r_hex: s.r_hex, s_hex: s.s_hex }),
+        };
+        if let Err(reason) = send_action_with_timeout(&sender, req).await {
+            tracing::warn!("[ACTION] {action} dropped: game loop {reason} (table {table_id})");
+            let _ = socket.emit("error", &serde_json::json!({
+                "code": "GAME_LOOP_UNRESPONSIVE",
+                "msg": "桌面无响应，请稍后重试",
+                "detail": reason,
+                "action": action,
+                "table_id": table_id
+            }));
+        }
     }
 }

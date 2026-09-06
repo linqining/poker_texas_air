@@ -398,6 +398,12 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
 #[tokio::test]
 #[ignore = "requires live STARKNET_RPC_URL (local devnet); run in the full gate or manually"]
 async fn live_flow_assignments_match_mirror_targets() {
+    // CI 全量门禁带 --run-ignored all 也会执行本测试；无 devnet 时早退跳过
+    // （本测试曾无守卫地挂在 mirror 对拍 await 上，拖死整个门禁）。
+    if std::env::var("STARKNET_RPC_URL").is_err() {
+        eprintln!("STARKNET_RPC_URL not set — skipped (no devnet)");
+        return;
+    }
     use crate::config::Config;
     use crate::models::Database;
     use crate::pokergame::game_state::{

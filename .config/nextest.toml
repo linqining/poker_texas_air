@@ -8,4 +8,4 @@ retries = 0
 # 全量门禁（含被 ignore 的慢 prove 测试 / e2e）：不强杀，60s 起仅标记 slow。
 # 用法：cargo test-all-nextest
 [profile.all]
-slow-timeout = { period = "60s" }
+slow-timeout = { period = "60s", terminate-after = 5 }

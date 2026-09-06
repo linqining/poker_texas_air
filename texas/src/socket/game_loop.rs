@@ -534,7 +534,7 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                         );
                         return true;
                     }
-                    let (active, removed_players) = {
+                    let (active, removed_players, chips_to_unlock) = {
                         // First pass: collect wallet->player_id mappings with read lock
                         let wallet_to_player_id: std::collections::HashMap<String, String> = {
                             let gs = state.state.read().await;
@@ -568,15 +568,15 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                                     }
                                 }
                             }
-                            // Return chips to sitting_out players
-                            for (address, stack) in to_remove.iter() {
-                                if *stack > 0 {
-                                    tracing::info!("return chips to sitting_out player: {} stack: {}", address, stack);
-                                    if let Some(pid) = wallet_to_player_id.get(address) {
-                                        let _ = state.db.unlock_chips(pid, *stack as i64).await;
-                                    }
-                                }
-                            }
+                            // Return chips to sitting_out players（锁内仅收集额度，
+                            // DB await 统一移到写锁块外执行）
+                            let chips_to_unlock: Vec<(String, i64)> = to_remove
+                                .iter()
+                                .filter(|(_, stack)| *stack > 0)
+                                .filter_map(|(address, stack)| {
+                                    wallet_to_player_id.get(address).map(|pid| (pid.clone(), *stack as i64))
+                                })
+                                .collect();
                             // Remove players from table
                             for (wallet_addr,_) in to_remove.iter() {
                                 tracing::info!("remove_player_by_pk: {}", wallet_addr);
@@ -585,9 +585,15 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                                 }
                             }
                             table.reset_for_next_hand();
-                            (table.active_players().len(), to_remove)
-                        } else { (0, Vec::new()) }
+                            (table.active_players().len(), to_remove, chips_to_unlock)
+                        } else { (0, Vec::new(), Vec::new()) }
                     };
+
+                    // DB 退还筹码必须在写锁外执行：state 是覆盖所有桌的全局单锁，
+                    // 跨 await 会冻结全服的 tick 与 socket handler。
+                    for (pid, stack) in chips_to_unlock {
+                        let _ = state.db.unlock_chips(&pid, stack).await;
+                    }
 
                     let tables_info = state.get_current_tables().await;
                     let players_info = state.get_current_players().await;

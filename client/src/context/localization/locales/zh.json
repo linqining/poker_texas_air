@@ -951,6 +951,7 @@
   "claim-status-checking": "检测中…",
   "claim-register-btn": "一键注册",
   "claim-registering": "注册中…",
+  "claim-wrong-network": "钱包当前不在 Sepolia 测试网：Ready 重装/更新后默认主网，此状态下钱包会直接拒绝私密操作（151 TOKEN_NOT_SUPPORTED）。请把 Ready 切到 Sepolia Testnet 后重试。",
   "claim-payout-detail": "注册后结算奖励才能私密领取（一次性，合约内的链上登记）",
   "claim-payout-tip": "提交 payout commitment（一次性链上交易，任何钱包均可）",
   "claim-pool-name": "池 viewing key（Ready 隐私系统）",

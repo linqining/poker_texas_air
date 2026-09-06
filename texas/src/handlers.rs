@@ -378,16 +378,16 @@ pub async fn player_action(
         sig: None,
     };
 
-    match sender.send(action_request).await {
+    match crate::socket::send_action_with_timeout(&sender, action_request).await {
         Ok(()) => {
             tracing::debug!("[player_action] action sent successfully, pk_hex={}, action={}, table_id={}", body.pk_hex, body.action, table_id);
             (StatusCode::OK, Json(serde_json::json!({
                 "message": format!("Action {} submitted", body.action)
             }))).into_response()
         }
-        Err(_) => {
-            tracing::error!("[player_action] failed to send action, pk_hex={}, action={}, table_id={}", body.pk_hex, body.action, table_id);
-            err_resp(StatusCode::INTERNAL_SERVER_ERROR, "Failed to send action")
+        Err(reason) => {
+            tracing::error!("[player_action] failed to send action, pk_hex={}, action={}, table_id={}: {}", body.pk_hex, body.action, table_id, reason);
+            err_resp(StatusCode::SERVICE_UNAVAILABLE, "Game loop not responding")
         }
     }
 }

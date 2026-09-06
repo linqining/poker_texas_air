@@ -70,6 +70,8 @@ aggregator = []
 test-helpers = []
 
 [dependencies]
+# 跨池死锁 tripwire 报警（blake3_flock::on_flock_pool 自检日志）
+tracing = "0.1"
 # ===== 工作区内复用 =====
 poker_l1 = { path = "poker_l1" }
 poker_protocol = { workspace = true }

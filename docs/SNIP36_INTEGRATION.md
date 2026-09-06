@@ -6,7 +6,10 @@
 > **2026-09-06 核对修订**：SNIP-36 **未被废弃**——已随 Shinobi 升级于
 > **2026-04-21 主网激活**（Starknet v0.14.2），现为 STRK20/strkBTC 隐私的
 > 核心基础设施。此前文档中"SNIP-36 新版本不支持"系对 prover 工具链版本
-> 问题的误传，不是协议状态；协议侧无等待项，缺口全部在我方（§5）。
+> 问题的误传，不是协议状态；协议侧无等待项，缺口全部在我方（§5）。>
+> **执行计划**：`docs/plan-snip36-execution.md`（P0 瘦身实测 → P1 cairo
+> ≥2.12 → P2 v3 双门 → P3 SNOS 形态 → P4 提交工具 → P5 sepolia 全链路，
+> 3–5 周，P0/P1 可立即并行开始）。
 > 关联：`DAPV_SOUNDNESS.md` §9-10（绑定方案/结算验证算法）、
 > `poker_contracts/DEPLOYMENTS.md`（dual v4 部署档案）、
 > `docs/TODO.md`（任务状态以 TODO 为准）。

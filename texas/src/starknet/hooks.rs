@@ -83,7 +83,7 @@ pub fn on_hand_complete(table: &Table) {
 }
 
 /// 锁外结算：日志一次性重放 → 强制对账 → 证明 → 入队上链。
-async fn settle_hand_from_log(input: super::prove_log::HandSettleInput) {
+async fn settle_hand_from_log(mut input: super::prove_log::HandSettleInput) {
     let table_id = input.table_id;
     let Some(start) = input.log.start.clone() else { return };
     // hand_id 在开局时由 record_hand_start 分配（动作签名挑战域同源）。
@@ -143,19 +143,32 @@ async fn settle_hand_from_log(input: super::prove_log::HandSettleInput) {
     // 根词进 settlement digest 尾词，词条进电路见证。
     let action_log_digest = starknet_ff::FieldElement::from_bytes_be(&input.action_log_digest)
         .expect("action log digest is a canonical felt");
-    let settlement =
-        match super::submit::settle_hand(
-            &mirror,
-            rake_recipient,
-            &wallet_map,
-            action_log_digest,
-            &input.action_log,
-        )
+    // settle_hand 为同步 CPU 重活（prove 约 2s/手），按其调用方约定放
+    // spawn_blocking，避免占死一个 tokio worker。mirror 移入闭包借用后
+    // 原样带回（后续还要进 PENDING_SETTLE），action_log 取走所有权。
+    let (settlement, mirror) = {
+        let action_log = std::mem::take(&mut input.action_log);
+        match tokio::task::spawn_blocking(move || {
+            let result = super::submit::settle_hand(
+                &mirror,
+                rake_recipient,
+                &wallet_map,
+                action_log_digest,
+                &action_log,
+            );
+            (result, mirror)
+        })
+        .await
         {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("[starknet-settle] table {table_id} hand {hand_id} settlement build failed: {e}");
-            return;
+            Ok((Ok(s), m)) => (s, m),
+            Ok((Err(e), _)) => {
+                tracing::warn!("[starknet-settle] table {table_id} hand {hand_id} settlement build failed: {e}");
+                return;
+            }
+            Err(join_err) => {
+                tracing::error!("[starknet-settle] table {table_id} hand {hand_id} settlement build task panicked: {join_err}");
+                return;
+            }
         }
     };
     // 对账 2：抽水必须与游戏层同分（前端筹码 / 牌史 / 链上三本账的锚）。

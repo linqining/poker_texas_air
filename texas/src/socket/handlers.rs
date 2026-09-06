@@ -359,7 +359,10 @@ async fn handle_stand_up_local(
     }
 
     // 注：on-chain 模式已在上方提前 return，以下为 off-chain 模式的本地处理路径。
-    let (stand_msg, need_clear, leave_proof_verified) = {
+    // 持写锁块内禁止 await：state 是覆盖所有桌的全局单锁，跨 await 会冻结
+    // 全服的 tick 与 socket handler。DB 退还筹码移到锁外执行，锁内只同步
+    // 收集待退还额度（必须在 remove_player 之前读取 seat.stack）。
+    let (stand_msg, need_clear, leave_proof_verified, chips_to_unlock) = {
         let mut gs = state.state.write().await;
         if let Some(table) = gs.tables.get_mut(&table_id) {
             let msg = table.find_player_by_pk(pk_hex)
@@ -367,12 +370,11 @@ async fn handle_stand_up_local(
                     seat.player.as_ref().map(|p| format!("{} left the table", p.name))
                 });
 
-            // Return chips before removing
-            if let Some(seat) = table.find_player_by_pk(pk_hex) {
-                if let Some(ref pid) = player_id {
-                    let _ = state.db.unlock_chips(pid, seat.stack as i64).await;
-                }
-            }
+            // Return chips before removing（锁内仅记录额度，锁外执行 DB await）
+            let chips_to_unlock = match (&player_id, table.find_player_by_pk(pk_hex)) {
+                (Some(pid), Some(seat)) => Some((pid.clone(), seat.stack as i64)),
+                _ => None,
+            };
 
             // Verify leave proof and remove player
             // off-chain 模式下 leave_round 可能为 None（例如客户端未生成 proof），
@@ -397,9 +399,12 @@ async fn handle_stand_up_local(
             };
 
             let clear = table.active_players().len() == 1;
-            (msg, clear, verified)
-        } else { (None, false, false) }
+            (msg, clear, verified, chips_to_unlock)
+        } else { (None, false, false, None) }
     };
+    if let Some((pid, stack)) = chips_to_unlock {
+        let _ = state.db.unlock_chips(&pid, stack).await;
+    }
 
     broadcast::broadcast_to_table(io, state, table_id, stand_msg.as_deref()).await;
 
@@ -765,7 +770,16 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                     .and_then(|p| gs.tables.get(&payload.table_id).and_then(|t| t.get_pk_hex_by_wallet_address(&p.wallet_address.0)))
             };
             if let (Some(pk_hex), Some(sender)) = (pk_hex, state.get_action_sender(payload.table_id).await) {
-                let _ = sender.send(ActionRequest { pk_hex, action: "raise".to_string(), amount: Some(payload.amount), seq: payload.seq, sig: payload.sig.map(|s| crate::pokergame::actions::ActionSig { r_hex: s.r_hex, s_hex: s.s_hex }) }).await;
+                let req = ActionRequest { pk_hex, action: "raise".to_string(), amount: Some(payload.amount), seq: payload.seq, sig: payload.sig.map(|s| crate::pokergame::actions::ActionSig { r_hex: s.r_hex, s_hex: s.s_hex }) };
+                if let Err(reason) = crate::socket::send_action_with_timeout(&sender, req).await {
+                    let _ = s.emit("error", &serde_json::json!({
+                        "code": "GAME_LOOP_UNRESPONSIVE",
+                        "msg": "桌面无响应，请稍后重试",
+                        "detail": reason,
+                        "action": "raise",
+                        "table_id": payload.table_id
+                    }));
+                }
             }
         }
     });

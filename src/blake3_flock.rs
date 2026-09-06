@@ -302,6 +302,16 @@ impl HashProofProvider for FlockProvider {
         // test/rayon stacks never overflow.  `install` is synchronous, so
         // the closure borrows the caller's slice directly — no deep copy of
         // the statement messages before entering the pool.
+        //
+        // 调用方常驻全局 rayon 池——install 同步阻塞等 flock 池，因此本池
+        // 任务绝不允许再等待全局池（交叉池 AB-BA 死锁）。此处自检只报警
+        // 不 panic（服务长跑优先）；触发即说明 flock 上下文重入了根 crate
+        // 证明路径，需立即排查（见 flock_pool() 约束注释）。
+        if on_flock_pool() {
+            tracing::error!(
+                "[flock-pool] worker re-entered prove_statements — cross-pool AB-BA deadlock risk (see flock_pool() docs)"
+            );
+        }
         flock_pool().install(|| prove_statements_on_stack(statements))
     }
 
@@ -342,6 +352,14 @@ pub fn verify_flock_archive(inner: &ArchivedFlockHashesProof) -> TexasAirResult<
     // channel/FRI cost; see prove_statements_on_stack).  The result is
     // fail-closed in segment order regardless of scheduling: the first
     // failing segment by index is the reported error.
+    // 交叉池死锁自检（只报警不 panic）：flock 池 worker 重入本函数意味着
+    // flock 上下文调用了根 crate 证明路径，与"全局 worker 阻塞等 flock 池"
+    // 互等即成 AB-BA 死锁（见 flock_pool() 约束注释）。
+    if on_flock_pool() {
+        tracing::error!(
+            "[flock-pool] worker re-entered verify_flock_archive — cross-pool AB-BA deadlock risk (see flock_pool() docs)"
+        );
+    }
     flock_pool().install(|| {
         let segments = segment_statements(&inner.statements)?;
         let mut chains = inner.chains.iter();
@@ -458,13 +476,37 @@ fn blake3_setup(n_blocks: usize) -> std::sync::Arc<Blake3Setup> {
     setup
 }
 
+/// flock 专用线程池（64MB 栈，供深递归 witness 生成使用）。
+///
+/// # 跨池死锁约束（改动前必读）
+///
+/// 全局 rayon 池的 worker（orchestrator 批量任务、组合证明 `rayon::join`、
+/// stwo 内部 `par_iter`）会经由 `install` **同步阻塞**等待本池的结果。这
+/// 安全的前提是：**本池任务绝不等待全局池**。一旦 flock 池任务回调根
+/// crate 的证明路径（它们大量使用全局池 `par_iter`/`join`），即形成
+/// "全局 worker 等 flock、flock worker 等全局"的交叉池 AB-BA 死锁——
+/// 与 texas crate 修掉的全局锁自锁（39a390e）同构。flock 库升级或在本池
+/// 内新增回调时必须复查此约束：本池线程名为 `texas-flock-N`，可用
+/// [`on_flock_pool`] 做运行时自检（两处 `install` 入口已埋日志报警）。
 fn flock_pool() -> &'static rayon::ThreadPool {
     FLOCK_POOL.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
             .stack_size(64 * 1024 * 1024)
+            .thread_name(|i| format!("texas-flock-{i}"))
             .build()
             .expect("flock prover thread pool builds")
     })
+}
+
+/// 当前线程是否运行在 flock 专用池上（按线程名判定）。
+///
+/// 用于"flock 池内不得重入根 crate 证明路径"的运行时自检——只记日志
+/// 报警、不 panic，保证服务长跑；出现该日志说明交叉池死锁的前提已被
+/// 破坏，需要立即排查（见 [`flock_pool`] 的约束说明）。
+pub fn on_flock_pool() -> bool {
+    std::thread::current()
+        .name()
+        .is_some_and(|n| n.starts_with("texas-flock-"))
 }
 
 /// The segmentation of an ordered statement list into sub-proof units: one

@@ -795,6 +795,7 @@
   "claim-status-checking": "Prüfe…",
   "claim-register-btn": "Ein-Klick-Registrierung",
   "claim-registering": "Registriere…",
+  "claim-wrong-network": "Die Wallet ist nicht im Sepolia-Testnetz. Nach Neuinstallation/Update startet Ready im Mainnet, wo private Aktionen abgelehnt werden (151 TOKEN_NOT_SUPPORTED). Bitte Ready auf Sepolia Testnet umschalten und erneut versuchen.",
   "claim-payout-detail": "Einmal registrieren, damit abgerechnete Belohnungen privat abgehoben werden können (on-chain-Registrierung im Vertrag)",
   "claim-payout-tip": "Payout-Commitment einreichen (einmalige On-Chain-Transaktion, mit jeder Wallet möglich)",
   "claim-pool-name": "Pool-Viewing-Key (Ready-Privatsystem)",

@@ -168,15 +168,180 @@ export async function detectStrk20Support(account: unknown): Promise<boolean> {
   return false;
 }
 
-/** 简单语义化版本比较（'0.10.3' vs '0.9.2' 等；非数字段按 0 处理）。 */
+/**
+ * 简单语义化版本比较（'0.10.3' vs '0.9.2' 等；非数字段按 0 处理）。
+ * 预发布后缀按 semver 规则处理：'0.10.4-rc.1' < '0.10.4'（若按数字清洗
+ * 会变成 0.10.41，连 '0.10.10' 都比不过——版本选择会被预发布线劫持）。
+ */
 export function compareVersions(a: string, b: string): number {
-  const pa = a.replace(/[^0-9.]/g, '').split('.').map((n) => parseInt(n, 10) || 0);
-  const pb = b.replace(/[^0-9.]/g, '').split('.').map((n) => parseInt(n, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
-    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+  const parse = (v: string) => {
+    const [core, pre = ''] = v.trim().split('-');
+    const nums = core
+      .replace(/[^0-9.]/g, '')
+      .split('.')
+      .map((n) => parseInt(n, 10) || 0);
+    return { nums, pre };
+  };
+  const A = parse(a);
+  const B = parse(b);
+  for (let i = 0; i < Math.max(A.nums.length, B.nums.length); i += 1) {
+    const diff = (A.nums[i] ?? 0) - (B.nums[i] ?? 0);
     if (diff !== 0) return diff;
   }
-  return 0;
+  if (A.pre === B.pre) return 0;
+  if (!A.pre) return 1;
+  if (!B.pre) return -1;
+  return A.pre < B.pre ? -1 : 1;
+}
+
+/**
+ * 钱包错误的统一文本化：钱包 JSON-RPC 错误可能是 Error、裸对象
+ * {code, message} 甚至嵌套 data——String() 会得到 '[object Object]'，
+ * 导致后面按错误码/错误名的正则全部失配。
+ */
+export function walletErrText(e: unknown): string {
+  if (typeof e === 'string') return e;
+  const rec = e as { message?: unknown; code?: unknown; data?: unknown } | null;
+  if (rec && typeof rec === 'object') {
+    const parts: string[] = [];
+    if (typeof rec.code !== 'undefined') parts.push(`code ${String(rec.code)}`);
+    if (typeof rec.message === 'string' && rec.message) parts.push(rec.message);
+    if (typeof rec.data === 'string' && rec.data) parts.push(rec.data);
+    if (parts.length) return parts.join(' ');
+    try { return JSON.stringify(e) ?? String(e); } catch { /* fallthrough */ }
+  }
+  return String((e as Error)?.message ?? e);
+}
+
+/**
+ * 官方错误码表（types-js wallet-api errors）→ 可操作的中文提示。
+ * 返回 null 表示没有映射，调用方原样透出原始错误文本。
+ */
+function friendlyWalletError(msg: string): string | null {
+  const code = Number(/code[":\s]+(\d+)/.exec(msg)?.[1] ?? 0);
+  if (code === 118 || /NOT_REGISTERED/i.test(msg)) {
+    return '钱包尚未在隐私池注册：请先在 Ready 内做一次 Shield（入池），钱包会自动完成注册，再回来操作。';
+  }
+  if (code === 119 || /INSUFFICIENT_PRIVATE_BALANCE/i.test(msg)) {
+    return '池内屏蔽余额不足：请先在 Ready 内将足额 STRK shield 入池后再试。';
+  }
+  if (code === 114 || /INVALID_REQUEST_PAYLOAD/i.test(msg)) {
+    return (
+      '钱包校验 STRK20 请求失败（' + msg.slice(0, 120) +
+      '）。多为池内无私密票据（未 shield/未注册）或钱包侧 schema 校验不通过——' +
+      '先在 Ready 里 Shield 入池后再试；若已入池仍报此错，把 Console 里 [strk20] 日志发维护者。'
+    );
+  }
+  if (code === 162 || /API_VERSION_NOT_SUPPORTED/i.test(msg)) {
+    return (
+      '钱包不支持本 dapp 请求的 Wallet API 版本（' + msg.slice(0, 120) +
+      '）。请更新 Ready 扩展后重试；若仍报错，把 Console 里 [strk20] 日志发维护者。'
+    );
+  }
+  if (code === 151 || /TOKEN_NOT_SUPPORTED/i.test(msg) || /not supported for private tokens/i.test(msg)) {
+    return (
+      '钱包当前不对该代币开放私密操作（151 TOKEN_NOT_SUPPORTED）。最常见原因是' +
+      '**钱包网络不在 Sepolia**：Ready 重装/更新后默认主网，而本 dapp 是 Sepolia 应用——' +
+      '请把 Ready 切到 Sepolia Testnet 后重试。若网络正确仍报此错，说明钱包版本尚未' +
+      '对 Sepolia STRK 开放私密代币（钱包内 STRK 资产页也没有 Shield/入池 入口），' +
+      '只能等待钱包恢复或换主网验证；并把 Console 里 [strk20] 日志发维护者。'
+    );
+  }
+  if (code === 163 || /UNKNOWN_ERROR/i.test(msg)) {
+    return (
+      '钱包在处理私密交易时内部失败（163 UNKNOWN_ERROR）。常见于钱包未入池、'
+      + '钱包版本变更后的 payload 校验或钱包侧证明服务异常：先在 Ready 内做一次 '
+      + 'Shield/入池（钱包会自动完成注册）再回来重试；若已入池仍报此错，'
+      + '把 Console 里 [strk20] 日志发维护者。'
+    );
+  }
+  return null;
+}
+
+/**
+ * 提交用 api_version 的选择。稳定版优先：钱包可能同时声明 shadow-account
+ * 预发布线（如 '0.10.4-rc.1'），Ready 对未识别的版本串会回未映射的
+ * 163 UNKNOWN_ERROR（2026-09-06 One-click register 线上报错）——预发布
+ * 候选只在稳定版失败后作兜底重试。
+ */
+function pickSubmitApiVersions(
+  declared: string[],
+): { preferred: string | null; fallback: string | null } {
+  const candidates = declared.filter(
+    (v) => typeof v === 'string' && compareVersions(v, STRK20_WALLET_API_MIN) >= 0,
+  );
+  const stable = candidates.filter((v) => !v.includes('-')).sort(compareVersions).pop() ?? null;
+  const pre = candidates.filter((v) => v.includes('-')).sort(compareVersions).pop() ?? null;
+  if (stable) return { preferred: stable, fallback: pre };
+  return { preferred: pre, fallback: null };
+}
+
+/**
+ * STRK20 actions 的统一提交阶梯（shield/claim 共用）：
+ *   1. v6 通道（WalletAccountV6.strk20InvokeTransaction）——不携带
+ *      api_version（starknet.js 只发 params:{actions}）；
+ *   2. 平铺请求面带稳定版 api_version（历史修复：Ready 5.x 缺它回 114）；
+ *   3. 预发布 api_version 兜底重试（稳定版被拒且钱包声明了预发布线时）。
+ * v6 通道的 118 NOT_REGISTERED 是终态答复（未入池钱包，平铺重试只会得到
+ * 同一个答案），直接原样抛出；其余 v6 失败（包括 163 UNKNOWN_ERROR——
+ * 2026-09-06 线上：Ready 5.33.x 对 v6 通道的 payload 校验失败不再回 114）
+ * 都降级到平铺通道重试，失败时抛最后一次错误。
+ */
+async function submitStrk20Actions(
+  wallet: Record<string, unknown> | null,
+  actions: unknown[],
+): Promise<{ transaction_hash?: string }> {
+  const declared = await getWalletApiVersions();
+  const { preferred, fallback } = pickSubmitApiVersions(declared);
+  const v6 = await getStrk20WalletAccount();
+  if (v6) {
+    try {
+      const res = await v6.strk20InvokeTransaction(actions);
+      if (res?.transaction_hash) {
+        logger.log('[strk20] submitted (V6):', res.transaction_hash);
+        return res;
+      }
+      logger.warn('[strk20] v6 channel returned empty hash; falling back to flat request');
+    } catch (err) {
+      const msg = walletErrText(err);
+      if (/NOT_REGISTERED/i.test(msg)) throw err;
+      logger.warn(
+        '[strk20] v6 channel rejected (' + msg.slice(0, 120) +
+        '); retrying flat request with api_version',
+        preferred ?? '(none)',
+      );
+    }
+  }
+  try {
+    const res = await walletApiRequest<{ transaction_hash?: string }>(
+      wallet ?? {},
+      'wallet_strk20InvokeTransaction',
+      { actions, ...(preferred ? { api_version: preferred } : {}) },
+    );
+    if (res?.transaction_hash) {
+      logger.log('[strk20] submitted (flat, api_version', preferred ?? '(none)', '):', res.transaction_hash);
+      return res;
+    }
+    throw new Error('wallet returned empty tx hash');
+  } catch (flatErr) {
+    const flatMsg = walletErrText(flatErr);
+    if (!fallback || fallback === preferred) throw flatErr;
+    logger.warn(
+      '[strk20] flat submit failed (' + flatMsg.slice(0, 120) +
+      '); retrying with prerelease api_version',
+      fallback,
+    );
+    const res = await walletApiRequest<{ transaction_hash?: string }>(
+      wallet ?? {},
+      'wallet_strk20InvokeTransaction',
+      { actions, api_version: fallback },
+    );
+    if (res?.transaction_hash) {
+      logger.log('[strk20] submitted (flat, prerelease api_version', fallback, '):', res.transaction_hash);
+      return res;
+    }
+    throw new Error('wallet returned empty tx hash');
+  }
 }
 
 /**
@@ -396,8 +561,9 @@ export interface ClaimRewardsArgs {
  * 118(NOT_REGISTERED) 的官方解法（"先做一次 Shield，钱包会自动完成注册"）。
  * 官方 schema 的 shield 动作只有 {type:'deposit', token, amount} 一种形状
  * （不存在 'shield' 类型；shield 实际是 approve+deposit 两笔，钱包弹两次确认）。
- * 提交管线与 claimRewardsPrivate 完全一致：v6 通道 → 114 时平铺通道带
- * api_version 重试。
+ * 提交管线与 claimRewardsPrivate 完全一致（共用 submitStrk20Actions）：
+ * v6 通道 → 平铺带稳定版 api_version 重试 → 预发布版本兜底（v6 通道的
+ * 163 UNKNOWN_ERROR 同样触发降级重试——2026-09-06 线上教训）。
  *
  * 已知边界（官方 SDK 文档 sdk/register、setup-requirements）：池注册 = 上链
  * 发布 viewing key，而 viewing key 只存在于钱包内，dapp 无法代注册（
@@ -436,66 +602,23 @@ export async function shieldForPoolRegistration(
   // INVALID_REQUEST_PAYLOAD(114)——与私密领取同一教训，线上实测）。
   const amountHex = '0x' + amountWei.toString(16);
   const actions = [{ type: 'deposit', token: CANONICAL_STRK_ADDRESS, amount: amountHex }];
-  // 与 claimRewardsPrivate 相同：先取钱包声明的最高 0.10.x 版本，v6 通道
-  // 被拒绝后经平铺请求面带上 api_version 重试（starknet.js 的
-  // strk20InvokeTransaction 只发 params:{actions}，无法携带 api_version，
-  // Ready 5.x 缺它必回 114——线上实测）。
-  const declared = await getWalletApiVersions();
-  const apiVersion = declared
-    .filter((v) => compareVersions(v, STRK20_WALLET_API_MIN) >= 0)
-    .sort(compareVersions)
-    .pop();
-  const v6 = await getStrk20WalletAccount();
-  if (v6) {
-    try {
-      const res = await v6.strk20InvokeTransaction(actions);
-      const hash = res?.transaction_hash ?? '';
-      if (hash) {
-        logger.log('[strk20] pool-registration shield submitted (V6):', hash);
-        return { hash, success: true };
-      }
-    } catch (err) {
-      const msg = String(err);
-      // 118：从未入池的钱包不能 deposit——唯一出路是钱包内 Shield（自动注册）
-      if (/NOT_REGISTERED/i.test(msg)) return notRegisteredResult();
-      // 非 114 的错误原样抛出（余额不足等，钱包给最终答复）
-      if (!/INVALID_REQUEST_PAYLOAD/i.test(msg)) throw err;
-      logger.warn(
-        '[strk20] v6 shield rejected (INVALID_REQUEST_PAYLOAD); retrying flat request with api_version',
-        apiVersion ?? '(none)',
-      );
-      if (typeof (wallet as { request?: unknown } | null)?.request !== 'function') throw err;
-    }
-  }
+  // 提交走统一阶梯：v6 通道 → 平铺带稳定版 api_version → 预发布版本兜底
+  // （v6 通道的 163 UNKNOWN_ERROR 也会降级重试——2026-09-06 线上教训）。
   try {
-    // 平铺/WSF 统一经 walletApiRequest，带 api_version（若已知）
-    const res = await walletApiRequest<{ transaction_hash?: string }>(
-      wallet ?? {},
-      'wallet_strk20InvokeTransaction',
-      { actions, ...(apiVersion ? { api_version: apiVersion } : {}) },
-    );
+    const res = await submitStrk20Actions(wallet, actions);
     const hash = res?.transaction_hash ?? '';
-    if (hash) {
-      logger.log('[strk20] pool-registration shield submitted (flat):', hash);
-      return { hash, success: true };
-    }
+    if (!hash) return { hash: '', success: false, error: 'wallet returned empty tx hash' };
+    logger.log('[strk20] pool-registration shield submitted:', hash);
+    return { hash, success: true };
   } catch (e) {
-    const msg = String(e);
-    logger.warn('[strk20] pool-registration shield flat submit failed:', msg);
+    const msg = walletErrText(e);
+    logger.warn('[strk20] pool-registration shield submit failed:', msg);
+    // 118：从未入池的钱包不能 deposit——唯一出路是钱包内 Shield（自动注册）
     if (/NOT_REGISTERED/i.test(msg)) return notRegisteredResult();
-    if (/INVALID_REQUEST_PAYLOAD/i.test(msg)) {
-      return {
-        hash: '',
-        success: false,
-        error:
-          '钱包校验 Shield 请求失败（114 INVALID_REQUEST_PAYLOAD）。' +
-          '请在 Ready 钱包内直接使用 Shield/入池 入口手工入池一次（钱包会自动完成注册），再回来重试；' +
-          '若已入池仍报此错，请把 Console 里 [strk20] 日志发维护者。',
-      };
-    }
-    return { hash: '', success: false, error: msg };
+    const friendly = friendlyWalletError(msg);
+    if (friendly) return { hash: '', success: false, error: friendly };
+    throw e;
   }
-  return { hash: '', success: false, error: 'wallet returned empty tx hash' };
 }
 
 export async function claimRewardsPrivate(
@@ -560,99 +683,37 @@ export async function claimRewardsPrivate(
     },
   ];
   try {
-    // 官方通道：WalletAccountV6.strk20InvokeTransaction（get-starknet v6
-    // discovery 拿到的 WSF 钱包）。ZK 证明、费用动作都在钱包侧完成。
-    // spec 的 params 支持 api_version（'0.10.3' 等）：部分钱包按它做
-    // payload schema 校验，缺失时回 INVALID_REQUEST_PAYLOAD(114)。两路
-    // 提交都带上钱包声明的最高 0.10.x 版本。
-    const declared = await getWalletApiVersions();
-    const apiVersion = declared
-      .filter((v) => compareVersions(v, STRK20_WALLET_API_MIN) >= 0)
-      .sort(compareVersions)
-      .pop();
-    const v6 = await getStrk20WalletAccount();
-    if (v6) {
-      // 预检屏蔽余额：为 0/不足时钱包只会回模糊的 INVALID_REQUEST_PAYLOAD，
-      // 提前拦截并给出可操作提示（查询失败不阻断，让钱包给最终答复）。
-      try {
-        const entries = await v6.strk20Balances([CANONICAL_STRK_ADDRESS]);
-        const norm = CANONICAL_STRK_ADDRESS.toLowerCase();
-        const hit = (entries ?? []).find((e) => BigInt(e.token ?? 0n) === BigInt(norm));
-        const shielded = hit ? BigInt(hit.balance) : 0n;
-        if (shielded < amount) {
-          const fmt = (v: bigint) => (Number(v) / 1e18).toFixed(4);
-          return {
-            hash: '',
-            success: false,
-            error:
-              `池内屏蔽余额不足（${fmt(shielded)} STRK < 需要 ${fmt(amount)} STRK）。` +
-              '请先在 Ready 钱包内将 STRK shield 入隐私池（钱包内有 Shield/入池 入口），再回来私密领取。',
-          };
-        }
-      } catch (e) {
-        logger.warn('[strk20] pre-claim shielded balance check failed (continuing):', e);
+    // 预检屏蔽余额：为 0/不足时钱包只会回模糊的 INVALID_REQUEST_PAYLOAD，
+    // 提前拦截并给出可操作提示（查询失败不阻断，让钱包给最终答复）。
+    try {
+      const entries = await getShieldedBalance(account, CANONICAL_STRK_ADDRESS);
+      if (entries !== null && entries < amount) {
+        const fmt = (v: bigint) => (Number(v) / 1e18).toFixed(4);
+        return {
+          hash: '',
+          success: false,
+          error:
+            `池内屏蔽余额不足（${fmt(entries)} STRK < 需要 ${fmt(amount)} STRK）。` +
+            '请先在 Ready 钱包内将 STRK shield 入隐私池（钱包内有 Shield/入池 入口），再回来私密领取。',
+        };
       }
-      try {
-        const res = await v6.strk20InvokeTransaction(actions);
-        const hash = res?.transaction_hash ?? '';
-        if (!hash) return { hash: '', success: false, error: 'wallet returned empty tx hash' };
-        logger.log('[strk20] private claim submitted (V6):', hash);
-        return { hash, success: true };
-      } catch (err) {
-        // starknet.js 的 strk20InvokeTransaction 只发 params:{actions}，无法携带
-        // api_version；Ready（5.x）对 invoke 请求按 api_version 做 payload schema
-        // 校验，缺失时直接回 114（余额查询不受影响，线上实测）。带版本号经平铺
-        // 请求面重试；其他错误原样抛出。
-        if (!/INVALID_REQUEST_PAYLOAD/i.test(String(err))) throw err;
-        logger.warn(
-          '[strk20] v6 invoke rejected (INVALID_REQUEST_PAYLOAD); retrying flat request with api_version',
-          apiVersion ?? '(none)',
-        );
-        if (typeof (wallet as { request?: unknown } | null)?.request !== 'function') throw err;
-      }
+    } catch (e) {
+      logger.warn('[strk20] pre-claim shielded balance check failed (continuing):', e);
     }
-    // 回退：平铺/WSF 统一经 walletApiRequest，带 api_version（若已知）
-    const res = await walletApiRequest<{ transaction_hash?: string }>(
-      wallet ?? {},
-      'wallet_strk20InvokeTransaction',
-      { actions, ...(apiVersion ? { api_version: apiVersion } : {}) },
-    );
+    // 提交走统一阶梯：v6 通道 → 平铺带稳定版 api_version → 预发布版本兜底
+    // （v6 通道的 163 UNKNOWN_ERROR 也会降级重试——2026-09-06 线上教训）。
+    const res = await submitStrk20Actions(wallet, actions);
     const hash = res?.transaction_hash ?? '';
     if (!hash) return { hash: '', success: false, error: 'wallet returned empty tx hash' };
-    logger.log('[strk20] private claim submitted (flat):', hash);
+    logger.log('[strk20] private claim submitted:', hash);
     return { hash, success: true };
   } catch (err) {
     logger.error('[strk20] private claim failed:', err);
-    const msg = String(err);
-    // 按官方错误码表归因（types-js wallet-api errors）：
-    // 114 INVALID_REQUEST_PAYLOAD = 请求 schema 校验失败
-    // 118 NOT_REGISTERED = 用户未在隐私池注册（先在钱包里 shield 一次）
-    // 119 INSUFFICIENT_PRIVATE_BALANCE = 池内屏蔽余额不足
-    const code = Number(/code[":\s]+(\d+)/.exec(msg)?.[1] ?? 0);
-    if (code === 118 || /NOT_REGISTERED/i.test(msg)) {
-      return {
-        hash: '',
-        success: false,
-        error: '钱包尚未在隐私池注册：请先在 Ready 内做一次 Shield（入池），钱包会自动完成注册，再回来私密领取。',
-      };
-    }
-    if (code === 119 || /INSUFFICIENT_PRIVATE_BALANCE/i.test(msg)) {
-      return {
-        hash: '',
-        success: false,
-        error: '池内屏蔽余额不足：请先在 Ready 内将足额 STRK shield 入池（私密领取要求池内余额 ≥ 领取额）。',
-      };
-    }
-    if (code === 114 || /INVALID_REQUEST_PAYLOAD/i.test(msg)) {
-      return {
-        hash: '',
-        success: false,
-        error:
-          '钱包校验 STRK20 请求失败（' + msg.slice(0, 120) +
-          '）。多为池内无私密票据（未 shield/未注册）或钱包侧 schema 校验不通过——先在 Ready 里 Shield 入池后再试；若已入池仍报此错，把 Console 里 [strk20] 日志发维护者。',
-      };
-    }
-    return { hash: '', success: false, error: msg };
+    // 按官方错误码表归因（types-js wallet-api errors）：118 未注册 /
+    // 119 屏蔽余额不足 / 114 schema 校验失败 / 162 api_version 不支持 /
+    // 163 钱包内部失败（映射与文案统一在 friendlyWalletError）。
+    const msg = walletErrText(err);
+    return { hash: '', success: false, error: friendlyWalletError(msg) ?? msg };
   }
 }
 

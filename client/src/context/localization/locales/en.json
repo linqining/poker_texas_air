@@ -951,6 +951,7 @@
   "claim-status-checking": "Checking…",
   "claim-register-btn": "One-click register",
   "claim-registering": "Registering…",
+  "claim-wrong-network": "Your wallet is not on Sepolia Testnet. After a reinstall/update Ready defaults to mainnet, where private actions are rejected (151 TOKEN_NOT_SUPPORTED). Switch Ready to Sepolia Testnet and retry.",
   "claim-payout-detail": "Register once so settled rewards can be claimed privately (on-chain registration inside the contract)",
   "claim-payout-tip": "Submit the payout commitment (one-time on-chain transaction, works with any wallet)",
   "claim-pool-name": "Pool viewing key (Ready privacy system)",
