@@ -153,6 +153,7 @@ pub fn run_compose(
     let payload = mint::mint_hand(
         hand_binding,
         counts.n_own,
+        0,
         counts.n_reveal,
         counts.n_leave,
         counts.n_recon,

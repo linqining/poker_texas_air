@@ -653,3 +653,270 @@ mod hand_start_baseline_tests {
         assert!(!table.mental_poker_game.players.contains_key(orphan.to_string().as_str()));
     }
 }
+
+// ============================================================
+// snip36 递归证明 e2e：真实一手牌 → 每参与者首条已签名动作 →
+// action-sig 批次 → host 直验 + 承诺链对拍 → （ignore）完整出证。
+// 证明材料 = 动作签名 v3（endorsement 退役后的唯一参与背书来源）。
+// ============================================================
+mod recursion_e2e {
+    use super::*;
+    use crate::pokergame::actions::ActionSig;
+    use crate::starknet::recursion_prover;
+    use hand_verify_native::recurse::{
+        build_action_batch_payload, fold_accumulator, prove_payload_layer, write_prod_params,
+        RecurseTask, GENESIS_ACC,
+    };
+    use hand_verify_native::handbatch::{payload_digest, verify_hand};
+    use poker_protocol::z_poker::protocol::sign_game_action;
+
+    /// 带签名的动作：v3 域签名 → 服务端验签（table 口径）→ 动作执行 →
+    /// record_action 落签名本体（镜像 game_loop 接受点的完整链路）。
+    fn signed_act_and_advance(
+        table: &mut Table,
+        players: &[Player],
+        action_override: Option<&str>,
+    ) {
+        let turn_seat = table.turn().expect("betting must have a current turn");
+        let turn_pk = {
+            let seat = table.local_seats.get(&turn_seat).expect("turn seat");
+            seat.player.as_ref().expect("seat occupied").pk_hex.clone()
+        };
+        let player = players.iter().find(|p| p.pk_hex == turn_pk).expect("turn player");
+
+        let others_max_bet = table
+            .local_seats
+            .values()
+            .filter(|s| s.id != turn_seat && !s.folded && s.player.is_some())
+            .map(|s| s.total_bet)
+            .max()
+            .unwrap_or(0);
+        let my_bet = table.local_seats.get(&turn_seat).map(|s| s.total_bet).unwrap_or(0);
+        let action = match action_override {
+            Some(a) => a.to_string(),
+            None => {
+                if my_bet < others_max_bet { "call".to_string() } else { "check".to_string() }
+            }
+        };
+        let amount = if action == "call" {
+            others_max_bet.saturating_sub(my_bet)
+        } else {
+            0
+        };
+
+        // v3 签名（hand_id 从开局分配值——与真实客户端同源）。
+        let hand_id = table
+            .hand_proof_log
+            .start
+            .as_ref()
+            .expect("hand started")
+            .hand_id;
+        let seat = table
+            .find_player_by_pk(&player.pk_hex)
+            .expect("turn player seated")
+            .id;
+        let seq = table.accepted_seq_of(seat) + 1;
+        let (r_hex, s_hex) = sign_game_action(
+            &player.client.sk,
+            table.summary.id,
+            hand_id,
+            seq,
+            &action,
+            amount,
+            &mut OsRng,
+        );
+        let sig = ActionSig { r_hex: r_hex.clone(), s_hex: s_hex.clone() };
+
+        // 服务端口径验签（table_id/hand_id/seq/action/amount 全进签名域）。
+        assert!(
+            table.verify_action_sig(&player.pk_hex, seq, &action, amount, &sig),
+            "signature must verify against the table domain"
+        );
+
+        let result = match action.as_str() {
+            "call" => table.handle_call(&player.pk_hex),
+            "check" => table.handle_check(&player.pk_hex),
+            _ => unreachable!("test only drives check/call"),
+        };
+        let _ = result;
+
+        // 接受点：seq 单调 + 签名本体落日志（game_loop 镜像）。
+        let seq = seq.max(table.accepted_seq_of(seat));
+        table.record_action(seat, seq, &action, amount, false, true, Some(sig));
+
+        // turn 推进镜像（同 act_and_advance）。
+        if table.unfolded_players().len() <= 1 {
+            table.end_without_showdown();
+        } else if table.is_betting_round_complete() {
+            table.advance_to_next_phase();
+        } else {
+            let last = table.turn().unwrap_or(1);
+            table.set_turn(table.next_unfolded_player(last, 1));
+        }
+    }
+
+    /// 与 run_full_hand 同骨架，但下注轮全部走带签名动作。
+    fn run_signed_full_hand(table_id: u32) -> Table {
+        let mut table = Table::new(table_id, "recursion-e2e".to_string(), 10000, 9, String::new());
+        let players = seat_players(&mut table, 2);
+        table.mental_poker_game.encrypt_deck();
+
+        table.start_hand();
+        let mut shuffled = 0;
+        while table.shuffle_state.is_active() && !table.shuffle_state.pending_players.is_empty() {
+            let current = table
+                .shuffle_state
+                .current_player_pk
+                .clone()
+                .expect("current shuffler set");
+            let player = players
+                .iter()
+                .find(|p| p.pk_hex == current)
+                .expect("current shuffler seated");
+            submit_real_shuffle(&mut table, player);
+            shuffled += 1;
+        }
+        table.advance_shuffle();
+        assert!(table.reveal_token_state.phase == RevealPhase::HandReveal);
+        drive_reveal_phase(&mut table, &players);
+
+        let mut steps = 0;
+        loop {
+            steps += 1;
+            assert!(steps < 400, "game did not terminate");
+            if table.reveal_token_state.is_active() {
+                let phase_done = drive_reveal_phase(&mut table, &players);
+                if phase_done == RevealPhase::ShowdownReveal {
+                    table.settle_hand();
+                    break;
+                }
+                continue;
+            }
+            if table.summary.hand_over || table.round_state() == RoundState::Waiting {
+                break;
+            }
+            if table.turn().is_some() {
+                signed_act_and_advance(&mut table, &players, None);
+                continue;
+            }
+            break;
+        }
+        assert!(
+            table.summary.went_to_showdown,
+            "check/call line goes to showdown"
+        );
+        table
+    }
+
+    /// host 自验（不出证，毫秒级）：一手真实牌的已签名动作 →
+    /// action-sig 批次 → host 直验闭合 → 承诺链对拍确定性。
+    #[test]
+    fn recursion_e2e_signed_hand_host_verify() {
+        let table = run_signed_full_hand(9);
+
+        // 材料提取：每参与者首条已签名动作 + 座位公钥。
+        let start = table.hand_proof_log.start.as_ref().expect("hand started");
+        let hand_id = start.hand_id;
+        let materials = recursion_prover::action_sig_materials(
+            &table.action_log,
+            &start.participants,
+        );
+        assert_eq!(
+            materials.len(),
+            start.participants.len(),
+            "every participant must have a first signed action"
+        );
+
+        // 组批（v3 header 6 词 + 每语句 10 词）。
+        let hb = starknet_crypto::FieldElement::from(0xABCDu64);
+        let statements: Vec<hand_verify_native::recurse::ActionSigStatement> = materials
+            .iter()
+            .map(|m| hand_verify_native::recurse::ActionSigStatement {
+                pk_x_hex: m.pk_x_hex.clone(),
+                pk_y_hex: m.pk_y_hex.clone(),
+                r_x_hex: m.r_x_hex.clone(),
+                r_y_hex: m.r_y_hex.clone(),
+                s_hex: m.s_hex.clone(),
+                table_id: table.summary.id,
+                hand_id,
+                seq: m.seq,
+                action: m.action.clone(),
+                amount: m.amount,
+            })
+            .collect();
+        let payload =
+            build_action_batch_payload(hb, table.summary.id, hand_id, &statements)
+                .expect("batch build");
+
+        // host 直验（与 Cairo verify_hand 同构的方程检查）。
+        let report = verify_hand(hb, &payload).expect("host verify");
+        assert!(report.accepted(), "signed batch must verify host-side");
+        assert_eq!(report.n_action, 2, "two action-sig statements");
+        assert_eq!(report.n_own, 0, "ownership bucket retired with endorsements");
+
+        // 承诺链对拍：claim 与 acc 与 host 独立重算一致。
+        let task = RecurseTask { hand_binding: hb, payload: payload.clone() };
+        let claim = task.claim(&report);
+        let acc = fold_accumulator(GENESIS_ACC, &[claim]);
+        // digest 也应是 payload 的确定性函数（重算一次比对）。
+        let claim2 = poseidon_reclaim(hb, &payload, &report);
+        assert_eq!(claim, claim2, "claim must be deterministic");
+        assert!(acc != starknet_crypto::FieldElement::ZERO);
+    }
+
+    fn poseidon_reclaim(
+        hb: starknet_crypto::FieldElement,
+        payload: &[starknet_crypto::FieldElement],
+        report: &hand_verify_native::handbatch::VerifyReport,
+    ) -> starknet_crypto::FieldElement {
+        use starknet_crypto::{poseidon_hash_many, FieldElement};
+        let digest = payload_digest(payload);
+        poseidon_hash_many(&[
+            hb,
+            digest,
+            FieldElement::from(report.n_own),
+            FieldElement::from(report.n_reveal),
+            FieldElement::from(report.n_leave),
+            FieldElement::from(report.n_recon),
+            FieldElement::from(report.n_action),
+        ])
+    }
+
+    /// 完整出证（真实 prove-hand：compile → run → prove → 内置 verify →
+    /// parity 门）。需要 proving-tool/target/release/prove-hand。
+    #[test]
+    #[ignore = "runs prove-hand (~15s); needs proving-tool release binary"]
+    fn recursion_e2e_signed_hand_full_prove() {
+        let table = run_signed_full_hand(9);
+        let start = table.hand_proof_log.start.as_ref().expect("hand started");
+        let hand_id = start.hand_id;
+        let materials = recursion_prover::action_sig_materials(
+            &table.action_log,
+            &start.participants,
+        );
+        assert_eq!(materials.len(), 2);
+        let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("output/e2e-signed-hand");
+        let out = recursion_prover::prove_batch_blocking(
+            table.summary.id,
+            hand_id,
+            hand_binding_bytes(&table),
+            &materials,
+            &out_dir,
+        )
+        .expect("full prove");
+        assert!(out.acc.len() == 66, "acc is a felt hex");
+        assert!(out.ec_ops > 0, "EC residuals proven in trace");
+        println!(
+            "e2e prove ok: acc={} steps={} ec_ops={} elapsed_ms={}",
+            out.acc, out.steps, out.ec_ops, out.elapsed_ms
+        );
+    }
+
+    fn hand_binding_bytes(table: &Table) -> [u8; 32] {
+        let mut hb = [0xABu8; 32];
+        hb[0] = 0x03;
+        let _ = table;
+        hb
+    }
+}

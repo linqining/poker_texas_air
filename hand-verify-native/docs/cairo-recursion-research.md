@@ -156,3 +156,33 @@ cargo run --release -- recurse            # 功能往返 + 负例
 cargo run --release -- recurse-perf       # 性能矩阵
 ```
 
+
+## 6. texas 集成（2026-09-06，form-③ → 结算路径）
+
+递归信封已并入根 workspace（`hand-verify-native` 成为成员，运行时仍依赖
+proving-tool 的 prove-hand 二进制），并接入 texas 结算路径：
+
+- **挑战域 v3**：动作签名挑战升级为 felt 直通
+  `poseidon([label, table_id, hand_id, seq, action_felt, amount, R_x, R_y])`
+  （`poker-protocol-core::stark_curve::action_sig_challenge`），与
+  ownership/reveal 挑战同构——Cairo 端 `hand_verify.cairo` 的 action 桶
+  （kind=5，词条 10 词）原生复刻，无字节级操作。v2 字节域未上生产即被
+  取代；跨 crate 对拍测试
+  （`action_sig_challenge_matches_protocol_core`，dev-dep
+  poker-protocol-core）钉死 raw ≡ core 标量（mod n）。
+  教训：types-core 的 `Felt::from_raw` 是 Montgomery limbs 语义——
+  常量 felt 必须走 `from_bytes_be`（对拍测试抓出）。
+- **签名留存**：`ActionLogEntry.sig: Option<ActionSig>`——验签成功即落
+  签名本体（此前验完即丢），是本批次的数据源；auto 代打为 None。
+- **snip36 模式**（`STARKNET_SETTLEMENT_MODE=snip36`）：牌局结束 →
+  每参与者首条已签名动作组 action-sig 批次（header 6 词尾槽 n_action）
+  → 异步出证（`spawn_blocking` + prove-hand）→ host parity 门 →
+  acc/proof 落盘 prover_work_dir → v3 双门入口提交（随 cairo ≥2.12
+  合约上链后激活）；证明失败自动回退 legacy 结算，结算永不阻塞。
+  非 snip36 模式（legacy/v2）不启动任何证明进程。
+- **端到端**：`recurse` 全绿（主链 2 层 × 2 任务含 n_action=2、
+  EC_OP 256、parity ✓、负例语料 tampered/wrong-prev 均拒）。
+- ⚠️ **已知间歇问题**：cairo-lang executable 编译/运行存在偶发的
+  `ASSERT_EQ failed: 0 != 1 @ pc=0:17`（同代码同输入时绿时挂，重跑即
+  复绿）——疑似编译器或 runner 的非确定行为，与改动内容无关；正式
+  环境需固定编译器版本并做双跑校验（记录待查）。

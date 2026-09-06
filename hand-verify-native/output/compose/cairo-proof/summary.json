@@ -11,52 +11,52 @@
     "public_outputs": "public_outputs.json"
   },
   "timings_ms": {
-    "compile": 1437,
-    "run_witness": 364,
-    "prove": 9546,
-    "verify": 26,
-    "serialize": 24,
-    "total": 11408
+    "compile": 1316,
+    "run_witness": 359,
+    "prove": 7315,
+    "verify": 22,
+    "serialize": 38,
+    "total": 9059
   },
   "execution": {
-    "steps": 900,
-    "unique_pcs": 626,
+    "steps": 938,
+    "unique_pcs": 664,
     "builtin_instance_counter": {
-      "bitwise_builtin": 0,
-      "range_check_builtin": 64,
-      "pedersen_builtin": 0,
-      "poseidon_builtin": 16,
-      "ec_op_builtin": 16,
-      "add_mod_builtin": 0,
-      "range_check96_builtin": 0,
       "mul_mod_builtin": 0,
-      "output_builtin": 1
+      "bitwise_builtin": 0,
+      "range_check96_builtin": 0,
+      "add_mod_builtin": 0,
+      "output_builtin": 1,
+      "ec_op_builtin": 16,
+      "poseidon_builtin": 16,
+      "range_check_builtin": 64,
+      "pedersen_builtin": 0
     },
     "opcodes_instance_counter": {
-      "mul_opcode_small": 3,
-      "add_opcode": 74,
-      "assert_eq_opcode_imm": 86,
-      "call_opcode_abs": 0,
-      "jnz_opcode_taken": 77,
+      "add_opcode_small": 166,
+      "ret_opcode": 23,
+      "add_opcode": 77,
       "jump_opcode_double_deref": 0,
+      "call_opcode_abs": 0,
       "jump_opcode_abs": 0,
-      "blake_compress_opcode": 0,
-      "call_opcode_rel_imm": 22,
-      "jump_opcode_rel_imm": 14,
-      "generic_opcode": 0,
-      "add_opcode_small": 158,
-      "assert_eq_opcode_double_deref": 190,
-      "mul_opcode": 34,
-      "add_ap_opcode": 18,
-      "ret_opcode": 22,
+      "jump_opcode_rel_imm": 15,
+      "call_opcode_rel_imm": 23,
+      "add_ap_opcode": 20,
+      "assert_eq_opcode_double_deref": 197,
       "qm_31_add_mul_opcode": 0,
-      "assert_eq_opcode": 165,
+      "assert_eq_opcode_imm": 83,
+      "jnz_opcode_non_taken": 35,
+      "generic_opcode": 0,
+      "mul_opcode_small": 4,
+      "mul_opcode": 34,
+      "blake_compress_opcode": 0,
       "jump_opcode_rel": 0,
-      "jnz_opcode_non_taken": 37
+      "assert_eq_opcode": 178,
+      "jnz_opcode_taken": 83
     }
   },
   "public": {
-    "program_hash": "0x303029d8ce0ec1d0295e4037fc7f87a1ada0c27423cc99bcd080d25b1c6829f",
+    "program_hash": "0x6e9b1bf96f94c4829942e82363c5cb32a940a802d112b84f4e68aec5e7df344",
     "output": [
       "0x1"
     ]

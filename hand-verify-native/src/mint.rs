@@ -54,6 +54,7 @@ fn scalar_from_felt(f: Felt) -> Felt {
 pub fn mint_hand(
     hand_binding: Felt,
     n_own: u32,
+    n_action: u32,
     n_reveal: u32,
     n_leave: u32,
     n_recon: u32,
@@ -73,12 +74,18 @@ pub fn mint_hand(
         recon_blocks.push(mint_reconstruct(hand_binding, g, &mut rand));
     }
 
+    let mut action_blocks = Vec::with_capacity(n_action as usize);
+    for _ in 0..n_action {
+        action_blocks.push(mint_action(g, &mut rand, "call"));
+    }
+
     let mut payload = Vec::new();
     payload.push(Felt::from(n_own as u64)); // n_own
     payload.push(Felt::from(0u64)); // n_shuffle (unsupported → must stay 0)
     payload.push(Felt::from(n_reveal as u64)); // n_reveal
     payload.push(Felt::from(n_leave as u64)); // n_leave
     payload.push(Felt::from(n_recon as u64)); // n_recon
+    payload.push(Felt::from(n_action as u64)); // n_action (v3 header tail)
 
     // Ownership: pk = sk·G, R = w·G, s = (w + c·sk) mod n.
     for _ in 0..n_own {
@@ -120,7 +127,43 @@ pub fn mint_hand(
 
     payload.extend(leave_blocks.into_iter().flatten());
     payload.extend(recon_blocks.into_iter().flatten());
+    payload.extend(action_blocks.into_iter().flatten());
     payload
+}
+
+/// Mint one action-signature entry (v3 felt-domain challenge): the player
+/// signs `(table_id, hand_id, seq, action, amount)`; the entry rides the
+/// challenge words alongside (pk, R, s).
+fn mint_action(g: Point, rand: &mut RandChain, action: &str) -> Vec<Felt> {
+    let sk = scalar_from_felt(rand.next());
+    let w = rand.next();
+    let pk = g.mul(sk);
+    let r = g.mul(w);
+    let action_felt = super::handbatch::ascii_felt_pub(action);
+    let table_id = 7u64;
+    let hand_id = 9u64;
+    let seq = rand_u64(rand);
+    let amount = 0u64;
+    let c = super::handbatch::action_sig_challenge_raw(
+        table_id, hand_id, seq, action_felt, amount, r,
+    );
+    let s = scalar_add_mod_n(w, c, sk);
+    let (pkx, pky) = pk.to_affine().unwrap();
+    let (rx, ry) = r.to_affine().unwrap();
+    vec![
+        pkx, pky, rx, ry, s,
+        Felt::from(table_id),
+        Felt::from(hand_id),
+        Felt::from(seq),
+        action_felt,
+        Felt::from(amount),
+    ]
+}
+
+fn rand_u64(rand: &mut RandChain) -> u64 {
+    let f = rand.next();
+    let bytes = f.to_bytes_be();
+    u64::from_be_bytes(bytes[24..].try_into().expect("tail 8 bytes"))
 }
 
 /// Mint one leave block peeling a random layer, with `n_cards` cards.

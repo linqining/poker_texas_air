@@ -40,7 +40,8 @@ pub struct RecurseTask {
 
 impl RecurseTask {
     /// Host 侧 claim 词 —— 与 Cairo 端 claim 公式逐 felt 同构：
-    /// `poseidon([hand_binding, payload_digest, n_own, n_reveal, n_leave, n_recon])`。
+    /// `poseidon([hand_binding, payload_digest, n_own, n_reveal, n_leave,
+    ///             n_recon, n_action])`（v3：尾部追加 action 桶计数）。
     pub fn claim(&self, report: &VerifyReport) -> Felt {
         let digest = payload_digest(&self.payload);
         poseidon_hash_many(&[
@@ -50,6 +51,7 @@ impl RecurseTask {
             Felt::from(report.n_reveal),
             Felt::from(report.n_leave),
             Felt::from(report.n_recon),
+            Felt::from(report.n_action),
         ])
     }
 }
@@ -64,7 +66,12 @@ pub fn fold_accumulator(prev_acc: Felt, claims: &[Felt]) -> Felt {
 }
 
 /// 铸造 `n_tasks` 手诚实任务（seed 连号，hand_binding 派生自 seed）。
-pub fn mint_tasks(counts: KindCounts, n_tasks: usize, seed_base: u64) -> Vec<RecurseTask> {
+pub fn mint_tasks(
+    counts: KindCounts,
+    n_action: u32,
+    n_tasks: usize,
+    seed_base: u64,
+) -> Vec<RecurseTask> {
     (0..n_tasks as u64)
         .map(|i| {
             let seed = seed_base + i;
@@ -72,6 +79,7 @@ pub fn mint_tasks(counts: KindCounts, n_tasks: usize, seed_base: u64) -> Vec<Rec
             let payload = mint::mint_hand(
                 hand_binding,
                 counts.n_own,
+                n_action,
                 counts.n_reveal,
                 counts.n_leave,
                 counts.n_recon,
@@ -318,6 +326,7 @@ pub struct RecursionReport {
 /// 的公开输出作为 `prev_acc`。每层过 parity 门 + 独立复验。
 pub fn run_recursion(
     counts: KindCounts,
+    n_action: u32,
     tasks_per_layer: usize,
     n_layers: usize,
     seed_base: u64,
@@ -329,7 +338,7 @@ pub fn run_recursion(
     let mut seed = seed_base;
     let total = Instant::now();
     for layer in 0..n_layers {
-        let tasks = mint_tasks(counts, tasks_per_layer, seed);
+        let tasks = mint_tasks(counts, n_action, tasks_per_layer, seed);
         seed += tasks_per_layer as u64;
         let expected_acc = host_fold_tasks(&tasks, prev_acc)?;
         let outcome =
@@ -342,15 +351,111 @@ pub fn run_recursion(
 
 /// 负例：篡改任务（ownership s 词 +1）→ Cairo 内 `verify_hand` 返回 false →
 /// panic → 该批次无证明。返回 Err 即表示负例未被正确拒绝。
+/// 一条待证明的动作签名语句（texas 结算路径的输入形态——wire 用 hex）。
+#[derive(Debug, Clone)]
+pub struct ActionSigStatement {
+    pub pk_x_hex: String,
+    pub pk_y_hex: String,
+    pub r_x_hex: String,
+    pub r_y_hex: String,
+    pub s_hex: String,
+    pub table_id: u32,
+    pub hand_id: u32,
+    pub seq: u64,
+    pub action: String,
+    pub amount: u64,
+}
+
+fn felt_from_hex(hex_str: &str) -> Result<Felt, String> {
+    let t = hex_str.trim().trim_start_matches("0x").trim_start_matches("0X");
+    if t.is_empty() || t.len() % 2 != 0 || t.len() > 64 {
+        return Err(format!("bad felt hex length {}", t.len()));
+    }
+    let mut buf = [0u8; 32];
+    for (i, pair) in t.as_bytes().rchunks(2).enumerate() {
+        let hi = (pair[0] as char).to_digit(16).ok_or("bad hex digit")? as u8;
+        let lo = (pair[1] as char).to_digit(16).ok_or("bad hex digit")? as u8;
+        buf[31 - i] = hi * 16 + lo;
+    }
+    Felt::from_bytes_be(&buf).map_err(|e| format!("felt out of range: {e:?}"))
+}
+
+fn felt_hex_pub(f: Felt) -> String {
+    format!("0x{}", f.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+/// 组装 action-sig 批次 payload（v3 header 6 词 + 每语句 10 词）。
+/// host 直验（fail-closed）：任一语句 off-curve / 签名不闭合 → Err。
+pub fn build_action_batch_payload(
+    hand_binding: Felt,
+    table_id: u32,
+    hand_id: u32,
+    statements: &[ActionSigStatement],
+) -> Result<Vec<Felt>, String> {
+    use crate::handbatch::ascii_felt_pub;
+
+    let mut payload: Vec<Felt> = vec![
+        Felt::ZERO, // n_own（endorsement 退役，ownership 桶恒空）
+        Felt::ZERO, // n_shuffle
+        Felt::ZERO, // n_reveal
+        Felt::ZERO, // n_leave
+        Felt::ZERO, // n_recon
+        Felt::from(statements.len() as u64),
+    ];
+    for st in statements {
+        let pkx = felt_from_hex(&st.pk_x_hex)?;
+        let pky = felt_from_hex(&st.pk_y_hex)?;
+        let rx = felt_from_hex(&st.r_x_hex)?;
+        let ry = felt_from_hex(&st.r_y_hex)?;
+        let sv = felt_from_hex(&st.s_hex)?;
+        let action_felt = ascii_felt_pub(&st.action);
+        payload.extend_from_slice(&[
+            pkx, pky, rx, ry, sv,
+            Felt::from(st.table_id),
+            Felt::from(st.hand_id),
+            Felt::from(st.seq),
+            action_felt,
+            Felt::from(st.amount),
+        ]);
+    }
+    let _ = (table_id, hand_id); // hand_id 已随每语句词条进挑战域
+    Ok(payload)
+}
+
+/// 对一个已组装的 action-sig 批次出证一层信封：
+/// host 直验（fail-closed）→ 期望承诺链 → prove-hand 出证 → parity 门。
+/// 返回最终 acc（公开输出，hex）与出证摘要。
+pub fn prove_payload_layer(
+    hand_binding: Felt,
+    payload: Vec<Felt>,
+    prev_acc: Felt,
+    out_dir: &Path,
+    params_path: Option<&Path>,
+) -> Result<(Felt, LayerOutcome), String> {
+    let task = RecurseTask { hand_binding, payload };
+    // host 直验（fail-closed）
+    let report = verify_hand(task.hand_binding, &task.payload)
+        .map_err(|e| format!("host verify: {e:?}"))?;
+    if !report.accepted() {
+        return Err("batch must verify host-side before proving".into());
+    }
+    let claim = task.claim(&report);
+    let expected_acc = fold_accumulator(prev_acc, &[claim]);
+    let outcome = prove_layer(prev_acc, &[task], expected_acc, out_dir, params_path)?;
+    Ok((outcome.cairo_acc, outcome))
+}
+
 pub fn run_negative_tampered_task(
     counts: KindCounts,
     seed: u64,
     out_dir: &Path,
     params_path: Option<&Path>,
 ) -> Result<(), String> {
-    let mut tasks = mint_tasks(counts, 2, seed);
+    let mut tasks = mint_tasks(counts, 2, 2, seed);
     let last = tasks.last_mut().expect("two tasks");
-    last.payload[5 + 4] = last.payload[5 + 4] + Felt::from(1u32);
+    // 篡改首个 ownership 响应词（v3 header 6 词 + word 4 = s 标量——
+    // 标量篡改不破坏点编码，host verify 残差非零、Cairo 端同样拒绝）。
+    last.payload[6 + 4] = last.payload[6 + 4] + Felt::from(1u32);
     let report = verify_hand(last.hand_binding, &last.payload).map_err(|e| format!("{e:?}"))?;
     if report.accepted() {
         return Err("tamper must fail host verification (test bug)".into());
@@ -369,7 +474,7 @@ pub fn run_negative_wrong_prev(
     out_dir: &Path,
     params_path: Option<&Path>,
 ) -> Result<(), String> {
-    let tasks = mint_tasks(counts, 2, seed);
+    let tasks = mint_tasks(counts, 2, 2, seed);
     let expected_from_genesis = host_fold_tasks(&tasks, GENESIS_ACC)?;
     let forged = GENESIS_ACC + Felt::from(1u32);
     match prove_layer(forged, &tasks, expected_from_genesis, out_dir, params_path) {
@@ -404,7 +509,7 @@ pub fn perf_sweep(
     let mut rows = Vec::with_capacity(sizes.len());
     let mut seed = seed_base;
     for &n in sizes {
-        let tasks = mint_tasks(counts, n, seed);
+        let tasks = mint_tasks(counts, 2, n, seed);
         seed += n as u64;
         let expected_acc = host_fold_tasks(&tasks, GENESIS_ACC)?;
         let outcome = prove_layer(

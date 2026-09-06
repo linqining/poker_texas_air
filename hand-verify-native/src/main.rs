@@ -43,7 +43,7 @@ struct RoundTrip {
 fn run_round_trip(label: &'static str, counts: KindCounts, seed: u64) -> RoundTrip {
     let hb = hand_binding(seed);
     let payload = mint::mint_hand(
-        hb, counts.n_own, counts.n_reveal, counts.n_leave, counts.n_recon, seed,
+        hb, counts.n_own, 0, counts.n_reveal, counts.n_leave, counts.n_recon, seed,
     );
 
     // 1. Host-native sigma verification (the form-① trust boundary).
@@ -116,7 +116,7 @@ fn self_test() {
     for (label, counts, seed) in corpora {
         let hb = hand_binding(seed);
         let payload = mint::mint_hand(
-            hb, counts.n_own, counts.n_reveal, counts.n_leave, counts.n_recon, seed,
+            hb, counts.n_own, 0, counts.n_reveal, counts.n_leave, counts.n_recon, seed,
         );
         let report = verify_hand(hb, &payload).expect("parses");
         assert!(report.accepted(), "{label} honest hand must verify");
@@ -137,7 +137,7 @@ fn self_test() {
     ] {
         let hb = hand_binding(seed);
         let payload = mint::mint_hand(
-            hb, counts.n_own, counts.n_reveal, counts.n_leave, counts.n_recon, seed,
+            hb, counts.n_own, 0, counts.n_reveal, counts.n_leave, counts.n_recon, seed,
         );
         let claim =
             HandBatchClaim::new(hb, payload_digest(&payload), counts, Felt::ZERO);
@@ -151,13 +151,13 @@ fn self_test() {
     let seed = 201u64;
 
     // 1. Tampered s (ownership response word).
-    let mut payload = mint::mint_hand(hb, 2, 4, 0, 0, seed);
+    let mut payload = mint::mint_hand(hb, 2, 1, 4, 0, 0, seed);
     payload[5 + 4] = payload[5 + 4] + Felt::from(1u32);
     assert!(!verify_hand(hb, &payload).unwrap().accepted(), "tampered s must reject");
     println!("  tampered ownership s → rejected ✔");
 
     // 2. Cross-hand replay (same payload, different binding).
-    let payload = mint::mint_hand(hb, 2, 4, 0, 0, seed);
+    let payload = mint::mint_hand(hb, 2, 1, 4, 0, 0, seed);
     assert!(
         !verify_hand(hb + Felt::from(1u32), &payload).unwrap().accepted(),
         "cross-hand replay must reject"
@@ -165,7 +165,7 @@ fn self_test() {
     println!("  cross-hand replay → rejected ✔");
 
     // 3. Off-curve pk.
-    let mut payload = mint::mint_hand(hb, 1, 0, 0, 0, seed);
+    let mut payload = mint::mint_hand(hb, 1, 0, 0, 0, 0, seed);
     payload[5] = payload[5] + Felt::from(1u32);
     assert!(verify_hand(hb, &payload).is_err(), "off-curve pk must reject");
     println!("  off-curve pk → rejected ✔");
@@ -174,7 +174,7 @@ fn self_test() {
     //    generated under a different hand binding must fail inside the
     //    protocol — this is the property an L1 verifier relies on.
     let counts = KindCounts { n_own: 2, n_reveal: 4, n_leave: 0, n_recon: 0 };
-    let payload = mint::mint_hand(hb, counts.n_own, counts.n_reveal, 0, 0, seed);
+    let payload = mint::mint_hand(hb, counts.n_own, 0, counts.n_reveal, 0, 0, seed);
     let claim =
             HandBatchClaim::new(hb, payload_digest(&payload), counts, Felt::ZERO);
     let proof = prove::prove_claim(&claim).expect("prove");
@@ -360,7 +360,7 @@ fn recurse_cmd() {
     println!("== recurse: Cairo-route recursion envelope (form-③) ==");
     let params = recurse::write_prod_params(&out_root).expect("params");
     let report =
-        recurse::run_recursion(counts, 2, 2, 1101, &out_root, Some(&params)).expect("recursion");
+        recurse::run_recursion(counts, 0, 2, 2, 1101, &out_root, Some(&params)).expect("recursion");
     for (i, layer) in report.layers.iter().enumerate() {
         println!(
             "  layer {i}: {} tasks, steps {}, EC_OP {}, prove {} ms (compile {} / run {}), \
@@ -447,7 +447,7 @@ fn recurse_perf_cmd() {
     );
 
     println!("== 2-layer chain (2 tasks/layer) ==");
-    let report = recurse::run_recursion(counts, 2, 2, 1401, &out_root.join("chain"), Some(&params))
+    let report = recurse::run_recursion(counts, 2, 2, 2, 1401, &out_root.join("chain"), Some(&params))
         .expect("chain");
     for (i, layer) in report.layers.iter().enumerate() {
         println!(

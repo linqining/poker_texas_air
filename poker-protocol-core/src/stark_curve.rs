@@ -36,6 +36,11 @@ use crate::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
 /// Group order as a 256-bit integer, parsed from the same constant the
 /// Cairo-side verifier uses. Debug-checked against `starknet_curve`'s
 /// `EC_ORDER` in the test suite.
+/// 群阶 n 的大端 32 字节表示（跨 crate 对拍/测试用）。
+pub fn ec_order_bytes_be() -> [u8; 32] {
+    EC_ORDER_U256.to_be_bytes()
+}
+
 pub const EC_ORDER_U256: U256 =
     U256::from_be_hex("0800000000000010ffffffffffffffffb781126dcae7b2321e66a241adc64d2f");
 
@@ -71,6 +76,11 @@ impl StarkScalar {
 
     pub fn to_u256(&self) -> U256 {
         self.0
+    }
+
+    /// Big-endian 32-byte representation（跨 crate 对拍/序列化用）。
+    pub fn to_bytes_be(&self) -> [u8; 32] {
+        self.0.to_be_bytes()
     }
 }
 
@@ -788,6 +798,61 @@ pub fn handbatch_endorsement_challenge(
     ];
     let h = poseidon_hash_many(&felts);
     StarkScalar(reduce_mod_n(U256::from_be_slice(&h.to_bytes_be())))
+}
+
+/// #16 动作签名挑战 v3（felt 直通 Poseidon，与 ownership/reveal 挑战同纪律
+/// ——递归信封的 Cairo 验证器可原生复刻，无字节级操作）：
+/// `c = poseidon([label, table_id, hand_id, seq, action_felt, amount,
+///                R_x, R_y]) mod n`。
+/// 方程：`s·G − R − c·pk = O`（pk = 座位牌局公钥）。
+/// v2（`zgame.action-sig.v2`，poseidon_over_bytes 字节域）未上生产即被
+/// v3 取代：endorsement 通道删除后动作签名是参与背书的唯一来源，需要
+/// 进递归证明批次；felt 定长域让 Cairo 复刻与 ownership_terms 同构。
+/// `zgame.action-sig.v3` 的 short-string felt（运行时 from_bytes_be——
+/// types-core 的 `Felt::from_raw` 是 Montgomery limbs 语义，直接喂 direct
+/// limbs 会得到错值（对拍测试抓出），故与 `handbatch_proto_label` 同为 fn）。
+pub fn action_sig_label() -> Felt {
+    let mut buf = [0u8; 32];
+    buf[32 - 19..].copy_from_slice(b"zgame.action-sig.v3");
+    Felt::from_bytes_be(&buf)
+}
+
+/// action 名 → short-string felt（ASCII 大端，≤31 字节；服务端动作白名单
+/// fold/check/call/raise/allin 均远小于 31）。未知 action 返回 None——
+/// 挑战无法编码即无法签名/验证（fail-closed）。
+pub fn action_name_felt(action: &str) -> Option<Felt> {
+    let bytes = action.as_bytes();
+    if bytes.is_empty() || bytes.len() > 31 {
+        return None;
+    }
+    let mut buf = [0u8; 32];
+    buf[32 - bytes.len()..].copy_from_slice(bytes);
+    Felt::from_bytes_be(&buf).into()
+}
+
+/// 动作签名挑战（v3 felt 域）。`r_x`/`r_y` 为签名 nonce 点 R 的仿射坐标
+/// （与 ownership 挑战的 pk/R 编码同风格：单射、无压缩位）。
+pub fn action_sig_challenge(
+    table_id: u32,
+    hand_id: u32,
+    seq: u64,
+    action: &str,
+    amount: u64,
+    r_x: Felt,
+    r_y: Felt,
+) -> Option<StarkScalar> {
+    let action_felt = action_name_felt(action)?;
+    let h = poseidon_hash_many(&[
+        action_sig_label(),
+        Felt::from(table_id),
+        Felt::from(hand_id),
+        Felt::from(seq),
+        action_felt,
+        Felt::from(amount),
+        r_x,
+        r_y,
+    ]);
+    Some(StarkScalar(reduce_mod_n(U256::from_be_slice(&h.to_bytes_be()))))
 }
 
 /// 可折叠 reveal-token 挑战（felt 直通 Poseidon，与 ownership 的

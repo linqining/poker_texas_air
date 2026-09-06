@@ -11,54 +11,54 @@
     "public_outputs": "public_outputs.json"
   },
   "timings_ms": {
-    "compile": 1553,
-    "run_witness": 456,
-    "prove": 3970,
+    "compile": 1364,
+    "run_witness": 425,
+    "prove": 3373,
     "verify": 22,
-    "serialize": 17,
-    "total": 6029
+    "serialize": 24,
+    "total": 5219
   },
   "execution": {
-    "steps": 49239,
-    "unique_pcs": 3060,
+    "steps": 49401,
+    "unique_pcs": 3104,
     "builtin_instance_counter": {
-      "range_check_builtin": 4096,
-      "pedersen_builtin": 0,
-      "bitwise_builtin": 0,
       "range_check96_builtin": 0,
       "poseidon_builtin": 1024,
       "output_builtin": 1,
+      "pedersen_builtin": 0,
       "add_mod_builtin": 0,
       "ec_op_builtin": 256,
+      "bitwise_builtin": 0,
+      "range_check_builtin": 4096,
       "mul_mod_builtin": 0
     },
     "opcodes_instance_counter": {
-      "jnz_opcode_non_taken": 1524,
-      "jnz_opcode_taken": 4494,
-      "assert_eq_opcode": 6577,
-      "add_opcode": 5143,
-      "qm_31_add_mul_opcode": 0,
-      "call_opcode_rel_imm": 1423,
-      "jump_opcode_rel": 0,
-      "jump_opcode_rel_imm": 922,
-      "add_ap_opcode": 212,
-      "assert_eq_opcode_double_deref": 12030,
-      "assert_eq_opcode_imm": 1809,
+      "call_opcode_rel_imm": 1427,
+      "mul_opcode_small": 82,
+      "add_opcode": 5157,
+      "add_opcode_small": 11982,
+      "assert_eq_opcode_double_deref": 12062,
       "jump_opcode_abs": 0,
-      "add_opcode_small": 11932,
+      "generic_opcode": 0,
       "call_opcode_abs": 0,
-      "ret_opcode": 1423,
-      "blake_compress_opcode": 0,
-      "mul_opcode": 1670,
+      "qm_31_add_mul_opcode": 0,
+      "jump_opcode_rel_imm": 926,
+      "assert_eq_opcode_imm": 1803,
+      "assert_eq_opcode": 6613,
+      "jump_opcode_rel": 0,
+      "jnz_opcode_non_taken": 1520,
       "jump_opcode_double_deref": 0,
-      "mul_opcode_small": 80,
-      "generic_opcode": 0
+      "jnz_opcode_taken": 4516,
+      "add_ap_opcode": 216,
+      "ret_opcode": 1427,
+      "mul_opcode": 1670,
+      "blake_compress_opcode": 0
     }
   },
   "public": {
-    "program_hash": "0xdc2c8e19990528bd6e111347ef3a381853f2668bdafa8e4a3190b1fce8eed6",
+    "program_hash": "0x48b0b8978361cf77faaabedc408d61b59b7468ef0e7ef0bb93a95707c8c8d36",
     "output": [
-      "0x7a4ec646023e672d590212d1749ad4faae09c5cad279baad7dffea9ea2d61cf"
+      "0x526f7fe05f37891a423d349497663d2cf7080f0c6818185580427ee732aee65"
     ]
   },
   "prover_params": {

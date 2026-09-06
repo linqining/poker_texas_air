@@ -60,6 +60,8 @@ pub struct HandStartData {
 /// 一名参与者（join 重放输入）。
 #[derive(Debug, Clone)]
 pub struct HandParticipant {
+    /// 游戏座位号（动作日志条目按它映射到本结构的 pk）。
+    pub seat: u32,
     /// 钱包 felt（hex，全精度——结算记账户头）。
     pub wallet: String,
     /// 玩家 pk hex（游戏层座位标识；命令按它匹配座位）。
@@ -194,6 +196,7 @@ pub fn record_hand_start(table: &mut Table) {
             }
         };
         plan.push((seat_id, HandParticipant {
+            seat: seat_id,
             wallet: player.wallet_address.0.clone(),
             pk_hex,
             pk,

@@ -8,7 +8,7 @@ mod types;
 // Re-export all public items so the public API remains unchanged
 pub use client::ClientPlayer;
 pub use expel::{ExpelRecord, ExpelSessionPhase, ExpelStateResponse, ExpelSummary};
-pub use game_action::{sign_game_action, verify_game_action_hex, action_msg_bytes};
+pub use game_action::{sign_game_action, verify_game_action_hex};
 pub use game::MentalPokerGame;
 pub use rounds::{JoinGameAndShuffleRound, LeaveGameRound, MaskAndShuffleRound, ShuffleRound};
 pub use types::{

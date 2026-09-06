@@ -36,6 +36,8 @@ pub const PROTO_LABEL: &str = "poker/hand-batch/proto";
 pub const REVEAL_LABEL: &str = "poker/reveal-token/fold-v1";
 pub const LEAVE_LABEL: &str = "poker/leave-fold/v1";
 pub const RECON_LABEL: &str = "poker/reconstruct-fold/v1";
+/// Action-sig challenge label (short-string felt; `zgame.action-sig.v3`).
+pub const ACTION_SIG_LABEL: &str = "zgame.action-sig.v3";
 pub const V1_LABEL: &str = "poker/hand-batch/v1";
 
 /// Statement kind tags for the ρ transcript — matches the foldable epoch's
@@ -44,9 +46,15 @@ pub const KIND_OWNERSHIP: u64 = 1;
 pub const KIND_REVEAL: u64 = 2;
 pub const KIND_LEAVE: u64 = 3;
 pub const KIND_RECONSTRUCT: u64 = 4;
+/// Player action signature (the only participation endorsement since the
+/// endorsement channel's removal — v3 felt-domain challenge).
+pub const KIND_ACTION: u64 = 5;
 
 /// Words per statement section, matching `hand_verify.cairo`'s wire format.
 pub const WORDS_PER_OWNERSHIP: usize = 5; // pk 2, R 2, s
+/// Action sig: `[pk 2, R 2, s, table_id, hand_id, seq, action_felt, amount]`
+/// (v3 felt-domain challenge words ride the entry).
+pub const WORDS_PER_ACTION: usize = 10;
 pub const WORDS_PER_REVEAL: usize = 14; // pk 2, c1 2, c2 2, token 2, t1 2, t2 2, nonce, s
 /// Leave: `[n, pk 2, cpk 2, nonce, s, in_c1 2n, in_c2 2n, out_c1 2n,
 /// out_c2 2n, a 2n]`.
@@ -57,6 +65,11 @@ pub const WORDS_PER_RECONSTRUCT: usize = 13;
 
 /// ASCII label → single felt (big-endian, ≤31 bytes) — same encoding as the
 /// protocol's `ascii_felt`.
+/// Public re-export for `mint` (action-name short-string felt encoding).
+pub fn ascii_felt_pub(s: &str) -> Felt {
+    ascii_felt(s)
+}
+
 fn ascii_felt(s: &str) -> Felt {
     let bytes = s.as_bytes();
     assert!(bytes.len() <= 31, "label must fit one felt");
@@ -91,10 +104,11 @@ pub enum VerifyError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifyReport {
     pub n_own: u32,
+    pub n_action: u32,
     pub n_reveal: u32,
     pub n_leave: u32,
     pub n_recon: u32,
-    /// Number of EC equations folded (= n_own + 2·n_reveal
+    /// Number of EC equations folded (= n_own + n_action + 2·n_reveal
     /// + Σ(1 + cards) over leave + 2·n_recon).
     pub n_eq: u32,
     /// Every individual residual is the group identity.
@@ -109,6 +123,17 @@ impl VerifyReport {
     pub fn accepted(&self) -> bool {
         self.all_residuals_identity && self.fold_identity
     }
+}
+
+fn felt_to_u64(f: Felt) -> Result<u64, VerifyError> {
+    let bytes = f.to_bytes_be();
+    if bytes[..24].iter().any(|&b| b != 0) {
+        return Err(VerifyError::CountOverflow);
+    }
+    Ok(u64::from_be_bytes([
+        bytes[24], bytes[25], bytes[26], bytes[27],
+        bytes[28], bytes[29], bytes[30], bytes[31],
+    ]))
 }
 
 fn felt_to_u32(f: Felt) -> Result<u32, VerifyError> {
@@ -134,11 +159,61 @@ pub struct LeaveCard {
     pub a: Point,
 }
 
+
+#[cfg(test)]
+mod action_sig_parity {
+    use super::*;
+    use num_bigint::BigUint;
+
+    /// v3 挑战跨 crate 对拍：host RAW poseidon ≡ protocol core 的归约标量
+    /// （mod 群阶 n）。endorsement 退役后动作签名是唯一参与背书来源，挑战
+    /// 公式漂移会让递归信封验证的批次与协议侧签名脱钩。
+    #[test]
+    fn action_sig_challenge_matches_protocol_core() {
+        let g = Point::generator();
+        let r = g.mul(Felt::from(777u64));
+        let (rx, ry) = r.to_affine().expect("non-identity R");
+        let table_id = 7u64;
+        let hand_id = 42u64;
+        let seq = 123456789u64;
+        let action = "call";
+        let amount = 320u64;
+
+        let raw = action_sig_challenge_raw(
+            table_id, hand_id, seq, ascii_felt(action), amount, r,
+        );
+        use starknet_types_core::felt::Felt as CoreFelt;
+        let core = poker_protocol_core::stark_curve::action_sig_challenge(
+            table_id as u32,
+            hand_id as u32,
+            seq,
+            action,
+            amount,
+            CoreFelt::from_bytes_be(&rx.to_bytes_be()),
+            CoreFelt::from_bytes_be(&ry.to_bytes_be()),
+        )
+        .expect("action name must encode")
+        .to_bytes_be();
+
+        // raw (mod n) == core 标量字节（n = Stark 曲线群阶）
+        let n = BigUint::from_bytes_be(&core_order_bytes());
+        let raw_int = BigUint::from_bytes_be(&raw.to_bytes_be());
+        let reduced = (raw_int % n).to_bytes_be();
+        let mut padded = [0u8; 32];
+        padded[32 - reduced.len()..].copy_from_slice(&reduced);
+        assert_eq!(padded, core, "challenge must match protocol core");
+    }
+
+    fn core_order_bytes() -> [u8; 32] {
+        poker_protocol_core::stark_curve::ec_order_bytes_be()
+    }
+}
+
 /// Payload statement order matches `hand_verify.cairo`:
-/// header `[n_own, n_shuffle, n_reveal, n_leave, n_recon]`, then ownership
+/// header `[n_own, n_shuffle, n_reveal, n_leave, n_recon, n_action]`, then ownership
 /// block, (shuffle block — fail-closed), reveal, leave, recon blocks.
 pub fn verify_hand(hand_binding: Felt, payload: &[Felt]) -> Result<VerifyReport, VerifyError> {
-    if payload.len() < 5 {
+    if payload.len() < 6 {
         return Err(VerifyError::Truncated);
     }
     let n_own = felt_to_u32(*payload.get(0).expect("header checked"))?;
@@ -146,15 +221,18 @@ pub fn verify_hand(hand_binding: Felt, payload: &[Felt]) -> Result<VerifyReport,
     let n_reveal = felt_to_u32(*payload.get(2).expect("header checked"))?;
     let n_leave = felt_to_u32(*payload.get(3).expect("header checked"))?;
     let n_recon = felt_to_u32(*payload.get(4).expect("header checked"))?;
+    // v3 header tail: n_action rides slot 5 (existing slots unchanged).
+    let n_action = felt_to_u32(*payload.get(5).expect("header checked"))?;
     if n_shuffle > 0 {
         return Err(VerifyError::UnsupportedSection("shuffle"));
     }
     let (n_own, n_reveal, n_leave, n_recon) =
         (n_own as usize, n_reveal as usize, n_leave as usize, n_recon as usize);
+    let n_action = n_action as usize;
 
     // Leave blocks are variable-length: walk the layout to compute the
     // expected total before touching statement words.
-    let mut cursor = 5;
+    let mut cursor = 6;
     let mut leave_card_counts = Vec::with_capacity(n_leave);
     for _ in 0..n_own {
         cursor += WORDS_PER_OWNERSHIP;
@@ -174,6 +252,9 @@ pub fn verify_hand(hand_binding: Felt, payload: &[Felt]) -> Result<VerifyReport,
     for _ in 0..n_recon {
         cursor += WORDS_PER_RECONSTRUCT;
     }
+    for _ in 0..n_action {
+        cursor += WORDS_PER_ACTION;
+    }
     if cursor != payload.len() {
         return Err(VerifyError::Truncated);
     }
@@ -182,7 +263,7 @@ pub fn verify_hand(hand_binding: Felt, payload: &[Felt]) -> Result<VerifyReport,
 
     let mut equations: Vec<FoldEquation> = Vec::new();
     let mut all_identity = true;
-    let mut cursor = 5;
+    let mut cursor = 6;
 
     // ---- ownership: eq = s·G − c·pk − R ----
     for _ in 0..n_own {
@@ -265,6 +346,23 @@ pub fn verify_hand(hand_binding: Felt, payload: &[Felt]) -> Result<VerifyReport,
         cursor += WORDS_PER_RECONSTRUCT;
     }
 
+    // ---- action sig: eq = s·G − R − c·pk (v3 felt-domain challenge) ----
+    for _ in 0..n_action {
+        let pk = point_word(payload[cursor], payload[cursor + 1], "pk")?;
+        let r = point_word(payload[cursor + 2], payload[cursor + 3], "R")?;
+        let s = payload[cursor + 4];
+        let table_id = felt_to_u32(payload[cursor + 5])? as u64;
+        let hand_id = felt_to_u32(payload[cursor + 6])? as u64;
+        let seq = felt_to_u64(payload[cursor + 7])?;
+        let action_felt = payload[cursor + 8];
+        let amount = felt_to_u64(payload[cursor + 9])?;
+        let c = action_sig_challenge_raw(table_id, hand_id, seq, action_felt, amount, r);
+        let residual = g.mul(s) - r - pk.mul(c);
+        all_identity &= residual.is_identity();
+        equations.push(FoldEquation { kind: KIND_ACTION, s, c, residual });
+        cursor += WORDS_PER_ACTION;
+    }
+
     // ---- Horner fold: L = ρ·(ρ·(…(ρ·eq_N + eq_{N−1})…) + eq_1) ----
     let rho = hand_rho(hand_binding, &equations);
     let mut acc = equations
@@ -277,6 +375,7 @@ pub fn verify_hand(hand_binding: Felt, payload: &[Felt]) -> Result<VerifyReport,
 
     Ok(VerifyReport {
         n_own: n_own as u32,
+        n_action: n_action as u32,
         n_reveal: n_reveal as u32,
         n_leave: n_leave as u32,
         n_recon: n_recon as u32,
@@ -284,6 +383,33 @@ pub fn verify_hand(hand_binding: Felt, payload: &[Felt]) -> Result<VerifyReport,
         all_residuals_identity: all_identity,
         fold_identity: acc.is_identity(),
     })
+}
+
+/// Action-sig challenge v3 (RAW felt, no mod-n — same discipline as
+/// endorsement): `c = poseidon([label, table_id, hand_id, seq, action_felt,
+/// amount, Rx, Ry])`. Byte-identical to
+/// `poker-protocol-core::stark_curve::ACTION_SIG_LABEL` short-string felt;
+/// the parity test (`action_sig_challenge_matches_protocol_core`) pins the
+/// cross-crate equivalence (raw ≡ core's reduced scalar mod n).
+pub fn action_sig_challenge_raw(
+    table_id: u64,
+    hand_id: u64,
+    seq: u64,
+    action_felt: Felt,
+    amount: u64,
+    r: Point,
+) -> Felt {
+    let (rx, ry) = r.to_affine().expect("non-identity R");
+    poseidon_hash_many(&[
+        ascii_felt(ACTION_SIG_LABEL),
+        Felt::from(table_id),
+        Felt::from(hand_id),
+        Felt::from(seq),
+        action_felt,
+        Felt::from(amount),
+        rx,
+        ry,
+    ])
 }
 
 /// `c = poseidon([proto_label, hb, Gx, Gy, pkx, pky, Rx, Ry])` — raw felt
@@ -398,7 +524,7 @@ mod tests {
     #[test]
     fn honest_two_player_hand_accepts() {
         let hb = Felt::from(0xabcdefu64);
-        let payload = mint_hand(hb, 2, 18, 1, 1, 1);
+        let payload = mint_hand(hb, 2, 0, 18, 1, 1, 1);
         let report = verify_hand(hb, &payload).expect("parse");
         assert!(report.accepted());
         assert_eq!(report.n_own, 2);
@@ -412,9 +538,9 @@ mod tests {
     #[test]
     fn tampered_s_rejects() {
         let hb = Felt::from(0xabcdefu64);
-        let mut payload = mint_hand(hb, 2, 4, 0, 0, 2);
-        // bump the first ownership response word (header 5 + word 4)
-        payload[5 + 4] = payload[5 + 4] + Felt::from(1u32);
+        let mut payload = mint_hand(hb, 2, 0, 4, 0, 0, 2);
+        // bump the first ownership response word (header 6 + word 4)
+        payload[6 + 4] = payload[6 + 4] + Felt::from(1u32);
         let report = verify_hand(hb, &payload).unwrap();
         assert!(!report.accepted());
         assert!(!report.all_residuals_identity);
@@ -424,7 +550,7 @@ mod tests {
     fn tampered_leave_card_rejects() {
         let hb = Felt::from(0xabcdefu64);
         // layout: 5 header + own + reveal; first leave word block follows
-        let mut payload = mint_hand(hb, 1, 2, 1, 1, 3);
+        let mut payload = mint_hand(hb, 1, 0, 2, 1, 1, 3);
         let leave_at = 5 + 1 * WORDS_PER_OWNERSHIP + 2 * WORDS_PER_REVEAL;
         // bump the first card's `a` x-coordinate: header 7 + four 2n-word
         // sections (in_c1, in_c2, out_c1, out_c2) precede `a`
@@ -441,7 +567,7 @@ mod tests {
     #[test]
     fn tampered_recon_rejects() {
         let hb = Felt::from(0xabcdefu64);
-        let mut payload = mint_hand(hb, 1, 1, 0, 1, 4);
+        let mut payload = mint_hand(hb, 1, 0, 1, 0, 1, 4);
         // last word of the payload is the recon response s
         let last = payload.len() - 1;
         payload[last] = payload[last] + Felt::from(1u32);
@@ -452,7 +578,7 @@ mod tests {
     #[test]
     fn cross_hand_replay_rejects() {
         let hb = Felt::from(0xabcdefu64);
-        let payload = mint_hand(hb, 2, 4, 0, 0, 3);
+        let payload = mint_hand(hb, 2, 0, 4, 0, 0, 3);
         // same payload verified under a different hand binding must fail
         let report = verify_hand(hb + Felt::from(1u32), &payload).unwrap();
         assert!(!report.accepted());
@@ -461,14 +587,14 @@ mod tests {
     #[test]
     fn truncated_payload_rejects() {
         let hb = Felt::from(0xabcdefu64);
-        let payload = mint_hand(hb, 2, 4, 0, 0, 4);
+        let payload = mint_hand(hb, 2, 0, 4, 0, 0, 4);
         assert_eq!(verify_hand(hb, &payload[..8]), Err(VerifyError::Truncated));
     }
 
     #[test]
     fn shuffle_section_fail_closed() {
         let hb = Felt::from(0xabcdefu64);
-        let mut payload = mint_hand(hb, 1, 2, 0, 0, 5);
+        let mut payload = mint_hand(hb, 1, 0, 2, 0, 0, 5);
         payload[1] = Felt::from(1u32); // n_shuffle = 1
         assert_eq!(
             verify_hand(hb, &payload),
@@ -479,8 +605,8 @@ mod tests {
     #[test]
     fn off_curve_pk_rejects() {
         let hb = Felt::from(0xabcdefu64);
-        let mut payload = mint_hand(hb, 1, 0, 0, 0, 6);
-        payload[5] = payload[5] + Felt::from(1u32); // pk_x + 1 → off curve
+        let mut payload = mint_hand(hb, 1, 0, 0, 0, 0, 6);
+        payload[6] = payload[6] + Felt::from(1u32); // pk_x + 1 → off curve
         assert!(matches!(verify_hand(hb, &payload), Err(VerifyError::OffCurve("pk"))));
     }
 }

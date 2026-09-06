@@ -29,7 +29,7 @@
 //! ## Payload (identical wire format to hand_batch_stark)
 //!
 //! ```text
-//! [n_own, n_shuffle, n_reveal, n_leave, n_recon,
+//! [n_own, n_shuffle, n_reveal, n_leave, n_recon, n_action,
 //!  ownership × n_own:     [pk 2, R 2, s],
 //!  shuffle   × n_shuffle: BG bucket (11n+31 words, deck n=52 — see
 //!                         dual::bg_stark for the layout; residuals and
@@ -37,7 +37,9 @@
 //!  reveal    × n_reveal:  [pk 2, c1 2, c2 2, token 2, t1 2, t2 2, nonce, s],
 //!  leave     × n_leave:   [n, pk 2, cpk 2, nonce, s,
 //!                          in_c1 2n, in_c2 2n, out_c1 2n, out_c2 2n, a 2n],
-//!  recon     × n_recon:   [g1 2, g2 2, p1 2, p2 2, A 2, B 2, s]]
+//!  recon     × n_recon:   [g1 2, g2 2, p1 2, p2 2, A 2, B 2, s],
+//!  action    × n_action:  [pk 2, R 2, s, table_id, hand_id, seq,
+//!                           action_felt, amount]]  (v3 felt-domain)
 //! ```
 //!
 //! ## Status
@@ -50,12 +52,14 @@
 use core::array::{ArrayTrait, SpanTrait};
 use core::ec::{EcPoint, EcPointTrait, EcStateTrait, NonZeroEcPoint};
 use core::option::Option;
+use core::poseidon::poseidon_hash_span;
 use core::traits::TryInto;
 
 use super::bg_stark;
 use super::bg_stark::BG_DECK_SIZE;
 use super::hand_batch_stark::{
     felt_to_u256, leave_equations, ownership_equation, reconstruct_equations, reveal_equations,
+    GENERATOR_X, GENERATOR_Y,
 };
 
 /// Shuffle bucket support level for this build.
@@ -68,40 +72,46 @@ pub const HAND_SHUFFLE_STATUS: felt252 = 'BG_PORT_ACTIVE';
 /// Returns `true` iff every equation residual is the identity point.
 pub fn verify_hand(hand_binding: felt252, payload: Span<felt252>) -> bool {
     if payload.len() < 5 {
-        return false;
+        panic_with_felt252('F01');
     }
     let n_own = felt_to_u256(*payload.at(0));
     let n_shuffle = felt_to_u256(*payload.at(1));
     let n_reveal = felt_to_u256(*payload.at(2));
     let n_leave = felt_to_u256(*payload.at(3));
     let n_recon = felt_to_u256(*payload.at(4));
+    let n_action = felt_to_u256(*payload.at(5));
     let n_own_u32: u32 = match n_own.try_into() {
         Option::Some(v) => v,
-        Option::None => { return false; },
+        Option::None => { panic_with_felt252('F02'); },
     };
     let n_shuffle_u32: u32 = match n_shuffle.try_into() {
         Option::Some(v) => v,
-        Option::None => { return false; },
+        Option::None => { panic_with_felt252('F03'); },
     };
     let n_reveal_u32: u32 = match n_reveal.try_into() {
         Option::Some(v) => v,
-        Option::None => { return false; },
+        Option::None => { panic_with_felt252('F04'); },
     };
     let n_leave_u32: u32 = match n_leave.try_into() {
         Option::Some(v) => v,
-        Option::None => { return false; },
+        Option::None => { panic_with_felt252('F05'); },
     };
     let n_recon_u32: u32 = match n_recon.try_into() {
         Option::Some(v) => v,
-        Option::None => { return false; },
+        Option::None => { panic_with_felt252('F06'); },
     };
-    if payload.len() < 5 + 5 * n_own_u32 + 14 * n_reveal_u32 + 13 * n_recon_u32 {
-        return false;
+    let n_action_u32: u32 = match n_action.try_into() {
+        Option::Some(v) => v,
+        Option::None => { panic_with_felt252('F07'); },
+    };
+    if payload.len() < 6 + 5 * n_own_u32 + 14 * n_reveal_u32 + 13 * n_recon_u32
+        + 10 * n_action_u32 {
+        panic_with_felt252('F08');
     }
 
     // Residual checks per statement — direct (no fold: this is a program,
     // each zero-test is a felt comparison).
-    let mut cursor: u32 = 5;
+    let mut cursor: u32 = 6;
 
     // ---- ownership: s·G − c·pk − R == O ----
     let mut i: u32 = 0;
@@ -113,10 +123,10 @@ pub fn verify_hand(hand_binding: felt252, payload: Span<felt252>) -> bool {
             *payload.at(cursor + 4),
         ) {
             Option::Some(v) => v,
-            Option::None => { return false; }, // off-curve / malformed
+            Option::None => { panic_with_felt252('F09'); }, // off-curve / malformed
         };
         if !residual_is_identity(eq) {
-            return false;
+            panic_with_felt252('F10');
         }
         cursor += 5;
         i += 1;
@@ -127,24 +137,24 @@ pub fn verify_hand(hand_binding: felt252, payload: Span<felt252>) -> bool {
     while i < n_shuffle_u32 {
         let bucket_len: u32 = 11 * BG_DECK_SIZE + 31;
         if payload.len() < cursor + bucket_len {
-            return false;
+            panic_with_felt252('F11');
         }
         if felt_to_u256(*payload.at(cursor)) != (BG_DECK_SIZE.into()) {
-            return false; // CK pinned for n=52 only
+            panic_with_felt252('F12'); // CK pinned for n=52 only
         }
         let (bg_eqs, _ch, scalars_ok) = match bg_stark::bg_equations(
             payload.slice(cursor, bucket_len),
         ) {
             Option::Some(v) => v,
-            Option::None => { return false; },
+            Option::None => { panic_with_felt252('F13'); },
         };
         if !scalars_ok {
-            return false;
+            panic_with_felt252('F14');
         }
         let mut k: u32 = 0;
         while k < bg_eqs.len() {
             if !residual_is_identity(*bg_eqs.at(k)) {
-                return false;
+                panic_with_felt252('F15');
             }
             k += 1;
         }
@@ -154,7 +164,7 @@ pub fn verify_hand(hand_binding: felt252, payload: Span<felt252>) -> bool {
 
     // ---- reveal: eq1, eq2 == O ----
     i = 0;
-    while i < n_reveal_u32 {
+    while i < n_reveal_u32 { // DIAG: reveal enabled
         let ((eq1, eq2), _w) = match reveal_equations(
             hand_binding,
             (*payload.at(cursor), *payload.at(cursor + 1)),
@@ -167,10 +177,10 @@ pub fn verify_hand(hand_binding: felt252, payload: Span<felt252>) -> bool {
             *payload.at(cursor + 13),
         ) {
             Option::Some(v) => v,
-            Option::None => { return false; },
+            Option::None => { panic_with_felt252('F16'); },
         };
         if !residual_is_identity(eq1) || !residual_is_identity(eq2) {
-            return false;
+            panic_with_felt252('F17');
         }
         cursor += 14;
         i += 1;
@@ -178,14 +188,14 @@ pub fn verify_hand(hand_binding: felt252, payload: Span<felt252>) -> bool {
 
     // ---- leave: eq0 + per-card == O ----
     i = 0;
-    while i < n_leave_u32 {
+    while i < n_leave_u32 { // DIAG: leave enabled
         let n_cards_f = felt_to_u256(*payload.at(cursor));
         let n_cards: u32 = match n_cards_f.try_into() {
             Option::Some(v) => v,
-            Option::None => { return false; },
+            Option::None => { panic_with_felt252('F18'); },
         };
         if payload.len() < cursor + 7 + 10 * n_cards {
-            return false;
+            panic_with_felt252('F19');
         }
         let base = cursor + 7;
         let (eqs, _w) = match leave_equations(
@@ -201,12 +211,12 @@ pub fn verify_hand(hand_binding: felt252, payload: Span<felt252>) -> bool {
             payload.slice(base + 8 * n_cards, 2 * n_cards),
         ) {
             Option::Some(v) => v,
-            Option::None => { return false; },
+            Option::None => { panic_with_felt252('F20'); },
         };
         let mut k: u32 = 0;
         while k < eqs.len() {
             if !residual_is_identity(*eqs.at(k)) {
-                return false;
+                panic_with_felt252('F21');
             }
             k += 1;
         }
@@ -216,7 +226,7 @@ pub fn verify_hand(hand_binding: felt252, payload: Span<felt252>) -> bool {
 
     // ---- recon: eq1, eq2 == O (CP-DLEQ, kind=4) ----
     i = 0;
-    while i < n_recon_u32 {
+    while i < n_recon_u32 { // DIAG: recon enabled
         let ((eq1, eq2), _w) = match reconstruct_equations(
             hand_binding,
             (*payload.at(cursor), *payload.at(cursor + 1)),
@@ -228,12 +238,68 @@ pub fn verify_hand(hand_binding: felt252, payload: Span<felt252>) -> bool {
             *payload.at(cursor + 12),
         ) {
             Option::Some(v) => v,
-            Option::None => { return false; },
+            Option::None => { panic_with_felt252('F22'); },
         };
         if !residual_is_identity(eq1) || !residual_is_identity(eq2) {
-            return false;
+            panic_with_felt252('F23');
         }
         cursor += 13;
+        i += 1;
+    }
+
+    // ---- action sig: eq = s·G − R − c·pk == O (v3 felt-domain, kind=5) ----
+    // c = poseidon([label, table_id, hand_id, seq, action_felt, amount,
+    //               R_x, R_y]) — RAW (< P), no mod-n reduction (group order
+    // makes it a no-op; same discipline as ownership_equation). Label =
+    // short-string felt 'zgame.action-sig.v3' — byte-identical to the Rust
+    // host's `action_sig_challenge_raw` (parity test pinned cross-crate).
+    i = 0;
+    while i < n_action_u32 { // DIAG: action enabled
+        let pk_point = match EcPointTrait::new(
+            *payload.at(cursor), *payload.at(cursor + 1),
+        ) {
+            Option::Some(p) => p,
+            Option::None => { panic_with_felt252('F24'); },
+        };
+        let r_point = match EcPointTrait::new(
+            *payload.at(cursor + 2), *payload.at(cursor + 3),
+        ) {
+            Option::Some(p) => p,
+            Option::None => { panic_with_felt252('F25'); },
+        };
+        let s = *payload.at(cursor + 4);
+        let c_input: Array<felt252> = array![
+            'zgame.action-sig.v3',
+            *payload.at(cursor + 5),
+            *payload.at(cursor + 6),
+            *payload.at(cursor + 7),
+            *payload.at(cursor + 8),
+            *payload.at(cursor + 9),
+            *payload.at(cursor + 2),
+            *payload.at(cursor + 3),
+        ];
+        let c = poseidon_hash_span(c_input.span());
+
+        let g_nz: NonZeroEcPoint = EcPointTrait::new(GENERATOR_X, GENERATOR_Y)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let r_neg_nz: NonZeroEcPoint = match (-r_point).try_into() {
+            Option::Some(nz) => nz,
+            Option::None => { panic_with_felt252('F26'); },
+        };
+        let pk_neg_nz: NonZeroEcPoint = match (-pk_point).try_into() {
+            Option::Some(nz) => nz,
+            Option::None => { panic_with_felt252('F27'); },
+        };
+        let mut state = EcStateTrait::init();
+        state.add_mul(s, g_nz);
+        state.add_mul(c, pk_neg_nz);
+        state.add(r_neg_nz);
+        if !residual_is_identity(state.finalize()) {
+            return false;
+        }
+        cursor += 10;
         i += 1;
     }
 

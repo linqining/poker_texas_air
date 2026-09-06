@@ -101,20 +101,25 @@ impl StarknetConfig {
             vault_address: std::env::var("STARKNET_VAULT_ADDRESS").unwrap_or_default(),
             settlement_address: std::env::var("STARKNET_SETTLEMENT_ADDRESS").unwrap_or_default(),
             dual_settlement_address: std::env::var("STARKNET_DUAL_SETTLEMENT_ADDRESS").unwrap_or_default(),
-            // 2026-09-06 固定为 legacy：DAPV 需要在结算期向客户端收集
-            // ownership 认可（10s 窗口 + 有界重试），客户端失联时该手结算
-            // 被丢弃且无 forfeit 恢复路径；开局期铸造/随动作附带落地前
-            // （DAPV_SOUNDNESS §9 L2 注册期语义）钉死 legacy 结算。
-            // STARKNET_SETTLEMENT_MODE 仍读但被忽略——恢复时撤销本钉即可。
+            // 2026-09-06：endorsement 收集通道删除后 DAPV 旧模式（dapv/auto）
+            // 的前提已不存在，但动作签名（zgame.action-sig.v3）已成为每手
+            // 必然的参与背书材料——`snip36` 模式据此启用：牌局结束异步出
+            // 递归证明（action-sig 批次）后提交。除 snip36 外仍钉 legacy
+            // （v2 结算不启动证明）。
             settlement_mode: {
                 let requested = std::env::var("STARKNET_SETTLEMENT_MODE").unwrap_or_default();
-                if !requested.is_empty() && requested != "legacy" {
-                    eprintln!(
-                        "[starknet-config] STARKNET_SETTLEMENT_MODE={requested} ignored — \
-                         pinned to legacy until deal-time endorsements land"
-                    );
+                match requested.trim() {
+                    "snip36" => "snip36".to_string(),
+                    other => {
+                        if !other.is_empty() && other != "legacy" {
+                            eprintln!(
+                                "[starknet-config] STARKNET_SETTLEMENT_MODE={other} ignored — \
+                                 pinned to legacy (available: legacy | snip36)"
+                            );
+                        }
+                        "legacy".to_string()
+                    }
                 }
-                "legacy".to_string()
             },
             settle_mode: SettleMode::parse(
                 &std::env::var("STARKNET_SETTLE_MODE").unwrap_or_default(),
@@ -169,6 +174,12 @@ impl StarknetConfig {
     /// Hand-batch 失败后是否允许回退 legacy（仅 auto 模式）。
     pub fn dapv_fallback_legacy(&self) -> bool {
         self.settlement_mode != "dapv"
+    }
+
+    /// 是否启用 snip36 递归证明结算模式（牌局结束异步证明后提交；
+    /// 非 snip36 模式（v2/legacy）不启动任何证明进程）。
+    pub fn settlement_mode_snip36(&self) -> bool {
+        self.settlement_mode.trim() == "snip36"
     }
 
     /// 归一化的 settle 入口值（trim 后；空/未知 → "v2"）。

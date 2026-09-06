@@ -186,11 +186,135 @@ async fn settle_hand_from_log(mut input: super::prove_log::HandSettleInput) {
         hex_encode(&settlement.aggregate_digest)
     );
 
+    // ===== snip36 模式：异步递归证明（action-sig 批次）→ 提交 =====
+    // 非 snip36 模式（legacy/v2）不启动任何证明进程。
+    if super::chain()
+        .map(|c| c.config.settlement_mode_snip36())
+        .unwrap_or(false)
+    {
+        let dual_addr = super::chain()
+            .map(|c| c.config.dual_settlement_address.clone())
+            .unwrap_or_default();
+        let work_dir = super::chain()
+            .map(|c| c.config.prover_work_dir.clone())
+            .unwrap_or_else(|| "/tmp/zgame-prover".to_string());
+        tokio::spawn(async move {
+            snip36_settle_flow(table_id, mirror, settlement, start, input, dual_addr, work_dir)
+                .await;
+        });
+        return;
+    }
+
     PENDING_SETTLE
         .lock()
         .map(|mut g| g.insert(table_id, PendingSettle { settlement, mirror, attempts: 0 }))
         .ok();
     run_settle_attempt(table_id).await;
+}
+
+/// snip36 结算流：递归证明（action-sig 批次）→ 工件落盘 → v3 入口提交
+/// （合约随 cairo ≥2.12 上链后激活）→ 失败回退 legacy 结算。
+/// 结算永不因证明阻塞/失败而丢失（对账已通过的 settlement 保底上链）。
+async fn snip36_settle_flow(
+    table_id: u32,
+    mirror: TableMirror,
+    settlement: super::submit::HandSettlement,
+    start: super::prove_log::HandStartData,
+    input: super::prove_log::HandSettleInput,
+    dual_addr: String,
+    work_dir: String,
+) {
+    let hand_id = settlement.hand_id;
+
+    // 1. 材料：每参与者首条已签名动作（v3 域：含 hand_id）。
+    let materials =
+        super::recursion_prover::action_sig_materials(&input.action_log, &start.participants);
+    if materials.is_empty() {
+        tracing::warn!(
+            "[snip36] table {table_id} hand {hand_id}: no signed actions — proof skipped"
+        );
+    }
+
+    // 2. 异步出证（阻塞调用移入 spawn_blocking；hand_binding = 注册值）。
+    let binding = super::dual_settle::prepare_handbatch_binding(&mirror, &settlement);
+    let prove_result = match binding {
+        Ok(b) => {
+            let out_dir =
+                std::path::Path::new(&work_dir).join(format!("hand-{hand_id}-recursion"));
+            let mats = materials.clone();
+            let table_id = input.table_id;
+            let hand_id = settlement.hand_id;
+            let hb_bytes = b.hand_binding.to_bytes_be();
+            tokio::task::spawn_blocking(move || {
+                super::recursion_prover::prove_batch_blocking(
+                    table_id, hand_id, hb_bytes, &mats, &out_dir,
+                )
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("join: {e:?}")))
+        }
+        Err(e) => Err(format!("binding: {e}")),
+    };
+
+    match prove_result {
+        Ok(out) => {
+            tracing::info!(
+                "[snip36] table {table_id} hand {hand_id} recursion proof ok: acc={} steps={} ec_ops={} out={}",
+                out.acc, out.steps, out.ec_ops, out.out_dir
+            );
+            if dual_addr.is_empty() {
+                tracing::warn!(
+                    "[snip36] dual settlement address not configured — proof archived, settlement falls back to legacy"
+                );
+            } else {
+                // v3 入口提交：calldata = [hand_binding, hand_id, segment(15)]
+                // —— segment 由 settlement_private 公开段给出；外部 settle
+                // prover 未配置时落盘工件并回退 legacy（P2/P4 激活项）。
+                tracing::info!(
+                    "[snip36] hand {hand_id} proof ready; v3 settlement submission activates with the cairo >= 2.12 contract (plan-snip36-execution P2/P4)"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "[snip36] table {table_id} hand {hand_id} recursion proof failed: {e} — settlement falls back to legacy"
+            );
+        }
+    }
+
+    // 3. legacy 保底：对账已通过的 settlement 直接上链（幂等/重投同 legacy）。
+    submit_legacy_with_retry(table_id, settlement).await;
+}
+
+/// legacy 结算（snip36 回退腿）：单次提交 + 已结算幂等容忍。
+async fn submit_legacy_with_retry(table_id: u32, settlement: super::submit::HandSettlement) {
+    let Some(chain) = super::chain() else { return };
+    let addr = chain.config.settlement_address.clone();
+    if addr.is_empty() {
+        tracing::info!(
+            "[snip36] dev mode: legacy settlement calldata generated, on-chain submit skipped (register {} felts)",
+            settlement.register_calldata.len()
+        );
+        return;
+    }
+    match super::submit::submit_settlement(&settlement, &addr).await {
+        Ok((register_hash, settle_hash)) => {
+            let _ = settle_ok_once(table_id, settlement.hand_id);
+            tracing::info!(
+                "[snip36-fallback] table {table_id} hand {} legacy settle ok: register={register_hash} settle={settle_hash}",
+                settlement.hand_id
+            );
+        }
+        Err(e) if is_already_settled_error(&e) => {
+            let _ = settle_ok_once(table_id, settlement.hand_id);
+        }
+        Err(e) => {
+            tracing::error!(
+                "[snip36-fallback] table {table_id} hand {} legacy settle failed: {e}",
+                settlement.hand_id
+            );
+        }
+    }
 }
 
 /// 强制对账：VM 快照与游戏层终局事实逐分比对（total_bet / 公共牌数 /

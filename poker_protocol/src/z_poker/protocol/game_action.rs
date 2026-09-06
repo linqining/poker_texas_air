@@ -1,90 +1,79 @@
 //! #16 抗审查动作签名（`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §2）。
 //!
 //! 玩家以**牌局身份 SK**（Part B 随机密钥，与钱包零派生，Stark curve）
-//! 对动作签名：
+//! 对动作签名（endorsement 通道删除后的唯一参与背书来源）：
 //!
 //! ```text
-//! msg  = "zgame.action-sig.v2" || table_id(u32 BE) || hand_id(u32 BE)
-//!      || seq(u64 BE) || len(action)(u32 BE) || action || amount(u64 BE)
-//! r    = w·G
-//! c    = H_stark(msg || r_compressed)          -- StarkCurve::hash_to_scalar
-//! s    = w + c·sk
+//! c = poseidon_hash_many([label, table_id, hand_id, seq, action_felt,
+//!                         amount, R_x, R_y]) mod n     -- felt 直通挑战
+//! R = w·G；s = w + c·sk
 //! ```
-//! 验证：`s·G == r + c·pk`（pk = 座位牌局公钥，SIT_DOWN 时已绑定；本项目
-//! 全链路为 Stark curve，与 DAPV 认可/`hand_batch_stark` 同域同式）。
+//! 验证：`s·G == R + c·pk`（pk = 座位牌局公钥，SIT_DOWN 时已绑定）。
 //!
-//! 域分离：常量域名 + 定长编码 + 动作名长度前缀；`amount` 仅 raise 非零。
+//! v3（2026-09-06）：挑战从 v2 字节域（poseidon_over_bytes(msg‖R)）升级为
+//! **felt 定长域**——与 ownership/reveal 挑战同构（`ACTION_SIG_LABEL`
+//! short-string felt、R 用仿射坐标、action 名 short-string felt），递归
+//! 信封的 Cairo 验证器原生复刻（`recursion.cairo` action-sig kind），
+//! 无字节级操作。v2 未上生产即被取代。
+//!
 //! 防重放：`(table_id, hand_id)` 域分离 + seq 单调（hand_id 在开局时由
 //! `record_hand_start` 分配并进 HandStartData，签名/验证两侧同源）。
-//! v2（2026-09-06）：挑战域加入 hand_id——动作签名升级为逐手归属凭证
-//! （ENDORSment 通道删除后的唯一参与背书来源）。本项目全部使用 Stark
-//! curve；legacy-bls381 仅为参考实现，不在此处出现。
+//! 本项目全部使用 Stark curve。
 
 use poker_protocol_core::curve::{Curve, CurvePoint, CurveScalar};
+use poker_protocol_core::stark_curve::action_sig_challenge;
 use poker_protocol_core::StarkCurve;
 use rand_core::{CryptoRng, RngCore};
 
-pub const ACTION_SIG_DOMAIN: &[u8] = b"zgame.action-sig.v2";
-
-/// 规范化动作消息字节（客户端 / 服务端 / 测试三方共用的唯一口径）。
-pub fn action_msg_bytes(
+/// StarkCurve 签名核心（`w` 注入便于确定性测试）。
+/// 方程：`s = w + c·sk`，`c = poseidon(label, table, hand, seq, action,
+/// amount, R_x, R_y) mod n`。
+pub fn sign_game_action_generic(
+    sk: &<StarkCurve as Curve>::Scalar,
     table_id: u32,
     hand_id: u32,
     seq: u64,
     action: &str,
     amount: u64,
-) -> Vec<u8> {
-    let mut m = Vec::with_capacity(ACTION_SIG_DOMAIN.len() + 28 + action.len());
-    m.extend_from_slice(ACTION_SIG_DOMAIN);
-    m.extend_from_slice(&table_id.to_be_bytes());
-    m.extend_from_slice(&hand_id.to_be_bytes());
-    m.extend_from_slice(&seq.to_be_bytes());
-    m.extend_from_slice(&(action.len() as u32).to_be_bytes());
-    m.extend_from_slice(action.as_bytes());
-    m.extend_from_slice(&amount.to_be_bytes());
-    m
-}
-
-/// 曲线泛型签名核心（`w` 注入便于确定性测试；对外入口固定 StarkCurve）。
-pub fn sign_game_action_generic<C: Curve>(
-    sk: &C::Scalar,
-    table_id: u32,
-    hand_id: u32,
-    seq: u64,
-    action: &str,
-    amount: u64,
-    nonce: &C::Scalar,
-) -> (C::Point, C::Scalar) {
-    let msg = action_msg_bytes(table_id, hand_id, seq, action, amount);
-    let g = C::base_g();
+    nonce: &<StarkCurve as Curve>::Scalar,
+) -> (<StarkCurve as Curve>::Point, <StarkCurve as Curve>::Scalar) {
+    let g = StarkCurve::base_g();
     let r = g * *nonce;
-    let mut challenge_input = msg.clone();
-    challenge_input.extend_from_slice(r.compress().as_ref());
-    let c = C::hash_to_scalar(&challenge_input);
+    // 挑战（core 的 action_sig_challenge 与此处 felts 表同源同式）
+    let c = {
+        let (rx, ry) = r
+            .to_affine_parts()
+            .expect("nonce point not identity");
+        action_sig_challenge(table_id, hand_id, seq, action, amount, rx, ry)
+            .expect("action name must encode")
+    };
     let s = *nonce + c * *sk;
     (r, s)
 }
 
-/// 曲线泛型验证核心（与签名核心同式重算挑战）。
-pub fn verify_game_action_generic<C: Curve>(
-    pk: &C::Point,
+/// StarkCurve 验证核心（与签名核心同式重算挑战）。
+pub fn verify_game_action_generic(
+    pk: &<StarkCurve as Curve>::Point,
     table_id: u32,
     hand_id: u32,
     seq: u64,
     action: &str,
     amount: u64,
-    r: &C::Point,
-    s: &C::Scalar,
+    r: &<StarkCurve as Curve>::Point,
+    s: &<StarkCurve as Curve>::Scalar,
 ) -> bool {
     if r.is_identity() {
         return false;
     }
-    let msg = action_msg_bytes(table_id, hand_id, seq, action, amount);
-    let mut challenge_input = msg.clone();
-    challenge_input.extend_from_slice(r.compress().as_ref());
-    let c = C::hash_to_scalar(&challenge_input);
-    let g = C::base_g();
-    let lhs = g * s;
+    let c = match r.to_affine_parts() {
+        Some((rx, ry)) => {
+            action_sig_challenge(table_id, hand_id, seq, action, amount, rx, ry)
+        }
+        None => None,
+    };
+    let Some(c) = c else { return false };
+    let g = StarkCurve::base_g();
+    let lhs = g * *s;
     let rhs = *r + *pk * c;
     lhs == rhs
 }
@@ -124,7 +113,7 @@ pub fn sign_game_action(
             continue;
         }
         let (r, s_val) =
-            sign_game_action_generic::<StarkCurve>(sk, table_id, hand_id, seq, action, amount, &nonce);
+            sign_game_action_generic(sk, table_id, hand_id, seq, action, amount, &nonce);
         if s_val == <StarkCurve as Curve>::Scalar::zero() || r.is_identity() {
             continue;
         }
@@ -151,7 +140,7 @@ pub fn verify_game_action_hex(
     ) else {
         return false;
     };
-    verify_game_action_generic::<StarkCurve>(&pk, table_id, hand_id, seq, action, amount, &r, &s)
+    verify_game_action_generic(&pk, table_id, hand_id, seq, action, amount, &r, &s)
 }
 
 #[cfg(test)]
@@ -168,8 +157,8 @@ mod tests {
         let sk = sample_sk();
         let pk = StarkCurve::base_g() * sk;
         let nonce = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
-        let (r, s) = sign_game_action_generic::<StarkCurve>(&sk, 7, 3, 5, "raise", 320, &nonce);
-        assert!(verify_game_action_generic::<StarkCurve>(
+        let (r, s) = sign_game_action_generic(&sk, 7, 3, 5, "raise", 320, &nonce);
+        assert!(verify_game_action_generic(
             &pk, 7, 3, 5, "raise", 320, &r, &s
         ));
     }
@@ -179,18 +168,18 @@ mod tests {
         let sk = sample_sk();
         let pk = StarkCurve::base_g() * sk;
         let nonce = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
-        let (r, s) = sign_game_action_generic::<StarkCurve>(&sk, 7, 3, 5, "raise", 320, &nonce);
-        assert!(!verify_game_action_generic::<StarkCurve>(
+        let (r, s) = sign_game_action_generic(&sk, 7, 3, 5, "raise", 320, &nonce);
+        assert!(!verify_game_action_generic(
             &pk, 7, 3, 6, "raise", 320, &r, &s
         ));
-        assert!(!verify_game_action_generic::<StarkCurve>(
+        assert!(!verify_game_action_generic(
             &pk, 7, 3, 5, "fold", 320, &r, &s
         ));
-        assert!(!verify_game_action_generic::<StarkCurve>(
+        assert!(!verify_game_action_generic(
             &pk, 7, 3, 5, "raise", 321, &r, &s
         ));
         let other_pk = StarkCurve::base_g() * StarkCurve::hash_to_scalar(b"other-sk");
-        assert!(!verify_game_action_generic::<StarkCurve>(
+        assert!(!verify_game_action_generic(
             &other_pk, 7, 3, 5, "raise", 320, &r, &s
         ));
     }
@@ -200,8 +189,8 @@ mod tests {
         let sk = sample_sk();
         let pk = StarkCurve::base_g() * sk;
         let nonce = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
-        let (r, s) = sign_game_action_generic::<StarkCurve>(&sk, 1, 3, 5, "call", 0, &nonce);
-        assert!(!verify_game_action_generic::<StarkCurve>(
+        let (r, s) = sign_game_action_generic(&sk, 1, 3, 5, "call", 0, &nonce);
+        assert!(!verify_game_action_generic(
             &pk, 2, 3, 5, "call", 0, &r, &s
         ));
     }
@@ -213,8 +202,8 @@ mod tests {
         let sk = sample_sk();
         let pk = StarkCurve::base_g() * sk;
         let nonce = <StarkCurve as Curve>::Scalar::random(&mut OsRng);
-        let (r, s) = sign_game_action_generic::<StarkCurve>(&sk, 7, 3, 5, "call", 0, &nonce);
-        assert!(!verify_game_action_generic::<StarkCurve>(
+        let (r, s) = sign_game_action_generic(&sk, 7, 3, 5, "call", 0, &nonce);
+        assert!(!verify_game_action_generic(
             &pk, 7, 4, 5, "call", 0, &r, &s
         ));
     }

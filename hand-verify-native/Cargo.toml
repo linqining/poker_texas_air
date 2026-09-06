@@ -1,17 +1,14 @@
-# Standalone workspace for the native-Stwo hand_verify spike.
+# 递归证明信封（form-③）+ 原生 Stwo hand_verify spike。
 #
-# Deliberately NOT a member of the root workspace (same pattern as
-# `proving-tool/`): the root `Cargo.toml` members list does not include this
-# directory, so `cargo` commands at the repo root never touch it and the main
-# project build stays untouched. It has its own Cargo.lock and target dir.
+# 2026-09-06 起并入根 workspace（此前与 proving-tool 同为独立 workspace）：
+# snip36 结算模式（STARKNET_SETTLEMENT_MODE=snip36）需要 texas 直接驱动
+# 递归信封（牌局结束异步证明 → 提交），库级依赖比子进程拼装可靠。
+# 运行时仍依赖 proving-tool 的 prove-hand 二进制（出证 CLI，
+# HAND_VERIFY_PROVE_HAND 可覆盖路径）——该依赖在文档与失败信息中标注，
+# 不进 cargo 依赖图（proving-tool 保持独立 workspace）。
 #
-# Purpose: evaluate the "Stark-curve sigma + native Stwo" architecture for
-# hand_verify — host-native EC verification plus an O(1)-verify statement
-# AIR — without the Cairo VM / stwo-cairo pipeline (which measures ~13.6s
-# prove per hand at 148 EC ops on the reference M3 Pro).
-
-[workspace]
-resolver = "2"
+# 定位：「Stark-curve sigma + native Stwo」hand_verify——host 原生 EC
+# 验证 + O(1)-verify 语句 AIR + Cairo 路线递归信封（EC_OP in trace）。
 
 [package]
 name = "hand-verify-native"
@@ -25,6 +22,14 @@ description = "Native Stwo (no Cairo VM) spike for hand_verify: Stark-curve sigm
 name = "hand-verify-native"
 path = "src/main.rs"
 
+[dev-dependencies]
+# 挑战域对拍：action-sig v3 的 host RAW 挑战必须与协议 core 的归约标量
+# 在群阶意义下等价（raw ≡ core mod n）——跨 crate 公式漂移即测试红。
+poker-protocol-core = { path = "../poker-protocol-core" }
+# core 的 Felt 类型载体（starknet-crypto 0.8 的 Felt = types-core Felt）；
+# 对拍测试用它把 0.6 FieldElement 的坐标转成 core 签名接受的类型。
+starknet-types-core = { version = "0.2", default-features = false }
+
 [dependencies]
 stwo = { version = "2.3", features = ["parallel", "prover"] }
 stwo-constraint-framework = { version = "2.3", features = ["prover"] }
@@ -34,7 +39,3 @@ starknet-crypto = { version = "0.6", default-features = false, features = ["allo
 num-bigint = "0.4.8"
 bincode = "1"
 serde_json = "1"
-
-[profile.release]
-# Keep default opt-level/codegen-units so timings stay comparable to the
-# prove-hand baseline (which also uses plain release defaults).

@@ -71,7 +71,6 @@ fn main(prev_acc: felt252, tasks: Span<felt252>) -> felt252 {
             panic_with_felt252('HAND_VERIFY_FAILED');
         }
 
-        // digest = poseidon([payload_len] ++ payload) —— host payload_digest 同构。
         let mut digest_preimage: Array<felt252> = array![];
         digest_preimage.append(payload_len.into());
         let mut j: u32 = 0;
@@ -81,7 +80,6 @@ fn main(prev_acc: felt252, tasks: Span<felt252>) -> felt252 {
         }
         let digest = poseidon_hash_span(digest_preimage.span());
 
-        // claim = poseidon(hand_binding, digest, counts) —— counts 取自 header。
         let mut claim_preimage: Array<felt252> = array![];
         claim_preimage.append(hand_binding);
         claim_preimage.append(digest);
@@ -89,19 +87,18 @@ fn main(prev_acc: felt252, tasks: Span<felt252>) -> felt252 {
         claim_preimage.append(*payload.at(2));
         claim_preimage.append(*payload.at(3));
         claim_preimage.append(*payload.at(4));
+        claim_preimage.append(*payload.at(5));
         claims.append(poseidon_hash_span(claim_preimage.span()));
 
         cursor += 2 + payload_len;
         i += 1;
     }
 
-    // new_acc = poseidon([prev_acc] ++ claims)。
     let mut acc_preimage: Array<felt252> = array![];
     acc_preimage.append(prev_acc);
     let claims_span = claims.span();
-    let n_claims = claims_span.len();
     let mut k = 0;
-    while k < n_claims {
+    while k < claims_span.len() {
         acc_preimage.append(*claims_span.at(k));
         k += 1;
     }

@@ -59,6 +59,9 @@ pub struct ActionLogEntry {
     pub owed: u64,
     pub my_bet: u64,
     pub big_blind: u64,
+    /// 玩家动作签名本体（endorsement 通道删除后的参与背书材料；
+    /// 递归证明 action-sig 批次的数据源）。auto 代打/未签名迁移 = None。
+    pub sig: Option<ActionSig>,
 }
 pub const ACTION_RECEIPT: &str = "ACTION_RECEIPT";
 
@@ -245,8 +248,7 @@ mod auto_action_tests {
     fn action_log_digest_is_order_and_flag_sensitive() {
         let e = |seq: u64, action: &str, auto: bool| ActionLogEntry {
             seat: 1, seq, action: action.into(), amount: 0, auto, sig_ok: true,
-            owed: 0, my_bet: 0, big_blind: 20,
-        };
+            owed: 0, my_bet: 0, big_blind: 20, sig: None };
         let a = action_log_digest_hex(&[e(1, CHECK, false), e(2, FOLD, true)]);
         let b = action_log_digest_hex(&[e(1, CHECK, false), e(2, FOLD, false)]);
         let c = action_log_digest_hex(&[e(2, FOLD, true), e(1, CHECK, false)]);
@@ -267,8 +269,8 @@ mod auto_action_tests {
         // 独立复刻电路吸收口径：[DOMAIN] ++ Σ packed_word。
         use starknet::core::utils::starknet_keccak;
         let log = vec![
-            ActionLogEntry { seat: 0, seq: 1, action: CALL.into(), amount: 20, auto: false, sig_ok: true, owed: 20, my_bet: 0, big_blind: 20 },
-            ActionLogEntry { seat: 1, seq: 2, action: FOLD.into(), amount: 0, auto: true, sig_ok: true, owed: 500, my_bet: 20, big_blind: 20 },
+            ActionLogEntry { seat: 0, seq: 1, action: CALL.into(), amount: 20, auto: false, sig_ok: true, owed: 20, my_bet: 0, big_blind: 20, sig: None },
+            ActionLogEntry { seat: 1, seq: 2, action: FOLD.into(), amount: 0, auto: true, sig_ok: true, owed: 500, my_bet: 20, big_blind: 20, sig: None },
         ];
         let mut fields = vec![starknet_keccak(b"zgame.action_log.v1")];
         for e in &log {
@@ -288,17 +290,17 @@ mod auto_action_tests {
         assert_eq!(action_word(CALL), Some(starknet::core::types::Felt::from(0x43414C4Cu64)));
         assert_eq!(action_word(FOLD), Some(starknet::core::types::Felt::from(0x464F4C44u64)));
         // 合法性词（切片 2）：非 auto canonical 0；auto 按位域还原逐字段一致。
-        let non_auto = ActionLogEntry { seat: 0, seq: 1, action: CALL.into(), amount: 20, auto: false, sig_ok: true, owed: 20, my_bet: 0, big_blind: 20 };
+        let non_auto = ActionLogEntry { seat: 0, seq: 1, action: CALL.into(), amount: 20, auto: false, sig_ok: true, owed: 20, my_bet: 0, big_blind: 20, sig: None };
         assert_eq!(legality_word(&non_auto), Some(starknet::core::types::Felt::ZERO));
-        let auto_fold = ActionLogEntry { seat: 1, seq: 2, action: FOLD.into(), amount: 0, auto: true, sig_ok: true, owed: 500, my_bet: 20, big_blind: 20 };
+        let auto_fold = ActionLogEntry { seat: 1, seq: 2, action: FOLD.into(), amount: 0, auto: true, sig_ok: true, owed: 500, my_bet: 20, big_blind: 20, sig: None };
         let leg = legality_word(&auto_fold).expect("legality word");
         // 194 位值无法用 u128 还原——位域正确性由电路端到端（跨语言对齐）
         // 校验；此处验证确定性 + 不同 owed 产生不同词。
         assert_eq!(leg, legality_word(&auto_fold).expect("auto entry has legality word"));
-        let owed_differs = ActionLogEntry { owed: 501, ..auto_fold.clone() };
+        let owed_differs = ActionLogEntry { owed: 501, sig: None, ..auto_fold.clone() };
         assert_ne!(leg, legality_word(&owed_differs).expect("legality"));
         // 打包词位域：seat@170 / seq@106 / amount@42 —— 还原逐字段一致。
-        let e = ActionLogEntry { seat: 3, seq: 7, action: RAISE.into(), amount: 120, auto: false, sig_ok: false, owed: 20, my_bet: 20, big_blind: 20 };
+        let e = ActionLogEntry { seat: 3, seq: 7, action: RAISE.into(), amount: 120, auto: false, sig_ok: false, owed: 20, my_bet: 20, big_blind: 20, sig: None };
         let packed = action_entry_word(&e).expect("known action");
         assert!(packed < starknet::core::types::Felt::from_hex(
             "0x4000000000000000000000000000000000000000000").expect("2^170") // < 2^202

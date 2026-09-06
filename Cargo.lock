@@ -1402,6 +1402,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hand-verify-native"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "num-bigint",
+ "poker-protocol-core",
+ "serde_json",
+ "starknet-crypto 0.6.2",
+ "starknet-types-core",
+ "stwo",
+ "stwo-constraint-framework",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3721,6 +3735,7 @@ dependencies = [
  "chrono",
  "clap",
  "dotenv",
+ "hand-verify-native",
  "hex",
  "itertools 0.14.0",
  "jsonwebtoken",

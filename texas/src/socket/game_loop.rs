@@ -817,7 +817,7 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
                     if let Some(table) = gs.tables.get_mut(&table_id) {
                         if let Some(seat) = table.find_player_by_pk(&GamePkHex(pk_hex.clone())).map(|x| x.id) {
                             let seq = table.accepted_seq_of(seat) + 1;
-                            table.record_action(seat, seq, "fold", 0, true, false);
+                            table.record_action(seat, seq, "fold", 0, true, false, None);
                             Some(build_action_receipt_payload(table_id, &GamePkHex(pk_hex.clone()), seq, "fold", 0, "autoAccepted", ""))
                         } else {
                             None
@@ -854,7 +854,7 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
                     if let Some(table) = gs.tables.get_mut(&table_id) {
                         if let Some(seat) = table.find_player_by_pk(&GamePkHex(pk_hex.clone())).map(|x| x.id) {
                             let seq = table.accepted_seq_of(seat) + 1;
-                            table.record_action(seat, seq, "check", 0, true, false);
+                            table.record_action(seat, seq, "check", 0, true, false, None);
                             Some(build_action_receipt_payload(table_id, &GamePkHex(pk_hex.clone()), seq, "check", 0, "autoAccepted", ""))
                         } else {
                             None
@@ -890,7 +890,7 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
                     if let Some(table) = gs.tables.get_mut(&table_id) {
                         if let Some(seat) = table.find_player_by_pk(&GamePkHex(pk_hex.clone())).map(|x| x.id) {
                             let seq = table.accepted_seq_of(seat) + 1;
-                            table.record_action(seat, seq, "call", 0, true, false);
+                            table.record_action(seat, seq, "call", 0, true, false, None);
                             Some(build_action_receipt_payload(table_id, &GamePkHex(pk_hex.clone()), seq, "call", 0, "autoAccepted", ""))
                         } else {
                             None
@@ -1073,7 +1073,14 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                         if let Some(seat) = seat_id {
                             // seq 只前进不回退（未签名迁移动作保持 accepted 单调）
                             let seq = req.seq.unwrap_or(0).max(table.accepted_seq_of(seat));
-                            table.record_action(seat, seq, &req.action, amount_for_sig, false, sig_ok);
+                                                        // 留存签名本体（sig_ok 时）——递归证明 action-sig
+                            // 批次与结算可审计性的数据源；验签失败不落签名。
+                            let kept_sig = if sig_ok {
+                                req.sig.clone()
+                            } else {
+                                None
+                            };
+                            table.record_action(seat, seq, &req.action, amount_for_sig, false, sig_ok, kept_sig);
                             // C2：接受点标记，入口查重据此拦截同 (table, pk, seq) 重放
                             state.mark_action_processed(table_id, &req.pk_hex.0, seq);
                             pending_receipts.push(build_action_receipt_payload(table_id, &req.pk_hex, seq, &req.action, amount_for_sig, "accepted", ""));

@@ -345,6 +345,7 @@ impl Table {
         amount: u64,
         auto: bool,
         sig_ok: bool,
+        sig: Option<crate::pokergame::actions::ActionSig>,
     ) {
         // #18 Phase C 切片 2：记录时刻的下注语境（与 handle_auto_fold 的
         // 推导逐字段同源：owed = summary.call_amount、my_bet = seat.bet、
@@ -363,6 +364,7 @@ impl Table {
             owed,
             my_bet,
             big_blind,
+            sig,
         });
     }
 
@@ -830,8 +832,8 @@ mod tests {
         ));
 
         // 记账：seq 单调推进 + 日志 + 公开段
-        table.record_action(0, 1, "raise", 320, false, true);
-        table.record_action(0, 2, "call", 0, false, true);
+        table.record_action(0, 1, "raise", 320, false, true, None);
+        table.record_action(0, 2, "call", 0, false, true, None);
         assert_eq!(table.accepted_seq_of(0), 2);
         assert_eq!(table.action_log.len(), 2);
         let client = table.to_client();
