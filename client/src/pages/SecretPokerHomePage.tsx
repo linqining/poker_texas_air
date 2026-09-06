@@ -137,8 +137,12 @@ export default function SecretPokerHomePage() {
 
   return (
     <S.Home>
-      {/* 未领取资金提醒（登录且金库有筹码时常驻） */}
-      <UnclaimedFundsBanner />
+      {/* 未领取资金提醒（登录且金库有筹码时常驻）。吸顶导航栏悬于页面
+          最上层，槽位负责让出导航高度（Lobby 宿主自带顶部 padding，
+          不需要此槽位）。 */}
+      <S.FundsBannerSlot>
+        <UnclaimedFundsBanner />
+      </S.FundsBannerSlot>
       {/* Subtle ambient particles */}
       <S.Particles>
         {particles.map((p) => (

@@ -110,13 +110,30 @@ export const Home = styled.div`
   background: ${(props) => props.theme.colors.lightestBg};
   color: ${(props) => props.theme.colors.fontColorDark};
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  /* Scroll-snap is now driven by the document (<body>) via Global.ts.
-     Keeping the page itself a normal block-flow element ensures the
-     browser's native scroll chain works on every platform (desktop
-     wheel, mobile touch, trackpad, etc.) and avoids the "stuck"
-     symptom where a nested overflow:auto island never receives the
-     scroll gesture. */
+  /* 普通块级流布局：文档级 scroll-snap 已移除（hero 首屏 + 条件横幅
+     让 snap 锚点几何不可达，Chrome 重吸附会劫持滚动——见 Global.ts），
+     页面走浏览器原生滚动链。 */
   overflow-x: clip;
+`;
+
+/* 未领取资金横幅槽位：吸顶导航栏（theme.other.navHeight）悬于页面最
+   上层，槽位作为 S.Home 的直接子元素承担两件事——
+   1. margin-top 让出导航高度（横幅首屏不被盖住）；
+   2. sticky 吸附：滚动时横幅贴在导航栏正下方不消失（"处理前一直
+      看得见"）。sticky 只能在父容器范围内吸附，所以必须放在横跨
+      整页的槽位上、而不是横幅组件自己的小 wrapper 里。
+   横幅组件因未登录/已关闭/无筹码返回 null 时，:empty 归零边距避免
+   首屏出现幻影空隙。 */
+export const FundsBannerSlot = styled.div`
+  position: sticky;
+  top: calc(${(props) => props.theme.other.navHeight} + 0.5rem);
+  margin-top: calc(${(props) => props.theme.other.navHeight} + 0.75rem);
+  /* 高于各 section 的 z-index(1-2)，低于侧边圆点(50)/导航栏(300) */
+  z-index: 3;
+
+  &:empty {
+    margin-top: 0;
+  }
 `;
 
 /* ===== Hero ===== */
@@ -128,13 +145,12 @@ export const Hero = styled.section`
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  padding: 5rem 2rem 2rem;
+  padding: calc(${(props) => props.theme.other.navHeight} + 1.5rem) 2rem 2rem;
   scroll-margin-top: 5rem;
-  scroll-snap-align: start;
 
   @media (max-width: 1023px) {
     padding: 1.5rem;
-    padding-top: 7rem;
+    padding-top: calc(${(props) => props.theme.other.navHeight} + 1.5rem);
     padding-bottom: 4rem;
   }
 `;
@@ -295,7 +311,6 @@ export const Section = styled.section<{ $variant?: 'default' | 'alt' | 'how' | '
   position: relative;
   z-index: 1;
   scroll-margin-top: 5rem;
-  scroll-snap-align: start;
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
@@ -619,7 +634,6 @@ export const Footer = styled.footer`
   position: relative;
   z-index: 1;
   scroll-margin-top: 5rem;
-  scroll-snap-align: start;
   min-height: 50vh;
   display: flex;
   flex-direction: column;

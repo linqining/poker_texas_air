@@ -185,6 +185,9 @@ interface ThemeOther {
   stdBorderRadius: string;
   cardDropShadow: string;
   navMenuDropShadow: string;
+  /** 吸顶导航栏高度——fixed 定位后所有页面顶部内容/吸附锚点的
+   * 唯一避让依据（Navbar min-height 与此保持一致）。 */
+  navHeight: string;
   /** iOS safe-area helpers */
   safeAreaTop: string;
   safeAreaBottom: string;
@@ -396,6 +399,7 @@ const theme: Theme = {
     stdBorderRadius: '2rem',
     cardDropShadow: '0 8px 30px rgba(0, 0, 0, 0.06)',
     navMenuDropShadow: '-10px 0px 30px rgba(0, 0, 0, 0.06)',
+    navHeight: '5.5rem',
     safeAreaTop: 'env(safe-area-inset-top, 0px)',
     safeAreaBottom: 'env(safe-area-inset-bottom, 0px)',
     safeAreaLeft: 'env(safe-area-inset-left, 0px)',

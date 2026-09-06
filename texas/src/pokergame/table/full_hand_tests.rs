@@ -407,6 +407,7 @@ mod full_hand_vector_gen {
             u256_word_pub(0), // n_shuffle（BG 桶待链上 CK/MSM）
             u256_word_pub(captured.len() as u64),
             u256_word_pub(1), // n_leave
+            u256_word_pub(0), // n_recon（Hand-batch v2.8 五词头）
         ];
         let mut equations: Vec<HandBatchEquation> = Vec::new();
         for i in 0..n {

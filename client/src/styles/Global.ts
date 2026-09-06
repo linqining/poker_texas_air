@@ -71,14 +71,16 @@ const GlobalStyles = createGlobalStyle`
     overscroll-behavior-y: contain;
     /* Better touch behavior on iOS */
     -webkit-text-size-adjust: 100%;
-    /* Document-level scroll snap. Set on <html> so it covers the entire
-       page (any <body> child) and works in tandem with
-       scroll-snap-align: start on per-section targets. This keeps
-       native page-level scrolling instead of trapping it inside a
-       nested overflow:auto island (which on some browsers never
-       receives the wheel/touch gesture). */
-    scroll-snap-type: y proximity;
+    /* 平滑滚动（锚点跳转/程序滚动）。曾经的文档级 scroll-snap 已移除：
+       hero 是 100dvh 首屏，上方还有条件渲染的资金横幅，snap 锚点几何
+       随视口/内容变化经常不可达——Chrome 的重吸附会劫持程序滚动并在
+       窗口 resize 后落在几十 px 的杂散偏移上（导航栏被顶出、内容错位，
+       2026-09-06 两次线上排版事故同源）。各 section 保留
+       scroll-margin-top 仅供锚点定位使用。 */
     scroll-behavior: smooth;
+    /* 吸顶导航栏（theme.other.navHeight）悬于页面最上层——锚点定位
+       与滚动统一预留导航高度 + 一档呼吸位。 */
+    scroll-padding-top: calc(${(props) => props.theme.other.navHeight} + 0.5rem);
   }
 
   body {

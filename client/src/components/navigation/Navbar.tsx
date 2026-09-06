@@ -28,9 +28,19 @@ interface NavbarProps {
 
 const StyledNav = styled.nav`
   padding: 1rem 0;
-  position: absolute;
+  /* 吸顶：文档级 scroll-snap 在窗口宽度变化后会重新吸附（产生几十 px 的
+     滚动），absolute 定位的导航栏会跟着滚出视口上沿——logo 被切半、原位
+     置露出一条白带，看起来像整页排版坏了（2026-09-06 线上截图复现）。
+     fixed 让导航栏始终盖住视口顶部，微小的重吸附滚动不再可见。 */
+  position: fixed;
+  top: 0;
+  left: 0;
   z-index: ${({ theme }) => theme.zIndex.nav};
   width: 100%;
+  /* 高度与 theme.other.navHeight 保持一致——页面顶部避让和 scroll
+     padding 都引用该令牌，改这里要同步改令牌。 */
+  min-height: ${({ theme }) => theme.other.navHeight};
+  box-sizing: border-box;
   transition: background-color 0.4s ease;
   background-color: ${({ theme }) => theme.colors.lightestBg};
   border-bottom: 1px solid ${({ theme }) => theme.colors.borderSubtle};

@@ -28,7 +28,10 @@ const wasRecentlyDismissed = (): boolean => {
 };
 
 // 宿主页面（Lobby/Home）多为居中 flex 列布局，flex 子项会 shrink-to-fit
-// 被长文本撑满整行——外层 wrapper 强制自身宽度并居中，与页面内容栏对齐
+// 被长文本撑满整行——外层 wrapper 强制自身宽度并居中，与页面内容栏对齐。
+// 滚动吸附由宿主页面的槽位负责（sticky 只能在父容器范围内吸附，槽位必须
+// 是页面根容器的直接子元素——Home 见 SecretPokerHomePage 的
+// FundsBannerSlot；Lobby 是单屏页，流式跟随即可）。
 const BannerWrap = styled.div`
   width: 100%;
   max-width: 720px;

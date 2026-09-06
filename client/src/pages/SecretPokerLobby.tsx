@@ -22,10 +22,11 @@ const PageWrapper = styled.div`
   align-items: center;
   justify-content: flex-end;
   background: ${({ theme }) => theme.colors.fontColorLight};
-  padding: 5rem 1.5rem 2rem;
+  /* 顶部避让吸顶导航栏（theme.other.navHeight） */
+  padding: calc(${({ theme }) => theme.other.navHeight} + 0.75rem) 1.5rem 2rem;
 
   @media screen and (max-width: 468px) {
-    padding: 4.5rem 1rem 2rem;
+    padding: calc(${({ theme }) => theme.other.navHeight} + 0.5rem) 1rem 2rem;
   }
 
   @media screen and (max-width: 900px) and (max-height: 450px) and (orientation: landscape) {
