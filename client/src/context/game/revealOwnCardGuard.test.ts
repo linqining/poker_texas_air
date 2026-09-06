@@ -98,6 +98,14 @@ describe('revealOwnCardGuard', () => {
     expect(result.allowed).toContain(myCard);
   });
 
+  it('showdown 放行也必须接受服务端 wire 名 show_down_reveal', () => {
+    const myCard = { c1_hex: 'a'.repeat(64), c2_hex: 'b'.repeat(64) };
+    recordOwnCards([myCard]);
+    const result = guardRevealAssignment([myCard], [], 'show_down_reveal');
+    expect(result.blocked).toHaveLength(0);
+    expect(result.allowed).toContain(myCard);
+  });
+
   it('P0.4 冷启动（活性修复后）：无锚点时 HandReveal 手牌放行，避免首手死锁', () => {
     expect(hasOwnCardMarkers()).toBe(false);
     const result = guardRevealAssignment([otherCard, otherCard], [], 'HandReveal');
@@ -114,7 +122,10 @@ describe('revealOwnCardGuard', () => {
 
   it('ShowdownReveal 全放行（持有者必须交出自己的份额公开揭示）', () => {
     recordOwnCards([myCard]);
+    // wire 名（服务端 snake_case）与规范名都必须放行——2026-09-07 回归：
+    // 只比规范名时 showdown 必误报"防偷看守卫"且份额收不齐。
     const result = guardRevealAssignment([myCard], [otherCard], 'ShowdownReveal');
+    expect(result.allowed).toContain(myCard);
     expect(result.blocked).toHaveLength(0);
     expect(result.conservativelyBlocked).toBe(false);
     expect(result.allowed).toHaveLength(2);

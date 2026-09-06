@@ -84,6 +84,11 @@ pub struct HandProofLog {
     pub commands: Vec<HandCommand>,
     /// reveal 去重键（pk + 令牌集哈希）——客户端幂等重试不重复记录。
     seen_reveals: std::collections::HashSet<u64>,
+    /// 本手终局投入快照（wallet → total_bet）——派彩前采集。
+    /// `win_hand`（seat.rs）派彩时会清零赢家自己的 `total_bet`，而
+    /// `take_settle_input` 在派彩后执行：不快照则摊牌手的对账恒为
+    /// "vm 累计 vs game 0" 必拒（2026-09-07 线上两手复现）。
+    pub final_total_bets: Option<Vec<(String, u64)>>,
 }
 
 impl HandProofLog {
@@ -100,6 +105,7 @@ impl HandProofLog {
             }),
             commands: Vec::new(),
             seen_reveals: std::collections::HashSet::new(),
+            final_total_bets: None,
         }
     }
 
@@ -233,7 +239,29 @@ pub fn record_hand_start(table: &mut Table) {
         }),
         commands: Vec::new(),
         seen_reveals: std::collections::HashSet::new(),
+        final_total_bets: None,
     };
+}
+
+/// 派彩前快照终局投入（摊牌/fold-win 两条终局路径各调用一次；重复调用
+/// 以首次为准——首次才是派彩前语义）。
+pub fn record_final_bets(table: &mut Table) {
+    if table.hand_proof_log.start.is_none() {
+        return;
+    }
+    if table.hand_proof_log.final_total_bets.is_some() {
+        return;
+    }
+    let bets = table
+        .seats()
+        .iter()
+        .filter_map(|(_, s)| {
+            s.player
+                .as_ref()
+                .map(|p| (p.wallet_address.0.clone(), s.total_bet))
+        })
+        .collect();
+    table.hand_proof_log.final_total_bets = Some(bets);
 }
 
 /// reveal 令牌接受点（submit_reveal_tokens_for_pk 成功后）。
@@ -302,15 +330,23 @@ pub fn take_settle_input(table: &Table) -> Option<HandSettleInput> {
     if table.hand_proof_log.start.is_none() {
         return None;
     }
+    // 优先用派彩前快照（终局投入语义，与 VM 重放对账）；无快照（异常
+    // 路径/旧手）回退实时读取。
     let total_bets = table
-        .seats()
-        .iter()
-        .filter_map(|(_, s)| {
-            s.player
-                .as_ref()
-                .map(|p| (p.wallet_address.0.clone(), s.total_bet))
-        })
-        .collect();
+        .hand_proof_log
+        .final_total_bets
+        .clone()
+        .unwrap_or_else(|| {
+            table
+                .seats()
+                .iter()
+                .filter_map(|(_, s)| {
+                    s.player
+                        .as_ref()
+                        .map(|p| (p.wallet_address.0.clone(), s.total_bet))
+                })
+                .collect()
+        });
     // 与 pot.rs 审计日志同窗口（hand_log_start 起的本手动作）。
     let window = &table.action_log[table.hand_log_start.min(table.action_log.len())..];
     let action_log_digest = crate::pokergame::actions::action_log_digest_felt(window).to_bytes_be();

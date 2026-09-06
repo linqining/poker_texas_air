@@ -191,6 +191,9 @@ impl Table {
                 // 链上口径收取台费，然后分配。漏掉抽水会让前端筹码与链上
                 // 结算每手偏差 5%（2026-09-04 线上复现：链上 -340/+306/+34，
                 // 前端 760/1240 总和守恒）。
+                // 派彩前快照终局投入——win_hand 会清零赢家的 total_bet，
+                // 结算对账（take_settle_input）必须用派彩前值。
+                crate::starknet::prove_log::record_final_bets(self);
                 self.calculate_side_pots();
                 self.collect_rake_for_settlement();
                 self.determine_side_pot_winners();

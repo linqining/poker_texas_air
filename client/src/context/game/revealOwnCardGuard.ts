@@ -136,7 +136,12 @@ export function guardRevealAssignment(
   communityCards: unknown[],
   phase: string,
 ): RevealGuardResult {
-  const isShowdown = phase === 'ShowdownReveal';
+  // wire 名双形态：服务端 Display 序列化为 snake_case（
+  // game_state.rs:160 "show_down_reveal"），而枚举规范名是 ShowdownReveal——
+  // 此前只比规范名，摊牌阶段永远走不进放行分支 → 玩家自己的手牌被当成
+  // "偷看攻击" 拒出 token（每次 showdown 必报防偷看守卫错误，且份额
+  // 永远收不齐）。两种形态都放行。
+  const isShowdown = phase === 'ShowdownReveal' || phase === 'show_down_reveal';
   if (isShowdown) {
     // 摊牌阶段：持有者必须交出自己的份额（公开揭示），全部放行。
     return { allowed: [...handCards, ...communityCards], blocked: [], conservativelyBlocked: false };

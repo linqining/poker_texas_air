@@ -19,6 +19,8 @@ impl Table {
     }
 
     pub fn end_without_showdown(&mut self) {
+        // 派彩前快照终局投入（对账语义同摊牌路径——win_hand 清零赢家）。
+        crate::starknet::prove_log::record_final_bets(self);
         // 对齐 Move end_without_showdown：将剩余唯一未弃牌玩家判为赢家，获得全部底池。
         // Rust 中下注已通过 add_to_pot 累积到 self.pot，无需再调用 collect_bets_to_pot（否则双重计算）。
         let unfolded = self.unfolded_players();

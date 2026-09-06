@@ -38,17 +38,17 @@ pub fn ecpoint_to_hex(p: &EcPoint) -> String {
 
 fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
     let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    if bytes.len() != 48 {
-        return Err("EC point must be 48 bytes (BLS12-381 compressed)".to_string());
+    // DefaultCurve = StarkCurve：压缩点为 32 字节（x 大端 + 首字节 0x80 位
+    // 记 y 奇偶——StarkCompressedPoint 编码，见 stark_curve::compress）。
+    // 此前按 48 字节（BLS12-381 时代）断言——Stark 迁移时漏改；2026-09-06
+    // 重建 pkg 后首次进入产物，浏览器洗牌路径全部失败（hex 往返 c1/c2/pk）。
+    if bytes.len() != 32 {
+        return Err(format!(
+            "EC point must be 32 bytes (Stark compressed x||parity), got {}",
+            bytes.len()
+        ));
     }
-    let mut arr = [0u8; 48];
-    arr.copy_from_slice(&bytes);
-    let ct_opt = EcPoint::from_compressed(&arr);
-    if ct_opt.is_some().into() {
-        Ok(ct_opt.unwrap())
-    } else {
-        Err("Invalid EC point".to_string())
-    }
+    EcPoint::from_compressed(&bytes).ok_or_else(|| "Invalid EC point".to_string())
 }
 
 fn ct_to_json(ct: &ElGamalCiphertext) -> String {
@@ -765,3 +765,29 @@ pub fn sign_action(
         .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
         .map(|v| serde_wasm_bindgen::to_value(&v).unwrap_or(JsValue::NULL))
 }
+
+#[cfg(test)]
+mod curve_hex_tests {
+    use super::*;
+
+    /// 2026-09-07 回归：hex_to_ecpoint 曾按 BLS12-381 时代断言 48 字节，
+    /// Stark 压缩点 33 字节 → 浏览器洗牌全挂（2026-09-06 重建 pkg 首次
+    /// 把遗留代码编进产物后爆发）。roundtrip 必须闭环。
+    #[test]
+    fn ecpoint_hex_roundtrip() {
+        use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar};
+        let sk = Scalar::from_u64(12345);
+        let p = <DefaultCurve as Curve>::base_g() * sk;
+        let hex = ecpoint_to_hex(&p);
+        assert_eq!(hex.len(), 64, "32 bytes = 64 hex chars");
+        let back = hex_to_ecpoint(&hex).expect("roundtrip");
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn ecpoint_hex_rejects_wrong_length() {
+        assert!(hex_to_ecpoint(&"00".repeat(48)).is_err(), "BLS-era 48B must be rejected");
+        assert!(hex_to_ecpoint(&"00".repeat(33)).is_err(), "bad point rejected");
+    }
+}
+

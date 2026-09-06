@@ -816,6 +816,45 @@ mod recursion_e2e {
         table
     }
 
+    /// 2026-09-07 线上回归：win_hand（派彩）会清零赢家自己的
+    /// total_bet，而 take_settle_input 在派彩后执行——不快照则摊牌手的
+    /// 结算对账恒为 "vm 累计 vs game 0" 必拒（两手线上复现）。
+    /// 派彩前快照（record_final_bets）必须保留终局投入。
+    #[test]
+    fn showdown_settle_keeps_pre_payout_total_bets() {
+        let mut table = run_signed_full_hand(4243);
+        // 摊牌派彩已完成（win_hand 已清零赢家的 seat.total_bet）……
+        let any_seat_bet_left = table
+            .seats()
+            .values()
+            .any(|s| s.total_bet > 0 && s.player.is_some());
+        // ……但快照必须存在且保留派彩前投入（盲注 50/100 → 每人 ≥50，
+        // check/call 线两人相同 = 150）。
+        let snap = table
+            .hand_proof_log
+            .final_total_bets
+            .as_ref()
+            .expect("final_total_bets snapshot taken before payout");
+        assert_eq!(snap.len(), 2, "two participants snapshotted");
+        assert!(
+            snap.iter().all(|(_, b)| *b >= 50),
+            "snapshot keeps pre-payout contributions: {snap:?}"
+        );
+        // take 必须用快照：即使座位实时值已被派彩清零（至少赢家为 0）。
+        let _ = any_seat_bet_left;
+        let input = crate::starknet::prove_log::take_settle_input(&table)
+            .expect("settle input");
+        for (wallet, snap_bet) in snap {
+            let taken = input
+                .total_bets
+                .iter()
+                .find(|(w, _)| w == wallet)
+                .map(|(_, b)| *b)
+                .expect("wallet in taken total_bets");
+            assert_eq!(taken, *snap_bet, "take must use pre-payout snapshot");
+        }
+    }
+
     /// host 自验（不出证，毫秒级）：一手真实牌的已签名动作 →
     /// action-sig 批次 → host 直验闭合 → 承诺链对拍确定性。
     #[test]
