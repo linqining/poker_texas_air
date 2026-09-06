@@ -374,6 +374,9 @@ async fn submit_dual_fallback(
                 settlement.hand_id,
                 departed.len()
             );
+            // 兜底：结算流程启动后才注册离桌的玩家在此补放（独立交易，
+            // invoke_vault 内置 nonce 重试）。
+            super::lock::flush_leave_releases(settlement.hand_id).await;
         }
         Err(e) if is_already_settled_error(&e) => {
             let _ = settle_ok_once(table_id, settlement.hand_id);

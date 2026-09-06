@@ -113,6 +113,17 @@ pub fn restore_pending_releases(entries: Vec<String>, hand_id: u32) {
         .ok();
 }
 
+/// 结算成功后的兜底释放：bundle 构建时取走的名单可能漏掉"结算流程
+/// 启动后才注册离桌"的玩家（2026-09-07 线上：挂起写入比 take_pending
+/// 晚 0.1s → departed-released=0 → 释放滞留）。此刻"该手已结算 + 玩家
+/// 已离桌"两条件与注册时序无关地成立，补放同样安全。
+pub async fn flush_leave_releases(settled_hand_id: u32) {
+    let due = take_pending_releases_for(settled_hand_id);
+    for wallet in due {
+        release_player_lock(&wallet).await;
+    }
+}
+
 /// 手牌中止（refund_all_bets：摊牌物化失败 / reveal 超时 / 重建失败 /
 /// 洗牌失败，全员退款、无链上结算）时释放该手的挂起离桌玩家——
 /// 中止手永远不会有 settle 来触发释放，不在此处理就会滞留到 TTL。
