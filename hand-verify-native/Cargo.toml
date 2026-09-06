@@ -32,7 +32,6 @@ stwo-constraint-framework = { version = "2.3", features = ["prover"] }
 # backend the root protocol uses, so transcripts are Cairo-replayable.
 starknet-crypto = { version = "0.6", default-features = false, features = ["alloc"] }
 num-bigint = "0.4.8"
-rayon = "1.10"
 bincode = "1"
 serde_json = "1"
 

@@ -405,7 +405,6 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "num-bigint",
- "rayon",
  "serde_json",
  "starknet-crypto",
  "stwo",

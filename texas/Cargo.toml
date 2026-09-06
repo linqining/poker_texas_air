@@ -15,7 +15,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # json feature：Starknet JSON-RPC 调用需要 serde_json 序列化请求体。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-uuid = { version = "1", features = ["v4"] }
 jsonwebtoken = "9"
 rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
@@ -24,16 +23,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenv = "0.15"
 itertools = "0.14"
 hex = "0.4"
-blake2b_simd = "1"
-base64 = "0.22"
-thiserror = "2"
-ed25519-dalek = "2"
-bech32 = "0.9"
-bcs = "0.1"
-hmac = "0.12"
-sha2 = "0.10"
-zeroize = { version = "1", features = ["alloc"] }
-futures-util = "0.3"
 
 # ===== 工作区内协议栈（单一真源）=====
 # Plan D（2026-09-05）：Stark 曲线唯一世界；legacy-bls381/blst 已移除。
@@ -57,9 +46,6 @@ starknet-crypto = "0.6"
 # STARK 曲线参数（BETA）与 types-core Felt：P 层认可点解析/校验
 starknet-curve = "0.6"
 starknet-types-core = "0.2"
-# DAPV（P 层 ρ 折叠残差）：secp256k1 sigma + 仿射坐标编码
-k256 = { version = "0.13", default-features = false, features = ["arithmetic", "alloc", "std", "expose-field"] }
-sha3 = "0.10"
 rand_core = "0.6"
 
 [features]

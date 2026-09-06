@@ -47,17 +47,13 @@ ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 subtle = "2.5"
 rocksdb = { version = "0.22", default-features = false }
 solana_rbpf = "0.8"
-ff = "0.13"
 group = "0.13"
-pairing = "0.23"
 chacha20poly1305 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tracing = "0.1"
 rayon = "1"
 proptest = "1"
 stwo = { version = "2.3", features = ["parallel", "prover"] }
-stwo-air-utils = "2.3"
-stwo-air-utils-derive = "2.3"
 stwo-constraint-framework = { version = "2.3", features = ["prover"] }
 starknet-ff = { version = "0.3", features = ["serde"] }
 starknet-crypto = { version = "0.6", default-features = false, features = ["alloc"] }
@@ -83,8 +79,6 @@ rand_core = { workspace = true }
 vm-common = { path = "vm-common" }
 # ===== Stwo 证明后端 =====
 stwo = { workspace = true }
-stwo-air-utils = { workspace = true }
-stwo-air-utils-derive = { workspace = true }
 stwo-constraint-framework = { workspace = true }
 # Poseidon252 哈希（state_root 用）— 必须与 Stwo 同版本（0.6.x），
 # 否则 starknet_crypto::poseidon_hash_many 的 Felt 类型与
@@ -98,23 +92,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 blake2 = { workspace = true }
+num-bigint = "0.4.8"
+num-traits = "0.2"
 # ===== 二元域哈希证明后端（vendored flock，BLAKE3 merkle fork）=====
 flock-core = { path = "third_party/flock/crates/flock-core" }
 flock-prover = { path = "third_party/flock/crates/flock-prover" }
-tracing = { workspace = true }
 rayon = { workspace = true }
-num-bigint = "0.4.8"
-num-integer = "0.1.47"
-num-traits = "0.2"
-# curve25519 域算术后端：fiat-crypto 形式化验证的 u64 原语（与 halo2curves
-# 同源同版本）。curve25519-dalek 4.x 的 FieldElement 是 pub(crate) 无法导入，
-# 故在其后端之上实现 dalek 的单链 sqrt_ratio_i / invert 幂链，仅用于 host
-# 侧 witness 计算，AIR 约束不依赖。
-fiat-crypto = "0.2"
-# BLS12-381（密码学方法 AIR 用）
-ff = { workspace = true }
-group = { workspace = true }
-pairing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -3,7 +3,7 @@ use serde::{Serialize, Deserialize};
 use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext, DefaultCurve, CurveScalar, CurvePoint};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
-use poker_protocol::crypto::types::BASE_G;
+use poker_protocol::crypto::types::base_g;
 use rand_core::OsRng;
 use serde_wasm_bindgen;
 
@@ -253,7 +253,7 @@ impl WasmClientPlayer {
             Ok(s) => s,
             Err(e) => return Err(JsValue::from_str(&e)),
         };
-        let pk = *BASE_G * &sk;
+        let pk = base_g() * &sk;
         Ok(WasmClientPlayer {
             inner: ClientPlayer { sk, pk },
         })

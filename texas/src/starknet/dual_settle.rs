@@ -1858,7 +1858,6 @@ mod stark_vector_gen {
     #[ignore = "vector generator: leave-only"]
     fn print_leave_only() {
         use poker_protocol::crypto::curve::StarkCurve;
-        type SSC = <StarkCurve as Curve>::Scalar;
         let mut hand_binding = [0x5Bu8; 32];
         hand_binding[0] = 0x02;
         let g = StarkCurve::base_g();

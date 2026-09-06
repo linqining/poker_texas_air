@@ -292,22 +292,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "bcs"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85b6598a2f5d564fb7855dc6b06fd1c38cff5a72bd8b863a4d021938497b440a"
-dependencies = [
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "bech32"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
-
-[[package]]
 name = "bigdecimal"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1119,7 +1103,7 @@ dependencies = [
  "sha2",
  "sha3",
  "thiserror 1.0.69",
- "uuid 0.8.2",
+ "uuid",
 ]
 
 [[package]]
@@ -1278,17 +1262,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
-name = "futures-macro"
-version = "0.3.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.3",
-]
-
-[[package]]
 name = "futures-sink"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1307,7 +1280,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
- "futures-macro",
  "futures-sink",
  "futures-task",
  "pin-project-lite",
@@ -1820,15 +1792,6 @@ name = "itertools"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
 dependencies = [
  "either",
 ]
@@ -2400,15 +2363,12 @@ dependencies = [
  "blake2",
  "borsh",
  "ed25519-dalek",
- "ff",
- "group",
  "hex",
  "poker_protocol",
  "rand 0.8.7",
  "secp256k1",
  "serde",
  "serde_json",
- "sha3",
  "subtle",
  "thiserror 1.0.69",
  "tracing",
@@ -2420,19 +2380,14 @@ name = "poker_protocol"
 version = "0.1.0"
 dependencies = [
  "borsh",
- "curve25519-dalek",
  "hex",
- "merlin",
  "poker-protocol-abi",
  "poker-protocol-core",
  "poker-protocol-proofs",
  "rand 0.8.7",
  "rand_core 0.6.4",
  "rayon",
- "serde",
  "serde_json",
- "sha2",
- "sha3",
  "tracing",
 ]
 
@@ -2443,15 +2398,10 @@ dependencies = [
  "bincode",
  "blake2",
  "borsh",
- "ff",
- "fiat-crypto",
  "flock-core",
  "flock-prover",
- "group",
  "num-bigint",
- "num-integer",
  "num-traits",
- "pairing",
  "poker-protocol-bg",
  "poker-protocol-core",
  "poker_l1",
@@ -2466,11 +2416,8 @@ dependencies = [
  "starknet-crypto 0.6.2",
  "starknet-ff",
  "stwo",
- "stwo-air-utils",
- "stwo-air-utils-derive",
  "stwo-constraint-framework",
  "thiserror 1.0.69",
- "tracing",
  "tracing-subscriber",
  "vm-common",
 ]
@@ -3666,31 +3613,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stwo-air-utils"
-version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77f60480c80a27ec979022a679e50f09b22ac892298eac039e5dfb0031107413"
-dependencies = [
- "bytemuck",
- "itertools 0.12.1",
- "rayon",
- "stwo",
- "stwo-air-utils-derive",
-]
-
-[[package]]
-name = "stwo-air-utils-derive"
-version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70cadfd1768f7a1f34ed48a9e57c9f083938c5359f3465732f296cea8ed14aad"
-dependencies = [
- "itertools 0.13.0",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "stwo-constraint-framework"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3794,21 +3716,13 @@ name = "texas"
 version = "0.2.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
- "bcs",
- "bech32",
- "blake2b_simd",
  "borsh",
  "chrono",
  "clap",
  "dotenv",
- "ed25519-dalek",
- "futures-util",
  "hex",
- "hmac",
  "itertools 0.14.0",
  "jsonwebtoken",
- "k256",
  "poker-protocol-core",
  "poker_l1",
  "poker_protocol",
@@ -3818,23 +3732,18 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
- "sha3",
  "socketioxide",
  "starknet",
  "starknet-crypto 0.6.2",
  "starknet-curve 0.6.0",
  "starknet-ff",
  "starknet-types-core",
- "thiserror 2.0.20",
  "tokio",
  "tower 0.4.13",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
- "uuid 1.26.0",
- "zeroize",
 ]
 
 [[package]]
@@ -4317,17 +4226,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "uuid"
-version = "1.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
-dependencies = [
- "getrandom 0.4.3",
- "js-sys",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4344,7 +4242,6 @@ name = "vm-common"
 version = "0.1.0"
 dependencies = [
  "borsh",
- "thiserror 1.0.69",
 ]
 
 [[package]]
