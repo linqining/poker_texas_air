@@ -52,6 +52,34 @@ carry + RangeCheck），在原生 stwo 里手搓这套等价电路是代码生�
 - 依赖：`prove-hand` 二进制（`cd proving-tool && cargo build --release`，
   一次即可），可用 `HAND_VERIFY_PROVE_HAND` 覆盖路径。
 
+## 形态③（已实现）：Cairo 路线递归证明 —— 递归信封
+
+`cargo run --release -- recurse`（或 `cargo test --release --test recurse_test -- --ignored`）。
+
+调研与选型见 `docs/cairo-recursion-research.md`：递归走 **Cairo 路线**
+（与 ADR-2026-09-06-1「双证明合一」同构），不是原生 stwo AIR 递归
+（上游 stwo 2.3 无递归组件；Starkware 生产递归栈 `third_party/proving/`
+的 cairo-verifier 电路 + recursive tree 是 L2 升级路径，见调研文档
+§1/§3）。
+
+形态③ = `cairo/src/recursion.cairo` 递归信封：一个 Cairo 程序逐任务
+调用 `dual::hand_verify::verify_hand`（**真验证**——EC 残差经 EC_OP
+builtin 进 trace），并在**电路内**重算承诺链
+`new_acc = poseidon([prev_acc] ++ claims)`（claim =
+`poseidon(hand_binding, payload_digest, counts)`，批次词是程序输入，
+绝无外部断言）；第 k+1 层把第 k 层证明的公开输出作为 `prev_acc` ——
+proof-carrying data 链。任一任务验证失败 → Cairo panic → 该批次
+**无证明**（fail-closed）。
+
+- host 驱动 `src/recurse.rs`：出证走 prove-hand CLI（proving-tool 零
+  改动），每层过 **parity 门**（cairo 公开 acc 必须 == host 同公式
+  重算值）+ `--check-only` 独立复验。
+- **实测（M3 Pro，canonical_small + fast FRI）**：1 任务 4.6s /
+  13.7 MiB → 8 任务 12.6s / 13.9 MiB——证明尺寸与任务数基本无关
+  （SNIP-36 批摊薄基石成立），8 任务合封 2.9×；2 层链 11.7s 线性。
+- 负例：篡改任务 → panic 无证明；伪造 prev_acc（跨层拼接）→ parity
+  门拒绝。
+
 ## 用法
 
 ```bash
@@ -62,6 +90,8 @@ cargo run --release -- self-test   # 端到端自测：mint → 直验 → prove
 cargo run --release -- bench       # 规模扫描：2p/4p/9p/10×/40× 放大
 cargo run --release -- vectors     # 打印 golden transcript 向量
 cargo run --release -- compose     # 形态②：Cairo EC attestation + 原生 AIR 组合
+cargo run --release -- recurse     # 形态③：Cairo 路线递归信封（链 + 负例）
+cargo run --release -- recurse-perf # 形态③性能矩阵（canonical_small + fast FRI）
 # 完整性能矩阵（含缩放断言与批次摊销）：
 cargo test --release --test perf -- --ignored --nocapture
 ```

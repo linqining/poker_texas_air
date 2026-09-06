@@ -445,7 +445,7 @@ pub fn felt_mul_mod_p(a: Felt, b: Felt) -> Felt {
 
 use stwo::core::channel::Poseidon252Channel;
 use stwo::core::fields::qm31::SecureField;
-use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+use stwo::core::pcs::CommitmentSchemeVerifier;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::{

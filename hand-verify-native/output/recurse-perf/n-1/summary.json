@@ -1,0 +1,80 @@
+{
+  "tool": "prove-hand",
+  "program": "/Users/mac/projects/poker_texas_air/hand-verify-native/cairo/src/recursion.cairo",
+  "corelib": "/Users/mac/projects/poker_texas_air/third_party/corelib-2.19.4/corelib/src",
+  "scale": "full",
+  "inputs": "/Users/mac/projects/poker_texas_air/hand-verify-native/output/recurse-perf/n-1/inputs.json",
+  "verified": true,
+  "artifacts": {
+    "executable": "executable.json",
+    "proof": "proof.json",
+    "public_outputs": "public_outputs.json"
+  },
+  "timings_ms": {
+    "compile": 1519,
+    "run_witness": 428,
+    "prove": 2580,
+    "verify": 20,
+    "serialize": 18,
+    "total": 4575
+  },
+  "execution": {
+    "steps": 24699,
+    "unique_pcs": 3038,
+    "builtin_instance_counter": {
+      "range_check_builtin": 2048,
+      "bitwise_builtin": 0,
+      "output_builtin": 1,
+      "range_check96_builtin": 0,
+      "ec_op_builtin": 128,
+      "mul_mod_builtin": 0,
+      "add_mod_builtin": 0,
+      "pedersen_builtin": 0,
+      "poseidon_builtin": 512
+    },
+    "opcodes_instance_counter": {
+      "call_opcode_abs": 0,
+      "jump_opcode_rel_imm": 462,
+      "add_opcode_small": 5981,
+      "jump_opcode_rel": 0,
+      "add_ap_opcode": 109,
+      "assert_eq_opcode_imm": 912,
+      "mul_opcode_small": 40,
+      "jump_opcode_abs": 0,
+      "qm_31_add_mul_opcode": 0,
+      "blake_compress_opcode": 0,
+      "jump_opcode_double_deref": 0,
+      "call_opcode_rel_imm": 715,
+      "assert_eq_opcode": 3314,
+      "jnz_opcode_taken": 2252,
+      "ret_opcode": 715,
+      "assert_eq_opcode_double_deref": 6027,
+      "generic_opcode": 0,
+      "add_opcode": 2572,
+      "jnz_opcode_non_taken": 765,
+      "mul_opcode": 835
+    }
+  },
+  "public": {
+    "program_hash": "0xdc2c8e19990528bd6e111347ef3a381853f2668bdafa8e4a3190b1fce8eed6",
+    "output": [
+      "0x2db955dfb94694e4d6d7b8d290a1d468d94e28aa30342f16b297715c5787095"
+    ]
+  },
+  "prover_params": {
+    "channel_hash": "blake2s",
+    "channel_salt": 0,
+    "fri_config": {
+      "pow_bits": 16,
+      "log_blowup_factor": 1,
+      "log_last_layer_degree_bound": 0,
+      "n_queries": 40,
+      "fold_step": 1
+    },
+    "preprocessed_trace": "canonical_small",
+    "store_polynomials_coefficients": false,
+    "include_all_preprocessed_columns": false,
+    "opt_n_id_to_big_components": null,
+    "lifting_size_policy": "auto"
+  }
+}

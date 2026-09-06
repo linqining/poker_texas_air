@@ -24,7 +24,7 @@ use hand_verify_native::handbatch::{
     reconstruct_challenge, reveal_challenge, verify_hand, FoldEquation, LeaveCard,
     KIND_OWNERSHIP, KIND_RECONSTRUCT, KIND_REVEAL,
 };
-use hand_verify_native::{compose, curve, handbatch, mint, prove};
+use hand_verify_native::{compose, curve, handbatch, mint, prove, recurse};
 
 fn hand_binding(seed: u64) -> Felt {
     poseidon_hash_many(&[Felt::from(seed), Felt::from(0xB16Du64)])
@@ -192,7 +192,7 @@ fn self_test() {
     let wrong_counts =
             HandBatchClaim::new(hb, payload_digest(&payload), wrong_counts, Felt::ZERO);
     assert!(
-        prove::verify_stark_against(&wrong, &proof.stark_proof).is_err(),
+        prove::verify_stark_against(&wrong_counts, &proof.stark_proof).is_err(),
         "count mismatch must reject inside the STARK"
     );
     println!("  claim count mismatch → rejected inside STARK ✔");
@@ -352,6 +352,116 @@ fn mulbench() {
     }
 }
 
+/// Cairo-route recursion envelope (form-③): a 2-layer chained proof with
+/// 2 tasks each, plus the negative corpus (tampered task / forged prev_acc).
+fn recurse_cmd() {
+    let counts = KindCounts { n_own: 2, n_reveal: 18, n_leave: 1, n_recon: 1 };
+    let out_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("output/recurse");
+    println!("== recurse: Cairo-route recursion envelope (form-③) ==");
+    let params = recurse::write_prod_params(&out_root).expect("params");
+    let report =
+        recurse::run_recursion(counts, 2, 2, 1101, &out_root, Some(&params)).expect("recursion");
+    for (i, layer) in report.layers.iter().enumerate() {
+        println!(
+            "  layer {i}: {} tasks, steps {}, EC_OP {}, prove {} ms (compile {} / run {}), \
+             reverify {} ms, proof {}",
+            layer.n_tasks,
+            layer.steps,
+            layer.ec_ops,
+            layer.cairo_prove_ms,
+            layer.cairo_compile_ms,
+            layer.cairo_run_ms,
+            layer.check_verify_ms,
+            format_bytes(layer.proof_bytes),
+        );
+        println!(
+            "    acc: 0x{}",
+            layer.cairo_acc.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
+    }
+    println!(
+        "  chain   : genesis → 0x{} (host parity ✓, {} layers, total {} ms)",
+        report.host_chain_acc.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        report.layers.len(),
+        report.total_ms,
+    );
+
+    println!("== recurse: negative corpus ==");
+    recurse::run_negative_tampered_task(
+        counts,
+        1201,
+        &out_root.join("neg-tampered"),
+        Some(&params),
+    )
+    .expect("tampered batch must be rejected");
+    println!("  tampered task (bad s) → Cairo panic, no proof ✔");
+    recurse::run_negative_wrong_prev(counts, 1202, &out_root.join("neg-prev"), Some(&params))
+        .expect("forged prev_acc must be caught");
+    println!("  forged prev_acc (cross-layer splice) → parity gate rejects ✔");
+    println!("recurse: all green");
+}
+
+/// Recursion-envelope performance matrix: single-layer N ∈ {{1,2,4,8}} +
+/// a 2-layer chain, production params (canonical_small + fast FRI).
+fn recurse_perf_cmd() {
+    let counts = KindCounts { n_own: 2, n_reveal: 18, n_leave: 1, n_recon: 1 };
+    let out_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("output/recurse-perf");
+    println!("== recurse-perf: Cairo-route recursion envelope (canonical_small + fast FRI) ==");
+    println!("(task = 2-player hand: 2 own + 18 reveal + 1 leave + 1 recon)");
+    let params = recurse::write_prod_params(&out_root).expect("params");
+
+    println!(
+        "| {:<8} | {:>8} | {:>10} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} |",
+        "tasks", "EC_OP", "steps", "compile", "run", "prove", "total", "reverify", "proof"
+    );
+    println!(
+        "|----------|----------|------------|-----------|-----------|-----------|-----------|-----------|-----------|"
+    );
+    let rows = recurse::perf_sweep(counts, &[1, 2, 4, 8], 1301, &out_root, Some(&params))
+        .expect("perf sweep");
+    for r in &rows {
+        println!(
+            "| {:<8} | {:>8} | {:>10} | {:>8.1}s | {:>8.1}s | {:>8.1}s | {:>8.1}s | {:>8.1}s | {:>8} |",
+            r.n_tasks,
+            r.ec_ops,
+            r.steps,
+            r.cairo_compile_ms as f64 / 1000.0,
+            r.cairo_run_ms as f64 / 1000.0,
+            r.cairo_prove_ms as f64 / 1000.0,
+            r.total_ms as f64 / 1000.0,
+            r.check_verify_ms as f64 / 1000.0,
+            format_bytes(r.proof_bytes),
+        );
+    }
+
+    let unit = &rows[0];
+    let biggest = rows.last().unwrap();
+    let n_separate = unit.total_ms * biggest.n_tasks as u128;
+    println!();
+    println!(
+        "amortization: {} separate proofs ≈ {:.1}s vs 1 envelope proof {:.1}s ({:.1}×)",
+        biggest.n_tasks,
+        n_separate as f64 / 1000.0,
+        biggest.total_ms as f64 / 1000.0,
+        n_separate as f64 / biggest.total_ms as f64,
+    );
+
+    println!("== 2-layer chain (2 tasks/layer) ==");
+    let report = recurse::run_recursion(counts, 2, 2, 1401, &out_root.join("chain"), Some(&params))
+        .expect("chain");
+    for (i, layer) in report.layers.iter().enumerate() {
+        println!(
+            "  layer {i}: prove {} ms, EC_OP {}, reverify {} ms",
+            layer.cairo_prove_ms, layer.ec_ops, layer.check_verify_ms,
+        );
+    }
+    println!(
+        "  chain acc: 0x{}",
+        report.host_chain_acc.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>()
+    );
+    println!("recurse-perf: done");
+}
+
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "self-test".into());
     match mode.as_str() {
@@ -360,11 +470,17 @@ fn main() {
         "vectors" => vectors(),
         "compose" => compose_cmd(),
         "mulbench" => mulbench(),
+        "recurse" => recurse_cmd(),
+        "recurse-perf" => recurse_perf_cmd(),
         "help" | "--help" | "-h" => {
-            println!("usage: hand-verify-native [self-test|bench|vectors|compose|mulbench]");
+            println!(
+                "usage: hand-verify-native [self-test|bench|vectors|compose|mulbench|recurse|recurse-perf]"
+            );
         }
         other => {
-            eprintln!("unknown mode: {other} (expected self-test | bench | vectors | compose)");
+            eprintln!(
+                "unknown mode: {other} (expected self-test | bench | vectors | compose | recurse)"
+            );
             std::process::exit(2);
         }
     }

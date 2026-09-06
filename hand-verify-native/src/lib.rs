@@ -8,3 +8,4 @@ pub mod feltmul;
 pub mod handbatch;
 pub mod mint;
 pub mod prove;
+pub mod recurse;
