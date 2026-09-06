@@ -321,3 +321,28 @@ p_batch 承诺/长度）、`set_hand_verify_program_hash`；双 fact：
 
 （部署脚本 `scripts/deploy_sepolia_v4.sh`；旧 dual v3.x `0x55784c90...` 保留服务
 历史已结算手的认领，`.env` 已切换指向 v4。）
+
+## PokerDualSettlement v5 — cairo 2.19.4 迁移 + SNIP-36 v3 双门入口（2026-09-07）
+
+P1+P2 落地：合约工具链 scarb 2.11.4 → **2.19.4**（与证明侧 vendored corelib
+2.19.4 完全同版，双工具链合一）；snforge 0.39.0 → **0.63.0**（原生
+`cheat_proof_facts` mock）。新增 `verify_and_settle_dapv_stark_private_v3`
+（SNIP-36 `proof_facts` 协议内验证优先 + fact-registry 降级双门）+
+`DualProofSettledSnip36` 事件。`poker_swap.cairo` 删除（pSTRK 已下线，
+其 5 个测试随之移除）。测试 91/91（含 v3 四例：SNIP-36 门结算 /
+fact 降级 / 错 program hash 拒 / 错消息哈希拒）。
+
+**意外利好**：2.19.4 编译器产物 casm **36,508 felts**（2.11.4 时代为
+81,175 贴近 81,226 上限）——余量 55%，后续入口扩容空间充足。
+
+| 项 | 值 |
+| --- | --- |
+| 工具链 | scarb 2.19.4 + snforge 0.63.0（`~/.local/opt/toolchains/` 并行安装，PATH 前缀使用） |
+| class | `0x047e91d54d171401a314a591ab1b67d3259e09b9f90c0036675829f533884cf8` |
+| 地址 | `0x29bdc970330f545c8be2d78fdcd8a92cc0378dff4b6d7464257df9b4fdd47d6` |
+| 配置 | claim_helper=`0x60a4c474...`、circuit_program_hash=`0x744d16d3...`（视图已验证）、hand_verify_program_hash=`0x303029d8...` |
+| 回退 | v4 `0xbfc7046b...` 保留（v2/proved_private 入口）；`.env` 已切 v5 |
+
+⚠️ 槽位冻结待办：v3 的 `facts[2]`/`facts[8]` 槽位与消息哈希公式以
+SNIP-36 参考实现为口径——首个真实 SNIP-36 证明提交前需用 sepolia 真实
+proof_facts 样本对拍一次（执行计划 G2 门）。

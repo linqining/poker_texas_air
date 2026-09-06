@@ -39,6 +39,14 @@ fn seat_players(table: &mut Table, n: u64) -> Vec<Player> {
         // pk_hex = pk 点的十六进制（与真实客户端 get_pk_hex 一致；
         // submit_reveal_token 会从它反解点做校验）。
         let pk_hex = poker_protocol::z_poker::convert::ecpoint_to_hex(&client.pk);
+        // join 证明缓冲（record_hand_start 采集 HandStart 快照的前置——
+        // 真实流程由 join_table 写入；测试直连写同一缓冲）。
+        crate::starknet::prove_log::record_join(
+            table.summary.id,
+            &format!("0xwallet{idx}"),
+            &pk_hex,
+            crate::relayer::proof_bytes::serialize_pk_ownership_proof(&proof),
+        );
         table
             .mental_poker_game
             .register_player(pk_hex.clone(), client.pk, proof);
@@ -812,7 +820,11 @@ mod recursion_e2e {
     /// action-sig 批次 → host 直验闭合 → 承诺链对拍确定性。
     #[test]
     fn recursion_e2e_signed_hand_host_verify() {
-        let table = run_signed_full_hand(9);
+        // table_id 4242：join_buffer 按 (table_id, wallet) 键控——与其他共用
+        // table_id=9 + "0xwallet{idx}" 的 full_hand 测试并发跑时会互相覆盖
+        // join 证明缓冲，record_hand_start 读到别桌 pk → participants 与
+        // 签名 pk 错配（残差不闭合，2026-09-07 e2e 间歇失败根因）。
+        let table = run_signed_full_hand(4242);
 
         // 材料提取：每参与者首条已签名动作 + 座位公钥。
         let start = table.hand_proof_log.start.as_ref().expect("hand started");
@@ -887,7 +899,7 @@ mod recursion_e2e {
     #[test]
     #[ignore = "runs prove-hand (~15s); needs proving-tool release binary"]
     fn recursion_e2e_signed_hand_full_prove() {
-        let table = run_signed_full_hand(9);
+        let table = run_signed_full_hand(4242);
         let start = table.hand_proof_log.start.as_ref().expect("hand started");
         let hand_id = start.hand_id;
         let materials = recursion_prover::action_sig_materials(
@@ -905,7 +917,7 @@ mod recursion_e2e {
             &out_dir,
         )
         .expect("full prove");
-        assert!(out.acc.len() == 66, "acc is a felt hex");
+        assert_eq!(out.acc.len(), 64, "acc is a 32-byte felt hex");
         assert!(out.ec_ops > 0, "EC residuals proven in trace");
         println!(
             "e2e prove ok: acc={} steps={} ec_ops={} elapsed_ms={}",

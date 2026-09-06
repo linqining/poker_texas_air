@@ -118,11 +118,16 @@ pub fn action_log_domain() -> starknet::core::types::Felt {
 /// 动作名 → 大端 ASCII felt（"FOLD"/"CHECK"/"CALL"/"RAISE"；电路内按同一
 /// 4 常量白名单校验）。未知动作名返回 None（调用方拒绝该日志）。
 pub fn action_word(action: &str) -> Option<starknet::core::types::Felt> {
+    // 大小写归一：socket 层记录的动作名是小写（handlers 传 "fold"/"check"/
+    // "call"/"raise"），而打包/电路白名单是大写 ASCII——此前两层脱节，线上
+    // 任何带动作日志的手在 digest 计算时必 panic（2026-09-07 e2e 抓出）。
+    // 编码统一为大写字节，与电路 W_FOLD/W_CHECK/W_CALL/W_RAISE 常量一致。
+    let up = action.to_ascii_uppercase();
     let mut acc: u64 = 0;
-    for b in action.as_bytes() {
+    for b in up.as_bytes() {
         acc = (acc << 8).saturating_add(u64::from(*b));
     }
-    match action {
+    match up.as_str() {
         "FOLD" | "CHECK" | "CALL" | "RAISE" => Some(starknet::core::types::Felt::from(acc)),
         _ => None,
     }
@@ -260,7 +265,8 @@ mod auto_action_tests {
             "same log → same digest"
         );
         // 大小写敏感：白名单只认大写规范名（服务器接受路径已保证）。
-        assert!(action_word("check").is_none());
+        assert!(action_word("check").is_some(), "socket 层记录小写动作名");
+        assert_eq!(action_word("check"), action_word("CHECK"), "大小写归一");
         assert!(action_word("RAISE_ALL").is_none());
     }
 

@@ -130,6 +130,22 @@ pub trait IPokerDualSettlement<TContractState> {
         hand_id: u64,
         segment: Span<felt252>,
     );
+    /// P2-M5（SNIP-36）：v3 双门私密结算——**协议内证明优先，fact-registry
+    /// 降级**。calldata 与 v2 完全一致；验证门：
+    ///   (a) SNIP-36：tx 携带 proof/proof_facts（Invoke V3 扩展字段），
+    ///       合约经 `get_execution_info_v3_syscall` 读 `tx_info.proof_facts`，
+    ///       断言 `facts[2]`（virtual OS program hash）== 钉死的
+    ///       `circuit_program_hash` 且 `facts[8]`（首条 L2→L1 消息哈希）
+    ///       == `poseidon(本合约地址, 0, segment 长度, segment)`——公开段
+    ///       即被证明 create_proof 入口发出的消息 payload；
+    ///   (b) 降级：无 proof_facts 时走 v2 同款 fact-registry 门。
+    /// 派奖/幂等/事件与 v2 完全一致。
+    fn verify_and_settle_dapv_stark_private_v3(
+        ref self: TContractState,
+        hand_binding: felt252,
+        hand_id: u64,
+        segment: Span<felt252>,
+    );
     /// Owner-gated: 钉死电路 program hash（fact 的绑定根，换电路须重设）。
     fn set_circuit_program_hash(ref self: TContractState, program_hash: felt252);
     /// Prover/owner-gated: 登记已生成证明的 fact（prove-hand 后由运营侧调用）。
@@ -199,6 +215,9 @@ pub trait IPokerDualSettlement<TContractState> {
 pub mod PokerDualSettlement {
     use openzeppelin::access::ownable::OwnableComponent;
     use starknet::ContractAddress;
+    use starknet::syscalls::get_execution_info_v3_syscall;
+    use starknet::SyscallResultTrait;
+    use starknet::TxInfo;
     use core::num::traits::Zero;
     use core::hash::HashStateTrait;
     use core::poseidon::{poseidon_hash_span, PoseidonTrait};
@@ -215,7 +234,23 @@ pub mod PokerDualSettlement {
     const SETTLEMENT_SEGMENT_MAGIC: felt252 = 0x5350324d5f4f4b;
     const SETTLEMENT_SEGMENT_LEN: usize = 15;
 
-    fn fact_for_segment(program_hash: felt252, segment: Span<felt252>) -> felt252 {
+    /// SNIP-36 消息哈希公式（skill 参考实现口径；上链前需用真实 proof_facts
+/// 样本对拍冻结——槽位/公式以 SNIP-36 最终规范为准）：
+/// `poseidon([合约地址, 0, payload_len, payload...])`。
+fn snip36_message_hash(contract_addr: ContractAddress, segment: Span<felt252>) -> felt252 {
+    let mut h = PoseidonTrait::new();
+    h = h.update(contract_addr.into());
+    h = h.update(0);
+    h = h.update(segment.len().into());
+    let mut w: u32 = 0;
+    while w < segment.len() {
+        h = h.update(*segment.at(w));
+        w += 1;
+    }
+    h.finalize()
+}
+
+fn fact_for_segment(program_hash: felt252, segment: Span<felt252>) -> felt252 {
         let mut h = PoseidonTrait::new();
         h = h.update(program_hash);
         let mut w: u32 = 0;
@@ -455,6 +490,7 @@ fn dapv_prelude(
         SettlementFactRegistered: SettlementFactRegistered,
         DualProofSettledPrivateV2: DualProofSettledPrivateV2,
         DualProofSettledProvedPrivate: DualProofSettledProvedPrivate,
+        DualProofSettledSnip36: DualProofSettledSnip36,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -496,6 +532,16 @@ fn dapv_prelude(
         settlement_digest: felt252,
         participant_count: u32,
         p_batch_commitment: felt252,
+        total_winnings: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct DualProofSettledSnip36 {
+        hand_binding: felt252,
+        settlement_digest: felt252,
+        participant_count: u32,
+        /// 验证门路径：true = SNIP-36 协议内验证；false = fact-registry 降级。
+        via_snip36: bool,
         total_winnings: u256,
     }
 
@@ -968,6 +1014,89 @@ fn dapv_prelude(
                     settlement_digest: registered_digest,
                     participant_count: n,
                     p_batch_commitment,
+                    total_winnings,
+                },
+            );
+        }
+
+        /// P2-M5：v3 双门——SNIP-36 协议内验证优先，fact-registry 降级。
+        fn verify_and_settle_dapv_stark_private_v3(
+            ref self: ContractState,
+            hand_binding: felt252,
+            hand_id: u64,
+            segment: Span<felt252>,
+        ) {
+            assert!(hand_binding != 0, "Zero binding");
+            assert!(
+                !self.settled_bindings.read(hand_binding),
+                "Hand already settled"
+            );
+            assert!(segment.len() == SETTLEMENT_SEGMENT_LEN, "Segment length mismatch");
+            assert!(
+                *segment.at(0) == SETTLEMENT_SEGMENT_MAGIC,
+                "Segment magic mismatch"
+            );
+            assert!(*segment.at(1) == hand_id.into(), "Segment hand_id mismatch");
+            assert!(*segment.at(4) == hand_binding, "Segment binding mismatch");
+            let n: u32 = (*segment.at(3)).try_into().expect('n fits u32');
+            assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
+            let registered_digest = read_registered_digest(@self, hand_binding);
+            assert!(*segment.at(2) == registered_digest, "Segment digest mismatch");
+            assert!(
+                *segment.at(14) == self.action_logs.read(hand_binding),
+                "Segment action log mismatch"
+            );
+
+            // ===== 双门：SNIP-36 优先 =====
+            let program_hash = self.circuit_program_hash.read();
+            assert!(program_hash != 0, "Circuit program hash not set");
+            let mut via_snip36 = false;
+            let exec_info = get_execution_info_v3_syscall()
+                .unwrap_syscall();
+            let tx_info: TxInfo = exec_info.tx_info.unbox();
+            let facts: Span<felt252> = tx_info.proof_facts;
+            if facts.len() >= 9 {
+                // facts[2] = virtual OS program hash；facts[8] = 首条
+                // L2→L1 消息哈希（payload = segment）
+                if *facts.at(2) == program_hash
+                    && *facts.at(8) == snip36_message_hash(
+                        starknet::get_contract_address(), segment,
+                    )
+                {
+                    via_snip36 = true;
+                }
+            }
+            if !via_snip36 {
+                // 降级门：fact-registry（v2 同款）
+                let fact = fact_for_segment(program_hash, segment);
+                assert!(
+                    self.settlement_facts.read(fact),
+                    "Settlement fact not registered"
+                );
+            }
+
+            // ===== 派奖（与 v2 完全一致）=====
+            let total_u128: u128 = (*segment.at(13)).try_into().expect('total fits u128');
+            let total_winnings: u256 = total_u128.into();
+            assert!(total_winnings > 0_u256, "No winnings to escrow");
+            let vault_addr = self.vault_address.read();
+            let helper = self.claim_helper.read();
+            assert!(!helper.is_zero(), "Claim helper not set");
+            let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
+            vault.settlement_fund_escrow(helper, hand_binding, total_winnings);
+            let mut i: u32 = 0;
+            while i < 8_u32 {
+                self.claim_cms.write((hand_binding, i), *segment.at(5 + i));
+                i += 1;
+            }
+            self.amounts_hidden.write(hand_binding, true);
+            self.settled_bindings.write(hand_binding, true);
+            self.emit(
+                DualProofSettledSnip36 {
+                    hand_binding,
+                    settlement_digest: registered_digest,
+                    participant_count: n,
+                    via_snip36,
                     total_winnings,
                 },
             );
@@ -1536,3 +1665,176 @@ mod mock_vault {
 
 
 }
+
+// ============================================================
+// Tests (snforge 0.63): P2-M5 v3 双门入口 —— SNIP-36 proof_facts
+// 优先（cheat_proof_facts 原生 mock）+ fact-registry 降级。
+// ============================================================
+
+#[cfg(test)]
+mod settlement_snip36_v3_tests {
+    use core::hash::HashStateTrait;
+    use core::poseidon::PoseidonTrait;
+    use starknet::{ContractAddress, get_contract_address};
+    use snforge_std::{
+        ContractClassTrait, DeclareResultTrait, declare, cheat_proof_facts, CheatSpan,
+    };
+
+    use super::mock_vault::IMockVaultDispatcherTrait;
+    use super::mock_vault::IMockVaultDispatcher;
+    use super::{
+        IPokerDualSettlement, IPokerDualSettlementDispatcher,
+        IPokerDualSettlementDispatcherTrait,
+    };
+
+    const MAGIC: felt252 = 0x5350324d5f4f4b;
+    const PROGRAM_HASH: felt252 = 0xabcdef;
+
+    fn deploy_contract(name: ByteArray, calldata: @Array<felt252>) -> ContractAddress {
+        let class = declare(name).unwrap().contract_class();
+        let (address, _) = class.deploy(calldata).unwrap();
+        address
+    }
+
+    #[derive(Drop)]
+    struct Setup {
+        dual: IPokerDualSettlementDispatcher,
+        vault: IMockVaultDispatcher,
+        hand_binding: felt252,
+        segment: Array<felt252>,
+        total: felt252,
+    }
+
+    /// v2 测试同款部署/注册/公开段；`with_fact` 控制 fact-registry 登记。
+    /// proof_facts 由各测试自行 cheat（SNIP-36 门）。
+    fn setup(with_fact: bool) -> Setup {
+        let test_addr = get_contract_address();
+        let vault = deploy_contract("MockVault", @array![]);
+        let dual_addr = deploy_contract(
+            "PokerDualSettlement",
+            @array![test_addr.into(), vault.into(), test_addr.into()],
+        );
+        let dual = IPokerDualSettlementDispatcher { contract_address: dual_addr };
+        dual.set_claim_helper(test_addr);
+        dual.set_circuit_program_hash(PROGRAM_HASH);
+
+        let hand_binding: felt252 = 0xDDDD;
+        let hand_id: u64 = 44;
+        let digest: felt252 = 0x9900;
+        let action_log: felt252 = 0xA11CE;
+        dual.register_hand(hand_binding, digest, 0, action_log, 0, 0, 0);
+
+        // 公开段：赢家 seat0（+3000），输家 seat1/2（承诺根 0x21）
+        let payout_commitment: felt252 = 0x21;
+        let mut cms = array![];
+        let mut total: felt252 = 0;
+        let mut i: u32 = 0;
+        while i < 8_u32 {
+            let (sgn, m): (felt252, felt252) = if i == 0 {
+                (1, 3000)
+            } else if i == 1 {
+                (0, 2000)
+            } else if i == 2 {
+                (0, 1000)
+            } else {
+                (1, 0)
+            };
+            i += 1;
+            if sgn == 1 {
+                if m != 0 {
+                    total += m;
+                    let mut ch = PoseidonTrait::new();
+                    ch = ch.update(payout_commitment);
+                    ch = ch.update(hand_binding);
+                    ch = ch.update(m);
+                    ch = ch.update(0);
+                    cms.append(ch.finalize());
+                } else {
+                    cms.append(0);
+                };
+            } else {
+                cms.append(0);
+            };
+        }
+        let mut segment = array![MAGIC, hand_id.into(), digest, 3, hand_binding];
+        let mut w: u32 = 0;
+        while w < 8_u32 {
+            segment.append(*cms.at(w));
+            w += 1;
+        }
+        segment.append(total);
+        segment.append(action_log);
+
+        if with_fact {
+            let mut f = PoseidonTrait::new();
+            f = f.update(PROGRAM_HASH);
+            let mut w2: u32 = 0;
+            while w2 < segment.len() {
+                f = f.update(*segment.at(w2));
+                w2 += 1;
+            }
+            dual.register_settlement_fact(f.finalize());
+        }
+        Setup { dual, vault: IMockVaultDispatcher { contract_address: vault }, hand_binding, segment, total }
+    }
+
+    /// 构造 SNIP-36 proof_facts（9 词）：[2] = program hash，
+    /// [8] = 消息哈希（poseidon(合约地址, 0, len, segment)——与合约
+    /// snip36_message_hash 同公式）。
+    fn make_facts(dual_addr: ContractAddress, segment: Span<felt252>, program_hash: felt252) -> Span<felt252> {
+        let mut mh = PoseidonTrait::new();
+        mh = mh.update(dual_addr.into());
+        mh = mh.update(0);
+        mh = mh.update(segment.len().into());
+        let mut w: u32 = 0;
+        while w < segment.len() {
+            mh = mh.update(*segment.at(w));
+            w += 1;
+        }
+        array![0, 0, program_hash, 0, 0, 0, 0, 0, mh.finalize()].span()
+    }
+
+    #[test]
+    fn v3_snip36_gate_settles_without_fact() {
+        let s = setup(false); // 不登记 fact——只可能走 SNIP-36 门
+        let facts = make_facts(
+            s.dual.contract_address, s.segment.span(), PROGRAM_HASH,
+        );
+        cheat_proof_facts(s.dual.contract_address, facts, CheatSpan::Indefinite);
+        s.dual.verify_and_settle_dapv_stark_private_v3(s.hand_binding, 44, s.segment.span());
+        assert!(s.dual.hand_settled(s.hand_binding), "settled via SNIP-36 gate");
+        let total_u256: u256 = s.total.into();
+        assert!(s.vault.escrowed_for(s.hand_binding) == total_u256, "escrow");
+    }
+
+    #[test]
+    fn v3_falls_back_to_fact_registry() {
+        let s = setup(true); // 登记 fact、无 proof_facts
+        s.dual.verify_and_settle_dapv_stark_private_v3(s.hand_binding, 44, s.segment.span());
+        assert!(s.dual.hand_settled(s.hand_binding), "settled via fact-registry fallback");
+    }
+
+    #[test]
+    #[should_panic(expected: "Settlement fact not registered")]
+    fn v3_wrong_program_hash_rejected() {
+        let s = setup(false);
+        let facts = make_facts(
+            s.dual.contract_address, s.segment.span(), PROGRAM_HASH + 1,
+        );
+        cheat_proof_facts(s.dual.contract_address, facts, CheatSpan::Indefinite);
+        s.dual.verify_and_settle_dapv_stark_private_v3(s.hand_binding, 44, s.segment.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Settlement fact not registered")]
+    fn v3_wrong_message_hash_rejected() {
+        // facts[8] 用错合约地址重算（消息哈希不匹配 segment）
+        let s = setup(false);
+        let facts = make_facts(
+            get_contract_address(), s.segment.span(), PROGRAM_HASH,
+        );
+        cheat_proof_facts(s.dual.contract_address, facts, CheatSpan::Indefinite);
+        s.dual.verify_and_settle_dapv_stark_private_v3(s.hand_binding, 44, s.segment.span());
+    }
+}
+

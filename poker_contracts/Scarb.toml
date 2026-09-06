@@ -6,9 +6,9 @@ publish = false
 
 [dependencies]
 openzeppelin = "1.0.0"
-snforge_std = "0.39.0"
+snforge_std = "0.63.0"
 
-starknet = "2.11.4"
+starknet = "2.19.4"
 
 [cairo]
 sierra-release = true

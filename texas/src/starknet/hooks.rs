@@ -77,7 +77,13 @@ pub fn on_hand_complete(table: &Table) {
     let Some(input) = super::prove_log::take_settle_input(table) else {
         return; // 本手未记录（未开局/缺 join 证明）——无可证明结算
     };
-    tokio::spawn(async move {
+    // 无 tokio runtime 的环境（游戏层单测直接调 settle_hand）跳过链上
+    // 结算——此前这里会 panic；生产恒有 runtime，不受影响。
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!("[starknet-settle] no tokio runtime — settle skipped (test context)");
+        return;
+    };
+    handle.spawn(async move {
         settle_hand_from_log(input).await;
     });
 }

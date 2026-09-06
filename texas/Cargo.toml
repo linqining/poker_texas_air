@@ -6,7 +6,7 @@ license = "BUSL-1.1"
 description = "Secret poker game server: socket.io game loop + Starknet settlement (STRK20 RFP-03)"
 
 [dependencies]
-hand-verify-native = { path = "../hand-verify-native" }
+hand-verify-native = { path = "../poker_contracts/hand-verify-native" }
 axum = "0.7"
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }

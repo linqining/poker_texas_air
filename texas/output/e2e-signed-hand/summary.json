@@ -1,0 +1,80 @@
+{
+  "tool": "prove-hand",
+  "program": "/Users/mac/projects/poker_texas_air/hand-verify-native/cairo/src/recursion.cairo",
+  "corelib": "/Users/mac/projects/poker_texas_air/third_party/corelib-2.19.4/corelib/src",
+  "scale": "full",
+  "inputs": "/Users/mac/projects/poker_texas_air/texas/output/e2e-signed-hand/inputs.json",
+  "verified": true,
+  "artifacts": {
+    "executable": "executable.json",
+    "proof": "proof.json",
+    "public_outputs": "public_outputs.json"
+  },
+  "timings_ms": {
+    "compile": 1689,
+    "run_witness": 438,
+    "prove": 1627,
+    "verify": 32,
+    "serialize": 21,
+    "total": 3818
+  },
+  "execution": {
+    "steps": 2364,
+    "unique_pcs": 957,
+    "builtin_instance_counter": {
+      "mul_mod_builtin": 0,
+      "add_mod_builtin": 0,
+      "range_check_builtin": 256,
+      "ec_op_builtin": 16,
+      "range_check96_builtin": 0,
+      "output_builtin": 1,
+      "bitwise_builtin": 0,
+      "pedersen_builtin": 0,
+      "poseidon_builtin": 32
+    },
+    "opcodes_instance_counter": {
+      "generic_opcode": 0,
+      "jnz_opcode_taken": 224,
+      "jump_opcode_rel_imm": 46,
+      "blake_compress_opcode": 0,
+      "assert_eq_opcode": 373,
+      "jump_opcode_rel": 0,
+      "add_opcode": 191,
+      "mul_opcode": 34,
+      "assert_eq_opcode_imm": 111,
+      "jump_opcode_double_deref": 0,
+      "call_opcode_abs": 0,
+      "jnz_opcode_non_taken": 69,
+      "assert_eq_opcode_double_deref": 535,
+      "call_opcode_rel_imm": 73,
+      "add_ap_opcode": 27,
+      "ret_opcode": 73,
+      "jump_opcode_abs": 0,
+      "add_opcode_small": 604,
+      "qm_31_add_mul_opcode": 0,
+      "mul_opcode_small": 4
+    }
+  },
+  "public": {
+    "program_hash": "0x48b0b8978361cf77faaabedc408d61b59b7468ef0e7ef0bb93a95707c8c8d36",
+    "output": [
+      "0x599b44ae16eed62315841d53178a96ece5fc7be9bb640d9b31c10b5b2e8cab5"
+    ]
+  },
+  "prover_params": {
+    "channel_hash": "blake2s",
+    "channel_salt": 0,
+    "fri_config": {
+      "pow_bits": 16,
+      "log_blowup_factor": 1,
+      "log_last_layer_degree_bound": 0,
+      "n_queries": 40,
+      "fold_step": 1
+    },
+    "preprocessed_trace": "canonical_small",
+    "store_polynomials_coefficients": false,
+    "include_all_preprocessed_columns": false,
+    "opt_n_id_to_big_components": null,
+    "lifting_size_policy": "auto"
+  }
+}

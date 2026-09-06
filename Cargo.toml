@@ -16,7 +16,7 @@ exclude = ["third_party", "third_party/flock", "third_party/flock/crates/flock-c
 members = [
     ".",
     "hand-bench",
-    "hand-verify-native",
+    "poker_contracts/hand-verify-native",
     "poker_l1",
     "vm-common",
     "poker_protocol",

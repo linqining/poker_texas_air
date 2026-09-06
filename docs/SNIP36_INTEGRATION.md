@@ -149,13 +149,15 @@ fn message_hash_for_segment(self_addr: ContractAddress, segment: Span<felt252>) 
 | 7 | Phase 1 安全边界落档（本文 §1/§2） | ✅ 2026-09-06（同日修订：协议已主网激活，无协议等待项） |
 | 3a | libfuncs `all`（Scarb.toml） | ✅ 2026-09-06（构建 0 错、snforge 92/92） |
 | 0 | **证明瘦身实测**（新增，SNIP-36 直连的先决量化项） | ⏳ 目标 ≤500KB 级：紧凑二进制已定基（2.30MB）；FRI 参数收紧（70→30 queries 等）对**尺寸**的影响未实测（此前只测了时间 −11%/−26%）；批聚合摊薄单位成本（尺寸与手数无关已实测） |
-| 3b | 合约 proof_facts 消费路径（§4 v3 入口） | ⏳ 设计冻结；**cairo ≥2.12 迁移**后实施 |
+| 3b | 合约 proof_facts 消费路径（§4 v3 入口） | ✅ 2026-09-07：cairo 2.19.4 迁移 + v3 双门入口上链（dual v5 `0x29bdc970...`，snforge `cheat_proof_facts` mock 四例全绿） |
 | 5 | hand_verify 形态裁决 = 双证明合一（§3 ADR） | ✅ 已裁决；电路合并待做 |
 | 1 | 电路改造为 create_proof 入口 + 虚拟 SNOS 形态适配 | ⏳ §3 规格；被证明对象是虚拟 Starknet OS 程序（`starknet_proveTransaction` 上下文），非裸 prove-hand 产物 |
 | 2 | 证明管线切换（`starknet_os_runner` 自托管 prover） | ⏳ 规范给了 JSON-RPC 接口（`starknet_proveTransaction` → base64 proof + proof_facts + messages）；stwo 同族已确认 |
 | 4 | 提交工具（Invoke V3 `proof`/`proof_facts` 字段的 account.execute 扩展 + snops submit-proof） | ⏳ 后端 `snip36` 选项已预埋；激活随 3b |
-| 8 | snforge mock + sepolia 复现 | ⏳ 2.11.4 无 proof_facts 可 mock；随 3b |
+| 8 | snforge mock + sepolia 复现 | ✅ mock 部分（0.63 `cheat_proof_facts`）；sepolia 真实 proof_facts 样本对拍随 P4 |
 
-**cairo ≥2.12 迁移清单**（3b/1 的前置）：升级 scarb/cairo → 92 snforge
-重验 → casm 哈希/字节码上限重验 → declare/deploy v5 → `set_circuit_program_hash`
-/`set_hand_verify_program_hash` 重设 → `.env`/DEPLOYMENTS.md 档案。
+**cairo ≥2.12 迁移**：✅ 2026-09-07 完成——scarb 2.19.4 + snforge 0.63.0
+（与证明侧 vendored corelib 2.19.4 同版，双工具链合一）；91/91 测试；
+casm 36,508 felts（2.11.4 时代 81,175 → 编译器瘦身 55% 余量）；
+dual v5 已上链（见 DEPLOYMENTS.md）。测试命令：
+`PATH=~/.local/opt/toolchains/scarb-2.19.4/bin:~/.local/opt/toolchains/snforge-0.63.0/bin:$PATH snforge test`。
