@@ -462,21 +462,27 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     });
   };
 
+  // #16 抗审查：动作以牌局 SK 签名后发出（wasm 不可用时回退未签名）。
+  // sk 取值必须带 getPlayerKeys() 兜底（与 sitDown 等路径一致）：playerKeys
+  // prop 为 null 时签名静默退化 → 服务端留不下签名 → snip36 递归证明
+  // "no signed actions"（2026-09-07 线上）。
+  const actionSkHex = () =>
+    (playerKeys ?? getPlayerKeys())?.get_sk_hex?.() ?? null;
+
   const fold = () => {
     const t = currentTableRef?.current;
     if (!t || !socket) return;
     void (async () => {
-      const sig = await signTableAction(playerKeys?.get_sk_hex?.() ?? null, t.id, t.shuffleState?.hand_id, 'fold');
+      const sig = await signTableAction(actionSkHex(), t.id, t.shuffleState?.hand_id, 'fold');
       socket?.emit(FOLD, { tableId: t.id, ...sigToPayloadFields(sig) });
     })();
   };
 
-  // #16 抗审查：动作以牌局 SK 签名后发出（wasm 不可用时回退未签名）
   const check = () => {
     const t = currentTableRef?.current;
     if (!t || !socket) return;
     void (async () => {
-      const sig = await signTableAction(playerKeys?.get_sk_hex?.() ?? null, t.id, t.shuffleState?.hand_id, 'check');
+      const sig = await signTableAction(actionSkHex(), t.id, t.shuffleState?.hand_id, 'check');
       socket?.emit(CHECK, { tableId: t.id, ...sigToPayloadFields(sig) });
     })();
   };
@@ -485,7 +491,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     const t = currentTableRef?.current;
     if (!t || !socket) return;
     void (async () => {
-      const sig = await signTableAction(playerKeys?.get_sk_hex?.() ?? null, t.id, t.shuffleState?.hand_id, 'call');
+      const sig = await signTableAction(actionSkHex(), t.id, t.shuffleState?.hand_id, 'call');
       socket?.emit(CALL, { tableId: t.id, ...sigToPayloadFields(sig) });
     })();
   };
@@ -494,7 +500,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     const t = currentTableRef?.current;
     if (!t || !socket) return;
     void (async () => {
-      const sig = await signTableAction(playerKeys?.get_sk_hex?.() ?? null, t.id, t.shuffleState?.hand_id, 'raise', amount);
+      const sig = await signTableAction(actionSkHex(), t.id, t.shuffleState?.hand_id, 'raise', amount);
       socket?.emit(RAISE, { tableId: t.id, amount, ...sigToPayloadFields(sig) });
     })();
   };

@@ -839,5 +839,8 @@
   "claim-locked-until": "— entsperrt ~{hours}h nach deiner letzten Hand",
   "claim-locked-expired": "— Sperre abgelaufen",
   "claim-unlock": "Entsperren",
-  "claim-unlock-pending": "Wird entsperrt…"
+  "claim-unlock-pending": "Wird entsperrt…",
+  "claim-amount-label": "Auszuzahlender Betrag (STRK)",
+  "claim-amount-max": "max. {max}",
+  "claim-amount-invalid": "Ungültiger Betrag: 0 < Betrag ≤ Maximum"
 }

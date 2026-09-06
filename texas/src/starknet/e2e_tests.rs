@@ -963,6 +963,7 @@ async fn sepolia_settle_smoke() {
             &dual_addr,
             &settlement.players_remapped,
             &settlement.deltas,
+            &[],
         )
         .await
         .expect("on-chain dapv settle");

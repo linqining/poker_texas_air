@@ -273,6 +273,15 @@ const SuccessRing = styled.div`
   background: ${({ theme }) => theme.colors.successAlpha12};
 `;
 
+/** '0.66' / '12' → wei（十进制字符串解析，最多 18 位小数）；非法返回 null。 */
+function parseStrkToWei(s: string): bigint | null {
+  const t = s.trim();
+  if (!/^\d+(\.\d{1,18})?$/.test(t)) return null;
+  const [int, dec = ''] = t.split('.');
+  const wei = BigInt(int + dec.padEnd(18, '0'));
+  return wei > 0n ? wei : null;
+}
+
 const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onClose }) => {
   const theme = useTheme();
   const { walletAddress } = useContext(authContext)!;
@@ -317,6 +326,9 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   const [lockedWei, setLockedWei] = useState<bigint | null>(null);
   // #33 解锁截止（unix 秒，0 = 无会话）+ 自助解锁 pending + 每秒走钟
   const [unlockDeadline, setUnlockDeadline] = useState<number>(0);
+  // #33 解锁后全额可提，但玩家可能只想提一部分（如只取本局剩余、把
+  // 其余留在 vault 备下次买入）——金额输入默认全额，可改小。
+  const [amountStr, setAmountStr] = useState('');
   const [unlockPending, setUnlockPending] = useState(false);
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => {
@@ -427,6 +439,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     setDone(null);
     setError('');
     setPoolGuideOpen(false);
+    setAmountStr('');
     void runChecks(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, account]);
@@ -457,6 +470,12 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   const lockExpired = unlockDeadline > 0 && nowSec >= unlockDeadline;
   const lockRemainingH = unlockDeadline > 0 ? Math.max(0, (unlockDeadline - nowSec) / 3600) : 0;
   const shieldedText = shielded !== null ? (Number(shielded) / 1e18).toFixed(4) : null;
+  // 实际领取额：输入为空 = 全额可提；非空则按十进制字符串解析（避免
+  // 0.66*1e18 的浮点尾差），并校验 0 < 额 ≤ 可提。
+  const parsedWei = amountStr.trim() === '' ? amountWei : parseStrkToWei(amountStr);
+  const amountInvalid =
+    amountStr.trim() !== '' && (parsedWei === null || parsedWei <= 0n || parsedWei > amountWei);
+  const claimWei = amountInvalid ? 0n : (parsedWei ?? 0n);
 
   const close = () => {
     setPending(null);
@@ -467,8 +486,8 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
 
   const handleClaim = async (kind: 'private' | 'public') => {
     if (!account || pending) return;
-    if (amountWei <= 0n) {
-      // 全额被锁或余额为 0：锁定到期可自助解锁后全额领取
+    if (amountInvalid || claimWei <= 0n) {
+      // 全额被锁、余额为 0 或金额输入非法：锁定到期可自助解锁后全额领取
       setError(t('claim-blocked-locked'));
       return;
     }
@@ -476,8 +495,8 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     setError('');
     const res =
       kind === 'private'
-        ? await claimRewardsPrivate(account, { amountWei })
-        : await claimRewardsPublic(account, { amountWei });
+        ? await claimRewardsPrivate(account, { amountWei: claimWei })
+        : await claimRewardsPublic(account, { amountWei: claimWei });
     setPending(null);
     if (res.success) {
       setDone({ hash: res.hash, kind });
@@ -684,7 +703,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     if (reg.pool === false) {
       return t('claim-blocked-pool');
     }
-    if (shielded !== null && shielded < amountWei) {
+    if (shielded !== null && shielded < claimWei && claimWei > 0n) {
       return t('claim-blocked-balance');
     }
     if (lockedWei !== null && lockedWei > 0n && lockedWei >= amountWei) {
@@ -812,12 +831,48 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
             {privateBlockedReason && <Notice $kind="warn">{privateBlockedReason}</Notice>}
             {error && <Notice $kind="error">{error}</Notice>}
 
+            {/* 领取金额：默认全额可提，可改小（部分提现） */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+              <label
+                htmlFor="claim-amount"
+                style={{ fontSize: '0.72rem', fontWeight: 600, color: theme.colors.softText }}
+              >
+                {t('claim-amount-label')}{' '}
+                <span style={{ fontWeight: 400 }}>
+                  ({t('claim-amount-max').replace('{max}', strkText)})
+                </span>
+              </label>
+              <input
+                id="claim-amount"
+                inputMode="decimal"
+                autoComplete="off"
+                value={amountStr}
+                placeholder={strkText}
+                onChange={(e) => setAmountStr(e.target.value)}
+                style={{
+                  padding: '0.45rem 0.6rem',
+                  borderRadius: theme.radius.md,
+                  border: `1px solid ${amountInvalid ? theme.colors.danger : theme.colors.borderSubtle}`,
+                  fontSize: '0.95rem',
+                  fontVariantNumeric: 'tabular-nums',
+                  background: 'rgba(0,0,0,0.03)',
+                  color: theme.colors.fontColorDark,
+                  outline: 'none',
+                }}
+              />
+              {amountInvalid && (
+                <span style={{ fontSize: '0.7rem', color: theme.colors.danger }}>
+                  {t('claim-amount-invalid')}
+                </span>
+              )}
+            </div>
+
             <ActionsGrid>
               <ActionCell>
                 <Button
                   type="submit"
                   fullWidth
-                  disabled={pending !== null || amountWei <= 0n || strk20Ready !== true}
+                  disabled={pending !== null || claimWei <= 0n || strk20Ready !== true}
                   onClick={() => void handleClaim('private')}
                   title={strk20Ready ? t('claim-private-tip') : t('claim-private-tip-unsupported')}
                 >
@@ -830,7 +885,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
                   variant="secondary"
                   type="button"
                   fullWidth
-                  disabled={pending !== null || amountWei <= 0n}
+                  disabled={pending !== null || claimWei <= 0n}
                   onClick={() => void handleClaim('public')}
                   title={t('claim-public-tip')}
                 >

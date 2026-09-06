@@ -24,7 +24,7 @@ fn settle_ok_once(table_id: u32, mirror_hand: u32) -> bool {
     set.lock().map(|mut g| g.insert((table_id, mirror_hand))).unwrap_or(false)
 }
 
-fn settle_ok_already(table_id: u32, mirror_hand: u32) -> bool {
+pub(crate) fn settle_ok_already(table_id: u32, mirror_hand: u32) -> bool {
     let set = SETTLE_OK.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
     set.lock().map(|g| g.contains(&(table_id, mirror_hand))).unwrap_or(false)
 }
@@ -233,6 +233,10 @@ async fn snip36_settle_flow(
     let hand_id = settlement.hand_id;
 
     // 1. 材料：每参与者首条已签名动作（v3 域：含 hand_id）。
+    //    真实客户端未带签名时材料为空——空批次没有可证语句（handbatch
+    //    的 host 直验对零方程同样 Truncated 拒绝），直接跳过出证，
+    //    不再"warn 后仍然进 prove"（2026-09-07 线上：两手均
+    //    "no signed actions → host verify: Truncated"假失败）。
     let materials =
         super::recursion_prover::action_sig_materials(&input.action_log, &start.participants);
     if materials.is_empty() {
@@ -243,23 +247,27 @@ async fn snip36_settle_flow(
 
     // 2. 异步出证（阻塞调用移入 spawn_blocking；hand_binding = 注册值）。
     let binding = super::dual_settle::prepare_handbatch_binding(&mirror, &settlement);
-    let prove_result = match binding {
-        Ok(b) => {
-            let out_dir =
-                std::path::Path::new(&work_dir).join(format!("hand-{hand_id}-recursion"));
-            let mats = materials.clone();
-            let table_id = input.table_id;
-            let hand_id = settlement.hand_id;
-            let hb_bytes = b.hand_binding.to_bytes_be();
-            tokio::task::spawn_blocking(move || {
-                super::recursion_prover::prove_batch_blocking(
-                    table_id, hand_id, hb_bytes, &mats, &out_dir,
-                )
-            })
-            .await
-            .unwrap_or_else(|e| Err(format!("join: {e:?}")))
+    let prove_result = if materials.is_empty() {
+        Err("no signed actions — proving skipped".to_string())
+    } else {
+        match binding {
+            Ok(b) => {
+                let out_dir =
+                    std::path::Path::new(&work_dir).join(format!("hand-{hand_id}-recursion"));
+                let mats = materials.clone();
+                let table_id = input.table_id;
+                let hand_id = settlement.hand_id;
+                let hb_bytes = b.hand_binding.to_bytes_be();
+                tokio::task::spawn_blocking(move || {
+                    super::recursion_prover::prove_batch_blocking(
+                        table_id, hand_id, hb_bytes, &mats, &out_dir,
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("join: {e:?}")))
+            }
+            Err(e) => Err(format!("binding: {e}")),
         }
-        Err(e) => Err(format!("binding: {e}")),
     };
 
     match prove_result {
@@ -288,35 +296,86 @@ async fn snip36_settle_flow(
         }
     }
 
-    // 3. legacy 保底：对账已通过的 settlement 直接上链（幂等/重投同 legacy）。
-    submit_legacy_with_retry(table_id, settlement).await;
+    // 3. 保底：对账已通过的 settlement 经 dual 线性入口上链
+    //    （register_hand + verify_and_settle_dapv_stark）。
+    submit_dual_fallback(table_id, &mirror, &settlement).await;
 }
 
-/// legacy 结算（snip36 回退腿）：单次提交 + 已结算幂等容忍。
-async fn submit_legacy_with_retry(table_id: u32, settlement: super::submit::HandSettlement) {
+/// 结算保底腿：dual 线性结算（无证明依赖）。
+///
+/// 2026-09-07 起 legacy PokerSettlement（0x76a0b49a）在链上是 2026-08-31
+/// 的 4 参 `settle_hand` ABI（#18 Phase B 只改了源码未重部署），且构造时
+/// 绑定的还是旧 vault v2——新 5 参 calldata 反序列化必拒（线上
+/// "Failed to deserialize param #3"），双重失效。回退改走 dual：
+/// `vault.settlement_contract` 已指向 dual v5，`register_hand` +
+/// `verify_and_settle_dapv_stark` 与 e2e 冒烟（2026-09-05）同路径；
+/// endorsement 退役后 P-batch 由操作员自铸（纯形状合规的折叠方程）。
+async fn submit_dual_fallback(
+    table_id: u32,
+    mirror: &super::mirror::TableMirror,
+    settlement: &super::submit::HandSettlement,
+) {
     let Some(chain) = super::chain() else { return };
-    let addr = chain.config.settlement_address.clone();
-    if addr.is_empty() {
+    let dual_addr = chain.config.dual_settlement_address.clone();
+    if dual_addr.is_empty() {
         tracing::info!(
-            "[snip36] dev mode: legacy settlement calldata generated, on-chain submit skipped (register {} felts)",
-            settlement.register_calldata.len()
+            "[snip36] dev mode: dual settlement not configured, on-chain submit skipped              (register {} felts, settle {} felts)",
+            settlement.register_calldata.len(),
+            settlement.settle_calldata.len()
         );
         return;
     }
-    match super::submit::submit_settlement(&settlement, &addr).await {
+    // P-batch 词条：每参与者一条操作员自铸 endorsement（与 e2e 冒烟一致；
+    // 认可退役后合约只折叠方程形状，不再约束签名主体）。
+    let produce = |hb: &[u8; 32], _players: &[starknet_ff::FieldElement]| {
+        let mut out = Vec::new();
+        for _ in 0.._players.len() {
+            let sk = <super::dual_settle::Sc as poker_protocol::crypto::curve::CurveScalar>::random(
+                &mut rand::rngs::OsRng,
+            );
+            let pk = <poker_protocol::crypto::curve::StarkCurve as poker_protocol::crypto::curve::Curve>::base_g() * sk;
+            out.push(super::dual_settle::mint_endorsement(&sk, &pk, hb));
+        }
+        Ok(out)
+    };
+    let dual = match super::dual_settle::build_dual_settlement_with(mirror, settlement, &produce) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(
+                "[snip36-fallback] table {table_id} hand {} dual settlement build failed: {e}",
+                settlement.hand_id
+            );
+            return;
+        }
+    };
+    // #33 离桌快解锁：本手的挂起离桌玩家随结算 bundle 同笔释放；
+    // 失败归还，等下次重试或 TTL 兜底。赢额回锁与续钟也在同一笔
+    // bundle 里（原子，无异步窗口），不再有后置补锁调用。
+    let departed = super::lock::take_pending_releases_for(settlement.hand_id);
+    match super::dual_settle::submit_dual_settlement(
+        &dual,
+        &dual_addr,
+        &settlement.players_remapped,
+        &settlement.deltas,
+        &departed,
+    )
+    .await
+    {
         Ok((register_hash, settle_hash)) => {
             let _ = settle_ok_once(table_id, settlement.hand_id);
             tracing::info!(
-                "[snip36-fallback] table {table_id} hand {} legacy settle ok: register={register_hash} settle={settle_hash}",
-                settlement.hand_id
+                "[snip36-fallback] table {table_id} hand {} dual atomic settle ok: tx={register_hash} ({settle_hash}), departed-released={}",
+                settlement.hand_id,
+                departed.len()
             );
         }
         Err(e) if is_already_settled_error(&e) => {
             let _ = settle_ok_once(table_id, settlement.hand_id);
         }
         Err(e) => {
+            super::lock::restore_pending_releases(departed, settlement.hand_id);
             tracing::error!(
-                "[snip36-fallback] table {table_id} hand {} legacy settle failed: {e}",
+                "[snip36-fallback] table {table_id} hand {} dual atomic settle failed: {e}",
                 settlement.hand_id
             );
         }

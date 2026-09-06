@@ -27,25 +27,21 @@ fn vault_address() -> Result<Felt, String> {
     parse_felt(&addr).ok_or_else(|| format!("vault address invalid: {addr}"))
 }
 
-/// chips（服务端单位，1 chip = WEI_PER_CHIP wei = 1e15 wei）→ (lo, hi) u256 felts。
-fn chips_to_u256_felts(chips: i64) -> (Felt, Felt) {
-    let wei = (chips as i128)
-        .checked_mul(super::config::WEI_PER_CHIP as i128)
-        .expect("lock amount wei overflow") as u128;
-    // u256 calldata = [lo: 低 128 位, hi: 高 128 位]；1e15/chip 的量级下
-    // hi 恒为 0（i128 源值上界 2^127）。
-    let lo = Felt::from(wei);
-    let hi = Felt::from(0_u8);
-    (lo, hi)
-}
-
 /// 玩家入座成功后锁定买入筹码（owner-gated）。异步尽力而为：
 /// 失败仅告警——锁定缺失的代价是 #33 逃单窗口重新打开，日志必须显眼。
 pub async fn lock_player_chips(player_address: &str, chips: i64) {
     if chips <= 0 {
         return;
     }
-    match invoke_locklike(player_address, chips, "lock").await {
+    let Some(wei) = (chips as i128)
+        .checked_mul(super::config::WEI_PER_CHIP as i128)
+        .and_then(|w| u128::try_from(w).ok())
+    else {
+        tracing::error!("[in-hand-lock] lock amount overflow for {player_address}: {chips} chips");
+        return;
+    };
+    let (lo, hi) = wei_to_u256_felts(wei);
+    match invoke_vault(player_address, "lock", vec![lo, hi]).await {
         Ok(tx) => tracing::info!("[in-hand-lock] locked {chips} chips for {player_address}, tx={tx:#x}"),
         Err(e) => tracing::error!(
             "[in-hand-lock] LOCK FAILED for {player_address} ({chips} chips): {e} — 逃单窗口未关闭，需人工 vault.lock 补锁"
@@ -55,25 +51,244 @@ pub async fn lock_player_chips(player_address: &str, chips: i64) {
 
 /// 每手结算成功后续各参与者的 session 时钟（owner-gated）。
 /// 从未锁定的玩家（历史买入）会因 "No active session" 失败——仅告警。
+///
+/// 与结算提交共用 operator 账户：结算腿刚 send 完、交易还在内存池里时，
+/// 续钟交易容易以旧 nonce 构建（NonceTooOld / DuplicateNonce 被内存池
+/// 拒绝、不上链不花 gas——2026-09-07 线上两手 6 次续钟只成 1 次）。
+/// nonce 类错误按退避重试；其余错误（如 No active session）不重试。
 pub async fn refresh_player_session(player_address: &str) {
-    match invoke_locklike(player_address, 0, "refresh_session").await {
-        Ok(tx) => tracing::debug!("[in-hand-lock] session refreshed for {player_address}, tx={tx:#x}"),
-        Err(e) => tracing::warn!("[in-hand-lock] session refresh failed for {player_address}: {e}"),
+    const MAX_ATTEMPTS: u32 = 3;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match invoke_vault(player_address, "refresh_session", vec![]).await {
+            Ok(tx) => {
+                tracing::debug!("[in-hand-lock] session refreshed for {player_address}, tx={tx:#x}");
+                return;
+            }
+            Err(e) => {
+                if is_nonce_race(&e) && attempt < MAX_ATTEMPTS {
+                    tracing::warn!(
+                        "[in-hand-lock] session refresh nonce race for {player_address} (attempt {attempt}/{MAX_ATTEMPTS}): {e} — retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+                tracing::warn!("[in-hand-lock] session refresh failed for {player_address}: {e}");
+                return;
+            }
+        }
     }
 }
 
-async fn invoke_locklike(player_address: &str, chips: i64, fn_name: &str) -> Result<Felt, String> {
+// ===== #33 离桌快解锁 + 结算原子锁账（2026-09-07 逃单窗口修复）=====
+//
+// 漏洞（用户复现报告）：apply_settlement 正向 delta 只加 chip 不加锁，
+// 赢额从结算落地起永远可提（withdraw 只断言 spendable = chips - locked），
+// 而服务端 stack 仍可全押它——输家把差额提走后，下一手结算的
+// "Insufficient chip balance" 断言必失败，且结算是一整手打包一笔交易，
+// 一个逃单者让全手（含赢家）结算 revert。
+//
+// 修正模型（operator = vault owner = 结算提交者，零合约改动）：
+// - 在座：结算单笔 invoke 原子串起 register → settle → 赢额回锁 lock()
+//   → 续钟 refresh_session()——同交易按序执行、整体回滚，不存在
+//   "结算落地→回锁落地"的异步窗口。
+// - 离桌：牌局进行中离开 → 挂起，随最后一手的结算交易同笔 force_unlock；
+//   牌局未进行时离开 → 已结算即立即单独 force_unlock。
+
+/// 离桌快解锁的挂起登记：wallet → 该玩家最后一手 hand_id。
+/// 手牌进行中离桌的玩家等那手结算成功后由 [`flush_leave_releases`] 释放。
+fn pending_leave_releases() -> &'static std::sync::Mutex<std::collections::HashMap<String, u32>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 结算提交前取回"最后一手 = 本手"的挂起离桌玩家（随结算同笔释放）。
+/// 精确匹配（==）——更晚结算的其他手不代表该玩家的手已结算。
+pub fn take_pending_releases_for(hand_id: u32) -> Vec<String> {
+    pending_leave_releases()
+        .lock()
+        .map(|mut g| {
+            let due: Vec<String> = g
+                .iter()
+                .filter(|(_, h)| **h == hand_id)
+                .map(|(w, _)| w.clone())
+                .collect();
+            for w in &due {
+                g.remove(w);
+            }
+            due
+        })
+        .unwrap_or_default()
+}
+
+/// 结算提交失败时归还挂起条目（下次该手重试随结算再释放）。
+pub fn restore_pending_releases(entries: Vec<String>, hand_id: u32) {
+    pending_leave_releases()
+        .lock()
+        .map(|mut g| {
+            for w in entries {
+                g.insert(w, hand_id);
+            }
+        })
+        .ok();
+}
+
+/// 手牌中止（refund_all_bets：摊牌物化失败 / reveal 超时 / 重建失败 /
+/// 洗牌失败，全员退款、无链上结算）时释放该手的挂起离桌玩家——
+/// 中止手永远不会有 settle 来触发释放，不在此处理就会滞留到 TTL。
+/// 游戏层同步代码调用：spawn 出去执行链上操作，无 runtime 时告警
+/// 留给 TTL 兜底。
+pub fn abort_flush_leave_releases(hand_id: u32) {
+    let due = take_pending_releases_for(hand_id);
+    if due.is_empty() {
+        return;
+    }
+    tracing::info!(
+        "[in-hand-lock] hand {hand_id} aborted — releasing {} pending leave players",
+        due.len()
+    );
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(async move {
+                for wallet in due {
+                    release_player_lock(&wallet).await;
+                }
+            });
+        }
+        Err(_) => tracing::warn!(
+            "[in-hand-lock] no tokio runtime at abort — {hand_id} leave releases deferred to TTL"
+        ),
+    }
+}
+
+/// 离桌时排程释放。`hand_settled` = 该玩家最后一手是否已结算成功
+/// （hooks::settle_ok_already）：是则立即释放，否则挂起等那手 settle
+/// （随该手的结算交易同笔原子释放，见 dual_settle 的线性编排）。
+pub async fn schedule_leave_release(wallet: &str, last_hand_id: u32, hand_settled: bool) {
+    let wallet = normalize_wallet(wallet);
+    if hand_settled {
+        release_player_lock(&wallet).await;
+    } else {
+        pending_leave_releases()
+            .lock()
+            .map(|mut g| g.insert(wallet.clone(), last_hand_id))
+            .ok();
+        tracing::info!(
+            "[in-hand-lock] leave release pending for {wallet} after hand {last_hand_id} settles"
+        );
+    }
+}
+
+/// 全量释放玩家锁（force_unlock）：仅在"已离桌且最后一手已结算"时调用。
+async fn release_player_lock(wallet: &str) {
+    let Some(chain) = super::chain() else { return };
+    let vault = match vault_address() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("[in-hand-lock] leave release skipped for {wallet}: {e}");
+            return;
+        }
+    };
+    // 链上实际锁定量为准（服务端不追踪，重启/多进程都不影响正确性）。
+    let player = match parse_felt(wallet) {
+        Some(f) => f,
+        None => {
+            tracing::warn!("[in-hand-lock] leave release skipped: invalid wallet {wallet}");
+            return;
+        }
+    };
+    let locked_wei = match chain
+        .call_contract(
+            vault,
+            starknet::core::utils::starknet_keccak("locked_balance".as_bytes()),
+            vec![player],
+        )
+        .await
+    {
+        Ok(felts) => {
+            let lo = felts
+                .first()
+                .and_then(|f| <[u8; 16]>::try_from(&f.to_bytes_be()[16..32]).ok())
+                .map(u128::from_be_bytes)
+                .unwrap_or(0);
+            // u256 hi 段在真实量级下恒为 0；非 0 时按饱和处理告警放弃。
+            let hi_nonzero = felts.get(1).map(|f| *f != Felt::ZERO).unwrap_or(false);
+            if hi_nonzero {
+                tracing::warn!("[in-hand-lock] leave release skipped for {wallet}: locked u256 high limb non-zero");
+                return;
+            }
+            lo
+        }
+        Err(e) => {
+            tracing::warn!("[in-hand-lock] leave release read failed for {wallet}: {e:?}");
+            return;
+        }
+    };
+    if locked_wei == 0 {
+        tracing::debug!("[in-hand-lock] leave release: {wallet} already unlocked");
+        return;
+    }
+    match invoke_vault(wallet, "force_unlock", vec![]).await {
+        Ok(tx) => tracing::info!(
+            "[in-hand-lock] leave release: unlocked {:.4} STRK for {wallet}, tx={tx:#x}",
+            locked_wei as f64 / 1e18
+        ),
+        Err(e) => tracing::error!(
+            "[in-hand-lock] LEAVE RELEASE FAILED for {wallet} ({:.4} STRK): {e} — 玩家可等 TTL 自助解锁",
+            locked_wei as f64 / 1e18
+        ),
+    }
+}
+
+fn normalize_wallet(w: &str) -> String {
+    w.trim().trim_start_matches("wallet:").to_lowercase()
+}
+
+pub(crate) fn wallet_of_felt(p: &starknet_ff::FieldElement) -> String {
+    format!("0x{}", p.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+/// 玩家是否有活跃在局 session（view；结算编排用它过滤续钟调用，
+/// 避免对无 session 玩家的 refresh_session 断言 revert 拖垮整笔原子交易）。
+pub async fn vault_session_active(wallet: &str) -> bool {
+    let Some(chain) = super::chain() else { return false };
+    let Ok(vault) = vault_address() else { return false };
+    let Some(player) = parse_felt(wallet) else { return false };
+    chain
+        .call_contract(
+            vault,
+            selector("session_active"),
+            vec![player],
+        )
+        .await
+        .ok()
+        .and_then(|felts| felts.first().cloned())
+        .map(|f| f == Felt::ONE)
+        .unwrap_or(false)
+}
+
+fn is_nonce_race(err: &str) -> bool {
+    err.contains("NonceTooOld") || err.contains("DuplicateNonce")
+}
+
+/// wei → u256 calldata（lo, hi）。
+pub(crate) fn wei_to_u256_felts(wei: u128) -> (Felt, Felt) {
+    (Felt::from(wei), Felt::from(0_u8))
+}
+
+/// owner-gated vault 调用统一入口（player 地址为第一参）。
+async fn invoke_vault(
+    player_address: &str,
+    fn_name: &str,
+    extra_calldata: Vec<Felt>,
+) -> Result<Felt, String> {
     let chain = super::chain().ok_or("starknet chain not initialized")?;
     let vault = vault_address()?;
     let operator = chain.operator().await.ok_or("operator account unavailable")?;
     let player = parse_felt(player_address)
         .ok_or_else(|| format!("player address invalid: {player_address}"))?;
-    let calldata: Vec<Felt> = if chips > 0 {
-        let (lo, hi) = chips_to_u256_felts(chips);
-        vec![player, lo, hi]
-    } else {
-        vec![player]
-    };
+    let mut calldata = vec![player];
+    calldata.extend(extra_calldata);
     let call = Call {
         to: vault,
         selector: selector(fn_name),

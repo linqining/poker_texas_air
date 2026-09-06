@@ -534,7 +534,7 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                         );
                         return true;
                     }
-                    let (active, removed_players, chips_to_unlock) = {
+                    let cleanup = {
                         // First pass: collect wallet->player_id mappings with read lock
                         let wallet_to_player_id: std::collections::HashMap<String, String> = {
                             let gs = state.state.read().await;
@@ -557,6 +557,9 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
 
                         let mut gs = state.state.write().await;
                         if let Some(table) = gs.tables.get_mut(&table_id) {
+                            // #33 离桌快解锁要绑定"该玩家最后一手"：在
+                            // reset_for_next_hand 可能清零前先取 current_hand_id。
+                            let hand_at_removal = table.current_hand_id;
                             let mut to_remove = Vec::new();
                             for seat in table.local_seats.values_mut() {
                                 let is_broke = seat.stack == 0;
@@ -585,9 +588,10 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                                 }
                             }
                             table.reset_for_next_hand();
-                            (table.active_players().len(), to_remove, chips_to_unlock)
-                        } else { (0, Vec::new(), Vec::new()) }
+                            (table.active_players().len(), to_remove, chips_to_unlock, hand_at_removal)
+                        } else { (0, Vec::new(), Vec::new(), 0) }
                     };
+                    let (active, removed_players, chips_to_unlock, hand_at_removal) = cleanup;
 
                     // DB 退还筹码必须在写锁外执行：state 是覆盖所有桌的全局单锁，
                     // 跨 await 会冻结全服的 tick 与 socket handler。
@@ -622,6 +626,24 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                         if let Some(name) = player_name {
                             broadcast::broadcast_to_table(&io, &state, table_id, Some(&format!("{} left the table.", name))).await;
                         }
+                    }
+
+                    // #33 离桌快解锁：手尾清理移除的玩家（破产/坐观离桌）。
+                    // 手刚结束、settle 大概率还在飞——挂起等该手结算成功后
+                    // flush 释放；链上操作 spawn 出去不阻塞 tick。
+                    for (wallet_address, _) in removed_players.iter() {
+                        let seated_elsewhere = {
+                            let gs = state.state.read().await;
+                            gs.tables.values().any(|t| t.find_player_by_wallet(wallet_address).is_some())
+                        };
+                        if seated_elsewhere {
+                            continue;
+                        }
+                        let settled = crate::starknet::hooks::settle_ok_already(table_id, hand_at_removal);
+                        let wallet = wallet_address.clone();
+                        tokio::spawn(async move {
+                            crate::starknet::lock::schedule_leave_release(&wallet, hand_at_removal, settled).await;
+                        });
                     }
 
                     tracing::info!("[TICK] Table {} Waiting: cleanup after hand_complete, {} active, {} players removed", table_id, active, removed_players.len());

@@ -1096,6 +1096,7 @@ pub async fn submit_dual_settlement(
     dual_address: &str,
     players_remapped: &[Ff],
     deltas: &[i128],
+    departed: &[String],
 ) -> Result<(String, String), String> {
     let chain = super::chain().ok_or("starknet chain not initialized")?;
     let contract = super::chain::parse_felt(dual_address)
@@ -1232,6 +1233,124 @@ pub async fn submit_dual_settlement(
                 dual.settle_calldata.clone(),
             ),
         };
+
+    // ===== 线性模式原子编排（2026-09-07 设计裁定，零合约改动）=====
+    //
+    // operator = vault owner = settlement prover：单笔 __execute__ 多调用
+    // 按序执行、共享状态、整体回滚。把 register → settle → 赢额回锁 →
+    // 续钟 → 离桌释放串进同一笔交易：
+    // - 注册对结算可见（省掉两步提交的落地轮询）；
+    // - 赢额回锁与结算原子落地（消除"结算落地→回锁落地"的异步逃单窗口）；
+    // - 离桌玩家的 force_unlock 随最后一手结算同笔释放。
+    // 任一子调用 revert 则整笔 revert——回锁/续钟只对确有 session/余额
+    // 的玩家追加，避免无关断言拖垮结算。
+    if mode == SettleMode::Linear {
+        let vault = super::chain::parse_felt(&chain.config.vault_address)
+            .ok_or("invalid vault address in config")?;
+        let treasury = chain.config.treasury_address.to_lowercase();
+        let register_call = Call {
+            to: contract,
+            selector: starknet_keccak(register_selector.as_bytes()),
+            calldata: register_calldata,
+        };
+        let settle_call = Call {
+            to: contract,
+            selector: starknet_keccak(settle_selector.as_bytes()),
+            calldata: settle_calldata,
+        };
+        let mut calls = vec![settle_call];
+        let mut notes: Vec<&'static str> = Vec::new();
+        // 赢额回锁（treasury/rake 不锁——无 session，锁了只会造出假时钟）。
+        for (p, d) in players_remapped.iter().zip(deltas.iter()) {
+            if *d <= 0 {
+                continue;
+            }
+            let wallet = super::lock::wallet_of_felt(p);
+            if wallet == treasury {
+                continue;
+            }
+            let Some(wei) = (*d as i128)
+                .checked_mul(super::config::WEI_PER_CHIP as i128)
+                .and_then(|w| u128::try_from(w).ok())
+            else {
+                continue;
+            };
+            let (lo, hi) = super::lock::wei_to_u256_felts(wei);
+            calls.push(Call {
+                to: vault,
+                selector: starknet_keccak(b"lock"),
+                calldata: vec![ff_to_felt(*p), lo, hi],
+            });
+            notes.push("win-relock");
+        }
+        // 续钟（仅确有活跃 session 的参与者；无 session 的 refresh 会
+        // 断言 revert 拖垮整笔）。
+        for p in players_remapped {
+            let wallet = super::lock::wallet_of_felt(p);
+            if super::lock::vault_session_active(&wallet).await {
+                calls.push(Call {
+                    to: vault,
+                    selector: starknet_keccak(b"refresh_session"),
+                    calldata: vec![ff_to_felt(*p)],
+                });
+                notes.push("refresh");
+            }
+        }
+        // 离桌释放（force_unlock 无断言，空锁调用只是写零）。
+        for w in departed {
+            if let Some(f) = super::chain::parse_felt(w) {
+                calls.push(Call {
+                    to: vault,
+                    selector: starknet_keccak(b"force_unlock"),
+                    calldata: vec![f],
+                });
+                notes.push("leave-release");
+            }
+        }
+        // 注册先行：同笔内顺序执行，settle 看得到注册写入。
+        let mut attempts = vec![{
+            let mut c = vec![register_call.clone()];
+            c.extend(calls.iter().cloned());
+            c
+        }];
+        // 过渡兼容：老两步流程可能已把 register 落地而 settle 未成——
+        // 整笔因 "already registered" revert 时，去掉 register 重发。
+        attempts.push(calls.clone());
+        let mut last_err = String::new();
+        for (i, bundle) in attempts.iter().enumerate() {
+            match operator.execute_v3(bundle.clone()).send().await {
+                Ok(r) => {
+                    let hash = format!("{:#x}", r.transaction_hash);
+                    tracing::info!(
+                        "[dapv] atomic settle bundle (register+settle+{} extras: {}) tx={hash}",
+                        notes.len(),
+                        notes.iter().fold(std::collections::HashMap::<&'static str, usize>::new(), |mut m, n| { *m.entry(n).or_default() += 1; m })
+                            .iter()
+                            .map(|(k, v)| format!("{k}x{v}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                    let _ = i;
+                    return Ok((hash.clone(), hash));
+                }
+                Err(e) => {
+                    let text = format!("{e}");
+                    last_err = text.clone();
+                    if text.contains("already registered") || text.contains("Hand already settled") {
+                        continue; // 已注册/已结算：下一组（去 register）重试
+                    }
+                    return Err(format!("atomic settle bundle failed: {e}"));
+                }
+            }
+        }
+        // 第二组也报 already：结算早已完整落地——按幂等成功处理。
+        if last_err.contains("Hand already settled") || last_err.contains("already registered") {
+            return Ok(("already-settled".to_string(), "already-settled".to_string()));
+        }
+        return Err(format!("atomic settle bundle failed: {last_err}"));
+    }
+
+    // ===== Proved 模式：两步提交（未启用，保持原路径）=====
 
     let register_hash = match operator
         .execute_v3(vec![Call {

@@ -995,5 +995,8 @@
   "claim-locked-until": "—— 最后一手后约 {hours} 小时解锁",
   "claim-locked-expired": "—— 锁定已到期",
   "claim-unlock": "解锁",
-  "claim-unlock-pending": "解锁中…"
+  "claim-unlock-pending": "解锁中…",
+  "claim-amount-label": "提取金额（STRK）",
+  "claim-amount-max": "最多 {max}",
+  "claim-amount-invalid": "金额无效：需为 0 < 金额 ≤ 最大可提"
 }

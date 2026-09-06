@@ -995,5 +995,8 @@
   "claim-locked-until": "— unlocks in ~{hours}h after your last hand",
   "claim-locked-expired": "— lock has expired",
   "claim-unlock": "Unlock",
-  "claim-unlock-pending": "Unlocking…"
+  "claim-unlock-pending": "Unlocking…",
+  "claim-amount-label": "Amount to claim (STRK)",
+  "claim-amount-max": "max {max}",
+  "claim-amount-invalid": "Enter a valid amount: 0 < amount ≤ max"
 }

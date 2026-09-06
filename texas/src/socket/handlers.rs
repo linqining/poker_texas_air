@@ -702,7 +702,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             let _ = state.db.unlock_chips(&pid, stack as i64).await;
         }
 
-        let (leave_msg, need_clear) = {
+        let (leave_msg, need_clear, last_hand_id) = {
             let mut guard = state.state.write().await;
             let gs = &mut *guard;
             let name = gs.players.get(&socket_id).map(|p| p.name.clone());
@@ -713,10 +713,10 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 } else {
                     tracing::warn!("[LEAVE_TABLE] No pk_hex found for socket_id={}, cannot remove player", socket_id);
                 }
-                let msg = name.map(|n| format!("{} left the table.", n));
+                let msg = name.map(|n| format!("{n} left the table."));
                 let clear = table.active_players().len() == 1;
-                (msg, clear)
-            } else { (None, false) }
+                (msg, clear, table.current_hand_id)
+            } else { (None, false, 0) }
         };
 
         let tables_info = state.get_current_tables().await;
@@ -727,6 +727,23 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
         if let Some(msg) = &leave_msg {
             broadcast::broadcast_to_table(&io, &state, table_id, Some(msg)).await;
+        }
+
+        // #33 离桌快解锁：不在其他桌 + 最后一手已结算 → 立即 force_unlock；
+        // 最后一手还没结算（本分支无手牌进行中，但 settle 是异步的）→ 挂起，
+        // 该手结算成功后由 settle 钩子 flush。链上操作不阻塞 socket 流程。
+        if let Some(ref wa) = wallet_address {
+            let seated_elsewhere = {
+                let gs = state.state.read().await;
+                gs.tables.values().any(|t| t.find_player_by_wallet(&wa.0).is_some())
+            };
+            if !seated_elsewhere {
+                let wallet = wa.0.clone();
+                let settled = crate::starknet::hooks::settle_ok_already(table_id, last_hand_id);
+                tokio::spawn(async move {
+                    crate::starknet::lock::schedule_leave_release(&wallet, last_hand_id, settled).await;
+                });
+            }
         }
 
         if need_clear {

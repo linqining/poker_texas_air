@@ -182,6 +182,10 @@ impl Table {
     /// - 已离开玩家（left_during_hand）：total_bet 退款（记日志，实际退款由链上事件处理）
     /// 清空所有 bet/total_bet，清空底池。
     pub fn refund_all_bets(&mut self) {
+        // #33 中止手没有结算交易——挂在该手上的离桌释放永远等不到 settle
+        // 触发，在此直接释放（全员退款 = 零链上敞口，2026-09-07 线上盲区）。
+        let aborted_hand = self.current_hand_id;
+        crate::starknet::lock::abort_flush_leave_releases(aborted_hand);
         for seat in self.local_seats.values_mut() {
             if !seat.refunded && seat.total_bet > 0 {
                 if !seat.left_during_hand {
