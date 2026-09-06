@@ -654,28 +654,20 @@ export async function claimRewardsPrivate(
   // 隐私池内流转的资产是原生 STRK（pSTRK/PokerToken 已弃用——官方 Sepolia
   // 隐私池面向 STRK，钱包侧对未入池 token 直接拒绝 INVALID_REQUEST_PAYLOAD）
   const { CANONICAL_STRK_ADDRESS } = await import('./starknetGameActions');
-  const amountHex = '0x' + amount.toString(16);
   const actions = [
-    // 阶段 5：开输出 open note（helper 的产出在执行期填入）
+    // 阶段 5：开输出 open note（金额在执行时由 helper 的出资填入）。
     {
       type: 'transfer',
       token: CANONICAL_STRK_ADDRESS,
       amount: 'OPEN',
       recipient: player,
     },
-    // 阶段 6：公开提款 X STRK 池 → helper（privacy_invoke 的注资前提；
-    // InvokeInput 无自动注资机制——池 ABI 的 ServerAction 只有显式
-    // TransferTo/TransferFrom，缺这一步 helper 余额为 0 → op=1 必 revert
-    // "no unshield funds in helper"，2026-09-03 双真人线上复现）。
-    {
-      type: 'withdraw',
-      token: CANONICAL_STRK_ADDRESS,
-      amount: amountHex,
-      recipient: anonymizerAddress,
-    },
-    // 阶段 7：烧筹码 1:1 + helper 全额余额记回上面的 open note。
-    // calldata 与 helper privacy_invoke(operation, player, amount:u256,
-    // note_id) 对齐；operation=1 = OP_WITHDRAW。所有 felt 必须 0x 十六进制。
+    // 阶段 7：anonymizer 守恒出金（2026-09-07 修复）：withdraw_to 烧掉
+    // player 的等额筹码并把 vault 背书 STRK 释放给 helper，helper 全额
+    // 记回上面的 open note——输出由 vault 出资，无需池内预存余额。
+    // 旧模型（burn_chips + 用户 withdraw 自筹注资）每领 X 销毁 X 价值，
+    // 已废弃。calldata 与 helper privacy_invoke(operation, player,
+    // amount:u256, note_id) 对齐；operation=1 = OP_WITHDRAW，felt 均 0x hex。
     {
       type: 'invoke',
       contract: anonymizerAddress,
@@ -683,23 +675,6 @@ export async function claimRewardsPrivate(
     },
   ];
   try {
-    // 预检屏蔽余额：为 0/不足时钱包只会回模糊的 INVALID_REQUEST_PAYLOAD，
-    // 提前拦截并给出可操作提示（查询失败不阻断，让钱包给最终答复）。
-    try {
-      const entries = await getShieldedBalance(account, CANONICAL_STRK_ADDRESS);
-      if (entries !== null && entries < amount) {
-        const fmt = (v: bigint) => (Number(v) / 1e18).toFixed(4);
-        return {
-          hash: '',
-          success: false,
-          error:
-            `池内屏蔽余额不足（${fmt(entries)} STRK < 需要 ${fmt(amount)} STRK）。` +
-            '请先在 Ready 钱包内将 STRK shield 入隐私池（钱包内有 Shield/入池 入口），再回来私密领取。',
-        };
-      }
-    } catch (e) {
-      logger.warn('[strk20] pre-claim shielded balance check failed (continuing):', e);
-    }
     // 提交走统一阶梯：v6 通道 → 平铺带稳定版 api_version → 预发布版本兜底
     // （v6 通道的 163 UNKNOWN_ERROR 也会降级重试——2026-09-06 线上教训）。
     const res = await submitStrk20Actions(wallet, actions);

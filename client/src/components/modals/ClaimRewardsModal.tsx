@@ -703,9 +703,6 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     if (reg.pool === false) {
       return t('claim-blocked-pool');
     }
-    if (shielded !== null && shielded < claimWei && claimWei > 0n) {
-      return t('claim-blocked-balance');
-    }
     if (lockedWei !== null && lockedWei > 0n && lockedWei >= amountWei) {
       return t('claim-blocked-locked');
     }

@@ -9,6 +9,13 @@ use crate::auth;
 use crate::pokergame::player::truncate_name;
 use super::*;
 
+/// shuffle 提交错误里的状态机拒绝类（重复/迟到提交、非当前洗牌者）——
+/// 非密码学失败，zk 面板按"state rejected"而非"proof failed"展示。
+fn shuffle_state_rejection(err: &str) -> bool {
+    err.contains("not active") || err.contains("Not current player")
+}
+
+
 /// 获取用户可用筹码（PokerVault 链上筹码 - locked_chips）。
 /// 链上查询不可用（dev 模式）时返回 0 可用。
 async fn get_available_chips(state: &Arc<SocketState>, user: &crate::models::User) -> i64 {
@@ -297,14 +304,22 @@ async fn broadcast_sit_down(
                 "action": "sit_down",
             }));
             tracing::warn!("[SIT_DOWN_V2] Failed to join and shuffle: {}", e);
-            // ZK 可视化：shuffle 证明验证失败
+            // ZK 可视化：区分状态机拒绝（重复/迟到提交，非密码学问题）与
+            // 真正的证明验证失败——2026-09-07 前 "Shuffle not active" 这类
+            // 状态拒绝被误标为"证明失败"造成面板误报 ✗。
+            let err_text = format!("{e}");
+            let rejection = shuffle_state_rejection(&err_text);
             state.broadcast_crypto_event(
                 table_id,
                 broadcast::CryptoEventType::Shuffle,
                 pk_hex.to_string(),
                 None,
                 false,
-                Some(format!("shuffle proof verification failed: {}", e)),
+                Some(if rejection {
+                    format!("shuffle submit rejected (state): {}", e)
+                } else {
+                    format!("shuffle proof verification failed: {}", e)
+                }),
                 None,
             ).await;
         }
@@ -1157,14 +1172,19 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             }
             Err(e) => {
                 tracing::warn!("[SHUFFLE_SUBMIT] shuffle verification failed, pk_hex={}, table_id={}, error={}", pk_hex, payload.table_id, e);
-                // ZK 可视化：shuffle 证明验证失败
+                // ZK 可视化：状态机拒绝（重复/迟到提交）与证明失败分开展示
+                let rejection = shuffle_state_rejection(&e);
                 state.broadcast_crypto_event(
                     payload.table_id,
                     broadcast::CryptoEventType::Shuffle,
                     pk_hex.0.clone(),
                     None,
                     false,
-                    Some(format!("shuffle proof verification failed: {}", e)),
+                    Some(if rejection {
+                        format!("shuffle submit rejected (state): {}", e)
+                    } else {
+                        format!("shuffle proof verification failed: {}", e)
+                    }),
                     None,
                 ).await;
             }

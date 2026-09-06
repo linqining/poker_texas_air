@@ -107,6 +107,11 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
   // TABLE_UPDATED shuffle fallback 去重：同一 shuffle 轮（phase + 已完成人数）
   // 只补交一次，防止重复广播触发重复洗牌提交。
   const shuffleFallbackDoneRef = useRef<{ phase: string; completed: number } | null>(null);
+  // SHUFFLE_NOTICE 直推去重（纵深防御，2026-09-07）：服务端事件队列与直接
+  // 调用双通道曾同毫秒双发同态通知 → 客户端双重洗牌提交（第二次被
+  // "Shuffle not active" 拒绝）。签名 = 当前洗牌者 + 首张密牌 c1：状态真变
+  // 必改签名；同签名 250ms 内视为重复，忽略。
+  const lastShuffleNoticeRef = useRef<{ sig: string; at: number } | null>(null);
   // TABLE_UPDATED reconstruct fallback 去重：同一 reconstruct 轮（coefficient + pending 数）只补交一次。
   const reconstructFallbackKeyRef = useRef<string | null>(null);
 
@@ -267,6 +272,18 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       });
 
       socket.on(SHUFFLE_NOTICE, async (data: ShuffleNoticeData) => {
+        // 双通道去重：同态通知（同洗牌者 + 同首张密牌）250ms 内只处理一次。
+        // deck_encrypted 项在 wire 上是 {c1_hex, c2_hex}（ElGamalCiphertextJson；
+        // 客户端类型里的 string[][] 是陈旧声明，此处按运行时形状取值）。
+        const firstCard = data.shuffleState?.deck_encrypted?.[0] as { c1_hex?: string } | undefined;
+        const sig = `${data.shuffleState?.current_player_pk ?? ''}|${firstCard?.c1_hex ?? ''}`;
+        const now = Date.now();
+        const last = lastShuffleNoticeRef.current;
+        if (last && last.sig === sig && now - last.at < 250) {
+          logger.log('[Shuffle] duplicate SHUFFLE_NOTICE suppressed (same state within 250ms)');
+          return;
+        }
+        lastShuffleNoticeRef.current = { sig, at: now };
         setCommunityCards([]);
         setDecryptedHandCards([]);
         resetRevealDedup();

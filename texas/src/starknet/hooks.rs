@@ -169,10 +169,16 @@ async fn settle_hand_from_log(mut input: super::prove_log::HandSettleInput) {
             Ok((Ok(s), m)) => (s, m),
             Ok((Err(e), _)) => {
                 tracing::warn!("[starknet-settle] table {table_id} hand {hand_id} settlement build failed: {e}");
+                // 第三类终局：结算构建失败（一次性、无重试）——该手永不
+                // 上链（无 debit/credit，零和守恒），挂在该手上的离桌释放
+                // 不能等 settle，在此 flush（与 refund_all_bets 中止路径
+                // 同语义；2026-09-07 hand 1788734417 board-0 线上盲区）。
+                super::lock::abort_flush_leave_releases(hand_id);
                 return;
             }
             Err(join_err) => {
                 tracing::error!("[starknet-settle] table {table_id} hand {hand_id} settlement build task panicked: {join_err}");
+                super::lock::abort_flush_leave_releases(hand_id);
                 return;
             }
         }

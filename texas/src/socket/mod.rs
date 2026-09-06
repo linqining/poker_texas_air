@@ -347,6 +347,25 @@ impl GameLoopRegistry {
 
 static SOCKET_IO: OnceLock<SocketIo> = OnceLock::new();
 
+/// 按桌记录最近一次 SHUFFLE_NOTICE 推送签名（双通道去重，见
+/// send_shuffle_notice 内注释）。
+fn shuffle_notice_dedup()
+-> &'static std::sync::Mutex<HashMap<u32, (String, std::time::Instant)>> {
+    static S: OnceLock<std::sync::Mutex<HashMap<u32, (String, std::time::Instant)>>> =
+        OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn last_shuffle_notice(table_id: u32) -> Option<(String, std::time::Instant)> {
+    shuffle_notice_dedup().lock().ok()?.get(&table_id).cloned()
+}
+
+fn record_shuffle_notice(table_id: u32, sig: String) {
+    if let Ok(mut g) = shuffle_notice_dedup().lock() {
+        g.insert(table_id, (sig, std::time::Instant::now()));
+    }
+}
+
 pub fn set_socket_io(io: SocketIo) {
     let _ = SOCKET_IO.set(io);
 }
@@ -589,6 +608,26 @@ impl SocketState {
             let deck_len = shuffle_state.deck_encrypted.len();
             let first_c1 = shuffle_state.deck_encrypted.first().map(|c| c.c1_hex.as_str()).unwrap_or("none");
             let first_c2 = shuffle_state.deck_encrypted.first().map(|c| c.c2_hex.as_str()).unwrap_or("none");
+            // 双通道去重（2026-09-07）：同一次洗牌状态会经 TableEvent 消费者
+            // 与各处直接调用两条路径推送（game_loop 重构完成/超时、handlers
+            // SHUFFLE_SUBMIT/RECONSTRUCT_SUBMIT），曾出现同毫秒双发 → 客户端
+            // 双重洗牌提交（第二次被状态机拒绝，zk 面板误报"证明失败"）。
+            // 签名 = 当前洗牌者 + 首张密牌承诺：状态真变（轮转/换牌）必然
+            // 改签名；同签名 250ms 内视为重复推送，跳过 emit。
+            let sig = format!(
+                "{:?}|{}|{}",
+                shuffle_state.current_player_pk, deck_len, first_c1
+            );
+            if let Some((last_sig, at)) = last_shuffle_notice(table_id) {
+                if last_sig == sig && at.elapsed() < std::time::Duration::from_millis(250) {
+                    tracing::debug!(
+                        "[send_shuffle_notice] table={} duplicate push suppressed (same state within 250ms)",
+                        table_id
+                    );
+                    return;
+                }
+            }
+            record_shuffle_notice(table_id, sig);
             tracing::info!(
                 "[send_shuffle_notice] table={} deck_len={} first_c1={}... first_c2={}... current_pk={:?}",
                 table_id,

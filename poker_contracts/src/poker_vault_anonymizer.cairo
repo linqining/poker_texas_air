@@ -59,6 +59,14 @@ pub struct OpenNoteDeposit {
 pub trait IVaultLike<TContractState> {
     fn deposit_for(ref self: TContractState, player: ContractAddress, amount: u256);
     fn burn_chips(ref self: TContractState, player: ContractAddress, amount: u256);
+    /// #25 全链路私密提现：烧 player 筹码并把背书 STRK 转给 recipient。
+    /// vault 侧信任门 = unshield_helper（本合约需被 set_unshield_helper）。
+    fn withdraw_to(
+        ref self: TContractState,
+        player: ContractAddress,
+        recipient: ContractAddress,
+        amount: u256,
+    );
     fn token(self: @TContractState) -> ContractAddress;
 }
 
@@ -194,12 +202,16 @@ pub mod PokerVaultAnonymizer {
             let self_address = get_contract_address();
 
             if operation == OP_WITHDRAW {
-                // Unshield: burn the player's chips 1:1 (no token movement
-                // here — the pool already moved the user's burned input-note
-                // STRK into the helper), then return the helper's whole
-                // balance as the recipient's output note.
+                // Unshield（守恒模型，2026-09-07 修复）：withdraw_to 烧掉
+                // player 的 amount 筹码并让 vault 把背书 STRK 释放进 helper，
+                // helper 全额作为 recipient 的输出 note 记回池。
+                // 旧实现用 burn_chips（无代币移动）+ 要求用户先用池内
+                // 余额自筹注资——每领 X 销毁 X 价值（chips 烧掉、背书 STRK
+                // 滞留 vault 无人可领、用户拿回的只是自己的钱），且把
+                // "池内屏蔽余额 ≥ 领取额" 错立为前置。withdraw_to 模型下
+                // 输出 note 由 vault 出资，无需任何池内预存。
                 assert!(note_id != 0, "recipient note id required");
-                vault_dispatcher.burn_chips(player, amount);
+                vault_dispatcher.withdraw_to(player, self_address, amount);
                 let remaining = token_dispatcher.balance_of(self_address);
                 assert!(!remaining.is_zero(), "no unshield funds in helper");
                 assert!(remaining.high == 0_u128, "unshield overflows u128");
@@ -510,16 +522,18 @@ mod tests {
         let vault = IPokerVaultDispatcher { contract_address: s.vault };
 
         // Authorize the helper, then fund the player's chips (buy-in path).
+        // deposit_for 已把 400 STRK 背书金留在 vault。
         vault.set_authorized_helper(s.anonymizer);
+        vault.set_unshield_helper(s.anonymizer);
         tok.mint(test_addr, 1000);
         tok.approve(s.vault, 400);
         vault.deposit_for(s.player, 400);
         assert!(vault.chip_balance(s.player) == 400, "chips credited");
 
-        // The pool moves the user's burned input-note STRK to the helper
-        // before the withdraw leg runs.
-        tok.mint(test_addr, 300);
-        tok.transfer(s.anonymizer, 300);
+        // 守恒模型：无需任何预注资——withdraw_to 烧 300 筹码并把 vault
+        // 里的背书 STRK 释放给 helper（对比旧 burn_chips 模型要求池/用户
+        // 预先转 300 进 helper）。
+        let vault_balance_before = tok.balance_of(s.vault);
 
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
         let deposits = anon.privacy_invoke(1, s.player, 300, 42);
@@ -530,10 +544,14 @@ mod tests {
         assert!(note.token == s.token, "token mismatch");
         assert!(note.amount == 300, "output amount");
 
-        // Chips burned 1:1. The helper still holds the output STRK until
-        // the pool pulls it via the approval (same lifecycle as buy-in).
+        // Chips burned 1:1 AND the backing STRK left the vault into the
+        // helper — value conserved (user: chips -300, note +300).
         assert!(vault.chip_balance(s.player) == 100, "chips burned");
         assert!(vault.total_chips() == 100, "total chips reduced");
+        assert!(
+            tok.balance_of(s.vault) == vault_balance_before - 300,
+            "backing STRK released from vault"
+        );
         assert!(tok.balance_of(s.anonymizer) == 300, "helper holds output pre-pull");
 
         // The pool pulls the output note via the helper's approval.
@@ -542,14 +560,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected: "Only the authorized helper")]
+    #[should_panic(expected: "Only the unshield helper")]
     fn privacy_invoke_withdraw_fails_without_helper_authorization() {
         let test_addr = get_contract_address();
         let s = setup(test_addr);
-        let tok = IMockTokenDispatcher { contract_address: s.token };
-        tok.mint(test_addr, 300);
-        tok.transfer(s.anonymizer, 300);
-        // set_authorized_helper NOT called — burn_chips must refuse.
+        // set_unshield_helper NOT called — withdraw_to must refuse.
+        // （守恒模型无需预注资：helper 空、vault 空，任何出资都不存在。）
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
         anon.privacy_invoke(1, s.player, 300, 42);
     }
@@ -568,12 +584,9 @@ mod tests {
     fn privacy_invoke_withdraw_rejects_overdraw() {
         let test_addr = get_contract_address();
         let s = setup(test_addr);
-        let tok = IMockTokenDispatcher { contract_address: s.token };
         let vault = IPokerVaultDispatcher { contract_address: s.vault };
-        vault.set_authorized_helper(s.anonymizer);
-        // Player has NO chips; pool still funds the helper.
-        tok.mint(test_addr, 300);
-        tok.transfer(s.anonymizer, 300);
+        vault.set_unshield_helper(s.anonymizer);
+        // Player has NO chips — withdraw_to must refuse at the balance assert.
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
         anon.privacy_invoke(1, s.player, 300, 42);
     }
@@ -583,11 +596,8 @@ mod tests {
     fn privacy_invoke_withdraw_rejects_zero_note_id() {
         let test_addr = get_contract_address();
         let s = setup(test_addr);
-        let tok = IMockTokenDispatcher { contract_address: s.token };
         let vault = IPokerVaultDispatcher { contract_address: s.vault };
-        vault.set_authorized_helper(s.anonymizer);
-        tok.mint(test_addr, 300);
-        tok.transfer(s.anonymizer, 300);
+        vault.set_unshield_helper(s.anonymizer);
         let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
         anon.privacy_invoke(1, s.player, 300, 0);
     }

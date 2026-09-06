@@ -346,3 +346,21 @@ fact 降级 / 错 program hash 拒 / 错消息哈希拒）。
 ⚠️ 槽位冻结待办：v3 的 `facts[2]`/`facts[8]` 槽位与消息哈希公式以
 SNIP-36 参考实现为口径——首个真实 SNIP-36 证明提交前需用 sepolia 真实
 proof_facts 样本对拍一次（执行计划 G2 门）。
+
+## PokerVaultAnonymizer v4 — 私密领取守恒修复（2026-09-07）
+
+OP_WITHDRAW 从 `burn_chips`（无代币移动 + 用户池内自筹注资——每领 X 销毁
+X 价值：chips 烧掉、背书 STRK 滞留 vault 无人可领、输出 note 全额来自用户
+自己的钱）改为 `withdraw_to`：烧 player 等额筹码并由 vault 释放背书 STRK
+给 helper，输出 open note 由 vault 出资——**无需任何池内预存余额**，用户
+chips −X / note +X 分文不丢。前端两动作删去自筹 withdraw 桥与屏蔽余额
+前置检查（strk20.ts claimRewardsPrivate）。
+
+| 项 | 值 |
+| --- | --- |
+| class | `0x525646bdab97344307b3bd4cbb80344ee26415366743d181e52c61f1a250c81` |
+| 地址 | `0x7ee059ddb3afaa1975d8ac73f273ba6033bfc6a2f3b7421b35a2364023ad9dd` |
+| 构造 | owner=deployer(`0x6e37...c782`) vault=`0x0629385f...`(v3) pool=`0x254a6b...d91`（STRK20 Sepolia 池，视图回读 ✓） |
+| 接线 | vault `set_unshield_helper(0x7ee059dd...)` TX `0x18fbf4fa...`（旧 v3 `0x6fd4be6e...` 保留 authorized_helper 语义但 OP_WITHDRAW 已废弃） |
+| 测试 | snforge 91/91（withdraw 三负例改守恒语义：unshield 门/超额/零 note） |
+| env | client `VITE_POKER_VAULT_ANONYMIZER_ADDRESS` 已切新地址（vite 已重启） |
