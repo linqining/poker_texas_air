@@ -93,4 +93,69 @@ theorem settlement_clears_bets (postBets : Fin NumSeats → ℕ) (postPot : ℕ)
     (hbets : ∀ j, postBets j = 0) (hpot : postPot = 0) :
     (∀ j, postBets j = 0) ∧ postPot = 0 := ⟨hbets, hpot⟩
 
+/-! ### raked award（#22④：`RevealTimeoutRakedAward`，2026-09 新增） -/
+
+/-- raked award 的 rake 关系（对齐 canonical AIR 约束）：
+`rake = min(floor(pot · bps / 10_000), cap, pot)`——抽水取"按 bps 计算、
+封顶值、底池本身"三者的最小值，由 AIR 内 256-entry byte range 表的
+LogUp lookup 强制。 -/
+def RakeSat (pot bps cap rake : ℕ) : Prop :=
+  rake = min (pot * bps / 10000) (min cap pot)
+
+/-- **rake 不超过底池**：`rake ≤ pot`——抽水永远不能抽走超过底池的
+金额，幸存者保底拿到 `pot − rake`。 -/
+theorem rake_le_pot {pot bps cap rake : ℕ}
+    (h : RakeSat pot bps cap rake) : rake ≤ pot := by
+  unfold RakeSat at h
+  rw [h]
+  omega
+
+/-- **raked award 守恒**：幸存者恰得 `pot − rake`，rake 从桌台托管中
+移除——分配总额仍等于底池（无凭空生成/克扣）。 -/
+theorem raked_award_credit {pot bps cap rake : ℕ}
+    (h : RakeSat pot bps cap rake) :
+    (pot - rake) + rake = pot := by
+  unfold RakeSat at h
+  rw [h]
+  omega
+
+/-- **rake 受封顶与 bps 双重约束**：`rake ≤ cap` 且
+`rake ≤ floor(pot·bps/10⁴)`。 -/
+theorem rake_bounded_by_cap_and_bps {pot bps cap rake : ℕ}
+    (h : RakeSat pot bps cap rake) :
+    rake ≤ cap ∧ rake ≤ pot * bps / 10000 := by
+  unfold RakeSat at h
+  rw [h]
+  constructor <;> omega
+
+/-! ### 零和结算（#18：`SettlementPrivateStatement::validate`） -/
+
+/-- 零和约束（电路 `validate()` 规格约束 2）：全部参与者 signed deltas
+之和为零——筹码只在参与者之间转移，结算不能凭空增发或凭空销毁
+（rake 已在此之前从底池扣除）。 -/
+def ZeroSumSat (deltas : Fin NumSeats → ℤ) (nParticipants : ℕ) : Prop :=
+  (∑ j, deltas j) = 0 ∧
+  nParticipants = Finset.card (Finset.univ.filter (fun j => deltas j ≠ 0)) ∧
+  ∀ j, (deltas j).natAbs ≤ 18446744073709551615
+
+/-- **结算零和**：`Σ deltas = 0`——赢家的每一分都来自输家的账户变动，
+`n_participants` 恰为非零变动人数，`|delta| ≤ u64::MAX`（digest 用
+u64 幅度）。 -/
+theorem settlement_zero_sum {deltas : Fin NumSeats → ℤ} {nParticipants : ℕ}
+    (h : ZeroSumSat deltas nParticipants) :
+    (∑ j, deltas j) = 0 ∧
+      nParticipants = Finset.card {j | deltas j ≠ 0} ∧
+      (∀ j, deltas j ≠ 0 → nParticipants ≥ 1) := by
+  obtain ⟨hsum, hcount, hbound⟩ := h
+  refine ⟨hsum, hcount, ?_⟩
+  intro j hne
+  -- 至少存在一个非零 delta（j 自己），故参与者数 ≥ 1
+  have hmem : j ∈ (Finset.univ.filter (fun j => deltas j ≠ 0) :
+      Finset (Fin NumSeats)) := by
+    refine Finset.mem_filter.mpr ⟨Finset.mem_univ j, ?_⟩
+    simpa using hne
+  have hpos : 0 < Finset.card (Finset.univ.filter (fun j => deltas j ≠ 0)) :=
+    Finset.card_pos.mpr ⟨j, hmem⟩
+  omega
+
 end AirsLean

@@ -543,6 +543,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn test_verify_roots_accepts_consistent() {
         // 自洽 PI + 覆盖两端点的 flock 绑定证明 → verify_roots 必通过。
         let pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
@@ -554,6 +555,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn test_verify_roots_rejects_tampered_root() {
         // 篡改 pre_state_root（不改 image、不改证明）→ 端点语句与证明脱钩 → 失败。
         // 这验证了「root = BLAKE3(preimage) 由证明承载」这条绑定生效。
@@ -567,6 +569,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn test_verify_roots_rejects_tampered_image() {
         // 篡改 image（不改 root、不改证明）→ 端点语句与证明脱钩 → 失败。
         let mut pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
@@ -579,6 +582,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn test_verify_roots_rejects_empty_preimage() {
         let pi = TexasPublicInputs {
             pre_image: vec![],

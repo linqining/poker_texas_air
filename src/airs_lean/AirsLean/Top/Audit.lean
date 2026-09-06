@@ -56,15 +56,24 @@ theorem main_withdraw_bound (steps : List PStep)
 
 /-- **命题 1（抗审查）主定理**：验签通过的动作 + accepted-seq 缺口 ⇒
 动作被服务器接受当且仅当它出现在日志中（缺口 ⇒ 未接受 = 审查成立）；
-且代打受合法默认约束。 -/
+且代打受三分支合法默认约束（`legalAutoAction`）：auto-check 仅当
+面对零待跟注，auto-fold 仅当待跟注额超过大盲。 -/
 theorem main_censorship_detectable {acc : AcceptedSeq} {log : AcceptedLog} {p k : ℕ}
     (hbind : ReceiptBinding acc log p)
     (hlt : acc p < k)
     (e : LogEntry) (hseq : e.seq = k)
-    {isAuto checkFold facingBet : Bool}
-    (hauto : AutoSat isAuto checkFold facingBet)
-    (hautoOn : isAuto = true) (hcf : checkFold = true) :
-    ¬ (e ∈ log ∧ e.player = p) ∧ facingBet = false :=
-  ⟨censorship_provable hbind hlt e hseq, auto_check_legal hauto hautoOn hcf⟩
+    {callAmount myBet bigBlind : ℕ}
+    (hcheck : legalAutoAction callAmount myBet bigBlind = AutoKind.check) :
+    ¬ (e ∈ log ∧ e.player = p) ∧ (callAmount = 0 ∨ myBet ≥ callAmount) :=
+  ⟨censorship_provable hbind hlt e hseq, auto_check_cond hcheck⟩
+
+/-- **反 griefing 顶层推论**：任何被接受日志中的 auto-fold 条目都满足
+待跟注额 `> big_blind`——服务器不能借代打折叠面对零/小额下注的玩家。 -/
+theorem main_auto_fold_bounded (log : List LogEntry)
+    (h : ∀ e ∈ log, legalAutoAction e.owed e.myBet e.bigBlind = AutoKind.fold →
+      e.owed - e.myBet > e.bigBlind)
+    (e : LogEntry) (hmem : e ∈ log)
+    (hfold : legalAutoAction e.owed e.myBet e.bigBlind = AutoKind.fold) :
+    e.owed - e.myBet > e.bigBlind := h e hmem hfold
 
 end AirsLean.Top

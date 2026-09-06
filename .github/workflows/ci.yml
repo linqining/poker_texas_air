@@ -44,10 +44,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly-2026-04-15
-      # Slow (multi-second prove roundtrip) tests are #[ignore]d locally so the
-      # default `cargo test` stays a fast dev loop; the merge gate runs them all
-      # via --include-ignored so coverage is unchanged.
-      - run: cargo test --release --workspace -- --include-ignored
+      # nextest 以单测为粒度跨二进制并行（libtest 串行跑各二进制），大幅缩短
+      # 全量门禁时长；profile.all 不强杀慢 prove 测试（见 .config/nextest.toml）。
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --profile all --workspace --include-ignored
+      # nextest 不执行 doctest，单独补跑。
+      - run: cargo test --doc --workspace
 
   test-helpers:
     name: Release integration tests with test helpers

@@ -1219,6 +1219,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn pk_ownership_roundtrip_and_tamper() {
         let mut rng = test_rng();
         let (sk, pk) = keypair(&mut rng);
@@ -1279,6 +1280,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn remask_and_leave_roundtrip_with_direction_binding() {
         let mut rng = test_rng();
         let (sk, pk) = keypair(&mut rng);
@@ -1379,6 +1381,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn reveal_tokens_batched_roundtrip_and_tamper() {
         let mut rng = test_rng();
         let (sk, pk) = keypair(&mut rng);
@@ -1423,6 +1426,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn fold_with_proof_roundtrip_and_tamper() {
         let mut rng = test_rng();
         let (sk, pk) = keypair(&mut rng);

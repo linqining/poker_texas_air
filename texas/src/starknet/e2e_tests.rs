@@ -66,7 +66,14 @@ fn game_layer_join(
 /// reveal ×(DealHole/Board/Showdown) → 下注 → 结算 → calldata。
 /// 牌力完全平分（awards==total_bets）时换随机密钥重打，最多 20 次。
 #[test]
+#[ignore = "requires live STARKNET_RPC_URL (local devnet); run in the full gate or manually"]
 fn e2e_starknet_buyin_play_settle_calldata() {
+    // CI 全量门禁带 --include-ignored 也会执行本测试：无 RPC 时早退跳过，
+    // 本地起 devnet 并设置 STARKNET_RPC_URL 后才真正运行。
+    if std::env::var("STARKNET_RPC_URL").is_err() {
+        eprintln!("STARKNET_RPC_URL not set — skipped (no devnet)");
+        return;
+    }
     for attempt in 0..20 {
         match play_full_hand() {
             Ok(()) => {
@@ -389,6 +396,7 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
 // 复现线上 "reveal set does not cover vm assignments byte-wise"。
 // ============================================================
 #[tokio::test]
+#[ignore = "requires live STARKNET_RPC_URL (local devnet); run in the full gate or manually"]
 async fn live_flow_assignments_match_mirror_targets() {
     use crate::config::Config;
     use crate::models::Database;
@@ -829,6 +837,11 @@ async fn sepolia_settle_smoke() {
         eprintln!("STARKNET_SEPOLIA_SMOKE != 1 — skipped (no on-chain txs)");
         return;
     }
+    // CI 全量门禁带 --include-ignored 也会执行本测试：无 RPC 时早退跳过。
+    if std::env::var("STARKNET_RPC_URL").is_err() {
+        eprintln!("STARKNET_RPC_URL not set — skipped (no devnet)");
+        return;
+    }
     let rpc = std::env::var("STARKNET_RPC_URL").expect("STARKNET_RPC_URL");
     let op_addr = std::env::var("STARKNET_OPERATOR_ADDRESS").expect("STARKNET_OPERATOR_ADDRESS");
     let op_key = std::env::var("STARKNET_OPERATOR_PRIVATE_KEY").expect("STARKNET_OPERATOR_PRIVATE_KEY");
@@ -881,6 +894,7 @@ async fn sepolia_settle_smoke() {
         settlement_address: legacy_addr,
         dual_settlement_address: dual_addr.clone(),
         settlement_mode: "dapv".into(),
+        dapv_settle_entry: "v2".into(),
         settle_mode: super::config::SettleMode::Linear,
         prover_url: None,
         prover_work_dir: "/tmp/zgame-prover".into(),

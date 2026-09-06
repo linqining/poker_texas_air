@@ -2111,6 +2111,7 @@ mod tests {
     }
 
 #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn v2_proof_roundtrip() {
         let spec = small_spec();
         let archive = prove_poseidon252_chain_v2(&spec).expect("prove");
@@ -2118,6 +2119,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn v2_rejects_tampered_anchor() {
         let spec = small_spec();
         let mut archive = prove_poseidon252_chain_v2(&spec).expect("prove");
@@ -2126,6 +2128,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn v2_rejects_tampered_message() {
         let spec = small_spec();
         let mut archive = prove_poseidon252_chain_v2(&spec).expect("prove");
@@ -2134,6 +2137,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn name_commitment_matches_legacy_host_hash() {
         // Test-only oracle: the AIR-proven anchor lane 0 equals the legacy
         // host commitment for the same public bytes.
@@ -2151,6 +2155,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn name_commitment_rejects_foreign_name() {
         let archive = prove_name_commitment_v2("test").expect("prove");
         assert!(verify_name_commitment_v2(&archive, "tesu").is_err());
@@ -2159,6 +2164,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn v2_rejects_swapped_order() {
         let a = native::Poseidon252ChainSpec::hash_many(&[
             FieldElement::from(7u64),

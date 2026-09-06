@@ -2844,6 +2844,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn set_leave_after_hand_dispatch_proves_and_issues_receipt() {
         let mut pre = make_table("set-leave");
         seat_fixture::set_player(&mut pre.seats[0], [0x11; 20]);
@@ -2973,6 +2974,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn orchestrator_prove_create_table() {
         let pre = make_create_placeholder();
         let raw_args = borsh::to_vec(&CreateTableArgs {
@@ -3208,6 +3210,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn orchestrator_accepts_rebuy_ripple_carry() {
         let mut pre = make_table("rebuy-ripple-carry");
         seat_fixture::set_player(&mut pre.seats[0], [0x42; 20]);
@@ -3344,6 +3347,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn orchestrator_accepts_leave_table_funds_ripple_carry() {
         let mut pre = make_table("leave-ripple-carry");
         seat_fixture::set_player(&mut pre.seats[0], [0x43; 20]);

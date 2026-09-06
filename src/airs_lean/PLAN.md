@@ -1,5 +1,35 @@
 # airs_lean 实现清单
 
+> **变更核对同步（2026-09-06，基线 8481aa6 → b53fcbe）**：核对上游
+> Rust 变更并更新 Lean 模型，重建零错误、零 `sorry`：
+> 1. **收据**（`texas/src/pokergame/receipts.rs`）：`Decision` 枚举改为
+>    三值（accepted/autoAccepted/rejected）+ `reason`；回执域为
+>    `table_id` + `action`/`amount`。→ D3 `Receipt`/`Decision` 重写，
+>    新增 `receipt_msg_binding`（全字段入签）与接受路径区分定理；
+> 2. **动作日志**（`texas/src/pokergame/actions.rs`）：条目新增 `sig_ok`
+>    与合法性语境（owed/my_bet/big_blind），位域打包词
+>    `action(40)|flags(2)@40|amount(64)@42|seq(64)@106|seat(32)@170`，
+>    上限 30 条。→ D2 `LogEntry` 扩展 + `packed_flags_recovery`
+>    （flags 从打包词恢复）+ `every_row_signed` 改为 `sigOk ∨ isAuto`；
+> 3. **代打规则**：`legal_auto_action` 三分支（Check/Call/Fold，按
+>    `call_amount − my_bet` 与 `big_blind` 比较）。→ D5 重写为
+>    `legalAutoAction` + `auto_check_cond`/`auto_call_cond`/
+>    `auto_fold_anti_griefing`（反 griefing 收紧为"仅当待跟注 >
+>    大盲"）；`Top.main_censorship_detectable` 联动更新并新增
+>    `main_auto_fold_bounded`；
+> 4. **结算**：`RevealTimeoutRakedAward` 在 AIR 内证明
+>    `rake = min(floor(pot·bps/10⁴), cap, pot)`；电路 `validate()`
+>    新增零和校验与 `action_flags`/`accepted_seq_digest` 预留零字段；
+>    日志哈希切到 Poseidon sponge（域分离、合法性词不入 digest）。
+>    → S5 新增 `RakeSat`/`rake_le_pot`/`raked_award_credit`/
+>    `rake_bounded_by_cap_and_bps`/`ZeroSumSat`/`settlement_zero_sum`；
+>    D6 文档对齐吸收序列 `[hand_id] ++ Σ(player,sign,|delta|) ++
+>    [action_log_digest]`；
+> 5. **不变部分**：`src/airs/` 19 个 method AIR 与 composition 组件
+>    语义未变（仅 `proof.rs` 测试标记）；canonical 29 selector 数不变
+>    （新增完成布尔列与 rake lookup 不触及 S1/S6 建模的关系）；
+>    Foundations/S1–S4/S6/Custody 全部无需改动。
+
 > **实现状态（已完成 M0–M6）**：`lake build AirsLean` 零错误，
 > `scripts/count_sorries.sh` 计数为 0。三大顶层定理见
 > `AirsLean/Top/Audit.lean`；公理审计仅含标准公理与两条登记的

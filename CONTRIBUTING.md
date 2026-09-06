@@ -29,7 +29,20 @@ skipped by default. Three layers:
 | Dev loop | `cargo test` | everything except the ignored slow prove tests |
 | Dev loop, this workspace only | `cargo test-fast` | same, skipping vendored flock's own unit tests |
 | Dev loop, faster execution | `cargo test-nextest` | same crate set via nextest (parallel, isolated; no doctests) |
-| Full gate (pre-merge) | `cargo test-all` (or `cargo test --workspace -- --include-ignored`) | every test, including the slow prove roundtrips |
+| Full gate (pre-merge) | `cargo test-all-nextest` (or `cargo test --workspace -- --include-ignored`) | every test, including the slow prove roundtrips |
+
+Test-cost policy (keeps the dev loop under ~30s wall clock):
+
+- Any single test that reliably exceeds **10s** gets
+  `#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]`.
+  nextest marks SLOW live at 10s and hard-kills at 30s (`.config/nextest.toml`);
+  the full gate uses `profile.all` (60s slow marker, no kill).
+- Tests that need a live Starknet devnet (`STARKNET_RPC_URL`) additionally
+  early-return when the env is unset, so `--include-ignored` gates stay green
+  without infrastructure.
+- Vendored `third_party/flock` unit tests are excluded from every workspace
+  test command (own workspace); they are neither built nor run by the aliases
+  above.
 
 Build-speed notes that keep the dev loop usable:
 

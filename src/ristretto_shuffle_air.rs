@@ -1276,6 +1276,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn verifier_rejects_tampered_submissions() {
         let request_bytes = proved_request();
         admit_ristretto_air_v2_shuffle_submission(&request_bytes)
@@ -1333,6 +1334,7 @@ mod tests {
     }
 
     #[test]
+#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn in_circuit_components_match_the_native_schedule() {
         let request_bytes = proved_request();
         let components = ristretto_air_v2_shuffle_in_circuit_components(&request_bytes)

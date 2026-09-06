@@ -12,6 +12,11 @@ starknet = "2.11.4"
 
 [cairo]
 sierra-release = true
+# SNIP-36 预埋：proof_facts 消费路径（get_execution_info_v3_syscall）在
+# cairo ≥2.12 的 corelib 里才可用，且该 syscall 属 libfunc 白名单之外——
+# 升级编译器前先把 libfuncs 门放开（零行为变化：当前代码未用白名单外
+# libfunc，仅避免后续迁移时的二次编译回归）。
+allowed-libfuncs-list.name = "all"
 
 [lib]
 sierra-release = true

@@ -62,6 +62,15 @@ pub struct StarknetConfig {
     pub settlement_mode: String,
     /// Hand-batch 上链形态（`STARKNET_SETTLE_MODE`，默认 Linear）。
     pub settle_mode: SettleMode,
+    /// DAPV settle 上链入口（`STARKNET_DAPV_SETTLE_ENTRY`）：
+    /// `v2`（默认）= `verify_and_settle_dapv_stark_private_v2`——零明文结算，
+    /// fact-registry 单证明锚（settlement_private 电路），**可随时回退的
+    /// 稳定入口**；`proved_private` = `verify_and_settle_dapv_proved_private`
+    /// ——hand_verify + stark verify 双 fact 认证（P2-M4，dual v4）；
+    /// `snip36` = `verify_and_settle_dapv_stark_private_v3`——SNIP-36
+    /// proof_facts 优先 + fact-registry 降级双门（**合约侧随 cairo ≥2.12
+    /// 迁移上链后生效**，选中现网会 revert，属预期）。未知值一律回退 v2。
+    pub dapv_settle_entry: String,
     /// 外部 batch-prover 服务端点（`STARKNET_PROVER_URL`）。proved 模式的
     /// attestation 来源；服务器只提交 workload、接收 attestation，绝不
     /// 进程内跑 prover。当前 HTTP 客户端为存根（必然报错 → 回退 linear），
@@ -110,6 +119,7 @@ impl StarknetConfig {
             settle_mode: SettleMode::parse(
                 &std::env::var("STARKNET_SETTLE_MODE").unwrap_or_default(),
             ),
+            dapv_settle_entry: std::env::var("STARKNET_DAPV_SETTLE_ENTRY").unwrap_or_default(),
             prover_url: std::env::var("STARKNET_PROVER_URL")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
@@ -159,6 +169,15 @@ impl StarknetConfig {
     /// Hand-batch 失败后是否允许回退 legacy（仅 auto 模式）。
     pub fn dapv_fallback_legacy(&self) -> bool {
         self.settlement_mode != "dapv"
+    }
+
+    /// 归一化的 settle 入口值（trim 后；空/未知 → "v2"）。
+    pub fn dapv_settle_entry(&self) -> &str {
+        match self.dapv_settle_entry.trim() {
+            "proved_private" => "proved_private",
+            "snip36" => "snip36",
+            _ => "v2",
+        }
     }
 
     /// 结算上链是否可用（需要 RPC + settlement 合约 + 操作员密钥）。

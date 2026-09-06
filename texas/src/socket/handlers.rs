@@ -959,6 +959,10 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                             seat.stack = seat.stack.saturating_sub(payload.amount);
                         }
                     }
+                    // 必须先释放写锁再广播：broadcast_to_table 内部会对同一
+                    // RwLock 取读锁，tokio RwLock 不可重入，持写锁广播会
+                    // 永久自锁且该桌写锁永不释放（实锤死锁点）。
+                    drop(gs);
                     broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
                     return;
                 }

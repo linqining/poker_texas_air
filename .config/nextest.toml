@@ -1,0 +1,11 @@
+# 测试执行策略（配合 `cargo test-nextest`）：
+# - 10s 标记为 slow（对应评审"单测 >10s 要标记"），30s 强杀防挂起/死锁；
+# - nextest 以单测为粒度跨二进制并行，吃满 CPU（libtest 串行跑各二进制）。
+[profile.default]
+slow-timeout = { period = "10s", terminate-after = 3 }
+retries = 0
+
+# 全量门禁（含被 ignore 的慢 prove 测试 / e2e）：不强杀，60s 起仅标记 slow。
+# 用法：cargo test-all-nextest
+[profile.all]
+slow-timeout = { period = "60s" }

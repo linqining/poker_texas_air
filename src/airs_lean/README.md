@@ -37,6 +37,14 @@ lake env lean /tmp/axcheck.lean
 `[propext, Classical.choice, Quot.sound]`；`drop_breaks_digest` 额外依赖
 两条**登记过的**假设公理 `actionDigest`/`digest_inj`（哈希抗碰撞）。
 
+## 变更核对同步（2026-09-06）
+
+上游基线 8481aa6 → b53fcbe 的语义变更已核对并反映进模型（详见
+PLAN.md 头部"变更核对同步"）：D3 收据三值决定、D2 日志 sigOk/合法性
+语境/打包词/30 条上限、D5 代打三分支 `legal_auto_action`、D6 Poseidon
+sponge 域分离吸收链、S5 rake 上界与零和结算。`src/airs/` method AIR
+语义未变，Foundations/S1–S4/S6/Custody 无需改动。
+
 ## 结构
 
 ```
@@ -65,7 +73,8 @@ AirsLean/
 │   ├── ActionSig.lean     签名模型、动作真实性、域分离
 │   ├── ActionLog.lean     seq 严格递增 ⇒ 重放/重排不可表示
 │   ├── AcceptedSeq.lean   收据绑定、审查可证明、无假阳性、拒绝可归因
-│   ├── AutoAction.lean    代打合法默认（auto-check 零下注 / auto-fold 有注）
+│   ├── AutoAction.lean    代打合法默认三分支 legal_auto_action
+│   │                      （check 零待跟注 / call ≤ 大盲 / fold > 大盲）
 │   └── DigestBinding.lean 剔除/篡改破坏 settle digest（抗碰撞假设）
 └── Top/
     ├── Assumptions.lean   显式假设登记表
