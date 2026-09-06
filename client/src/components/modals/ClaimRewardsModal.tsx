@@ -29,6 +29,8 @@ import {
   getRegisteredPayoutCommitment,
   getShieldedBalance,
   getVaultLockedBalanceWei,
+  getVaultLockSession,
+  unlockVaultAfterDeadline,
   getWalletApiVersions,
   shieldForPoolRegistration,
   walletErrText,
@@ -217,7 +219,7 @@ const ReverifyLink = styled.button`
 `;
 
 /** 警告 / 错误条 */
-const Notice = styled(Text)<{ $kind: 'warn' | 'error' | 'success' }>`
+const Notice = styled(Text)<{ $kind: 'warn' | 'error' | 'success' | 'info' }>`
   text-align: center;
   font-size: 0.78rem;
   padding: 0.5rem 0.7rem;
@@ -228,6 +230,8 @@ const Notice = styled(Text)<{ $kind: 'warn' | 'error' | 'success' }>`
       return `background: rgba(245, 158, 11, 0.12); color: ${theme.colors.warningDark};`;
     if ($kind === 'error')
       return `background: ${theme.colors.dangerAlpha06}; color: ${theme.colors.danger};`;
+    if ($kind === 'info')
+      return `background: rgba(59, 130, 246, 0.10); color: ${theme.colors.mutedText};`;
     return `background: ${theme.colors.successAlpha12}; color: ${theme.colors.successStrong};`;
   }}
 `;
@@ -311,6 +315,14 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   // #33 在局锁定余额（wei）：入座锁定的买入筹码，离桌后 TTL（12h）解锁；
   // 锁定部分不可领取/出金（burn_chips/withdraw 断言 spendable）
   const [lockedWei, setLockedWei] = useState<bigint | null>(null);
+  // #33 解锁截止（unix 秒，0 = 无会话）+ 自助解锁 pending + 每秒走钟
+  const [unlockDeadline, setUnlockDeadline] = useState<number>(0);
+  const [unlockPending, setUnlockPending] = useState(false);
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const vaultAddr = starknetConfig.pokerVaultAddress || '';
   const flagsKey = `poker.claimReg:${(walletAddress || '').toLowerCase()}`;
@@ -338,10 +350,23 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   const runChecks = React.useCallback(async (useCache: boolean) => {
     if (!account) return;
     setChecking(true);
+    // cancelled 必须在下方缓存早退 return 之前初始化：锁定读取的 .then 闭包
+    // 引用它，若走早退路径声明永不执行，回调必抛 TDZ ReferenceError 并被
+    // .catch 吞掉 → 锁定行消失、按全额发交易撞 in-hand lock（2026-09-07）
+    let cancelled = false;
     // #33 在局锁定余额随每手结算变化，不受注册缓存影响——每次打开实时查
-    getVaultLockedBalanceWei(account)
-      .then((wei) => setLockedWei(wei))
-      .catch(() => setLockedWei(null));
+    // （锁定量与解锁截止一起读：session_last_activity + lock_ttl）
+    getVaultLockSession(account)
+      .then((sess) => {
+        if (cancelled) return;
+        setLockedWei(sess ? sess.lockedWei : null);
+        setUnlockDeadline(sess ? sess.unlockDeadlineSec : 0);
+      })
+      .catch((e) => {
+        logger.warn('[ClaimModal] lock session read failed:', e);
+        setLockedWei(null);
+        setUnlockDeadline(0);
+      });
     // 缓存快路径：两份注册都已确认 → 直接显示已注册态，不发任何链上查询/弹窗
     if (useCache) {
       const cached = readFlags();
@@ -354,7 +379,6 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     }
     let payout: boolean | null = null;
     let pool: boolean | null = null;
-    let cancelled = false;
     // 版本先行：0.10.3 在列表里就点亮按钮（detectStrk20Support 的 V6 探测
     // 可能因 discovery 未就绪而慢一步，版本线是更快的权威信号）
     getWalletApiVersions().then((versions) => {
@@ -421,8 +445,17 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
   if (!isOpen) return null;
 
   const chips = Math.max(0, Math.floor(chipsAmount ?? 0));
-  const amountWei = BigInt(chips) * WEI_PER_CHIP;
+  const fullAmountWei = BigInt(chips) * WEI_PER_CHIP;
+  // #33 可提 = 余额 − 在局锁定（部分锁定时按未锁差额发交易；此前按全额
+  // 发 → vault "Insufficient unlocked balance (in-hand lock)" 必拒）。
+  const lockedPart = lockedWei && lockedWei > 0n ? lockedWei : 0n;
+  const amountWei = fullAmountWei > lockedPart ? fullAmountWei - lockedPart : 0n;
+  const claimableChips = Math.floor(Number(amountWei) / Number(WEI_PER_CHIP));
   const strkText = (Number(amountWei) / 1e18).toFixed(4);
+  const lockedStrkText = (Number(lockedPart) / 1e18).toFixed(4);
+  // 解锁状态：TTL 已过（任何人可自助 unlock_after_deadline）→ 展示解锁入口
+  const lockExpired = unlockDeadline > 0 && nowSec >= unlockDeadline;
+  const lockRemainingH = unlockDeadline > 0 ? Math.max(0, (unlockDeadline - nowSec) / 3600) : 0;
   const shieldedText = shielded !== null ? (Number(shielded) / 1e18).toFixed(4) : null;
 
   const close = () => {
@@ -434,8 +467,9 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
 
   const handleClaim = async (kind: 'private' | 'public') => {
     if (!account || pending) return;
-    if (chips <= 0) {
-      setError(t('claim-error-empty'));
+    if (amountWei <= 0n) {
+      // 全额被锁或余额为 0：锁定到期可自助解锁后全额领取
+      setError(t('claim-blocked-locked'));
       return;
     }
     setPending(kind);
@@ -450,6 +484,26 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
     } else {
       setError(res.error || t('claim-error-failed'));
       logger.warn('[ClaimModal] claim failed:', res.error);
+    }
+  };
+
+  // #33 到期自助解锁（无许可）：TTL 过后一键解除在局锁定
+  const handleUnlock = async () => {
+    if (!account || unlockPending) return;
+    setUnlockPending(true);
+    setError('');
+    const res = await unlockVaultAfterDeadline(account);
+    setUnlockPending(false);
+    if (res.success) {
+      setDone({ hash: res.hash, kind: 'public' });
+      // 解锁落地后重读锁定（清零 → 下次打开全额可提）
+      void getVaultLockSession(account).then((sess) => {
+        setLockedWei(sess ? sess.lockedWei : null);
+        setUnlockDeadline(sess ? sess.unlockDeadlineSec : 0);
+      });
+    } else {
+      setError(res.error || t('claim-error-failed'));
+      logger.warn('[ClaimModal] unlock failed:', res.error);
     }
   };
 
@@ -713,6 +767,38 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
 
             <CheckBlock aria-label={t('claim-check-title')}>
               {walletChainMismatch && <Notice $kind="warn">{t('claim-wrong-network')}</Notice>}
+              {lockedPart > 0n && (
+                <Notice $kind={lockExpired ? 'warn' : 'info'}>
+                  {t('claim-locked-line')
+                    .replace('{locked}', lockedStrkText)
+                    .replace('{claimable}', strkText)}
+                  {' '}
+                  {lockExpired
+                    ? t('claim-locked-expired')
+                    : unlockDeadline > 0
+                      ? t('claim-locked-until').replace(
+                          '{hours}',
+                          lockRemainingH >= 1
+                            ? Math.ceil(lockRemainingH).toString()
+                            : Math.max(1, Math.ceil(lockRemainingH * 60)).toString() + 'm',
+                        )
+                      : ''}
+                  {lockExpired && (
+                    <>
+                      {' '}
+                      <Button
+                        variant="secondary"
+                        type="button"
+                        disabled={unlockPending}
+                        onClick={() => void handleUnlock()}
+                        style={{ marginLeft: 8, padding: '2px 10px', fontSize: '0.8rem' }}
+                      >
+                        {unlockPending ? t('claim-unlock-pending') : t('claim-unlock')}
+                      </Button>
+                    </>
+                  )}
+                </Notice>
+              )}
               <CheckHeader>
                 <CheckBlockTitle>{t('claim-check-title')}</CheckBlockTitle>
                 <ReverifyLink type="button" onClick={reverify} disabled={checking}>
@@ -724,14 +810,6 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
             </CheckBlock>
 
             {privateBlockedReason && <Notice $kind="warn">{privateBlockedReason}</Notice>}
-            {lockedWei !== null && lockedWei > 0n && (
-              <Notice $kind="warn">
-                {t('claim-locked-notice').replace(
-                  '{amount}',
-                  (Number(lockedWei) / 1e18).toFixed(4),
-                )}
-              </Notice>
-            )}
             {error && <Notice $kind="error">{error}</Notice>}
 
             <ActionsGrid>
@@ -739,7 +817,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
                 <Button
                   type="submit"
                   fullWidth
-                  disabled={pending !== null || chips <= 0 || strk20Ready !== true}
+                  disabled={pending !== null || amountWei <= 0n || strk20Ready !== true}
                   onClick={() => void handleClaim('private')}
                   title={strk20Ready ? t('claim-private-tip') : t('claim-private-tip-unsupported')}
                 >
@@ -752,7 +830,7 @@ const ClaimModal: React.FC<ClaimRewardsModalProps> = ({ isOpen, chipsAmount, onC
                   variant="secondary"
                   type="button"
                   fullWidth
-                  disabled={pending !== null || chips <= 0}
+                  disabled={pending !== null || amountWei <= 0n}
                   onClick={() => void handleClaim('public')}
                   title={t('claim-public-tip')}
                 >

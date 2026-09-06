@@ -974,7 +974,7 @@
   "claim-blocked-version": "钱包 Wallet API 版本（{versions}）低于 0.10.3，不支持 STRK20 私密交易——请更新 Ready",
   "claim-blocked-pool": "隐私池尚未注册：点击上方「一键注册」完成池注册后再私密领取",
   "claim-blocked-balance": "池内屏蔽余额不足：请先在钱包内将 STRK shield 入隐私池（私密领取要求池内余额 ≥ 领取额，执行后等额退回）",
-  "claim-blocked-locked": "领取额全部处于在局锁定：筹码在入座时被锁定，离桌后最多 12 小时自动解锁，解锁后即可领取",
+  "claim-blocked-locked": "全部余额在局锁定（买入锁定）：最后一手后 12 小时可解锁——倒计时结束后点“解锁”按钮，或直接点击领取解锁后的余额",
   "claim-locked-notice": "在局锁定 {amount} STRK：入座时锁定的买入筹码，离桌后最多 12 小时自动解锁；锁定部分暂不可领取或出金",
   "claim-error-empty": "无可领取筹码",
   "claim-error-failed": "领取失败",
@@ -990,5 +990,10 @@
   "claim-done-public": "公开出金已提交，STRK 将直接到账钱包",
   "claim-close": "关闭",
   "claim-error-shield": "Shield 提交失败",
-  "cookiebanner-info_aria": "阅读隐私政策，了解 Cookie 的使用方式"
+  "cookiebanner-info_aria": "阅读隐私政策，了解 Cookie 的使用方式",
+  "claim-locked-line": "在局锁定 {locked} STRK · 现在可提 {claimable} STRK",
+  "claim-locked-until": "—— 最后一手后约 {hours} 小时解锁",
+  "claim-locked-expired": "—— 锁定已到期",
+  "claim-unlock": "解锁",
+  "claim-unlock-pending": "解锁中…"
 }

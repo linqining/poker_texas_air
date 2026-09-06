@@ -818,7 +818,7 @@
   "claim-blocked-version": "Wallet-API-Version ({versions}) ist niedriger als 0.10.3 und unterstützt keine STRK20-Privattransaktionen — bitte Ready aktualisieren",
   "claim-blocked-pool": "Privacy-Pool noch nicht registriert: oben \"Ein-Klick-Registrierung\" nutzen, dann privat abheben",
   "claim-blocked-balance": "Unzureichendes Pool-Guthaben: zuerst STRK in den Privacy-Pool shielden (privates Abheben erfordert Guthaben ≥ Abhebebetrags; es wird danach zurückgegeben)",
-  "claim-blocked-locked": "Gesamter Betrag ist tischgesperrt: Chips wurden beim Buy-in gesperrt und werden innerhalb von 12 Stunden nach Verlassen des Tisches automatisch freigegeben",
+  "claim-blocked-locked": "Gesamtes Guthaben ist am Tisch gesperrt (Buy-in-Sperre): 12h nach der letzten Hand entsperrbar — klicke nach Ablauf auf „Entsperren“",
   "claim-locked-notice": "Tischgesperrte {amount} STRK: Beim Sitzplatz-Einstieg gesperrte Buy-in-Chips; sie werden innerhalb von 12 Stunden nach dem Verlassen freigegeben und können bis dahin nicht abgehoben oder ausgezahlt werden",
   "claim-error-empty": "Keine abhebbaren Chips",
   "claim-error-failed": "Abheben fehlgeschlagen",
@@ -834,5 +834,10 @@
   "claim-done-public": "Öffentliche Auszahlung übermittelt — STRK kommt direkt in deiner Wallet an",
   "claim-close": "Schließen",
   "claim-error-shield": "Shield-Übermittlung fehlgeschlagen",
-  "cookiebanner-info_aria": "Lesen Sie unsere Datenschutzerklärung, um zu erfahren, wie Cookies verwendet werden"
+  "cookiebanner-info_aria": "Lesen Sie unsere Datenschutzerklärung, um zu erfahren, wie Cookies verwendet werden",
+  "claim-locked-line": "Am Tisch gesperrt {locked} STRK · jetzt abhebbar {claimable} STRK",
+  "claim-locked-until": "— entsperrt ~{hours}h nach deiner letzten Hand",
+  "claim-locked-expired": "— Sperre abgelaufen",
+  "claim-unlock": "Entsperren",
+  "claim-unlock-pending": "Wird entsperrt…"
 }

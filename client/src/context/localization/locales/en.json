@@ -974,7 +974,7 @@
   "claim-blocked-version": "Wallet API version ({versions}) is below 0.10.3 and does not support STRK20 private transactions — please update Ready",
   "claim-blocked-pool": "Privacy pool not registered yet: use \"One-click register\" above, then claim privately",
   "claim-blocked-balance": "Insufficient pool shielded balance: shield STRK into the privacy pool first (private claim requires pool balance ≥ claim amount; it is returned afterwards)",
-  "claim-blocked-locked": "Entire claim amount is table-locked: chips were locked at buy-in and unlock automatically within 12 hours after you leave the table",
+  "claim-blocked-locked": "Entire balance is table-locked (buy-in lock). It unlocks 12h after your last hand — click Unlock when the timer expires, or wait for it to appear",
   "claim-locked-notice": "Table-locked {amount} STRK: buy-in chips locked at seat-down; they unlock automatically within 12 hours after leaving, and cannot be claimed or withdrawn until then",
   "claim-error-empty": "No claimable chips",
   "claim-error-failed": "Claim failed",
@@ -990,5 +990,10 @@
   "claim-done-public": "Public withdrawal submitted — STRK will arrive in your wallet directly",
   "claim-close": "Close",
   "claim-error-shield": "Shield submission failed",
-  "cookiebanner-info_aria": "Read our privacy policy to learn how cookies are used"
+  "cookiebanner-info_aria": "Read our privacy policy to learn how cookies are used",
+  "claim-locked-line": "Table-locked {locked} STRK · claimable now {claimable} STRK",
+  "claim-locked-until": "— unlocks in ~{hours}h after your last hand",
+  "claim-locked-expired": "— lock has expired",
+  "claim-unlock": "Unlock",
+  "claim-unlock-pending": "Unlocking…"
 }

@@ -796,6 +796,77 @@ export async function getVaultLockedBalanceWei(account: unknown): Promise<bigint
   }
 }
 
+/** #33 在局锁定的会话信息（vault view 聚合）：锁定量 + 解锁截止时间。 */
+export interface VaultLockSession {
+  lockedWei: bigint;
+  /** 解锁截止（unix 秒）= session_last_activity + lock_ttl；0 = 无会话。 */
+  unlockDeadlineSec: number;
+}
+
+export async function getVaultLockSession(account: unknown): Promise<VaultLockSession | null> {
+  const acct = account as { address?: string } | null;
+  if (!acct?.address) return null;
+  const { pokerVaultAddress } = starknetConfig;
+  if (!pokerVaultAddress) return null;
+  try {
+    const provider = getProvider();
+    // 带参（玩家地址）与无参（lock_ttl 是全局配置 view）分开传——
+    // 给无参 view 传 calldata 会 Contract error，整个会话读取退化为
+    // null → 前端锁定行消失且按全额发交易撞 in-hand lock（2026-09-07）。
+    const callAddr = async (entrypoint: string): Promise<string[]> =>
+      await provider.callContract({ contractAddress: pokerVaultAddress, entrypoint, calldata: [acct.address!] });
+    const callNoArg = async (entrypoint: string): Promise<string[]> =>
+      await provider.callContract({ contractAddress: pokerVaultAddress, entrypoint, calldata: [] });
+    const [locked, lastActivityRes, ttlRes] = await Promise.all([
+      callAddr('locked_balance'),
+      callAddr('session_last_activity'),
+      callNoArg('lock_ttl'),
+    ]);
+    const lo = BigInt(locked[0] ?? 0);
+    const hi = BigInt(locked[1] ?? 0);
+    const lastActivity = Number(BigInt(lastActivityRes[0] ?? 0));
+    const ttl = Number(BigInt(ttlRes[0] ?? 0));
+    return {
+      lockedWei: lo + (hi << 128n),
+      unlockDeadlineSec: lastActivity > 0 && ttl > 0 ? lastActivity + ttl : 0,
+    };
+  } catch (e) {
+    logger.warn('[strk20] lock session read failed:', e);
+    return null;
+  }
+}
+
+/**
+ * #33 到期自助解锁（无许可，任何人可调）：TTL 过期后解除锁定。
+ * 前端在锁定到期时提供入口；成功后 locked 清零即可全额领取。
+ */
+export async function unlockVaultAfterDeadline(account: unknown): Promise<TxResult> {
+  const acct = account as Strk20CapableAccount | null;
+  if (!acct?.execute || !acct.address) {
+    return { hash: '', success: false, error: 'Wallet account unavailable' };
+  }
+  const { pokerVaultAddress } = starknetConfig;
+  if (!pokerVaultAddress) {
+    return { hash: '', success: false, error: 'PokerVault address not configured' };
+  }
+  try {
+    const res = await acct.execute({
+      contractAddress: pokerVaultAddress,
+      entrypoint: 'unlock_after_deadline',
+      calldata: [acct.address],
+    });
+    const hash = res.transaction_hash;
+    getProvider()
+      .waitForTransaction(hash)
+      .then(() => logger.log('[strk20] unlock_after_deadline confirmed:', hash))
+      .catch(() => logger.warn('[strk20] unlock receipt not visible yet:', hash));
+    return { hash, success: true };
+  } catch (err) {
+    logger.error('[strk20] unlock_after_deadline failed:', err);
+    return { hash: '', success: false, error: String(err) };
+  }
+}
+
 export async function getRegisteredPayoutCommitment(
   account: unknown,
 ): Promise<string | null> {
