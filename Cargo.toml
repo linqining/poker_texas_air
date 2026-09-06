@@ -5,6 +5,11 @@ edition = "2024"
 description = "Texas Poker method AIR and custom-circuit proving primitives"
 license = "BUSL-1.1"
 
+[lints.rust]
+# CI sets RUSTFLAGS='--cfg=texas_release_tests' (see .github/workflows/ci.yml);
+# declare it so local builds don't warn about an unknown cfg.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(texas_release_tests)'] }
+
 [workspace]
 resolver = "2"
 exclude = ["third_party", "third_party/flock", "third_party/flock/crates/flock-core", "third_party/flock/crates/flock-prover", "third_party/flock/crates/flock-cuda-ffi", "fuzz"]

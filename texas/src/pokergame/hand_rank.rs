@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -21,12 +19,6 @@ pub enum Rank {
 }
 
 impl Rank {
-    pub const ALL: [Rank; 13] = [
-        Rank::Two, Rank::Three, Rank::Four, Rank::Five, Rank::Six,
-        Rank::Seven, Rank::Eight, Rank::Nine, Rank::Ten,
-        Rank::Jack, Rank::Queen, Rank::King, Rank::Ace,
-    ];
-
     pub fn value(self) -> u8 {
         self as u8
     }
@@ -82,14 +74,6 @@ impl Suit {
         }
     }
 
-    pub fn to_short(self) -> &'static str {
-        match self {
-            Suit::Spades => "s",
-            Suit::Hearts => "h",
-            Suit::Diamonds => "d",
-            Suit::Clubs => "c",
-        }
-    }
 }
 
 impl fmt::Display for Suit {

@@ -11,14 +11,12 @@
 //! poker_l1 使用 poker_texas_air 内的 poker_protocol（0.1.0）类型。两份副本的
 //! crypto/proofs 结构逐字节一致（构建期 diff 验证），通过 borsh roundtrip 转换。
 
-use borsh::{BorshDeserialize, BorshSerialize};
 use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch};
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    RaiseArgs, SeatIndexArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs,
-    SubmitShuffleV2Args,
+    RaiseArgs, SeatIndexArgs, SubmitRevealTokensArgs,
 };
 use poker_l1::vm::contracts::texas_poker::types::{CipherDeck, SeatMask, ShuffleState, TexasPokerTable};
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
@@ -29,8 +27,6 @@ use poker_protocol as ptx_protocol;
 pub use ptx_protocol::crypto::types::ECPoint as PtxECPoint;
 pub use ptx_protocol::crypto::ElGamalCiphertext as PtxElGamalCiphertext;
 pub use ptx_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof as PtxRevealTokenProof;
-use ptx_protocol::zk_shuffle::reconstruction::{ReconstructProofV3 as PtxReconstructProofV3, ReconstructionV3Statement as PtxReconstructionV3Statement};
-pub use ptx_protocol::zk_shuffle::ShuffleProof as PtxShuffleProof;
 pub use ptx_protocol::crypto::DefaultCurve as PtxCurve;
 
 
@@ -289,22 +285,6 @@ impl TableMirror {
     }
 
     /// 玩家洗牌提交（对应 WS `SHUFFLE_SUBMIT`）。
-    pub fn submit_shuffle(
-        &mut self,
-        seat_index: u8,
-        output_cards: Vec<PtxElGamalCiphertext>,
-        shuffle_proof: PtxShuffleProof,
-    ) -> Result<(), String> {
-        let caller = self.seat_player(seat_index)?;
-        let args = borsh::to_vec(&SubmitShuffleV2Args {
-            seat_index,
-            output_cards,
-            shuffle_proof,
-        })
-        .map_err(|e| format!("encode shuffle args: {e}"))?;
-        self.apply(caller, &texas_dispatch::selectors::submit_shuffle_v2(), args)
-    }
-
     /// 玩家揭牌令牌提交。
     pub fn submit_reveal_tokens(
         &mut self,
@@ -323,22 +303,6 @@ impl TableMirror {
     }
 
     /// 牌组重构提交（失败牌补救路径；镜像尽力跟随）。
-    pub fn submit_reconstruct(
-        &mut self,
-        seat_index: u8,
-        statement: PtxReconstructionV3Statement<PtxCurve>,
-        proof: PtxReconstructProofV3<PtxCurve>,
-    ) -> Result<(), String> {
-        let caller = self.seat_player(seat_index)?;
-        let args = borsh::to_vec(&SubmitReconstructDeckArgs {
-            seat_index,
-            statement,
-            proof,
-        })
-        .map_err(|e| format!("encode reconstruct args: {e}"))?;
-        self.apply(caller, &texas_dispatch::selectors::submit_reconstruct_deck(), args)
-    }
-
     pub fn fold(&mut self, seat_index: u8) -> Result<(), String> {
         let caller = self.seat_player(seat_index)?;
         let args = borsh::to_vec(&SeatIndexArgs { seat_index }).map_err(|e| e.to_string())?;
@@ -387,6 +351,7 @@ impl TableMirror {
 
 
     /// 当前镜像牌组（52 张，poker_l1 类型）。
+    #[cfg(test)]
     pub fn deck(&self) -> Vec<PtxElGamalCiphertext> {
         self.table.deck_state.encrypted.to_vec()
     }
@@ -656,13 +621,6 @@ pub mod conv {
         cts: &[poker_protocol::crypto::ElGamalCiphertext],
     ) -> Result<Vec<PtxElGamalCiphertext>, String> {
         cts.iter().map(ciphertext).collect()
-    }
-
-    pub fn shuffle_proof(
-        proof: &poker_protocol::zk_shuffle::ShuffleProof,
-    ) -> Result<PtxShuffleProof, String> {
-        let bytes = borsh::to_vec(proof).map_err(|e| e.to_string())?;
-        borsh::from_slice(&bytes).map_err(|e| format!("shuffle proof borsh bridge: {e}"))
     }
 
     pub fn ec_point(p: &poker_protocol::crypto::types::ECPoint) -> Result<PtxECPoint, String> {

@@ -959,7 +959,6 @@ fn build_action_receipt_payload(
     decision: &str,
     reason: &str,
 ) -> serde_json::Value {
-    use crate::pokergame::actions::action_sig_required;
 use crate::pokergame::receipts;
     let Some((_, operator_pk)) = receipts::operator() else {
         return serde_json::Value::Null;
@@ -1037,7 +1036,7 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                         "[process_action] REJECT action {} seat {:?} seq {:?}: {reason} (enforcement on)",
                         req.action, seat_id, req.seq
                     );
-                    if let Some(seat) = seat_id {
+                    if seat_id.is_some() {
                         pending_receipts.push(build_action_receipt_payload(table_id, &req.pk_hex, req.seq.unwrap_or(0), &req.action, amount_for_sig, "rejected", reason));
                     }
                     None

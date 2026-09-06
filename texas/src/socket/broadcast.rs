@@ -364,54 +364,6 @@ impl SocketState {
 // 玩家变更事件广播（player_update）
 // ---------------------------------------------------------------------------
 
-/// 玩家变更事件载荷，对应前端约定的 `player_update` WS 消息格式。
-///
-/// 顶层 `type` 字段固定为 `"player_update"`，用于同步链上玩家加入/离开/踢出/退款事件。
-#[derive(Debug, Clone, Serialize)]
-pub struct PlayerUpdatePayload {
-    #[serde(rename = "type")]
-    pub event_type: String,
-    pub action: String,
-    pub table_id: u64,
-    pub seat_index: u64,
-    pub pk_hex: String,
-    pub wallet: String,
-    pub buy_in: u64,
-    pub reason: u64,
-    pub message: String,
-}
-
-/// 广播一条 `player_update` 消息给该桌所有 WS 客户端。
-///
-/// 这是"观察者"事件：广播失败只记日志，不传播错误，绝不阻塞游戏主流程。
-pub async fn broadcast_player_update(
-    io: &SocketIo,
-    table_id: u64,
-    action: &str,
-    seat_index: u64,
-    pk_hex: String,
-    wallet: String,
-    buy_in: u64,
-    reason: u64,
-    message: String,
-) {
-    let payload = PlayerUpdatePayload {
-        event_type: actions::PLAYER_UPDATE.to_string(),
-        action: action.to_string(),
-        table_id,
-        seat_index,
-        pk_hex,
-        wallet,
-        buy_in,
-        reason,
-        message,
-    };
-    match io.to(table_room_name(table_id as u32)).emit(actions::PLAYER_UPDATE, &payload).await {
-        Ok(_) => {}
-        Err(e) => tracing::warn!("broadcast_player_update emit failed: {}", e),
-    }
-}
-
 /// #17：ACTION_RECEIPT 广播（全桌可见；客户端留存作为审查证据）。
 pub(crate) async fn broadcast_action_receipt(
     io: &SocketIo,

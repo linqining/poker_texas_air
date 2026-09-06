@@ -342,7 +342,7 @@ mod tests {
     /// NOTE: crypto/elgamal.rs STILL has the `||` bug in its legacy `is_valid()`.
     #[test]
     fn test_forgery_reveal_token_identity_c1_bypass() {
-        let (_sk, pk) = setup();
+        let (_sk, _pk) = setup();
 
         // Create a ciphertext with c1 = identity, c2 = some non-identity point
         let fake_plaintext = C::base_g() * <C as Curve>::Scalar::from_u64(999u64);
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn test_forgery_wrong_user_pk_now_detected() {
         // 真实用户的密钥对
-        let (real_sk, real_pk) = setup();
+        let (_real_sk, real_pk) = setup();
 
         // 攻击者的密钥对
         let attacker_sk = <C as Curve>::Scalar::random(&mut rand_core::OsRng);
@@ -469,7 +469,7 @@ mod tests {
         let attacker_pk = C::base_g() * attacker_sk;
 
         // 真实用户的公钥
-        let (real_sk, real_pk) = setup();
+        let (_real_sk, real_pk) = setup();
 
         // 攻击者构造任意密文和 token
         let arbitrary_pt = C::base_h() * <C as Curve>::Scalar::from_u64(777u64);

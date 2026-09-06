@@ -218,10 +218,6 @@ fn find_execute_fields(value: &Value) -> Option<(&Value, &Value, &Value)> {
     }
 }
 
-fn sig_enforcement_enabled() -> bool {
-    sig_required()
-}
-
 /// 验证 executeTransaction 的用户签名：
 /// 1. 从 body 提取 (userAddress, typedData, signature)；
 /// 2. TypedData::message_hash(user) 计算 SNIP-12 哈希；

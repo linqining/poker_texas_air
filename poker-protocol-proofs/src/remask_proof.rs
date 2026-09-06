@@ -57,7 +57,7 @@ mod tests {
         input: &ElGamalCiphertextGeneric<C>,
         sk: &C::Scalar,
         _pk: &C::Point,
-        rng: &mut (impl CryptoRng + RngCore),
+        _rng: &mut (impl CryptoRng + RngCore),
     ) -> ElGamalCiphertextGeneric<C> {
         ElGamalCiphertextGeneric {
             c1: input.c1,

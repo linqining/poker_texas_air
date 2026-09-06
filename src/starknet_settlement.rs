@@ -666,8 +666,7 @@ mod tests {
     fn action_log_sample() -> FieldElement {
         FieldElement::from(0xA11CE_u64)
     }
-    use poker_l1::vm::contracts::texas_poker::utils::{g1_generator as g1_gen, g1_identity as g1_id, G1Projective};
-    use group::Group;
+    use poker_l1::vm::contracts::texas_poker::utils::g1_generator as g1_gen;
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::card::{BoardCards, HoleCards};
     use poker_l1::vm::contracts::texas_poker::settlement::{

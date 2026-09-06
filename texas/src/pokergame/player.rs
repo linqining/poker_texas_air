@@ -84,7 +84,6 @@ pub struct GamePlayer {
 
 #[derive(Debug, Clone)]
 pub struct PlayerWithProof {
-    pub player: Player,
     pub pk: poker_protocol::crypto::EcPoint,
     pub pk_proof: poker_protocol::z_poker::PKOwnershipProof,
 }

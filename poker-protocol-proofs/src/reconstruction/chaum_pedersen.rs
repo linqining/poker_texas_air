@@ -34,6 +34,7 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
     /// * `P1` - First point (should equal s*G1)
     /// * `P2` - Second point (should equal s*G2)
     /// * `transcript` - Merlin transcript for Fiat-Shamir
+    #[allow(non_snake_case)]
     pub fn prove(
         G1: C::Point,
         G2: C::Point,
@@ -106,6 +107,7 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
     /// * `P1` - First point (claimed to be s*G1)
     /// * `P2` - Second point (claimed to be s*G2)
     /// * `transcript` - Merlin transcript for Fiat-Shamir
+    #[allow(non_snake_case)]
     pub fn verify(
         &self,
         G1: C::Point,

@@ -11,8 +11,7 @@
 
 use super::*;
 use crate::pokergame::player::{GamePkHex, GamePlayer, WalletAddress};
-use poker_protocol::crypto::curve::{Curve, CurveScalar};
-use poker_protocol::crypto::{DefaultCurve, Scalar};
+use poker_protocol::crypto::Scalar;
 use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::z_poker::protocol::ShuffleRound;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;

@@ -107,13 +107,6 @@ pub struct TableSummaryState {
     pub epoch: u64,
 }
 
-/// 链上 Table 的完整快照（V1），对应合约中 get_table_summary 的返回值
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct TableSummary {
-    pub meta: TableSummaryMeta,
-    pub state: TableSummaryState,
-}
-
 /// 链上 Table 的扩展快照（V2），对应合约中 get_table_summary_v2 的返回值。
 /// 由于合约部署原因，crypto 字段移至独立的 V2 结构体（与 Move TableSummaryV2 对齐）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

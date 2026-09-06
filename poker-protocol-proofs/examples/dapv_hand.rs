@@ -96,7 +96,6 @@ struct Player {
 }
 
 struct Hand {
-    hand_id: Option<[u8; 32]>,
     players: Vec<Player>,
     ownership: Vec<PKOwnershipProof<C>>,
     shuffle_inputs: Vec<Vec<Ct>>,
@@ -220,7 +219,6 @@ fn build_hand(hand_id: Option<[u8; 32]>) -> Result<Hand, String> {
     println!("  leave DLEQ x{N_LEAVERS} (52 cards): {:?}", t.elapsed());
 
     Ok(Hand {
-        hand_id,
         players,
         ownership,
         shuffle_inputs,

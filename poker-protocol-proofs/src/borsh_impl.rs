@@ -5,7 +5,7 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use poker_protocol_bg::BayerGrothShuffleProof;
-use poker_protocol_core::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric, StarkCurve, StarkPoint, StarkScalar};
+use poker_protocol_core::{CurvePoint, CurveScalar, ElGamalCiphertextGeneric, StarkCurve, StarkPoint, StarkScalar};
 
 type G1Projective = StarkPoint;
 type BlsScalar = StarkScalar;

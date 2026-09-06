@@ -27,12 +27,6 @@ pub(crate) fn is_system_object(_object: &Object) -> bool {
     false
 }
 
-fn validate_system_object(_object: &Object) -> PokerL1Result<()> {
-    Err(PokerL1Error::Other(
-        "object is not a recognized system singleton".into(),
-    ))
-}
-
 /// 内存版 ObjectStore + SMT backing。
 ///
 /// Phase 1 内存实现；Phase 4 扩展 rocksdb 后端。
@@ -72,12 +66,6 @@ impl ObjectStore {
         self.create_inner(object)
     }
 
-    /// Create one validated singleton from a trusted system path.
-    pub(crate) fn system_create(&mut self, object: Object) -> PokerL1Result<()> {
-        validate_system_object(&object)?;
-        self.create_inner(object)
-    }
-
     fn create_inner(&mut self, object: Object) -> PokerL1Result<()> {
         if object.data.len() > MAX_OBJECT_SIZE {
             return Err(PokerL1Error::ObjectTooLarge {
@@ -87,42 +75,6 @@ impl ObjectStore {
         }
         if self.objects.contains_key(&object.id) {
             return Err(PokerL1Error::ObjectIDCollision(object.id));
-        }
-        let key = object.id.merkle_key();
-        let value = borsh::to_vec(&object)
-            .map_err(|e| PokerL1Error::Serialization(format!("Object BCS encode: {e}")))?;
-        self.smt.upsert(key, &value);
-        self.objects.insert(object.id, object);
-        Ok(())
-    }
-
-    /// Replace one validated singleton without exposing a generic privileged write path.
-    pub(crate) fn system_replace(&mut self, object: Object) -> PokerL1Result<()> {
-        validate_system_object(&object)?;
-        if object.data.len() > MAX_OBJECT_SIZE {
-            return Err(PokerL1Error::ObjectTooLarge {
-                actual: object.data.len(),
-                limit: MAX_OBJECT_SIZE,
-            });
-        }
-        let existing = self
-            .objects
-            .get(&object.id)
-            .ok_or(PokerL1Error::ObjectNotFound(object.id))?;
-        if !is_system_object(existing) || existing.object_type != object.object_type {
-            return Err(PokerL1Error::Other(
-                "system object ID is occupied by a different object type".into(),
-            ));
-        }
-        let expected_version = existing
-            .version
-            .checked_add(1)
-            .ok_or_else(|| PokerL1Error::Other("system object version overflow".into()))?;
-        if object.version != expected_version {
-            return Err(PokerL1Error::ObjectVersionMismatch {
-                expected: expected_version,
-                actual: object.version,
-            });
         }
         let key = object.id.merkle_key();
         let value = borsh::to_vec(&object)

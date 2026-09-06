@@ -22,12 +22,10 @@ pub use game::new_plain_text;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::curve::{Curve, CurvePoint, CurveScalar};
-    use crate::crypto::{DefaultCurve, EcPoint, ElGamalCiphertext, Scalar, base_g, N_CARDS};
+    use crate::crypto::curve::{CurvePoint, CurveScalar};
+    use crate::crypto::{DefaultCurve, EcPoint, ElGamalCiphertext, Scalar, base_g};
     use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
-    use crate::zk_shuffle::reveal_token_proof::{
-        ExpelHandState, RevealTokenAndProof, REVEAL_TOKEN_PROOF_LABEL,
-    };
+    use crate::zk_shuffle::reveal_token_proof::REVEAL_TOKEN_PROOF_LABEL;
     use crate::zk_shuffle::transcript_ext::{
         CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
     };
@@ -35,42 +33,6 @@ mod tests {
 
     fn create_test_player() -> ClientPlayer {
         ClientPlayer::new()
-    }
-
-    fn create_test_expel_hand_state(
-        player: &ClientPlayer,
-        agg_pk: &EcPoint,
-        card_indices: &[usize],
-    ) -> Vec<ExpelHandState<DefaultCurve>> {
-        card_indices
-            .iter()
-            .map(|&idx| {
-                let pt = new_plain_text()[idx];
-                let r = Scalar::random(&mut OsRng);
-                let encrypted_card = ElGamalCiphertext::encrypt(&pt, agg_pk, &r);
-
-                let reveal_token = encrypted_card.gen_reveal_token(&player.sk);
-                let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
-                let proof = RevealTokenProof::<DefaultCurve>::prove(
-                    &player.sk,
-                    &player.pk,
-                    &encrypted_card,
-                    &reveal_token,
-                    &mut OsRng,
-                    &mut transcript,
-                );
-
-                let token_and_proof = RevealTokenAndProof::<DefaultCurve> {
-                    reveal_token,
-                    proof,
-                };
-
-                ExpelHandState::<DefaultCurve> {
-                    hand_encrypted: encrypted_card,
-                    reveal_tokens: vec![token_and_proof],
-                }
-            })
-            .collect()
     }
 
     #[test]

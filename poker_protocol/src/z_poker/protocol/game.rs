@@ -875,8 +875,7 @@ impl MentalPokerGame {
             return Err(VerificationError::LengthMismatch);
         }
         let ct = &hand[card_index];
-        let player = self
-            .players
+        self.players
             .get(player_pk)
             .ok_or(VerificationError::EntryNotFound)?;
         let active_sk_entries: Vec<Scalar> = self
@@ -931,12 +930,9 @@ impl MentalPokerGame {
             return Err(VerificationError::EntryNotFound);
         }
 
-        let player = self
-            .players
+        self.players
             .get(target_player_pk)
             .ok_or(VerificationError::EntryNotFound)?;
-
-        let player_pk_val = player.pk;
 
         let agg_pk = self.key_manager.get_aggregated_pk();
         let mut expelled_positions: Vec<usize> = Vec::new();

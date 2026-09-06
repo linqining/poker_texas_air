@@ -536,7 +536,6 @@ pub struct ChainLayout {
 // ===========================================================================
 
 pub(crate) const L: usize = LIMBS;
-pub(crate) const BASE16: u32 = 1 << 16;
 /// Limbs of a full state (3 felts) plus the round-position lane.
 pub const STATE_TUPLE: usize = 3 * L + 1;
 
@@ -552,8 +551,6 @@ pub(crate) const S_ANCHOR: usize = S_VOID + 3 * L + 1; // anchor state limbs
 pub const SCOPE_COLUMNS: usize = S_ANCHOR + 3 * L;
 /// Shared preprocessed tree: chain scope + 2^16 table + 2^12 table columns.
 pub const PREPROCESSED_COLUMNS: usize = SCOPE_COLUMNS + 2;
-pub(crate) const TABLE16_COLUMN: usize = SCOPE_COLUMNS;
-pub(crate) const TABLE12_COLUMN: usize = SCOPE_COLUMNS + 1;
 pub(crate) const TABLE16_LOG: u32 = 16;
 pub(crate) const TABLE12_LOG: u32 = 12;
 
@@ -903,12 +900,12 @@ pub(crate) fn one_round_witness(
     let mut muls: Vec<MulRow> = Vec::with_capacity(6);
     let mut reduces: Vec<ReduceRow> = Vec::with_capacity(6);
     // One column per limb position; each holds this row's single value.
-    let mut push = |col: &mut Vec<Vec<M31>>, values: &[u16]| {
+    let push = |col: &mut Vec<Vec<M31>>, values: &[u16]| {
         for &v in values {
             col.push(vec![M31::from(v as u32)]);
         }
     };
-    let mut push32 = |col: &mut Vec<Vec<M31>>, values: &[u32]| {
+    let push32 = |col: &mut Vec<Vec<M31>>, values: &[u32]| {
         for &v in values {
             col.push(vec![M31::from(v)]);
         }
@@ -941,7 +938,7 @@ pub(crate) fn one_round_witness(
     let mut post = [[0u16; LIMBS]; 3];
     for lane in 0..3 {
         let (square, square_carry) = mul_witness(&s_c[lane], &s_c[lane], 2 * L);
-        let (x2, x2c) = if lane < 2 {
+        let (x2, _x2c) = if lane < 2 {
             push(&mut col, &square);
             push32(&mut col, &square_carry);
             let gate = |v: u16| if scope.is_full { v } else { 0 };
@@ -1415,7 +1412,7 @@ mod tests {
 
     /// Big-integer value of a little-endian limb vector (no modular
     /// reduction) for cross-checking gadget rows.
-    fn bigUint_value(limbs: &[u16]) -> num_bigint::BigUint {
+    fn big_uint_value(limbs: &[u16]) -> num_bigint::BigUint {
         let mut v = num_bigint::BigUint::from(0u32);
         for &limb in limbs.iter().rev() {
             v = (v << 16) | num_bigint::BigUint::from(limb);
@@ -1439,8 +1436,8 @@ mod tests {
             assert_eq!(row.c.len(), MUL_C_LIMBS, "mul row {index} c width");
             assert_eq!(row.carry.len(), GADGET_CARRY_LIMBS, "mul row {index} carry width");
             assert_eq!(
-                bigUint_value(&row.a) * bigUint_value(&row.b),
-                bigUint_value(&row.c),
+                big_uint_value(&row.a) * big_uint_value(&row.b),
+                big_uint_value(&row.c),
                 "mul row {index}: c != a·b over the integers"
             );
         }
@@ -1449,8 +1446,8 @@ mod tests {
             assert_eq!(row.z.len(), LIMBS, "reduce row {index} z width");
             assert_eq!(row.q.len(), RED_Q_LIMBS, "reduce row {index} q width");
             assert_eq!(
-                bigUint_value(&row.z) + bigUint_value(&row.q) * &p_big,
-                bigUint_value(&row.x),
+                big_uint_value(&row.z) + big_uint_value(&row.q) * &p_big,
+                big_uint_value(&row.x),
                 "reduce row {index}: x != z + q·P"
             );
         }

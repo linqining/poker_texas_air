@@ -55,8 +55,10 @@ pub const REVEAL_TIMEOUT_CASCADE_EMPTY_SEAT: u8 = u8::MAX;
 const BASE_NUM_COLUMNS: usize = 1574;
 const FULL_BETTING_SEAT_WIDTH: usize = SEAT_STATUS_COUNT + 4 * 4 + 2;
 const FULL_BETTING_SEATS_OFFSET: usize = BASE_NUM_COLUMNS;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const FULL_POST_BETTING_SEATS_OFFSET: usize =
     FULL_BETTING_SEATS_OFFSET + MAX_CANONICAL_SEATS * FULL_BETTING_SEAT_WIDTH;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const FULL_SEAT_STACK_BLOCK_OFFSET: usize = MAX_CANONICAL_SEATS * SEAT_STATUS_COUNT;
 const NEXT_TURN_ADVICE_OFFSET: usize =
     BASE_NUM_COLUMNS + 2 * MAX_CANONICAL_SEATS * FULL_BETTING_SEAT_WIDTH + 2 * MAX_CANONICAL_SEATS;
@@ -291,28 +293,44 @@ const STATE_IMAGE_PROJECTION_LIMBS: usize = STATE_IMAGE_HEADER_PROJECTION_LIMBS
 // Stable positions in the fixed canonical ABI prefix.  Keep mutation tests
 // named rather than coupling them to incidental trace growth in the advice
 // suffix below.
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const ACTION_AMOUNT_OFFSET: usize = 267;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const PROOF_COMMITMENT_OFFSET: usize = ACTION_AMOUNT_OFFSET - 17;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const ACTION_SEAT_OFFSET: usize = 266;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const ACTION_AUXILIARY_OFFSET: usize = 271;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const ACTION_FLAG_OFFSET: usize = 275;
-const ACTION_AMOUNT_INVERSE_OFFSET: usize = 357;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const PRE_PHASE_OFFSET: usize = 281;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const POST_PHASE_OFFSET: usize = 282;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const POST_TURN_OFFSET: usize = 288;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const PRE_POT_OFFSET: usize = 305;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const POST_POT_OFFSET: usize = 309;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const POST_LEAVE_MASK_OFFSET: usize = 316;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const PRE_PROTOCOL_PENDING_MASK_OFFSET: usize = 317;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const POST_PROTOCOL_PENDING_MASK_OFFSET: usize = 318;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const SELECTED_POST_STATUS_OFFSET: usize = 339;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const DEADLINE_HEIGHT_OFFSET: usize = 276;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const PRE_CHIP_POOL_OFFSET: usize = BASE_NUM_COLUMNS - 2 * 4 * 16 - 9 - 8;
+#[cfg(test)] // 仅同文件测试用于列索引断言
 const POST_CHIP_POOL_OFFSET: usize = PRE_CHIP_POOL_OFFSET + 4;
 
-/// Shared 256-entry byte range table for the raked-award LogUp lookups,
-/// following the cairo-air range-check component pattern (single component,
-/// paired fractions, log_size+1 degree bound).
+// Shared 256-entry byte range table for the raked-award LogUp lookups,
+// following the cairo-air range-check component pattern (single component,
+// paired fractions, log_size+1 degree bound).
 relation!(CanonicalRange8, 1);
 
 #[derive(Debug, Clone)]
@@ -1867,7 +1885,6 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     } else {
         M31::from(0u32)
     });
-    let is_reveal_kick = w.kind == CanonicalTransitionKind::RevealTimeoutKick;
     let reveal_street_row = matches!(
         w.kind,
         CanonicalTransitionKind::RevealTimeoutKick
@@ -1955,12 +1972,6 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
             M31::from(((value >> 32) & 0xffff) as u32),
             M31::from(((value >> 48) & 0xffff) as u32),
         ]
-    };
-    let bits_of = |value: u128| -> Vec<M31> {
-        limb_of(value)
-            .into_iter()
-            .flat_map(|limb| u16_bits(u16::try_from(u64::from(limb.0)).expect("16-bit limb")))
-            .collect()
     };
     let byte_pair = |value: u64| -> [M31; 2] {
         [
@@ -3321,7 +3332,6 @@ impl FrameworkEval for CanonicalAir {
         let is_reconstruct_completion =
             protocol_completion_flag.clone() * is_submit_reconstruct.clone();
         let is_shuffle_completion = protocol_completion_flag.clone() * is_submit_shuffle.clone();
-        let is_reveal_completion = protocol_completion_flag.clone() * is_submit_reveal.clone();
         let is_nonfinal_reconstruct =
             is_submit_reconstruct.clone() - is_reconstruct_completion.clone();
         eval.add_constraint(
@@ -4464,7 +4474,7 @@ impl FrameworkEval for CanonicalAir {
         eval.add_constraint(is_award_family.clone() * (pre_subtag.clone() - pre_street.clone()));
         eval.add_constraint(is_award_family.clone() * (pre_turn.clone() - no_seat.clone()));
         eval.add_constraint(is_award_family.clone() * (post_turn.clone() - no_seat.clone()));
-        for (pre, post) in [
+        for (_pre, post) in [
             (&pre_subtag, &post_subtag),
             (&pre_leave_mask, &post_leave_mask),
         ] {

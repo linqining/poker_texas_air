@@ -14,7 +14,6 @@
 //! 洗牌在 VM 中不再重放（deck 同源注入，#20 Phase 2），因此证明链由
 //! reveal-token 任务构成——这正是玩家实际参与的那副牌。
 
-use poker_l1::signature::TaggedPubkey;
 use poker_protocol::crypto::{DefaultCurve};
 use poker_protocol::crypto::curve::{Curve, CurveScalar};
 use poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript as _CT;
@@ -396,7 +395,6 @@ async fn live_flow_assignments_match_mirror_targets() {
     use crate::pokergame::player::{GamePkHex, Player, WalletAddress};
     use crate::pokergame::table::Table;
     use crate::socket::SocketState;
-    use crate::starknet::hooks;
 
     fn parse_proof_json(v: &serde_json::Value) -> Result<ShuffleProofJson, String> {
         serde_json::from_value(v.clone()).map_err(|e| e.to_string())
@@ -518,7 +516,7 @@ async fn live_flow_assignments_match_mirror_targets() {
     {
         let mut gs = state.state.write().await;
         let table = gs.tables.get_mut(&1).unwrap();
-        table.start_shuffle();
+        let _ = table.start_shuffle();
     }
 
     // 新开局语义（2026-09-03）：start_shuffle 无条件重建 (G, m+agg) 基线、
@@ -642,7 +640,6 @@ fn rejoin_after_kick_materializes() {
     let revealed = game.list_revealed_community_cards();
     if revealed.len() != 3 {
         // 诊断：残余层 = c2 − Σtokens − m，看它等于谁的公钥
-        use poker_protocol::crypto::curve::{Curve, CurveScalar, CurvePoint};
         let card = &game.community_cards_encrypted[0];
         let sum_tok: poker_protocol::crypto::EcPoint = card.reveal_state.reveal_tokens.iter()
             .map(|t| t.reveal_token).sum();

@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn hand_bundle_rejects_statement_splices() {
         use crate::blake3_flock::FlockProvider;
-        use crate::hash_prover::{Blake2bStatement, HashProofProvider as _};
+        use crate::hash_prover::Blake2bStatement;
         use crate::texas_canonical::{
             CANONICAL_ABI_VERSION, CanonicalPhase, CanonicalSeat, CanonicalStateImage,
             MAX_CANONICAL_SEATS, NO_CANONICAL_SEAT,

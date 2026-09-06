@@ -13,7 +13,7 @@ impl Table {
 
         // 收集所有有下注的玩家 (seat_id, total_bet, folded, all_in)
         // all_in = stack == 0 && total_bet > 0（对齐 Move: stack 耗尽即 all-in）
-        let mut player_bets: Vec<(u32, u64, bool, bool)> = self.seats().values()
+        let player_bets: Vec<(u32, u64, bool, bool)> = self.seats().values()
             .filter(|s| s.total_bet > 0)
             .map(|s| (s.id, s.total_bet, s.folded, s.stack == 0))
             .collect();
@@ -176,6 +176,7 @@ impl Table {
     /// 镜像 Move settle_hand：Showdown 展示超时后分配底池并重置牌桌。
     /// 先 calculate_side_pots(total_bet)，再按链上口径收取台费，
     /// 然后分配 side pot 和 main pot 给赢家，最后 finish_showdown。
+    #[cfg(test)]
     pub fn settle_hand(&mut self) {
         self.calculate_side_pots();
         self.collect_rake_for_settlement();

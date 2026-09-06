@@ -17,7 +17,7 @@
 use bincode::Options;
 use blake2::{
     Blake2bVar,
-    digest::{Update, VariableOutput},
+    digest::Update,
 };
 use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
@@ -1318,6 +1318,7 @@ fn wire_error(message: impl Into<String>) -> TexasAirError {
 
 #[cfg(test)]
 mod tests {
+    use blake2::digest::VariableOutput;
     use super::*;
 
     #[test]

@@ -284,6 +284,7 @@ impl SettlementPrivateRequest {
     /// fact-registry 锚：`fact = poseidon([circuit_program_hash ++ 公开段])`。
     /// 电路 program_hash 部署时钉入合约常量，prover 侧经
     /// `register_settlement_fact` 登记，`..._v2` 结算入口校验。
+    #[cfg(test)]
     pub fn settlement_fact(&self, circuit_program_hash: [u8; 32]) -> Result<[u8; 32], String> {
         let ph = Ff::from_bytes_be(&circuit_program_hash).map_err(|e| e.to_string())?;
         let mut fields = vec![ph];

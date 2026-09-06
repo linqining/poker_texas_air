@@ -6,7 +6,6 @@ use axum::{
     response::Response,
     Json,
 };
-use base64::Engine;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -20,7 +19,6 @@ use crate::socket::SocketState;
 use crate::socket::broadcast::CryptoEventType;
 use crate::pokergame::game_state::RevealPhase;
 
-use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::z_poker::convert::hex_to_ecpoint;
 
 #[derive(Clone)]
@@ -373,7 +371,7 @@ pub async fn player_action(
     };
 
     // Verify that the authenticated user owns the pk_hex
-    let user = match state.db.find_user_by_id(&claims.user.id).await {
+    let _user = match state.db.find_user_by_id(&claims.user.id).await {
         Some(u) => u,
         None => {
             tracing::warn!("[player_action] user not found, user_id={}", claims.user.id);
@@ -467,7 +465,7 @@ pub async fn submit_reveal_token(
     };
 
     // A2 修复：验证请求中的 pk_hex 属于已认证用户
-    let user = match state.db.find_user_by_id(&claims.user.id).await {
+    let _user = match state.db.find_user_by_id(&claims.user.id).await {
         Some(u) => u,
         None => {
             tracing::warn!("[submit_reveal_token] user not found, user_id={}", claims.user.id);
@@ -610,14 +608,6 @@ pub async fn submit_reveal_token(
     }))).into_response()
 }
 
-pub async fn login(
-    Extension(_state): Extension<Arc<AppState>>,
-    _req: Request<Body>,
-) -> Response {
-    // 钱包登录模式下已禁用邮箱/密码登录
-    (StatusCode::NOT_FOUND, Json(serde_json::json!({"msg": "Email/password login is disabled. Please use wallet login."}))).into_response()
-}
-
 #[derive(Deserialize, Debug)]
 struct WalletLoginRequest {
     address: String,
@@ -740,18 +730,3 @@ pub async fn wallet_logout(
     (StatusCode::OK, Json(serde_json::json!({"msg": "Wallet logout successful"}))).into_response()
 }
 
-pub async fn register(
-    Extension(_state): Extension<Arc<AppState>>,
-    _req: Request<Body>,
-) -> Response {
-    // 钱包登录模式下已禁用注册
-    (StatusCode::NOT_FOUND, Json(serde_json::json!({"msg": "Registration is disabled. Please use wallet login."}))).into_response()
-}
-
-pub async fn free_chips(
-    _headers: HeaderMap,
-    Extension(_state): Extension<Arc<AppState>>,
-) -> Response {
-    // 钱包登录模式下筹码由链上余额决定，不再提供免费筹码
-    (StatusCode::NOT_FOUND, Json(serde_json::json!({"msg": "Free chips is disabled. Chips are settled on Starknet STRK20 via PokerVault."}))).into_response()
-}

@@ -188,12 +188,6 @@ impl Table {
         true
     }
 
-    pub fn players_all_in_this_turn(&self) -> Vec<&Seat> {
-        self.local_seats.values()
-            .filter(|s| !s.folded && s.bet > 0 && s.stack == 0)
-            .collect()
-    }
-
     pub fn check_betting_timeout(&mut self, timeout_secs: u64) -> Option<ActionResult> {
         // 对齐 Move：使用 summary.state.betting_started_at (u64 ms) 替代 Option<Instant>
         let timeout_start = self.betting_started_at();

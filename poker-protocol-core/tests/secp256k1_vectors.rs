@@ -3,14 +3,13 @@
 //! `cargo test -p poker-protocol-core --test secp256k1_vectors -- --nocapture --ignored`
 
 use k256::elliptic_curve::{
-    ops::Reduce, PrimeField,
+    PrimeField,
     sec1::ToEncodedPoint as ToSec1,
 };
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 use poker_protocol_core::{
     Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric, Secp256k1Curve,
 };
-use poker_protocol_proofs::transcript_ext::KeccakTranscript;
 
 fn print_u256(name: &str, bytes: &[u8; 32]) {
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
@@ -25,13 +24,6 @@ fn print_point(name: &str, point: &AffinePoint) {
     y.copy_from_slice(encoded.y().expect("non-identity"));
     print_u256(&format!("{name}_x"), &x);
     print_u256(&format!("{name}_y"), &y);
-}
-
-fn repr32<F: PrimeField>(value: &F) -> [u8; 32] {
-    let repr = value.to_repr();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(repr.as_ref());
-    out
 }
 
 #[test]

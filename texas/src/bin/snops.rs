@@ -1,6 +1,6 @@
 //! Starknet 运维工具：declare / deploy / invoke / call。
 use clap::{Parser, Subcommand};
-use starknet::accounts::{Account, ExecutionEncoding, SingleOwnerAccount};
+use starknet::accounts::{Account, SingleOwnerAccount};
 use starknet::contract::ContractFactory;
 use starknet::core::types::{Call, Felt};
 use starknet::providers::jsonrpc::HttpTransport;

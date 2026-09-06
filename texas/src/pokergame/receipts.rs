@@ -17,17 +17,6 @@ use serde::{Deserialize, Serialize};
 pub const RECEIPT_DOMAIN: &[u8] = b"zgame.action-receipt.v1";
 
 /// 动作决定。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Decision {
-    /// 玩家签名动作被接受。
-    Accepted,
-    /// 超时按合法默认动作代打（#17 auto 标记）。
-    AutoAccepted,
-    /// 被拒绝（附理由短码）。
-    Rejected,
-}
-
 /// 回执载荷（签名的确切字节序，见 [`receipt_msg_bytes`]）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,8 +108,19 @@ pub fn sign_receipt(
     }
 }
 
+// ---- 内部小工具（StarkCurve 编解码） ----
+
+type StarkCurveScalar = <StarkCurve as Curve>::Scalar;
+
+fn parse_sk(hex_str: &str) -> Result<StarkCurveScalar, String> {
+    let bytes = hex::decode(hex_str).map_err(|e| format!("sk hex: {e}"))?;
+    <StarkCurve as Curve>::Scalar::from_canonical_bytes(&bytes)
+        .ok_or_else(|| "sk out of range".into())
+}
+
 /// 回执验证（客户端同式；服务端测试用）。
-pub fn verify_receipt(
+#[cfg(test)]
+pub(crate) fn verify_receipt(
     operator_pk_hex: &str,
     receipt: &ActionReceipt,
     r_hex: &str,
@@ -143,21 +143,13 @@ pub fn verify_receipt(
     g * s == r + pk * c
 }
 
-// ---- 内部小工具（StarkCurve 编解码） ----
-
-type StarkCurveScalar = <StarkCurve as Curve>::Scalar;
-
-fn parse_sk(hex_str: &str) -> Result<StarkCurveScalar, String> {
-    let bytes = hex::decode(hex_str).map_err(|e| format!("sk hex: {e}"))?;
-    <StarkCurve as Curve>::Scalar::from_canonical_bytes(&bytes)
-        .ok_or_else(|| "sk out of range".into())
-}
-
+#[cfg(test)]
 fn point_from_hex(hex_str: &str) -> Option<<StarkCurve as Curve>::Point> {
     let bytes = hex::decode(hex_str).ok()?;
     <StarkCurve as Curve>::Point::from_compressed(&bytes)
 }
 
+#[cfg(test)]
 fn scalar_from_hex(hex_str: &str) -> Option<StarkCurveScalar> {
     let bytes = hex::decode(hex_str).ok()?;
     <StarkCurve as Curve>::Scalar::from_canonical_bytes(&bytes)

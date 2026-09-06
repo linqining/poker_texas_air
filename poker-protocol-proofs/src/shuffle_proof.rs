@@ -266,16 +266,6 @@ pub fn new_plain_text<C: Curve>(n: usize) -> Vec<C::Point> {
         .collect()
 }
 
-fn initial_encrypt_deck<C: Curve>(n: usize) -> Vec<ElGamalCiphertextGeneric<C>> {
-    new_plain_text::<C>(n)
-        .iter()
-        .map(|c| ElGamalCiphertextGeneric::<C> {
-            c1: C::base_g(),
-            c2: *c,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,7 +916,7 @@ mod tests {
         let mut prove_times = Vec::with_capacity(ITERATIONS);
         let mut verify_times = Vec::with_capacity(ITERATIONS);
 
-        for i in 0..ITERATIONS {
+        for _ in 0..ITERATIONS {
             let start = Instant::now();
             let proof = ZKShuffleProof::<RistrettoCurve>::prove(
                 &input,

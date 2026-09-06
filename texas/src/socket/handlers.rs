@@ -6,8 +6,6 @@ use socketioxide::{
 };
 
 use crate::auth;
-use crate::config::Config;
-use crate::pokergame::game_state::RevealPhase;
 use crate::pokergame::player::truncate_name;
 use super::*;
 
@@ -48,67 +46,6 @@ async fn try_on_chain_action(
 }
 
 
-
-
-
-/// 遗留 on-chain 钩子（crypto 动作）：同 [`try_on_chain_action`]，始终返回 `false`。
-async fn try_on_chain_crypto_action(
-    _socket: &SocketRef,
-    _state: &Arc<SocketState>,
-    _table_id: u32,
-    _action: &str,
-    _tx_kind_b64: String,
-    _gas_budget: Option<u64>,
-) -> bool {
-    // Sui on-chain 模式已移除（Starknet-only）：始终走本地处理。
-    false
-}
-
-// ============================================================================
-// Crypto proof serialization helpers (JSON → bytes)
-// ============================================================================
-
-use crate::pokergame::game_state::{
-    ElGamalCiphertextJson, ReconstructProofJson, ShuffleProofJson, SubmitRevealTokenJson,
-};
-use crate::relayer::proof_bytes;
-
-/// 将 `Vec<ElGamalCiphertextJson>` 序列化为 flat bytes（每个密文 96 字节）。
-fn serialize_ciphertexts_from_json(
-    cards: &[ElGamalCiphertextJson],
-) -> Result<Vec<u8>, String> {
-    let cts: Vec<poker_protocol::crypto::ElGamalCiphertext> = cards
-        .iter()
-        .map(|c| c.to_ciphertext())
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(proof_bytes::ciphertexts_to_bytes(&cts))
-}
-
-/// 将 `ShuffleProofJson` 序列化为 Move 合约期望的字节格式。
-fn serialize_shuffle_proof_from_json(proof: &ShuffleProofJson) -> Result<Vec<u8>, String> {
-    let p = proof.to_proof()?;
-    proof_bytes::serialize_shuffle_proof(&p)
-}
-
-/// 将 `ReconstructProofJson` 序列化为 Move 合约期望的字节格式。
-fn serialize_reconstruct_proof_from_json(proof: &ReconstructProofJson) -> Result<Vec<u8>, String> {
-    let p = proof.to_proof()?;
-    proof_bytes::serialize_reconstruct_proof(&p)
-}
-
-/// 将单个 `SubmitRevealTokenJson` 的 `reveal_token_hex` 转换为 48 字节 G1 compressed bytes。
-fn serialize_reveal_token_bytes(token: &SubmitRevealTokenJson) -> Result<Vec<u8>, String> {
-    let pt = poker_protocol::z_poker::convert::hex_to_ecpoint(&token.reveal_token_hex)?;
-    Ok(proof_bytes::g1_to_bytes(&pt))
-}
-
-/// 将 `SubmitRevealTokenJson` 的 `reveal_token_proof` 序列化为 Move 合约期望的字节格式。
-fn serialize_reveal_token_proof_bytes(
-    token: &SubmitRevealTokenJson,
-) -> Result<Vec<u8>, String> {
-    let p = token.reveal_token_proof.to_proof()?;
-    Ok(proof_bytes::serialize_reveal_token_proof(&p))
-}
 
 
 
@@ -682,7 +619,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         // let _ = io.emit(actions::TABLES_UPDATED, &tables_info).await;
 
         let wallet = {
-            let mut gs = state.state.write().await;
+            let gs = state.state.write().await;
             gs.players.get(&socket_id).map(|p| p.wallet_address.clone()).unwrap_or_else(|| WalletAddress::new("".to_string()))
         };
 
@@ -975,7 +912,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
 
         // E3 修复：使用 i64::try_from 避免 u64 -> i64 转换溢出
-        let deduct = match i64::try_from(payload.amount) {
+        let _deduct = match i64::try_from(payload.amount) {
             Ok(v) => -v,
             Err(_) => {
                 tracing::warn!("[REBUY] Amount too large for i64: {}", payload.amount);
@@ -1145,9 +1082,9 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         {
             let out: Result<Vec<poker_protocol::crypto::ElGamalCiphertext>, String> =
                 payload.output_cards.iter().map(|c| c.to_ciphertext()).collect();
-            if let (Ok(out), Some(Ok(proof))) = (out, payload.shuffle_proof.as_ref().map(|p| p.to_proof())) {
+            if let (Ok(_out), Some(Ok(_proof))) = (out, payload.shuffle_proof.as_ref().map(|p| p.to_proof())) {
                 let gs = state.state.read().await;
-                if let Some(table) = gs.tables.get(&payload.table_id) {
+                if let Some(_table) = gs.tables.get(&payload.table_id) {
                     // 方案A：SHUFFLE_SUBMIT 不再转发 mirror（deck 终局注入）。
                 }
             }
@@ -1353,7 +1290,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             }
 
             // 获取 reveal phase（与 HTTP submit_reveal_token 一致），在 mark_reveal_complete 之前读取
-            let reveal_phase = state.get_reveal_phase_for_table(payload.table_id).await.unwrap_or_default();
+            let _reveal_phase = state.get_reveal_phase_for_table(payload.table_id).await.unwrap_or_default();
 
             // 本地模式：复用 HTTP submit_reveal_token 逻辑
             let player_pk = match poker_protocol::z_poker::convert::hex_to_ecpoint(&pk_hex.0) {
@@ -1428,7 +1365,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             // Starknet 镜像：同步 reveal tokens 到 poker_l1（失败仅告警）
             {
                 let gs = state.state.read().await;
-                if let Some(table) = gs.tables.get(&payload.table_id) {
+                if let Some(_table) = gs.tables.get(&payload.table_id) {
                 }
             }
 
@@ -1443,7 +1380,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 None,
             ).await;
 
-            let all_complete = match state.mark_reveal_complete_for_pk(payload.table_id, &pk_hex).await {
+            let _all_complete = match state.mark_reveal_complete_for_pk(payload.table_id, &pk_hex).await {
                 Ok(result) => {
                     tracing::info!("[REVEAL_SUBMIT] reveal marked, table_id={}, pk_hex={}, all_complete={}", payload.table_id, pk_hex, result);
                     result
@@ -1463,7 +1400,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
         // 旧路径：reveal_tokens 为 None，保持原有行为（仅标记完成）
         // 获取 reveal phase（与 HTTP submit_reveal_token 一致），在 mark_reveal_complete 之前读取
-        let reveal_phase = state.get_reveal_phase_for_table(payload.table_id).await.unwrap_or_default();
+        let _reveal_phase = state.get_reveal_phase_for_table(payload.table_id).await.unwrap_or_default();
         let pk_hex_str = {
             let gs = state.state.read().await;
             gs.tables.get(&payload.table_id)
@@ -1482,7 +1419,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 None,
             ).await;
         }
-        let all_complete = {
+        let _all_complete = {
             let mut gs = state.state.write().await;
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
                 let pk_hex = table.get_pk_hex_by_wallet_address(&wallet_address);

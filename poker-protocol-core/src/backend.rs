@@ -405,7 +405,6 @@ use k256::elliptic_curve::{
 use k256::{ProjectivePoint as SecpPoint, Scalar as SecpScalar, Secp256k1};
 use k256::EncodedPoint as SecpEncodedPoint;
 use sha3::Keccak256 as KKeccak256;
-use sha3::Sha3_256 as KSha3;
 
 /// Wrapper around the 33-byte compressed secp256k1 SEC1 encoding.
 #[derive(Clone, Debug)]

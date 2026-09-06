@@ -36,6 +36,7 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
     /// # Security
     /// This function validates that base points are not identity to prevent
     /// trivial attacks where a base point of zero could compromise the proof.
+    #[allow(non_snake_case)]
     pub fn prove(
         base_points: &[C::Point],
         secrets: &[C::Scalar],
@@ -49,6 +50,7 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
     /// adversarial transcripts. This is deliberately unavailable outside unit
     /// tests; production callers always receive witness-consistency checks.
     #[cfg(test)]
+    #[allow(non_snake_case)]
     pub(crate) fn prove_unchecked(
         base_points: &[C::Point],
         secrets: &[C::Scalar],
@@ -58,6 +60,7 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
         Self::prove_inner(base_points, secrets, R, transcript, false)
     }
 
+    #[allow(non_snake_case)]
     fn prove_inner(
         base_points: &[C::Point],
         secrets: &[C::Scalar],
@@ -132,6 +135,7 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
     /// # Security
     /// This function validates that base points are not identity to ensure
     /// the proof maintains its knowledge soundness property.
+    #[allow(non_snake_case)]
     pub fn verify(
         &self,
         base_points: &[C::Point],

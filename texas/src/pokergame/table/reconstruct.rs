@@ -29,32 +29,6 @@ impl Table {
         Ok(())
     }
 
-    pub fn check_reconstruct_timeout(&mut self) -> Option<Vec<GamePkHex>> {
-        if !self.reconstruct_state.is_active {
-            return None;
-        }
-        let timeout_start = match self.reconstruct_state.timeout_start {
-            Some(t) => t,
-            None => return None,
-        };
-
-        if timeout_start.elapsed().as_secs() >= self.reconstruct_state.timeout_seconds {
-            // 移除未提交 deck 的玩家
-            let mut not_submitted = Vec::new();
-            for player_pk in self.reconstruct_state.pending_players.iter() {
-                not_submitted.push(player_pk.clone());
-            }
-            tracing::warn!("[RECONSTRUCT] Reconstruct timeout for players: {:?}",
-                not_submitted.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","));
-            for player_pk in &not_submitted {
-                self.remove_player_by_pk(player_pk);
-            }
-            self.reconstruct_state.reset();
-            return Some(not_submitted);
-        }
-        None
-    }
-
     pub fn execute_reconstruct_if_completed(&mut self) -> bool {
         if !self.reconstruct_state.is_active {
             return false;

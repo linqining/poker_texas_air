@@ -100,7 +100,7 @@ fn blake3_chain_blocks_with_cv(message: &[u8]) -> (Vec<Compression>, [u32; 8]) {
     let steps = chain_steps(message.len());
     let mut blocks: Vec<Compression> = Vec::with_capacity(steps.max(n_chunks + 1));
     let mut cv = BLAKE3_IV;
-    let mut push = |cv: [u32; 8], block: [u8; 64], blen: u32, blocks: &mut Vec<Compression>| {
+    let push = |cv: [u32; 8], block: [u8; 64], blen: u32, blocks: &mut Vec<Compression>| {
         let m = words64(&block);
         let state = blake3_compress(&cv, &m, 0, blen, 0);
         let mut lo = [0u32; 8];
@@ -134,7 +134,7 @@ pub fn blake3_chain_digest(message: &[u8]) -> [u8; 32] {
     let n_chunks = message.len().div_ceil(64);
     let steps = chain_steps(message.len());
     let mut cv = BLAKE3_IV;
-    let mut advance = |cv: [u32; 8], block: [u8; 64], blen: u32| {
+    let advance = |cv: [u32; 8], block: [u8; 64], blen: u32| {
         let state = blake3_compress(&cv, &words64(&block), 0, blen, 0);
         let mut lo = [0u32; 8];
         lo.copy_from_slice(&state[0..8]);

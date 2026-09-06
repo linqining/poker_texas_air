@@ -12,7 +12,6 @@
 //! - reveal 令牌按 (pk, 令牌集) 去重（客户端幂等重试不重复记录）；
 //! - auto 代打（超时 fold/check/call）与手动动作走同一 accept 点，天然覆盖。
 
-use poker_texas_air::prove_task::ProveTask;
 // 别名约定与 mirror.rs 相同：zgame poker_protocol → ptx 类型桥。
 use poker_protocol as ptx_protocol;
 pub use ptx_protocol::crypto::types::ECPoint as PtxECPoint;
@@ -284,8 +283,3 @@ pub fn take_settle_input(table: &Table) -> Option<HandSettleInput> {
     })
 }
 
-/// 类型再导出：构建产物（mirror TableMirror）与 ProveTask 同源。
-pub type BuiltMirror = super::mirror::TableMirror;
-
-/// 便于构建器复用：ProveTask 再导出（本模块 doc 提及）。
-pub type ProofTask = ProveTask;

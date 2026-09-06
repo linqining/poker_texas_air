@@ -40,7 +40,7 @@ use crate::blake2b_lookup_g::{
 };
 use crate::blake2b_smt_witness::{
     BLAKE2B_256_PARAMETER_WORD, BLAKE2B_IV, BLAKE2B_SIGMA, Blake2bSmtFixedValuePathWitness,
-    Blake2bSmtSingleBlock, SMT_FIXED_VALUE_OPENING_COMPRESSIONS, SMT_PATH_SIBLINGS,
+    Blake2bSmtSingleBlock, SMT_FIXED_VALUE_OPENING_COMPRESSIONS,
     SMT_SINGLE_BLOCK_INPUT_BYTES,
 };
 use crate::error::{TexasAirError, TexasAirResult};
@@ -1688,6 +1688,7 @@ pub fn prove_blake2b_lookup_smt_single_block(
 
 #[cfg(test)]
 mod tests {
+    use crate::blake2b_smt_witness::SMT_PATH_SIBLINGS;
     use super::*;
     use stwo::core::pcs::TreeVec;
     use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};

@@ -104,14 +104,6 @@ impl Table {
         }
     }
 
-    pub fn reset_shuffle(&mut self) {
-        tracing::info!("[SHUFFLE] === Shuffle reset ===");
-        tracing::info!("[SHUFFLE] Total active players: {}", self.active_players().len());
-        self.shuffle_state.reset();
-        tracing::info!("[SHUFFLE] Shuffle order: {:?}, current: {:?}",
-            self.shuffle_state.pending_players, self.shuffle_state.current_player_pk);
-    }
-
     pub fn set_current_shuffler(&mut self, player_pk: GamePkHex) {
         self.shuffle_state.current_player_pk = Some(player_pk.clone());
         self.shuffle_state.timeout_start = Some(std::time::Instant::now());
@@ -152,10 +144,7 @@ impl Table {
         seat_id: u32,
         amount: u64,
     ) -> Result<JoinResult, JoinError> {
-        let wallet_address = player.wallet_address.0.clone();
         let pk_hex=ecpoint_to_hex(&player_pk);
-
-        let player_for_seat = player.clone();
 
         if self.seats().values().any(|seat| {
             seat.player.as_ref().map_or(false, |p| p.pk_hex.0 == pk_hex)
@@ -224,8 +213,8 @@ impl Table {
             let pk_hex_game = GamePkHex::new(pk_hex.clone());
             self.mental_poker_game.register_player(pk_hex.clone(), player_pk, pk_proof);
             self.mental_poker_game.deck_encrypted = round.output_cards;
-            self.add_player(GamePkHex::new(pk_hex.clone()), player.wallet_address.clone());
-            self.sit_player(player_for_seat, actual_seat_id, amount, false);
+            let _ = self.add_player(GamePkHex::new(pk_hex.clone()), player.wallet_address.clone());
+            let _ = self.sit_player(player_for_seat, actual_seat_id, amount, false);
 
             if self.round_state() == RoundState::Waiting {
                 self.shuffle_state.completed_players.push(pk_hex_game.clone());
@@ -235,20 +224,12 @@ impl Table {
             Ok(JoinResult::JoinedAndShuffled)
         } else {
             // waiting 入座：牌局中买入的降级路径，或客户端显式选择不洗牌。
-            let player_for_proof = Player {
-                socket_id: player.socket_id.clone(),
-                id: player.wallet_address.0.clone(),
-                name: player.wallet_address.0.clone(),
-                bankroll: player.bankroll,
-                wallet_address: player.wallet_address.clone(),
-            };
             self.waiting_players.insert(GamePkHex::new(pk_hex.clone()), PlayerWithProof {
-                player: player_for_proof,
                 pk: player_pk,
                 pk_proof,
             });
-            self.add_player(GamePkHex::new(pk_hex.clone()), player.wallet_address.clone());
-            self.sit_player(player_for_seat, actual_seat_id, amount, true);
+            let _ = self.add_player(GamePkHex::new(pk_hex.clone()), player.wallet_address.clone());
+            let _ = self.sit_player(player_for_seat, actual_seat_id, amount, true);
             tracing::info!("[SHUFFLE] Player {} joined as waiting, sat at seat {}, will join next hand roundState{:?}", pk_hex, actual_seat_id,self.round_state());
             Ok(JoinResult::JoinedWaiting)
         }
@@ -335,7 +316,6 @@ impl Table {
 
     pub fn get_shuffle_public_state(&self) -> Option<ShufflePublicState> {
         if self.shuffle_state.is_active() {
-            let current_pk = self.shuffle_state.current_player_pk.clone();
             // 开局洗牌统一纯 shuffle：已注册玩家的密钥层由每手
             // start_preflop_shuffle 的 (G, m+agg) 基线预置包含；remask 补层
             // （旧 submit_join_shuffle 语义）对已注册玩家是重复加层，会让

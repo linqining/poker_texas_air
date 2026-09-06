@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
-use poker_protocol::z_poker::convert::{ecpoint_to_hex, hex_to_ecpoint, hex_to_scalar, scalar_to_hex};
+use poker_protocol::z_poker::convert::{ecpoint_to_hex, hex_to_ecpoint, hex_to_scalar};
 
 use poker_protocol::crypto::{CurveScalar, ElGamalCiphertext, Plaintext, Scalar};
 use poker_protocol::z_poker::key_manager::PKOwnershipProof;
@@ -71,25 +71,6 @@ pub enum ShufflePhase {
 }
 
 impl ShufflePhase {
-    pub fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(ShufflePhase::None),
-            1 => Some(ShufflePhase::Waiting),
-            2 => Some(ShufflePhase::Reconstruct),
-            3 => Some(ShufflePhase::BeforePreflop),
-            _ => None,
-        }
-    }
-
-    pub fn to_u8(self) -> u8 {
-        match self {
-            ShufflePhase::None => 0,
-            ShufflePhase::Waiting => 1,
-            ShufflePhase::Reconstruct => 2,
-            ShufflePhase::BeforePreflop => 3,
-        }
-    }
-
     /// 等价于 Move 的 shuffle_state.phase != shuffle_phase_none()
     pub fn is_active(self) -> bool {
         self != ShufflePhase::None
@@ -160,44 +141,9 @@ pub enum RevealPhase {
 }
 
 impl RevealPhase {
-    /// Rust 内部 u8 映射（None=0, HandReveal=1, RedealReveal=2, CommunityReveal=3, ShowdownReveal=4）
-    pub fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(RevealPhase::None),
-            1 => Some(RevealPhase::HandReveal),
-            2 => Some(RevealPhase::RedealReveal),
-            3 => Some(RevealPhase::CommunityReveal),
-            4 => Some(RevealPhase::ShowdownReveal),
-            _ => None,
-        }
-    }
-
-    pub fn to_u8(self) -> u8 {
-        match self {
-            RevealPhase::None => 0,
-            RevealPhase::HandReveal => 1,
-            RevealPhase::RedealReveal => 2,
-            RevealPhase::CommunityReveal => 3,
-            RevealPhase::ShowdownReveal => 4,
-        }
-    }
-
     /// 等价于 Move 的 reveal_phase != reveal_phase_none()
     pub fn is_active(self) -> bool {
         self != RevealPhase::None
-    }
-
-    /// 将 Move 合约的 7 值 reveal_phase 映射为 Rust 内部 RevealPhase。
-    /// Move: 0=NONE, 1=PREFLOP, 2=REDEAL, 3=FLOP, 4=TURN, 5=RIVER, 6=SHOWDOWN
-    pub fn from_chain_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => None,
-            1 => Some(RevealPhase::HandReveal),
-            2 => Some(RevealPhase::RedealReveal),
-            3 | 4 | 5 => Some(RevealPhase::CommunityReveal),
-            6 => Some(RevealPhase::ShowdownReveal),
-            _ => None,
-        }
     }
 }
 
@@ -320,24 +266,6 @@ impl<'de> Deserialize<'de> for PlayerRevealAssignment {
 
 
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
-pub enum ReconstructPhase {
-    #[default]
-    None,
-    Collecting,
-    Complete,
-}
-
-impl std::fmt::Display for ReconstructPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ReconstructPhase::None => write!(f, "none"),
-            ReconstructPhase::Collecting => write!(f, "collecting"),
-            ReconstructPhase::Complete => write!(f, "complete"),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct ReconstructState {
@@ -799,15 +727,6 @@ impl RevealTokenProofJson {
             response_s: hex_to_scalar(&self.response_s_hex)?,
             nonce: hex_to_scalar(&self.nonce_hex)?,
         })
-    }
-    pub fn from_proof(proof: RevealTokenProof<DefaultCurve>) -> Self {
-        Self {
-            user_public_key_hex: ecpoint_to_hex(&proof.user_public_key),
-            commitment_t1_hex: ecpoint_to_hex(&proof.commitment_t1),
-            commitment_t2_hex: ecpoint_to_hex(&proof.commitment_t2),
-            response_s_hex: scalar_to_hex(&proof.response_s),
-            nonce_hex: scalar_to_hex(&proof.nonce),
-        }
     }
 }
 

@@ -151,14 +151,6 @@ pub fn evaluate_best(cards: &[Card]) -> HandRank {
     best
 }
 
-/// 校验无重复牌（调试用）。
-fn assert_no_duplicates(cards: &[Card]) {
-    use std::collections::HashSet;
-    let set: HashSet<_> = cards.iter().map(|card| card.to_index()).collect();
-    debug_assert_eq!(set.len(), cards.len(), "牌组中存在重复牌");
-}
-
-/// 评估 5 张牌（核心算法）。
 fn evaluate_five(cards: &[Card; 5]) -> HandRank {
     let c0 = cards[0];
     let c1 = cards[1];

@@ -46,7 +46,7 @@
 //!   钱包/客户端持有，结算时经签名请求铸造（与游戏密钥同分布）。
 
 use poker_protocol_core::{Curve, CurvePoint, CurveScalar, StarkCurve};
-use starknet::accounts::{Account, ExecutionEncoding};
+use starknet::accounts::Account;
 use starknet::core::types::{Call, Felt};
 use starknet::core::utils::starknet_keccak;
 use starknet_ff::FieldElement as Ff;
@@ -179,8 +179,6 @@ pub fn take_client_endorsements(
 /// 铸造在客户端 client-wasm `endorsement_mint`，公式逐字节一致）。
 
 /// hand_batch.cairo 的域分离标签（逐字节对齐，勿改）。
-const HAND_PROTO_DOMAIN: &[u8] = b"poker/hand-batch/proto";
-const RHO_DOMAIN: &[u8] = b"poker/hand-batch/v1";
 
 /// 一条 hand-bound 所有权认可：pk = sk·G，s = w + c·sk，
 /// c = H(domain ‖ G ‖ pk ‖ R)，R = w·G。
@@ -189,16 +187,6 @@ pub struct Endorsement {
     pub pk: Pt,
     pub r: Pt,
     pub s: Sc,
-}
-
-/// keccak256("poker/hand-batch/proto" ‖ hand_id)——与 Cairo 端
-/// `hand_transcript_domain` 逐字节一致（digest 原始字节序）。
-fn hand_transcript_domain(hand_id: &[u8; 32]) -> [u8; 32] {
-    use sha3::Digest;
-    let mut h = sha3::Keccak256::new();
-    h.update(HAND_PROTO_DOMAIN);
-    h.update(hand_id);
-    h.finalize().into()
 }
 
 /// 铸造 hand-bound 认可。
@@ -211,7 +199,6 @@ pub fn mint_endorsement(
     pk: &Pt,
     hand_binding: &[u8; 32],
 ) -> Endorsement {
-    use rand_core::{CryptoRng, RngCore};
     let mut rng = rand::rngs::OsRng;
     let g = StarkCurve::base_g();
     loop {
@@ -538,7 +525,7 @@ fn build_dual_settlement_with(
     settlement: &HandSettlement,
     produce: &dyn Fn(&[u8; 32], &[Ff]) -> Result<Vec<Endorsement>, String>,
 ) -> Result<DualSettlement, String> {
-    let pre_table = mirror
+    let _pre_table = mirror
         .pre_settlement
         .as_ref()
         .unwrap_or(&mirror.table);
@@ -735,6 +722,7 @@ pub fn host_fold_check(hand_id_bytes: &[u8; 32], equations: &[HandBatchEquation]
 }
 
 /// [`host_fold_check`] 的语义别名（测试/诊断用）。
+#[cfg(test)]
 pub fn host_fold_is_identity(hand_id_bytes: &[u8; 32], equations: &[HandBatchEquation]) -> bool {
     host_fold_check(hand_id_bytes, equations)
 }
@@ -953,7 +941,7 @@ pub fn build_dual_settlement_from_client(
 
 /// 解析 hand_batch 载荷为折叠项（与 Cairo 端 ownership_terms 同构；
 /// 当前批次只含 ownership）。跨手重放检测与篡改检测的测试入口。
-pub fn parse_batch_terms(hand_binding: &[u8; 32], batch_words: &[[u8; 32]]) -> Option<Vec<HandBatchEquation>> {
+pub fn parse_batch_terms(_hand_binding: &[u8; 32], batch_words: &[[u8; 32]]) -> Option<Vec<HandBatchEquation>> {
     // 规范头（5 词，Hand-batch v2.8 方程序序）：[n_own, n_shuffle, n_reveal, n_leave, n_recon]
     if batch_words.len() < 5 {
         return None;
@@ -992,7 +980,7 @@ pub fn parse_batch_terms(hand_binding: &[u8; 32], batch_words: &[[u8; 32]]) -> O
         }
         let w = &batch_words[cursor..cursor + bucket_len];
         let mut o = 1usize;
-        let mut ct_n = |o: &mut usize| -> Option<poker_protocol_core::StarkElGamalCiphertext> {
+        let ct_n = |o: &mut usize| -> Option<poker_protocol_core::StarkElGamalCiphertext> {
             let c1 = point_from_words(&w[*o], &w[*o + 1])?;
             let c2 = point_from_words(&w[*o + 2], &w[*o + 3])?;
             *o += 4;
@@ -1339,7 +1327,6 @@ pub async fn submit_dual_settlement(
     // settle 断言 binding 已注册；两笔交易存在包含时差——轮询等注册可见
     // 再提交 settle（hand_binding view 的第三位 = registered 标记）。
     {
-        use starknet::providers::Provider;
         let selector = starknet_keccak("hand_binding".as_bytes());
         let binding_felt = super::chain::parse_felt(&format!("{:#x}", dual.hand_binding))
             .ok_or("invalid hand binding felt")?;
@@ -1375,12 +1362,6 @@ pub async fn submit_dual_settlement(
         register_hash,
         format!("{:#x}", settle_hash.transaction_hash),
     ))
-}
-
-#[allow(dead_code)]
-fn _ensure_imports() {
-    // 保持 ExecutionEncoding 引用（operator 类型由 chain 模块决定）。
-    let _ = ExecutionEncoding::New;
 }
 
 // ============================================================
@@ -1687,6 +1668,7 @@ pub fn bg_shuffle_fold_equations(
 
 /// 线性方程组的 ρ 折叠宿主 parity（与 host_fold_check 同 Horner 结构；
 /// BG 方程 kind=5 词绑定）。诚实方程组残差逐条为恒等，折叠亦必为恒等。
+#[cfg(test)]
 pub fn host_fold_check_linear(hand_binding: &[u8; 32], equations: &[LinearTerms]) -> bool {
     if equations.is_empty() {
         return false;
@@ -1710,7 +1692,6 @@ pub fn host_fold_check_linear(hand_binding: &[u8; 32], equations: &[LinearTerms]
 #[cfg(test)]
 mod stark_endorsement_tests {
     use super::*;
-    use rand_core::{CryptoRng, RngCore};
 
     fn random_scalar() -> Sc {
         <Sc as CurveScalar>::random(&mut rand::rngs::OsRng)
@@ -1961,11 +1942,10 @@ mod stark_vector_gen {
 #[cfg(test)]
 mod bg_fold_tests {
     use super::*;
-    use poker_protocol_core::{CryptoTranscript, PoseidonFeltTranscript};
+    use poker_protocol_core::PoseidonFeltTranscript;
     use poker_protocol::zk_shuffle::bayer_groth::{
     BayerGrothShuffleProof, MultiExponentiationArgument, ProductArgument,
 };
-    use rand_core::{CryptoRng, RngCore};
 
     type Ct = poker_protocol_core::StarkElGamalCiphertext;
 
@@ -2124,7 +2104,7 @@ mod bg_fold_tests {
         assert_eq!(n, 52);
         let b = &words[2..]; // after hand_binding + n: input 4n, output 4n, pk 2, comm 22, resp 3n+6, chal 6
         let mut o = 0usize;
-        let mut ct_n = |o: &mut usize| -> Ct {
+        let ct_n = |o: &mut usize| -> Ct {
             let c1 = point_from_words(&b[*o], &b[*o + 1]).expect("c1");
             let c2 = point_from_words(&b[*o + 2], &b[*o + 3]).expect("c2");
             *o += 4;
@@ -2559,7 +2539,6 @@ mod settle_mode_tests {
     use poker_l1::vm::contracts::texas_poker::settlement::{
         SettlementPlan, SettlementRunoutSchedule, SETTLEMENT_SEATS,
     };
-    use rand_core::CryptoRng;
 
     fn random_scalar() -> Sc {
         <Sc as CurveScalar>::random(&mut rand::rngs::OsRng)
@@ -2662,6 +2641,81 @@ mod settle_mode_tests {
             })
             .collect();
         build_dual_settlement_from_client(&mirror, &settlement, &endorsements).expect("dual build")
+    }
+
+    // ---- 错误/缺失语句的 fail-closed 场景 ----
+    //
+    // 场景：玩家客户端提交了错误（坏签名/错绑定）或缺失的 ownership 认可。
+    // 回归点：坏批次必须在**构建阶段**被拦（host fold parity），永远到不了
+    // register_hand 上链——链上因此不会出现「settle revert → binding 已注册
+    // 却永远无法结算」的卡死状态；缺语句由数量闸门拒绝，hooks 保留待投递
+    // 等补交重试（retry_later），结算失败是链下可恢复的，不是链上毒药。
+
+    fn client_endorsements_for(binding: &HandBatchBinding, n: usize) -> Vec<ClientEndorsement> {
+        (0..n)
+            .map(|i| {
+                let sk = <Sc as CurveScalar>::from_u64(9100 + i as u64);
+                let pk = StarkCurve::base_g() * sk;
+                let e = mint_endorsement(&sk, &pk, &binding.hand_id_bytes);
+                ClientEndorsement { pk: e.pk, r: e.r, s: e.s }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tampered_endorsement_fails_closed_before_onchain() {
+        let mirror = TableMirror::new(7, "test", [0xAA; 20], 9, 10, 20, [0xAA; 20]);
+        let settlement = synthetic_settlement();
+        let binding = prepare_handbatch_binding(&mirror, &settlement).expect("binding");
+
+        // 诚实控制：同一夹具下两人的成品认可构建成功。
+        let honest = client_endorsements_for(&binding, 2);
+        build_dual_settlement_from_client(&mirror, &settlement, &honest)
+            .expect("honest endorsements must build");
+
+        // 篡改一位玩家的 s（等价于客户端交来一份坏语句）：该方程残差
+        // s'·G − R − c·pk = G ≠ O，fold 失败，构建必须 Err。
+        let mut tampered = honest;
+        tampered[1].s = tampered[1].s + <Sc as CurveScalar>::one();
+        let err = build_dual_settlement_from_client(&mirror, &settlement, &tampered)
+            .err()
+            .expect("tampered endorsement must fail closed");
+        assert!(
+            err.contains("host fold parity"),
+            "expected host fold gate, got: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_endorsement_is_count_gated_not_fold_gated() {
+        let mirror = TableMirror::new(7, "test", [0xAA; 20], 9, 10, 20, [0xAA; 20]);
+        let settlement = synthetic_settlement();
+        let binding = prepare_handbatch_binding(&mirror, &settlement).expect("binding");
+
+        // 缺席玩家：2 人只交 1 份，数量闸门在构建入口直接拒绝。
+        let short = client_endorsements_for(&binding, 1);
+        let err = build_dual_settlement_from_client(&mirror, &settlement, &short)
+            .err()
+            .expect("missing endorsement must fail the count gate");
+        assert!(
+            err.contains("count 1 != participants 2"),
+            "expected count gate, got: {err}"
+        );
+
+        // 文档性断言：fold 校验**检测不到缺席**——剩下的每条方程各自有效，
+        // Σ ρⁱ·Lᵢ 仍为 O。缺席的守卫是数量（构建入口 count 检查 + 合约侧
+        // n_own == players.len()），两层缺一不可。
+        let endorsements: Vec<Endorsement> = short
+            .iter()
+            .map(|c| Endorsement { pk: c.pk, r: c.r, s: c.s })
+            .collect();
+        let words = assemble_batch(&endorsements, &[]);
+        let parsed = parse_batch_terms(&binding.hand_id_bytes, &words)
+            .expect("short batch still parses");
+        assert!(
+            host_fold_check(&binding.hand_id_bytes, &parsed),
+            "fold passes on a short batch — absence is count-gated, not fold-gated"
+        );
     }
 
     #[test]

@@ -39,10 +39,6 @@ impl StarknetChain {
         }
     }
 
-    pub fn provider(&self) -> Arc<JsonRpcHttp> {
-        self.provider.clone()
-    }
-
     /// 惰性构建操作员账户（需要地址 + 私钥 + RPC 齐备）。
     pub async fn operator(&self) -> Option<Arc<OperatorAccount>> {
         if !self.config.settlement_enabled() {
@@ -97,8 +93,3 @@ pub fn parse_felt(s: &str) -> Option<Felt> {
     Felt::from_hex(s).ok()
 }
 
-/// starknet.cairo 短字符串 → felt（"isValidSignature" 这类 selector 名用不到，
-/// selector 一律用 starknet_keccak；此函数用于把 ASCII 标签编码进 calldata）。
-pub fn cairo_short_string(s: &str) -> Option<Felt> {
-    starknet::core::utils::cairo_short_string_to_felt(s).ok()
-}

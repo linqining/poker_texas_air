@@ -7,7 +7,6 @@ pub const FETCH_LOBBY_INFO: &str = "FETCH_LOBBY_INFO";
 pub const RECEIVE_LOBBY_INFO: &str = "RECEIVE_LOBBY_INFO";
 pub const PLAYERS_UPDATED: &str = "PLAYERS_UPDATED";
 pub const JOIN_TABLE: &str = "JOIN_TABLE";
-pub const TABLE_JOINED: &str = "TABLE_JOINED";
 pub const LEAVE_TABLE: &str = "LEAVE_TABLE";
 pub const TABLE_LEFT: &str = "TABLE_LEFT";
 pub const LEAVE_DEFERRED: &str = "LEAVE_DEFERRED";
@@ -30,7 +29,6 @@ pub const REVEAL_NOTICE: &str = "REVEAL_NOTICE";
 pub const HAND_REVEAL_RESULT: &str = "HAND_REVEAL_RESULT";
 pub const COMMUNITY_REVEAL_RESULT: &str = "COMMUNITY_REVEAL_RESULT";
 pub const RECONSTRUCT_INITIATE: &str = "RECONSTRUCT_INITIATE";
-pub const RECONSTRUCT_VOTE: &str = "RECONSTRUCT_VOTE";
 pub const RECONSTRUCT_RESULT: &str = "RECONSTRUCT_RESULT";
 pub const RECONSTRUCT_NOTICE: &str = "RECONSTRUCT_NOTICE";
 pub const RECONSTRUCT_SUBMIT: &str = "RECONSTRUCT_SUBMIT";
@@ -38,7 +36,6 @@ pub const REDEAL_NOTICE: &str = "REDEAL_NOTICE";
 pub const REDEAL_RESULT: &str = "REDEAL_RESULT";
 pub const REDEAL_REQUEST: &str = "REDEAL_REQUEST";
 pub const CRYPTO_EVENT: &str = "crypto_event";
-pub const PLAYER_UPDATE: &str = "player_update";
 
 
 /// #16 动作签名（抗审查）：客户端以牌局身份 SK 对动作签名后随消息附上。
@@ -137,10 +134,6 @@ pub fn action_word(action: &str) -> Option<starknet::core::types::Felt> {
 /// 的合法性约束解包同一字段）。未知动作名返回 None。
 pub fn action_entry_word(e: &ActionLogEntry) -> Option<starknet::core::types::Felt> {
     use starknet::core::types::Felt;
-    const SH_FLAGS: u64 = 40;
-    const SH_AMOUNT: u64 = 42;
-    const SH_SEQ: u64 = 106;
-    const SH_SEAT: u64 = 170;
     let action = action_word(&e.action)?;
     let flags = u64::from(e.auto) + 2 * u64::from(e.sig_ok);
     // 2^40 / 2^42 / 2^106 / 2^170（打包值 < 2^202 < P，域乘加无回绕，

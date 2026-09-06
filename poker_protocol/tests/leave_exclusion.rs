@@ -5,9 +5,8 @@
 //! 玩家串谋（合计 N−1 份 token + 公开的这份）即可解密已弃牌者的底牌。
 
 use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
-use poker_protocol::crypto::{DefaultCurve, EcPoint, Scalar};
+use poker_protocol::crypto::{DefaultCurve, EcPoint};
 use poker_protocol::z_poker::protocol::ClientPlayer;
-use poker_protocol::z_poker::protocol::LeaveGameRound;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 use rand_core::OsRng;
 

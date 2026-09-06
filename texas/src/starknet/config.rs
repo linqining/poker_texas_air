@@ -56,7 +56,9 @@ pub struct StarknetConfig {
     /// 留空时 Hand-batch 路径不可用。
     pub dual_settlement_address: String,
     /// 结算模式：`dapv`（仅 DAPV，失败报错）| `legacy`（仅 register_aggregate/
-    /// settle_hand）| `auto`（默认：优先 DAPV，任一步失败自动回退 legacy）。
+    /// settle_hand）| `auto`（优先 DAPV，任一步失败自动回退 legacy）。
+    /// 2026-09-06 起固定为 `legacy`（见 `from_env`）：结算期收集 endorsement
+    /// 的 liveness 缺口在开局期铸造（DAPV §9 L2 注册期语义）落地前不可接受。
     pub settlement_mode: String,
     /// Hand-batch 上链形态（`STARKNET_SETTLE_MODE`，默认 Linear）。
     pub settle_mode: SettleMode,
@@ -90,7 +92,21 @@ impl StarknetConfig {
             vault_address: std::env::var("STARKNET_VAULT_ADDRESS").unwrap_or_default(),
             settlement_address: std::env::var("STARKNET_SETTLEMENT_ADDRESS").unwrap_or_default(),
             dual_settlement_address: std::env::var("STARKNET_DUAL_SETTLEMENT_ADDRESS").unwrap_or_default(),
-            settlement_mode: std::env::var("STARKNET_SETTLEMENT_MODE").unwrap_or_default(),
+            // 2026-09-06 固定为 legacy：DAPV 需要在结算期向客户端收集
+            // ownership 认可（10s 窗口 + 有界重试），客户端失联时该手结算
+            // 被丢弃且无 forfeit 恢复路径；开局期铸造/随动作附带落地前
+            // （DAPV_SOUNDNESS §9 L2 注册期语义）钉死 legacy 结算。
+            // STARKNET_SETTLEMENT_MODE 仍读但被忽略——恢复时撤销本钉即可。
+            settlement_mode: {
+                let requested = std::env::var("STARKNET_SETTLEMENT_MODE").unwrap_or_default();
+                if !requested.is_empty() && requested != "legacy" {
+                    eprintln!(
+                        "[starknet-config] STARKNET_SETTLEMENT_MODE={requested} ignored — \
+                         pinned to legacy until deal-time endorsements land"
+                    );
+                }
+                "legacy".to_string()
+            },
             settle_mode: SettleMode::parse(
                 &std::env::var("STARKNET_SETTLE_MODE").unwrap_or_default(),
             ),

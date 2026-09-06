@@ -1120,14 +1120,6 @@ mod tests {
         }
     }
 
-    fn from_core(p: &CorePoint) -> StarkPoint {
-        if p.is_identity() {
-            return <StarkPoint as CurvePoint>::identity();
-        }
-        let affine = p.to_affine().expect("non-identity point");
-        StarkPoint::from_affine_parts(affine.x(), affine.y())
-    }
-
     fn random_point() -> StarkPoint {
         StarkPoint::random(&mut OsRng)
     }

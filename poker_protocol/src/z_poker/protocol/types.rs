@@ -3,8 +3,7 @@ use crate::z_poker::card::PlayingCard;
 use crate::zk_shuffle::reconstruction::{
     ReconstructProof, ReconstructProofV3, ReconstructionV3Statement,
 };
-use crate::zk_shuffle::reveal_token_proof::{RevealTokenProof, REVEAL_TOKEN_PROOF_LABEL};
-use crate::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GamePhase {
@@ -73,20 +72,6 @@ pub struct RevealToken {
     pub proof: RevealTokenProof<DefaultCurve>,
     pub reveal_token: EcPoint,
     pub user_public_key: PublicKey,
-}
-
-impl RevealToken {
-    pub(crate) fn is_ok(&self) -> bool {
-        let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
-        self.proof
-            .verify(
-                &self.encrypted_card,
-                &self.reveal_token,
-                &self.user_public_key,
-                &mut transcript,
-            )
-            .is_ok()
-    }
 }
 
 #[derive(Debug)]

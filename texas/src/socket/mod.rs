@@ -1,5 +1,4 @@
 pub use handlers::register_handlers;
-pub use broadcast::{broadcast_player_update, PlayerUpdatePayload};
 
 pub mod broadcast;
 pub mod game_loop;
@@ -20,7 +19,7 @@ use crate::pokergame::actions;
 use crate::pokergame::deck::Card;
 use crate::pokergame::game_state::{ElGamalCiphertextJson, MaskAndShuffleRoundJson, ShuffleProofJson, PlayerReadableCardJson,
     PkProofJson, ReconstructProofJson, RevealPhase, ShufflePublicState, LeaveGameRoundJson, SubmitRevealTokenJson};
-use crate::pokergame::player::{Player, WalletAddress, GamePkHex, GamePlayer};
+use crate::pokergame::player::{Player, WalletAddress, GamePkHex};
 use crate::pokergame::table::{ActionRequest, ClientTable, JoinError, JoinResult, RoundState, Table};
 use poker_protocol::crypto::EcPoint;
 use poker_protocol::z_poker::convert::{ecpoint_to_hex, hex_to_ecpoint, scalar_to_hex};
@@ -379,32 +378,6 @@ pub(crate) struct GameState {
 }
 
 impl GameState {
-    /// Remove a player by pk_hex from the specified table and the players map.
-    /// Returns the player's socket_id if found.
-    pub fn remove_player_by_pk(&mut self, table_id: u32, pk_hex: &GamePkHex) -> Option<String> {
-        let wallet_address = self.tables.get(&table_id)
-            .and_then(|table| table.players().get(pk_hex).cloned());
-
-        if let Some(wallet_addr) = wallet_address {
-            let socket_id = self.players.iter()
-                .find(|(_, p)| p.wallet_address == wallet_addr)
-                .map(|(_, p)| p.socket_id.clone());
-
-            // Remove from the specified table
-            if let Some(table) = self.tables.get_mut(&table_id) {
-                table.remove_player_by_pk(pk_hex);
-            }
-
-            // Remove from players map
-            if let Some(ref sid) = socket_id {
-                self.players.remove(sid);
-            }
-
-            socket_id
-        } else {
-            None
-        }
-    }
 }
 
 pub struct SocketState {
@@ -508,14 +481,6 @@ impl SocketState {
         });
     }
 
-    pub async fn start_game_loop_from_ctx(&self, state: Arc<SocketState>, table_id: u32) {
-        let io = match get_socket_io() {
-            Some(io) => io,
-            None => return,
-        };
-        self.start_game_loop(io, state, table_id).await;
-    }
-
     pub async fn stop_game_loop(&self, table_id: u32) {
         // tracing::info!("stop_game_loop: {}", table_id);
         let mut registry = self.game_loop_registry.write().await;
@@ -523,23 +488,6 @@ impl SocketState {
     }
 
     /// Resolve socket_id from a pk_hex for a given table
-    pub async fn resolve_socket_id_by_pk(&self, table_id: u32, pk_hex: &GamePkHex) -> Option<String> {
-        let gs = self.state.read().await;
-        let wallet_addr = gs.tables.get(&table_id)
-            .and_then(|table| table.players().get(pk_hex).cloned());
-        if let Some(wallet_addr) = wallet_addr {
-            gs.players.values()
-                .find(|p| p.wallet_address == wallet_addr)
-                .map(|p| p.socket_id.clone())
-        } else {
-            None
-        }
-    }
-
-    pub async fn find_socket_id_by_pk(&self, table_id: u32, pk_hex: &GamePkHex) -> Option<String> {
-        self.resolve_socket_id_by_pk(table_id, pk_hex).await
-    }
-
     pub async fn send_shuffle_notice(&self, table_id: u32) {
         let io = match get_socket_io() {
             Some(io) => io,
@@ -663,7 +611,7 @@ impl SocketState {
         let mut gs = self.state.write().await;
         gs.players.insert(player.socket_id.clone(), player.clone());
         if let Some(table) = gs.tables.get_mut(&table_id) {
-            table.add_player(pk_hex.clone(), player.wallet_address.clone());
+            let _ = table.add_player(pk_hex.clone(), player.wallet_address.clone());
             Ok(table.active_players().len())
         } else {
             Err("Table not found".to_string())
@@ -862,10 +810,6 @@ pub(crate) fn hide_opponent_cards(base: &ClientTable, wallet_address: &WalletAdd
         }
     }
     copy
-}
-
-pub(crate) async fn send_simple_action(socket: &SocketRef, state: &Arc<SocketState>, table_id: u32, action: &str) {
-    send_simple_action_signed(socket, state, table_id, action, None, None).await
 }
 
 /// #16：带（可选）动作签名的简单动作发送。

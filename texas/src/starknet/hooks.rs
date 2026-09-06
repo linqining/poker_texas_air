@@ -14,24 +14,6 @@ use std::sync::OnceLock;
 use super::mirror::{seat_player_addr, TableMirror};
 
 /// 把 vault 的 settlement 绑定切到指定结算合约（operator 必须是 vault owner）。
-async fn rebind_vault_settlement(vault_address: &str, settlement_address: &str) -> Result<(), String> {
-    let chain = super::chain().ok_or("starknet chain not initialized")?;
-    let vault = super::chain::parse_felt(vault_address).ok_or("invalid vault address")?;
-    let target = super::chain::parse_felt(settlement_address).ok_or("invalid settlement address")?;
-    let operator = chain.operator().await.ok_or("operator account unavailable")?;
-    use starknet::accounts::Account;
-    operator
-        .execute_v3(vec![starknet::core::types::Call {
-            to: vault,
-            selector: starknet::core::utils::starknet_keccak(b"set_settlement_contract"),
-            calldata: vec![target],
-        }])
-        .send()
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("vault rebind submit failed: {e}"))
-}
-
 /// settle 成功上链的 (table, mirror_hand) 集合：失败可重试（game_loop tick
 /// 驱动），成功后幂等跳过。
 static SETTLE_OK: OnceLock<std::sync::Mutex<std::collections::HashSet<(u32, u32)>>> =
@@ -526,7 +508,7 @@ pub fn register_dev_endorsement_wallets() {
         Ok(v) if !v.trim().is_empty() => v,
         _ => return,
     };
-    use poker_protocol::crypto::curve::{Curve, CurveScalar};
+    use poker_protocol::crypto::curve::CurveScalar;
     for wallet in list.split(',') {
         let wallet = wallet.trim();
         if wallet.is_empty() {
@@ -544,7 +526,7 @@ fn mint_bot_endorsements(
     hand_id: u32,
     players_remapped: &[starknet_ff::FieldElement],
 ) {
-    use poker_protocol::crypto::curve::{Curve, CurveScalar};
+    use poker_protocol::crypto::curve::Curve;
     use poker_protocol::crypto::curve::StarkCurve;
     use std::format as fmt;
 

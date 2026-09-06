@@ -25,10 +25,9 @@ use std::borrow::Cow;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use group::Group;
 
-use super::utils::{g1_generator, G1Projective};
-use poker_protocol::crypto::curve::{CurvePoint as CPt, CurveScalar as CSc};
+use super::utils::g1_generator;
+use poker_protocol::crypto::curve::CurvePoint as CPt;
 use poker_protocol::crypto::types::ECPoint;
 // 注：`ElGamalCiphertext` 通过下方 `pub use` 重导出，避免重复导入。
 
@@ -3480,25 +3479,25 @@ mod tests {
     fn test_table_new_invalid_params() {
         // max_players < 2
         let result = std::panic::catch_unwind(|| {
-            TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 1, 50, 100);
+            let _ = TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 1, 50, 100);
         });
         assert!(result.is_err());
 
         // max_players > 9
         let result = std::panic::catch_unwind(|| {
-            TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 10, 50, 100);
+            let _ = TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 10, 50, 100);
         });
         assert!(result.is_err());
 
         // big_blind = 0
         let result = std::panic::catch_unwind(|| {
-            TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 6, 50, 0);
+            let _ = TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 6, 50, 0);
         });
         assert!(result.is_err());
 
         // small_blind > big_blind
         let result = std::panic::catch_unwind(|| {
-            TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 6, 200, 100);
+            let _ = TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 6, 200, 100);
         });
         assert!(result.is_err());
     }

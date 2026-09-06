@@ -25,7 +25,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
-use super::utils::{g1_generator, g1_identity, BlsScalar, G1Projective};
+use super::utils::{BlsScalar, G1Projective};
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
@@ -2092,7 +2092,7 @@ mod tests {
     use super::*;
     use crate::object_model::ObjectID;
     use crate::signature::TaggedPubkey;
-    use group::Group;
+    use crate::vm::contracts::texas_poker::utils::{g1_generator, g1_identity};
 
     fn make_table() -> TexasPokerTable {
         // creator 设为 [0xAA;20]，与 make_context().caller 一致，

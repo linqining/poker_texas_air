@@ -951,13 +951,6 @@ mod tests {
                 + FieldElement::from(seq) * p2_106
                 + FieldElement::from(seat) * p2_170
         };
-        // kind 编码：Check=0 / Call=1 / Fold=2 / 其它=3。
-        let kind_code = |action: &str| match action {
-            "CHECK" => 2_u32 - 2, // 0
-            "CALL" => 1,
-            "FOLD" => 2,
-            _ => 3,
-        };
         let legality_word = |kind: u64, owed: u64, my_bet: u64, big_blind: u64| {
             FieldElement::from(kind)
                 + FieldElement::from(owed) * p2_2

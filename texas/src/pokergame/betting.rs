@@ -38,10 +38,6 @@ impl BettingRound {
         self.min_raise
     }
 
-    pub fn get_actions_taken(&self) -> usize {
-        self.actions_taken
-    }
-
     pub fn validate_fold(&self, _seat: &Seat) -> Result<(), String> {
         Ok(())
     }
@@ -90,23 +86,6 @@ impl BettingRound {
     /// actions_taken 仅是计数器，无法反映每个玩家是否都行动过（如玩家加入/离开、
     /// 加注后重置等场景下计数会失真）。has_acted 在每次行动后置 true，在加注后
     /// 由调用方重置其他玩家，能准确反映"本轮是否所有人都行动过"。
-    pub fn is_complete(&self, seats: &[&Seat]) -> bool {
-        let active_players: Vec<&&Seat> = seats
-            .iter()
-            .filter(|s| !s.folded && !s.sitting_out && s.stack > 0)
-            .collect();
-
-        if active_players.is_empty() {
-            return true;
-        }
-        // 所有活跃玩家都必须已行动过
-        if !active_players.iter().all(|s| s.has_acted) {
-            return false;
-        }
-        // 且所有活跃玩家的下注都等于当前下注（或已 all-in）
-        active_players.iter().all(|s| s.bet == self.current_bet || s.stack == 0)
-    }
-
     /// 对齐 Move process_raise：all-in 时仅当 raise_amount >= min_raise 才更新
     /// min_raise 和 last_raiser_seat_id（重新打开行动权）；短 all-in 不更新。
     /// 非 all-in 时始终更新（调用方已通过 validate_raise 保证 raise_amount >= min_raise）。
@@ -145,22 +124,4 @@ impl BettingRound {
         self.actions_taken = 0;
     }
 
-    pub fn available_actions(&self, seat: &Seat) -> Vec<String> {
-        if seat.folded || seat.sitting_out || seat.stack == 0 {
-            return Vec::new();
-        }
-        let chips_to_call = self.current_bet.saturating_sub(seat.bet);
-        let mut actions = Vec::new();
-        actions.push("fold".to_string());
-        if chips_to_call == 0 {
-            actions.push("check".to_string());
-        } else {
-            actions.push("call".to_string());
-        }
-        // 对齐 Move can_raise：stack > to_call 即可 raise（含短 all-in）
-        if seat.stack > chips_to_call {
-            actions.push("raise".to_string());
-        }
-        actions
-    }
 }

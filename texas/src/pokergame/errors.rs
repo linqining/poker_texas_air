@@ -11,7 +11,6 @@
 //! 客户端约定（useGameSocket 的 error 处理器）：展示 `msg`；`code` 用于
 //! 特殊分支（如静默的良性重复提交）；`detail` 只打 console。
 
-use serde_json::Value;
 
 /// 错误码 + 用户文案登记表。新增错误必须在此登记文案，禁止裸字符串。
 pub fn user_message(code: &str) -> &'static str {
@@ -35,32 +34,8 @@ pub fn user_message(code: &str) -> &'static str {
 
 /// 构造结构化错误 payload。`code` 必须是本模块登记过的错误码；
 /// `detail` 是给开发者看的技术细节（不会展示给用户）。
-pub fn error_payload(code: &'static str, detail: impl std::fmt::Display) -> Value {
-    serde_json::json!({
-        "code": code,
-        // 稳定 i18n key：前端 locale 文件按此 key 查本地化文案（缺失时回退 msg）
-        "key": format!("socket_error_{code}"),
-        "msg": user_message(code),
-        "detail": detail.to_string(),
-    })
-}
-
 /// 与 `error_payload` 相同，但额外携带 action / table_id 上下文
 ///（客户端据此关闭下注 loading 遮罩等）。
-pub fn error_payload_with_ctx(
-    code: &'static str,
-    detail: impl std::fmt::Display,
-    action: &str,
-    table_id: u32,
-) -> Value {
-    let mut v = error_payload(code, detail);
-    if let Some(obj) = v.as_object_mut() {
-        obj.insert("action".into(), serde_json::Value::String(action.to_string()));
-        obj.insert("table_id".into(), serde_json::Value::from(table_id));
-    }
-    v
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,4 +78,32 @@ mod tests {
         assert_eq!(v["action"], "raise");
         assert_eq!(v["table_id"], 7);
     }
+}
+
+/// 构造结构化错误 payload（测试断言用）。
+#[cfg(test)]
+pub fn error_payload(code: &'static str, detail: impl std::fmt::Display) -> serde_json::Value {
+    serde_json::json!({
+        "code": code,
+        // 稳定 i18n key：前端 locale 文件按此 key 查本地化文案（缺失时回退 msg）
+        "key": format!("socket_error_{code}"),
+        "msg": user_message(code),
+        "detail": detail.to_string(),
+    })
+}
+
+/// 与 `error_payload` 相同，但额外携带 action / table_id 上下文。
+#[cfg(test)]
+pub fn error_payload_with_ctx(
+    code: &'static str,
+    detail: impl std::fmt::Display,
+    action: &str,
+    table_id: u32,
+) -> serde_json::Value {
+    let mut v = error_payload(code, detail);
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("action".into(), serde_json::Value::String(action.to_string()));
+        obj.insert("table_id".into(), serde_json::Value::from(table_id));
+    }
+    v
 }

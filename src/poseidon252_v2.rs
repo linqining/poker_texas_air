@@ -257,7 +257,6 @@ pub const REDUCE_FRACTION_COLUMNS: usize = RED_ENTRIES.div_ceil(2);
 pub struct ChainAir {
     log_size: u32,
     range16: V2Range16,
-    range12: V2Range12,
     state: V2State,
     mul_link: V2MulLink,
     red_link: V2RedLink,
@@ -1623,7 +1622,6 @@ pub fn prove_poseidon252_chain_v2(
             ChainAir {
                 log_size,
                 range16: range16.clone(),
-                range12: range12.clone(),
                 state: state.clone(),
                 mul_link: mul_link.clone(),
                 red_link: red_link.clone(),
@@ -1801,7 +1799,6 @@ pub fn verify_poseidon252_chain_v2(
             ChainAir {
                 log_size,
                 range16: range16.clone(),
-                range12: range12.clone(),
                 state: state.clone(),
                 mul_link: mul_link.clone(),
                 red_link: red_link.clone(),
@@ -2106,7 +2103,7 @@ mod tests {
             &spec.anchor_state().iter().map(|f| f.to_bytes_be()).collect::<Vec<_>>().try_into().unwrap(),
         )
         .unwrap();
-        check!("chain", ChainAir { log_size, range16: r16.clone(), range12: r12.clone(), state: st.clone(), mul_link: ml.clone(), red_link: rl.clone(), anchor }, chain_sum, log_size);
+        check!("chain", ChainAir { log_size, range16: r16.clone(), state: st.clone(), mul_link: ml.clone(), red_link: rl.clone(), anchor }, chain_sum, log_size);
         check!("mul", MulAir { log_size: mul_log, range16: r16.clone(), link: ml.clone() }, mul_sum, mul_log);
         check!("red", ReduceAir { log_size: reduce_log, range16: r16.clone(), range12: r12.clone(), link: rl.clone() }, red_sum, reduce_log);
         check!("t16", RangeTableAir::table16(native::TABLE16_LOG, r16.clone(), r12.clone()), t16_sum, native::TABLE16_LOG);

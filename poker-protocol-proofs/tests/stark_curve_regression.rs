@@ -11,7 +11,6 @@ use poker_protocol_core::{
     ec_encrypt_batch_generic, Curve, CurveScalar, ElGamalCiphertextGeneric, StarkCurve,
 };
 use poker_protocol_proofs::bayer_groth::BayerGrothShuffleProof;
-use poker_protocol_proofs::dleq_proof::RemaskKind;
 use poker_protocol_proofs::leave_proof::LeaveProof;
 use poker_protocol_proofs::pk_ownership::PKOwnershipProof;
 use poker_protocol_proofs::remask_proof::RemaskProof;

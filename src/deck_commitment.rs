@@ -39,7 +39,6 @@ pub fn deck_commitment(table: &TexasPokerTable) -> u64 {
 mod tests {
     use super::*;
     use poker_l1::vm::contracts::texas_poker::utils::{g1_generator as g1_gen, g1_identity as g1_id, G1Projective};
-    use group::Group;
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::types::{ElGamalCiphertext, TexasPokerTable};
 

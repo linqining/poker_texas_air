@@ -10,9 +10,7 @@ mod starknet;
 mod dev_bot;
 
 use std::collections::HashMap;
-use axum::Json;
 use axum::response::IntoResponse;
-use socketioxide::extract::State;
 use std::sync::Arc;
 
 use axum::{routing, Router};
@@ -65,7 +63,7 @@ async fn main() -> std::io::Result<()> {
     // initial_tables.insert(2, Table::new(2, "Table 2".to_string(), 20000, config.max_players_per_table, "".to_string()));
     // initial_tables.insert(3, Table::new(3, "Table 3".to_string(), 50000, config.max_players_per_table, "".to_string()));
     for table in initial_tables.values_mut() {
-        table.start_shuffle();
+        let _ = table.start_shuffle();
     }
 
     let config_for_socket = config.clone();

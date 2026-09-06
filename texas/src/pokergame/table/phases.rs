@@ -109,16 +109,6 @@ impl Table {
         }
     }
 
-    pub fn init_turn(&mut self) {
-        let active = self.active_players();
-        let new_turn = if active.len() <= 3 {
-            self.button()
-        } else {
-            self.next_active_player(self.button().unwrap_or(1), 3)
-        };
-        self.set_turn(new_turn);
-    }
-
     /// 对齐 Move post_blinds：发布盲注 + 设置首行动作（current_turn）。
     /// 非 heads-up: 首行动作 = BB 后第一个活跃玩家（UTG）
     /// heads-up: 首行动作 = SB/Button
@@ -187,37 +177,6 @@ impl Table {
     /// Unlike set_blinds which calculates positions/amounts, this directly
     /// uses the values from the chain event. Used when BlindsPosted event
     /// drives the off-chain state.
-    pub fn set_blinds_from_chain(
-        &mut self,
-        sb_seat: u64,
-        bb_seat: u64,
-        sb_amount: u64,
-        bb_amount: u64,
-        first_to_act: u64,
-    ) {
-        // Post small blind
-        let mut sb_actual: u64 = 0;
-        if let Some(seat) = self.local_seats.get_mut(&(sb_seat as u32)) {
-            let sb_amt = std::cmp::min(sb_amount, seat.stack);
-            sb_actual = seat.place_blind(sb_amt);
-        }
-        self.add_to_pot(sb_actual);
-
-        // Post big blind
-        let mut bb_actual: u64 = 0;
-        if let Some(seat) = self.local_seats.get_mut(&(bb_seat as u32)) {
-            let bb_amt = std::cmp::min(bb_amount, seat.stack);
-            bb_actual = seat.place_blind(bb_amt);
-        }
-        self.add_to_pot(bb_actual);
-
-        // Set betting state from chain values.
-        // 对齐 set_blinds：call_amount = bb_amount，min_raise = bb_amount
-        self.summary.call_amount = Some(bb_amount);
-        self.set_min_raise(bb_amount);
-        self.set_turn(Some(first_to_act as u32));
-    }
-
     pub fn deal_preflop(&mut self) {
         // 升序座位、每座连发 2 张（对齐 poker_l1 VM DealHole 的 canonical
         // 顺序：per-seat 连续 card_slot，deck index 升序）。deck 已被客户端

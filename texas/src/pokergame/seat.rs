@@ -1,6 +1,6 @@
 use crate::pokergame::actions;
 use crate::pokergame::deck::Card;
-use crate::pokergame::player::{GamePlayer, Player};
+use crate::pokergame::player::GamePlayer;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

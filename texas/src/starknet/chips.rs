@@ -14,7 +14,6 @@
 
 use starknet::core::types::Felt;
 use starknet::core::utils::starknet_keccak;
-use starknet::providers::Provider;
 
 use super::chain::parse_felt;
 use super::config::WEI_PER_CHIP;
@@ -24,18 +23,6 @@ fn selector(name: &str) -> Felt {
 }
 
 /// 查询 STRK20 余额（wei）。未配置 token 地址或调用失败返回 None。
-pub async fn strk_balance_wei(address: &str) -> Option<u128> {
-    let chain = super::chain()?;
-    let token = parse_felt(&chain.config.strk_address)?;
-    let owner = parse_felt(address)?;
-    // balanceOf(account) 返回 u256 = [low, high] 两个 felts。
-    let res = chain
-        .call_contract(token, selector("balanceOf"), vec![owner])
-        .await
-        .ok()?;
-    Some(u256_from_felts(&res))
-}
-
 /// 查询 PokerVault 中玩家的筹码余额（wei）。未配置 vault 返回 None。
 pub async fn vault_chip_balance_wei(address: &str) -> Option<u128> {
     let chain = super::chain()?;
@@ -78,7 +65,7 @@ pub async fn verify_deposit(
     }
 
     // 规避共享 provider 单例挂起：为本次校验新建独立 client
-    let url = url::Url::parse(&chain.config.rpc_url)
+    let _url = url::Url::parse(&chain.config.rpc_url)
         .unwrap_or_else(|_| url::Url::parse("http://127.0.0.1:5051").unwrap());
     let tx_hash = parse_felt(deposit_tx_hash)
         .ok_or_else(|| format!("invalid deposit tx hash: {deposit_tx_hash}"))?;

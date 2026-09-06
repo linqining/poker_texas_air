@@ -55,10 +55,12 @@ pub trait HandHistoryStore: Send + Sync {
     fn append(&self, table_id: u32, record: HandHistoryRecord);
     /// 按桌查询最近记录，新→旧排序；`limit` 截断。
     fn list_by_table(&self, table_id: u32, limit: usize) -> Vec<HandHistoryRecord>;
+
+    /// 当前记录总条数（测试用）。
+    #[cfg(test)]
+    fn len(&self, table_id: u32) -> usize;
     /// 精确取单手记录。
     fn get(&self, table_id: u32, hand_seq: u64) -> Option<HandHistoryRecord>;
-    /// 当前记录总条数（测试与运维用）。
-    fn len(&self, table_id: u32) -> usize;
 }
 
 /// 进程内实现：每桌一个 FIFO 队列，超出容量淘汰最旧记录。
@@ -116,14 +118,15 @@ impl HandHistoryStore for MemoryHistoryStore {
             .find(|r| r.hand_seq == hand_seq)
             .cloned()
     }
-
+    #[cfg(test)]
     fn len(&self, table_id: u32) -> usize {
         let map = match self.inner.lock() {
             Ok(m) => m,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(p) => p.into_inner(),
         };
-        map.get(&table_id).map_or(0, |q| q.len())
+        map.get(&table_id).map(|v| v.len()).unwrap_or(0)
     }
+
 }
 
 /// 进程级默认存储实例。换持久化实现时只需改这一处装配。

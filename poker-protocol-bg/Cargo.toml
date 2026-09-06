@@ -7,6 +7,8 @@ description = "Curve-generic Bayer-Groth shuffle argument"
 
 [features]
 borsh = ["dep:borsh", "poker-protocol-core/borsh"]
+# Debug helper: prints challenge derivations when enabled (used by proof.rs cfg gates).
+debug-print-challenges = []
 
 [dependencies]
 poker-protocol-core = { path = "../poker-protocol-core" }

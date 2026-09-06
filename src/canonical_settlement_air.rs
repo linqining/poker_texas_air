@@ -445,7 +445,8 @@ fn borrow_chain(a: u64, b: u64, unit: u64) -> ([u64; 8], [u8; 8]) {
 /// 9. kicker nibbles (5) + per (slot, rank) equality bits (+inverses).
 /// 10. descending-order borrow bits between adjacent kickers (4×4).
 /// Native 24-bit rank value of a seven-card hand, reusing the witness
-/// classification (used for absent-seat rank commitments).
+/// classification (test-side cross-check of the committed rank columns).
+#[cfg(test)]
 fn native_rank_value(cards: &[u8]) -> u32 {
     let ranks: Vec<u8> = cards.iter().map(|c| (c % 13) + 2).collect();
     let suits: Vec<u8> = cards.iter().map(|c| c / 13).collect();
@@ -480,7 +481,7 @@ fn native_rank_value(cards: &[u8]) -> u32 {
 
 fn hand_witness_bits(cards: &[u8]) -> Vec<M31> {
     let mut columns: Vec<M31> = Vec::new();
-    let mut push_bit = |columns: &mut Vec<M31>, bit: bool| {
+    let push_bit = |columns: &mut Vec<M31>, bit: bool| {
         columns.push(M31::from(u32::from(bit)));
     };
     let push_nibble = |columns: &mut Vec<M31>, value: u8| {
@@ -573,7 +574,6 @@ fn hand_witness_bits(cards: &[u8]) -> Vec<M31> {
     for high in window_highs {
         push_bit(&mut columns, global_window(high));
     }
-    let straight_any = window_highs.iter().any(|h| global_window(*h));
     let straight_high = window_highs
         .iter()
         .filter(|h| global_window(**h))
@@ -940,7 +940,7 @@ fn classify(counts: &[u8], straight_high: u8, flush: Option<[u8; 13]>) -> (u8, [
 
 fn settlement_witness(projection: &CanonicalSettlementProjection) -> Vec<M31> {
     let mut columns: Vec<M31> = Vec::new();
-    let mut push_amount = |columns: &mut Vec<M31>, value: u64| {
+    let push_amount = |columns: &mut Vec<M31>, value: u64| {
         for bit in bits_of_amount(value) {
             columns.push(M31::from(u32::from(bit)));
         }
@@ -1021,7 +1021,7 @@ fn settlement_witness(projection: &CanonicalSettlementProjection) -> Vec<M31> {
     }
 
     // 4. adder carry chains
-    let mut push_carries = |columns: &mut Vec<M31>, carries: &[u64; 7]| {
+    let push_carries = |columns: &mut Vec<M31>, carries: &[u64; 7]| {
         for carry in carries {
             columns.push(M31::from(*carry as u32));
         }
@@ -1358,17 +1358,17 @@ fn settlement_trace(projection: &CanonicalSettlementProjection) -> TexasAirResul
 // AIR
 // ---------------------------------------------------------------------------
 
-/// Constraints for one seven-card evaluation block, reading the witness in
-/// the exact order of `hand_witness_bits`.  `card_bytes` are the public
-/// scope bytes of the 7 cards.
-///
-/// DRAFT: the decomposition, histogram, windows, flush-suit selection and
-/// category-equality wiring are complete; the base-bit binding, priority
-/// ladder, kicker multiset/gt wiring and flush cardinality still need to be
-/// finalized before this enters the live constraint path.
-#[allow(dead_code)]
-/// Budgeted constraint emission for bisection: when CONSTRAINT_BUDGET is
-/// set, only the first N constraints inside `constrain_hand` are emitted.
+// Constraints for one seven-card evaluation block, reading the witness in
+// the exact order of `hand_witness_bits`.  `card_bytes` are the public
+// scope bytes of the 7 cards.
+//
+// DRAFT: the decomposition, histogram, windows, flush-suit selection and
+// category-equality wiring are complete; the base-bit binding, priority
+// ladder, kicker multiset/gt wiring and flush cardinality still need to be
+// finalized before this enters the live constraint path.
+//
+// Budgeted constraint emission for bisection: when CONSTRAINT_BUDGET is
+// set, only the first N constraints inside `constrain_hand` are emitted.
 // Debug bisection hook (HAND_SECTIONS bitmask).  NOTE: the evaluator
 // circuit is complete and the honest witness satisfies every constraint
 // row-wise under a full mask (16383), but the real prover still rejects
@@ -1376,9 +1376,9 @@ fn settlement_trace(projection: &CanonicalSettlementProjection) -> TexasAirResul
 // (value −1) is under investigation.  Default OFF keeps the settlement
 // suite green; flip to `false` to re-enable during debugging.
 
-/// Zero-config family tagging for the hand-evaluator constraints: each
-/// emission site records its family before `add_constraint`, so tests can
-/// attribute row-level violations by constraint index to a named family.
+// Zero-config family tagging for the hand-evaluator constraints: each
+// emission site records its family before `add_constraint`, so tests can
+// attribute row-level violations by constraint index to a named family.
 thread_local! {
     static HAND_FAMILY_LOG: std::cell::RefCell<Vec<(&'static str, usize, usize)>> =
         const { std::cell::RefCell::new(Vec::new()) };
@@ -1410,7 +1410,7 @@ fn hand_section_skipped(section: u32) -> bool {
 
 fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &[E::F; 3]) {
     let one: E::F = M31::from(1u32).into();
-    let mut next_bit = |eval: &mut E| -> E::F {
+    let next_bit = |eval: &mut E| -> E::F {
         let bit = eval.next_trace_mask();
         if !hand_section_skipped(18) {
             // Non-binary read detection: cast via a helper that only exists
@@ -1421,7 +1421,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
         }
         bit
     };
-    let mut next_nibble = |eval: &mut E| -> E::F {
+    let next_nibble = |eval: &mut E| -> E::F {
         let mut value: E::F = M31::from(0u32).into();
         for bit_index in 0..4 {
             let bit = next_bit(eval);
@@ -1430,7 +1430,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
         value
     };
     // eq-bit + inverse pair against a field difference.
-    let mut next_eq = |eval: &mut E, difference: E::F| -> E::F {
+    let next_eq = |eval: &mut E, difference: E::F| -> E::F {
         let eq = next_bit(eval);
         let inv = eval.next_trace_mask();
         if !hand_section_skipped(19) {
@@ -1438,7 +1438,7 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
         }
         eq
     };
-    let mut next_eq_gated = |eval: &mut E, difference: E::F, emit: bool| -> E::F {
+    let next_eq_gated = |eval: &mut E, difference: E::F, emit: bool| -> E::F {
         let eq = next_bit(eval);
         let inv = eval.next_trace_mask();
 
@@ -1920,12 +1920,6 @@ fn constrain_hand<E: EvalAtRow>(eval: &mut E, card_bytes: &[E::F], rank_scope: &
     // Per-category wiring: meaningful slots name members of the category
     // multiset in descending top order; padding slots are zero.
     {
-        // Presence expression helpers.
-        let pres = |v: usize| presence[v].clone();
-        let quad = |v: usize| group_bits[v][0].clone();
-        let trip = |v: usize| group_bits[v][1].clone();
-        let pair = |v: usize| group_bits[v][2].clone();
-
         // (category, meaningful slots, multiset-per-slot, exclusion rank set)
         // Multiset per slot: M_i(v) and the excluded ranks E(v).
         let g9 = !hand_section_skipped(13);
@@ -2292,7 +2286,7 @@ impl FrameworkEval for CanonicalSettlementAir {
         }
 
         // ---- witness helpers (must mirror settlement_witness exactly) ----
-        let mut next_bit = |eval: &mut E| -> E::F {
+        let next_bit = |eval: &mut E| -> E::F {
             let bit = eval.next_trace_mask();
             eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
             bit
@@ -2300,7 +2294,7 @@ impl FrameworkEval for CanonicalSettlementAir {
         // Read one amount's bits; returns the 8 byte expressions and
         // enforces booleanity, reconstruction, high-half pin and byte
         // equality against the given scope bytes.
-        let mut amount_from_bits_gated =
+        let amount_from_bits_gated =
             |eval: &mut E, scope_bytes: &[E::F], active_bytes: usize| -> Vec<E::F> {
                 let mut bytes = Vec::with_capacity(AMOUNT_BYTES);
                 for byte_index in 0..AMOUNT_BYTES {
@@ -2317,12 +2311,12 @@ impl FrameworkEval for CanonicalSettlementAir {
                 }
                 bytes
             };
-        let mut amount_from_bits = |eval: &mut E, scope_bytes: &[E::F]| -> Vec<E::F> {
+        let amount_from_bits = |eval: &mut E, scope_bytes: &[E::F]| -> Vec<E::F> {
             amount_from_bits_gated(eval, scope_bytes, AMOUNT_ACTIVE_BYTES)
         };
         // Witness-only advice amount: bits + reconstruction + high-byte pin,
         // with no scope binding.
-        let mut advice_amount_from_bits = |eval: &mut E, active_bytes: usize| -> Vec<E::F> {
+        let advice_amount_from_bits = |eval: &mut E, active_bytes: usize| -> Vec<E::F> {
             let mut bytes = Vec::with_capacity(AMOUNT_BYTES);
             for byte_index in 0..AMOUNT_BYTES {
                 let mut value: E::F = M31::from(0u32).into();
@@ -2337,7 +2331,7 @@ impl FrameworkEval for CanonicalSettlementAir {
             }
             bytes
         };
-        let mut mask_from_bits = |eval: &mut E, scope_bytes: &[E::F]| -> Vec<E::F> {
+        let mask_from_bits = |eval: &mut E, scope_bytes: &[E::F]| -> Vec<E::F> {
             let mut bits = Vec::with_capacity(16);
             for byte_index in 0..2 {
                 let mut value: E::F = M31::from(0u32).into();
@@ -2350,7 +2344,7 @@ impl FrameworkEval for CanonicalSettlementAir {
             }
             bits
         };
-        let mut selector_from_bits = |eval: &mut E, scope_byte_expr: &E::F| -> E::F {
+        let selector_from_bits = |eval: &mut E, scope_byte_expr: &E::F| -> E::F {
             let mut value: E::F = M31::from(0u32).into();
             for bit_index in 0..8 {
                 let bit = next_bit(eval);
@@ -2360,9 +2354,9 @@ impl FrameworkEval for CanonicalSettlementAir {
             eval.add_constraint(value.clone() - scope_byte_expr.clone());
             value
         };
-        let mut next_carries =
+        let next_carries =
             |eval: &mut E| -> Vec<E::F> { (0..7).map(|_| eval.next_trace_mask()).collect() };
-        let mut adder = |eval: &mut E, inputs: &[Vec<E::F>], target: &[E::F], carries: &[E::F]| {
+        let adder = |eval: &mut E, inputs: &[Vec<E::F>], target: &[E::F], carries: &[E::F]| {
             let mut carry_in: Option<E::F> = None;
             for byte in 0..AMOUNT_BYTES {
                 let mut sum: E::F = carry_in.take().unwrap_or_else(|| M31::from(0u32).into());
@@ -2623,7 +2617,7 @@ impl FrameworkEval for CanonicalSettlementAir {
 
         // Byte borrow chain of `x − y − unit`: reads 8 borrows + 8 diffs and
         // returns (borrows, diffs, final_borrow).
-        let mut chain =
+        let chain =
             |eval: &mut E, x: &[E::F], y: &[E::F], unit: u64| -> (Vec<E::F>, Vec<E::F>, E::F) {
                 let borrows: Vec<E::F> = (0..8).map(|_| eval.next_trace_mask()).collect();
                 let diffs: Vec<E::F> = (0..8).map(|_| eval.next_trace_mask()).collect();
@@ -3524,7 +3518,6 @@ mod tests {
     struct CountingEvaluator {
         trace_reads: usize,
         preprocessed_reads: usize,
-        #[allow(dead_code)]
         constraint_count: usize,
     }
 
@@ -3577,7 +3570,7 @@ mod tests {
     fn evaluate_consumes_exactly_the_witness_width() {
         let projection = projection_of(&three_seat_ladder());
         let witness = settlement_witness(&projection);
-        let mut counter = CountingEvaluator {
+        let counter = CountingEvaluator {
             trace_reads: 0,
             preprocessed_reads: 0,
             constraint_count: 0,
@@ -3738,9 +3731,7 @@ mod tests {
     /// Zero-config family attribution: replay the evaluate and map the
     /// failing constraint index (under a given HAND_SECTIONS mask) to its
     /// family label.
-    struct FamilyCountingEvaluator {
-        families: std::cell::RefCell<Vec<&'static str>>,
-    }
+    struct FamilyCountingEvaluator;
 
     impl EvalAtRow for FamilyCountingEvaluator {
         type F = M31;
@@ -3813,7 +3804,6 @@ mod tests {
             eprintln!("scene {name}: families {} ok={}", log.len(), result.is_ok());
             if result.is_err() {
                 eprintln!("  tail: {:?}", &log[log.len().saturating_sub(3)..]);
-                let per_row = 6 * 13;
                 let failing = log.len() - 1;
                 let hand = failing / 78;
                 let idx = failing % 78;
@@ -3906,15 +3896,8 @@ mod tests {
 
     #[test]
     fn family_map_under_masks() {
-        let projection = projection_of(&three_seat_ladder());
         // Emit-only replay: families are recorded in emission order.
-        let evaluator = FamilyCountingEvaluator {
-            families: std::cell::RefCell::new(Vec::new()),
-        };
-        let _ = evaluator;
-        CanonicalSettlementAir.evaluate(FamilyCountingEvaluator {
-            families: std::cell::RefCell::new(Vec::new()),
-        });
+        CanonicalSettlementAir.evaluate(FamilyCountingEvaluator {});
         let log = super::HAND_FAMILY_LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
         eprintln!("family log length: {}", log.len());
         for (index, family) in log.iter().enumerate() {

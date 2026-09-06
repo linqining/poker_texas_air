@@ -7,7 +7,7 @@
 //! the Cairo verifier, so any semantic drift shows up here first.
 
 use poker_protocol_core::{
-    Secp256k1Curve, Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric,
+    Secp256k1Curve, Curve, CurveScalar, ElGamalCiphertextGeneric,
 };
 use poker_protocol_proofs::bayer_groth::BayerGrothShuffleProof;
 use poker_protocol_proofs::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
@@ -53,7 +53,7 @@ fn secp256k1_pk_ownership_roundtrip_and_rejection() {
 
     // Zero secret key must be rejected at prove time.
     let zero = BnScalar::zero();
-    assert!(PKOwnershipProof::<Bn>::try_prove(&zero, &BnPoint::identity(), &mut rand_core::OsRng)
+    assert!(PKOwnershipProof::<Bn>::try_prove(&zero, &BnPoint::IDENTITY, &mut rand_core::OsRng)
         .is_err());
 }
 
@@ -251,7 +251,7 @@ fn secp256k1_three_player_hand_end_to_end() {
     }
 
     // Aggregate key: pk_A = sk_A * G summed over players (curve Add semantics).
-    let aggregate_pk = pks.iter().fold(<Bn as Curve>::Point::identity(), |acc, pk| acc + *pk);
+    let aggregate_pk = pks.iter().fold(<Bn as Curve>::Point::IDENTITY, |acc, pk| acc + *pk);
     let mut deck_cts = encrypt_deck(&deck, &aggregate_pk, &mut rand_core::OsRng);
 
     // Three sequential proven shuffles.

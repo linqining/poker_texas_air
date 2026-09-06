@@ -5,9 +5,3 @@ pub struct SidePot {
     pub amount: u64,
     pub players: Vec<u32>,
 }
-
-impl SidePot {
-    pub fn new() -> Self {
-        Self { amount: 0, players: vec![] }
-    }
-}

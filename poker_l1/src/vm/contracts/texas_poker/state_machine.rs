@@ -26,7 +26,6 @@
 
 use super::utils::{g1_identity, G1Projective};
 use borsh::{BorshDeserialize, BorshSerialize};
-use group::Group;
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
 use poker_protocol::zk_shuffle::ShuffleProof;
@@ -36,7 +35,7 @@ use poker_protocol::zk_shuffle::reconstruction::{
     canonical_base_deck,
 };
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript, MerlinTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 
 use super::betting::BettingRound;
 #[cfg(test)]

@@ -17,7 +17,7 @@ use poker_texas_air::orchestrator::Orchestrator;
 use poker_texas_air::starknet_settlement::{
     AggregateDigestFelts, RegisterAggregateCalldata, SettleHandCalldata,
 };
-use starknet::accounts::{Account, ExecutionEncoder};
+use starknet::accounts::Account;
 use starknet::core::types::{Call, Felt};
 use starknet::core::utils::starknet_keccak;
 use starknet_ff::FieldElement as Ff;
@@ -312,7 +312,6 @@ async fn wait_register_visible(
     contract: Felt,
     hand_id: u32,
 ) -> Result<(), String> {
-    use starknet::providers::Provider;
     let selector = starknet_keccak("settlement_digest".as_bytes());
     let hand_felt = Felt::from(hand_id);
     for _ in 0..45 {

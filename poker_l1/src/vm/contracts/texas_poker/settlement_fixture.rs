@@ -16,8 +16,7 @@
 use crate::object_model::ObjectID;
 use crate::vm::contracts::texas_poker::card::Card;
 use crate::vm::contracts::texas_poker::settlement::{
-    SETTLEMENT_SEATS, SettlementBoards, SettlementPlan, derive_fold_win_plan,
-    derive_settlement_plan_for_boards,
+    SETTLEMENT_SEATS, SettlementBoards, SettlementPlan, derive_settlement_plan_for_boards,
 };
 use crate::vm::contracts::texas_poker::side_pot::calculate_side_pots;
 use crate::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
@@ -477,6 +476,7 @@ pub fn side_pot_layers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::contracts::texas_poker::settlement::derive_fold_win_plan;
 
     #[test]
     fn three_seat_ladder_semantics_are_locked() {

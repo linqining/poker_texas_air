@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use crate::pokergame::game_state::{ElGamalCiphertextJson, ReconstructPhase, ShuffleProofJson,
+use crate::pokergame::game_state::{ElGamalCiphertextJson, ShuffleProofJson,
      ReconstructPublicState, MaskAndShuffleRoundJson, ReconstructState, ReconstructProofJson, PlayerReadableCard,
-     PkProofJson, PlayerReadableCardJson, PlayerRevealAssignment, RevealPhase, RevealTokenPublicState, ShufflePublicState, ShuffleState, RevealTokenState,
-     LeaveGameRoundJson};
+     PkProofJson, PlayerReadableCardJson, PlayerRevealAssignment, RevealPhase, RevealTokenPublicState, ShufflePublicState, ShuffleState, RevealTokenState};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -10,11 +9,11 @@ use crate::pokergame::deck::{Card, EncryptedDeck};
 use crate::pokergame::player::{GamePlayer, Player, PlayerWithProof, WalletAddress, GamePkHex};
 use crate::pokergame::seat::{ClientSeat,Seat};
 use crate::pokergame::side_pot::SidePot;
-use crate::pokergame::table_summary::{TableSummaryV2, TableSummaryMeta, TableSummaryState};
+use crate::pokergame::table_summary::TableSummaryV2;
 use poker_protocol::z_poker::{MentalPokerGame, GameConfig};
 use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Plaintext, Scalar};
 use poker_protocol::z_poker::convert::{ecpoint_to_hex, scalar_to_hex};
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript;
 use poker_protocol::crypto::CurvePoint;
 use poker_protocol::crypto::CurveScalar;
 /// 对齐 Move 合约 MIN_PLAYERS_TO_START = 2
@@ -50,7 +49,6 @@ pub enum JoinResult {
 }
 
 pub use crate::pokergame::error::JoinError;
-pub use events::{CryptoEventType, TableEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -304,6 +302,7 @@ impl Table {
     /// 返回当前聚合公钥。
     /// 始终从 `mental_poker_game.key_manager` 读取（单一真理之源）。
     /// `sync_deck_state` 负责将链上 `summary.crypto.aggregated_pk` 同步到 `mental_poker_game`。
+    #[cfg(test)]
     pub fn aggregated_pk(&self) -> EcPoint {
         self.mental_poker_game.key_manager.get_aggregated_pk()
     }
@@ -460,18 +459,6 @@ impl Table {
     /// The on-chain round_state is already validated by the Move contract,
     /// so we skip the local state machine validation to avoid getting stuck
     /// when local and chain states diverge.
-    pub fn transition_to_forced(&mut self, new_state: RoundState) {
-        let old_state = self.summary.meta.round_state;
-        if old_state != new_state.to_u8() {
-            tracing::info!(target: "table",
-                table_id = self.summary.id,
-                old_state = old_state,
-                new_state = new_state.to_u8(),
-                "forced transition (chain authority)");
-        }
-        self.summary.meta.round_state = new_state.to_u8();
-    }
-
     pub fn new(id: u32, name: String, limit: u64, max_players: u32, chain_table_id: String) -> Self {
         let local_seats = Self::init_seats(max_players);
         let mut summary = TableSummaryV2::default();
@@ -729,7 +716,7 @@ impl Table {
     }
 
     pub fn get_pk_hex_by_wallet_address(&self,wallet: &str)->Option<GamePkHex>{
-        self.players().iter().find(|(pk_hex,wallet_addr)| wallet_addr.0 == wallet).map(|(pk_hex,_)|pk_hex.clone())
+        self.players().iter().find(|(_pk_hex, wallet_addr)| wallet_addr.0 == wallet).map(|(pk_hex,_)|pk_hex.clone())
     }
 }
 
@@ -799,7 +786,7 @@ mod tests {
     /// #16/#17：动作签名验证 + accepted-seq 单调 + 动作日志/公开段。
     #[test]
     fn action_sig_verify_and_accepted_seq() {
-        use poker_protocol::crypto::curve::{Curve, CurveScalar};
+        use poker_protocol::crypto::curve::Curve;
         use poker_protocol::crypto::curve::StarkCurve;
 
         let mut table = make_test_table();

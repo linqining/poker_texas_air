@@ -16,7 +16,7 @@ use super::types::{ReconstructDeck, ReconstructDeckV3, RevealToken};
 use crate::crypto::curve::{CurvePoint, CurveScalar};
 use crate::z_poker::card::PlayingCard;
 use crate::z_poker::key_manager::PKOwnershipProof;
-use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript, MerlinTranscript};
+use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 use hex;
 use rand_core::OsRng;
 

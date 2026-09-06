@@ -9,7 +9,7 @@ use halo2curves::bn256::{Fq, Fr, G1, G1Affine};
 use halo2curves::ff::{Field, PrimeField};
 use halo2curves::group::Group;
 use halo2curves::CurveAffine;
-use poker_protocol_core::{Bn254Curve, Curve, CurvePoint, CurveScalar};
+use poker_protocol_core::{Bn254Curve, Curve};
 
 fn repr32<F: PrimeField>(value: &F) -> [u8; 32] {
     let repr = value.to_repr();

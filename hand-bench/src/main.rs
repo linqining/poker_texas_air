@@ -23,7 +23,7 @@ use poker_texas_air::texas_canonical_air::{
 };
 
 fn base_image() -> CanonicalStateImage {
-    let mut image = CanonicalStateImage {
+    let image = CanonicalStateImage {
         abi_version: poker_texas_air::texas_canonical::CANONICAL_ABI_VERSION,
         table_id: 7,
         hand_id: 1,
@@ -463,7 +463,7 @@ fn borsh_ser<T: borsh::BorshSerialize>(value: &T) -> Vec<u8> {
 /// prove with the native poker_protocol stack; the server runs only the
 /// AIR-side verifiers (`verify_*` / `admit_*`).
 fn full_hand_v2_nine() {
-    use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar, RistrettoCurve};
+    use poker_protocol::crypto::curve::{Curve, CurvePoint, RistrettoCurve};
     use poker_protocol::ristretto_air::{RistrettoAirCiphertext, RistrettoShuffleSubmission};
     use poker_texas_air::ristretto_player_proofs_air::{
         RistrettoCiphertext, prove_fold_with_proof_v2_poseidon2, prove_pk_ownership_poseidon2,
@@ -696,7 +696,7 @@ fn full_hand_v2_nine() {
         let started = Instant::now();
         let results: Vec<_> = batches
             .par_iter()
-            .map(|(seat, context, wire, proof, tokens)| {
+            .map(|(seat, context, wire, _proof, tokens)| {
                 verify_reveal_tokens_batched_poseidon2(
                     &public_keys[*seat],
                     street_cards,
@@ -865,7 +865,7 @@ fn full_hand_v3_dual() {
     }
     let phase_prove = started.elapsed();
     let started = Instant::now();
-    for (seat, context, proof) in &ownership {
+    for (seat, _context, proof) in &ownership {
         assert!(proof.verify(&public_keys[*seat]), "ownership verify seat {seat}");
         total_bytes += point_bytes(&proof.commitment).len() + proof.response.as_bytes().len();
     }
@@ -1120,7 +1120,7 @@ fn full_hand_v3_dual() {
             reveal_commitment: starknet_crypto::poseidon_hash_many(
                 &reveal_proofs
                     .iter()
-                    .flat_map(|(_seat, ct, token, _proof)| {
+                    .flat_map(|(_seat, _ct, token, _proof)| {
                         let t = point_bytes(token);
                         point_felts(&t).to_vec()
                     })
@@ -1165,8 +1165,7 @@ fn full_hand_v3_dual() {
 /// with its server-side verifier; wall clocks and proof sizes are printed per
 /// phase.
 fn full_hand_v2() {
-    use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar, RistrettoCurve};
-    use poker_protocol::precompile_abi::ShuffleVerifyRequest;
+    use poker_protocol::crypto::curve::{Curve, CurvePoint, RistrettoCurve};
     use poker_protocol::ristretto_air::{
         RistrettoAirCiphertext, RistrettoShuffleSubmission, RistrettoTexasDeck,
     };
@@ -1336,7 +1335,7 @@ fn full_hand_v2() {
     )
     .expect("fold_with_proof proof");
     let fold_prove = started.elapsed();
-    let new_aggregate = aggregate - public_keys[fold_seat];
+    let _new_aggregate = aggregate - public_keys[fold_seat];
     let started = Instant::now();
     verify_fold_with_proof_v2(
         &public_keys[fold_seat],

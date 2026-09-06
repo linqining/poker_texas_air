@@ -13,19 +13,17 @@
 //! (`as_bytes()` for scalars, SEC1 uncompressed BE for points).
 
 use k256::elliptic_curve::sec1::ToEncodedPoint;
-use k256::{AffinePoint, Scalar};
+use k256::AffinePoint;
 use poker_protocol_core::{
     CryptoTranscript, Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric, Secp256k1Curve,
 };
 use poker_protocol_proofs::dleq_proof::{DLEqProof, DLEqProofKind, LeaveKind};
-use poker_protocol_proofs::pk_ownership::PKOwnershipProof;
 use poker_protocol_proofs::reveal_token_proof::RevealTokenProof;
 use poker_protocol_proofs::transcript_ext::KeccakTranscript;
 
 type Pt = <Secp256k1Curve as Curve>::Point;
 type Sc = <Secp256k1Curve as Curve>::Scalar;
 
-const PROTOCOL_NAME: &[u8] = b"poker_hand_batch_test_v1";
 const HAND_PROTO_DOMAIN: &[u8] = b"poker/hand-batch/proto";
 
 fn hand_transcript_domain(hand_id: &[u8; 32]) -> Vec<u8> {
@@ -62,7 +60,6 @@ fn scalar_wire_bytes(s: &Sc) -> Vec<u8> {
 
 /// Point literal convention: SEC1 uncompressed x/y, big-endian.
 fn point_affine(p: &Pt) -> AffinePoint {
-    use k256::elliptic_curve::Group as _;
     p.to_affine()
 }
 
@@ -293,7 +290,7 @@ fn print_hand_batch_cairo_vectors() {
     {
         let mut i = 0usize;
         for (eqi, sz) in eq_sizes.iter().enumerate() {
-            let mut acc = <Secp256k1Curve as Curve>::Point::identity();
+            let mut acc = <Secp256k1Curve as Curve>::Point::IDENTITY;
             for _ in 0..*sz {
                 acc = acc + terms[i].point * terms[i].coeff;
                 i += 1;

@@ -30,7 +30,7 @@ mod tests {
     use stwo::prover::backend::simd::qm31::PackedSecureField;
     use stwo::prover::pcs::CommitmentSchemeProver;
     use stwo::prover::poly::BitReversedOrder;
-    use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
+    use stwo::prover::poly::circle::CircleEvaluation;
     use stwo::prover::{ComponentProver, prove};
     use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
     use stwo_constraint_framework::{

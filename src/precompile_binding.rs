@@ -21,7 +21,7 @@ use poker_protocol::precompile_abi::{
 };
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
 use poker_protocol::zk_shuffle::reveal_token_proof::{REVEAL_TOKEN_PROOF_LABEL, RevealTokenProof};
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript, MerlinTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 use stwo::core::fields::m31::M31;
 
 use crate::error::{TexasAirError, TexasAirResult};

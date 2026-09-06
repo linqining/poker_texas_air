@@ -1,7 +1,6 @@
 //! Canonical helpers for constructing tagged-seat test fixtures.
 
-use poker_l1::vm::contracts::texas_poker::utils::{g1_generator as g1_gen, g1_identity as g1_id, G1Projective};
-use group::Group;
+use poker_l1::vm::contracts::texas_poker::utils::g1_generator as g1_gen;
 use poker_l1::Address;
 use poker_l1::vm::contracts::texas_poker::card::HoleCards;
 use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, PlayingSeat, Seat, SeatStatus};

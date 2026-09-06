@@ -310,26 +310,6 @@ impl Table {
         })
     }
 
-    pub fn check_reveal_timeout(&mut self) -> Option<Vec<GamePkHex>> {
-        if !self.reveal_token_state.is_active() {
-            return None;
-        }
-        let timeout_start = match self.reveal_token_state.timeout_start {
-            Some(t) => t,
-            None => return None,
-        };
-        if timeout_start.elapsed().as_secs() >= self.reveal_token_state.timeout_seconds {
-            if self.reveal_token_state.pending_players.is_empty() {
-                return None;
-            }
-            let time_out_pks = self.reveal_token_state.pending_players.clone();
-            self.reveal_token_state.reset();
-            tracing::info!("[REVEAL-TOKEN] timeout {:?} players, clear reveal state", time_out_pks.len());
-            return Some(time_out_pks);
-        }
-        None
-    }
-
     /// 玩家已不在本轮 pending（重复提交 / 状态已推进）的错误文本。
     /// 多客户端同账号、广播与 TABLE_UPDATED fallback 并发、服务器重播等
     /// 场景下重复到达属正常现象，提交方应按幂等成功处理（见 is_benign）。

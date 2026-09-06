@@ -13,12 +13,12 @@ use std::time::Duration;
 use poker_protocol::z_poker::protocol::ClientPlayer;
 
 use crate::auth;
-use crate::models::{Database, User};
+use crate::models::User;
 use crate::pokergame::player::{GamePkHex, Player, WalletAddress};
 use crate::pokergame::game_state::{ElGamalCiphertextJson, MaskAndShuffleRoundJson, PkProofJson, ShuffleProofJson};
 use crate::socket::SocketState;
 
-use poker_protocol::crypto::{hash_to_scalar, ElGamalCiphertext};
+use poker_protocol::crypto::ElGamalCiphertext;
 
 // ---- JSON 序列化辅助（与 client-wasm 逐字节一致的线格式）----
 
@@ -111,7 +111,7 @@ pub async fn start_bot(
         .map_err(|e| format!("deposit verify: {e}"))?;
 
     eprintln!("[bot] deposit verified OK");
-    let token = auth::create_token(&user_id, &state.config.jwt_secret, state.config.jwt_token_expires_in)
+    let _token = auth::create_token(&user_id, &state.config.jwt_secret, state.config.jwt_token_expires_in)
         .map_err(|e| format!("token: {e}"))?;
 
     eprintln!("[bot] deposit verified OK");
@@ -126,11 +126,11 @@ pub async fn start_bot(
         crate::starknet::hooks::register_bot_endorsement_key(&wallet, sk);
         eprintln!("[bot] endorsement key registered for {wallet}");
     }
-    let my_addr = match crate::starknet::mirror::TableMirror::addr_from_starknet(&wallet) {
+    let _my_addr = match crate::starknet::mirror::TableMirror::addr_from_starknet(&wallet) {
         Some(a) => a,
         None => return Err("bad wallet for mirror".into()),
     };
-    let my_seat_u8 = 0u8; // placeholder：真实座位由 mirror 座位表查得
+    let _my_seat_u8 = 0u8; // placeholder：真实座位由 mirror 座位表查得
     // Starknet 镜像：预缓冲 join（真实 pk 所有权证明），下一手 start_preflop_shuffle 应用
     let pk_proof_obj = player.generate_pk_proof();
     let proof_bytes = crate::relayer::proof_bytes::serialize_pk_ownership_proof(&pk_proof_obj);
@@ -236,7 +236,6 @@ pub async fn start_bot(
     }
     eprintln!("[bot] joined, entering drive loop…");
 
-    let seat_id_num = seat_id as u32;
     // 驱动循环：轮到 bot 时生成真实证明并提交
     let started = std::time::Instant::now();
     let mut step = 0usize;
@@ -430,14 +429,6 @@ pub async fn start_bot(
     Ok(())
 }
 
-type EcP = poker_protocol::crypto::EcPoint;
-fn hex_to_point(s: &str) -> EcP {
-    poker_protocol::z_poker::convert::hex_to_ecpoint(s).unwrap_or_else(|_| {
-        use poker_protocol::crypto::curve::Curve;
-        <poker_protocol::crypto::DefaultCurve as Curve>::base_g()
-    })
-}
-
 /// reveal 轮到自己时生成真实 tokens（从服务器 reveal 状态取本玩家待提交的加密牌）。
 async fn pending_reveal_tokens(
     state: &std::sync::Arc<SocketState>,
@@ -469,8 +460,4 @@ async fn pending_reveal_tokens(
     }
     Ok(Some(player.batch_generate_reveal_token(&hand_cts)))
 }
-
-use poker_protocol::crypto::Scalar;
-#[allow(dead_code)]
-fn _witness(_: (Scalar, ElGamalCiphertext)) {}
 

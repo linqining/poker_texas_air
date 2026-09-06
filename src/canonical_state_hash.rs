@@ -137,7 +137,6 @@ mod tests {
 
     #[test]
     fn preimage_is_the_exact_native_commitment_input() {
-        use blake2::Blake2bVar;
         let image = image();
         let preimage = canonical_state_image_preimage(&image).unwrap();
         assert_eq!(

@@ -87,17 +87,3 @@ async fn invoke_locklike(player_address: &str, chips: i64, fn_name: &str) -> Res
     Ok(res.transaction_hash)
 }
 
-/// 读玩家锁定余额（chips 单位）。查询失败返回 None（调用方按 0 处理）。
-pub async fn locked_balance_chips(player_address: &str) -> Option<u128> {
-    let chain = super::chain()?;
-    let vault = vault_address().ok()?;
-    let player = parse_felt(player_address)?;
-    let res = chain
-        .call_contract(vault, selector("locked_balance"), vec![player])
-        .await
-        .ok()?;
-    let lo: u128 = (*res.first()?).try_into().ok()?;
-    let hi: u128 = res.get(1).copied().and_then(|h| h.try_into().ok()).unwrap_or(0);
-    let wei = lo.wrapping_add(hi.wrapping_shl(128));
-    Some(wei / (super::config::WEI_PER_CHIP as u128))
-}
