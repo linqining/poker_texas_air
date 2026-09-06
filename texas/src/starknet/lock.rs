@@ -51,31 +51,11 @@ pub async fn lock_player_chips(player_address: &str, chips: i64) {
 
 /// 每手结算成功后续各参与者的 session 时钟（owner-gated）。
 /// 从未锁定的玩家（历史买入）会因 "No active session" 失败——仅告警。
-///
-/// 与结算提交共用 operator 账户：结算腿刚 send 完、交易还在内存池里时，
-/// 续钟交易容易以旧 nonce 构建（NonceTooOld / DuplicateNonce 被内存池
-/// 拒绝、不上链不花 gas——2026-09-07 线上两手 6 次续钟只成 1 次）。
-/// nonce 类错误按退避重试；其余错误（如 No active session）不重试。
+/// nonce 竞争重试统一在 invoke_vault 内处理。
 pub async fn refresh_player_session(player_address: &str) {
-    const MAX_ATTEMPTS: u32 = 3;
-    for attempt in 1..=MAX_ATTEMPTS {
-        match invoke_vault(player_address, "refresh_session", vec![]).await {
-            Ok(tx) => {
-                tracing::debug!("[in-hand-lock] session refreshed for {player_address}, tx={tx:#x}");
-                return;
-            }
-            Err(e) => {
-                if is_nonce_race(&e) && attempt < MAX_ATTEMPTS {
-                    tracing::warn!(
-                        "[in-hand-lock] session refresh nonce race for {player_address} (attempt {attempt}/{MAX_ATTEMPTS}): {e} — retrying"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    continue;
-                }
-                tracing::warn!("[in-hand-lock] session refresh failed for {player_address}: {e}");
-                return;
-            }
-        }
+    match invoke_vault(player_address, "refresh_session", vec![]).await {
+        Ok(tx) => tracing::debug!("[in-hand-lock] session refreshed for {player_address}, tx={tx:#x}"),
+        Err(e) => tracing::warn!("[in-hand-lock] session refresh failed for {player_address}: {e}"),
     }
 }
 
@@ -277,10 +257,39 @@ pub(crate) fn wei_to_u256_felts(wei: u128) -> (Felt, Felt) {
 }
 
 /// owner-gated vault 调用统一入口（player 地址为第一参）。
+/// nonce 竞争统一退避重试：结算 bundle/释放/续钟共用 operator 账户，
+/// 前一笔还在内存池时本笔易以旧 nonce 构建被拒（不上链不花 gas——
+/// 2026-09-07 线上：OPP 离桌释放 2.08 STRK 因无重试直接丢失）。
 async fn invoke_vault(
     player_address: &str,
     fn_name: &str,
     extra_calldata: Vec<Felt>,
+) -> Result<Felt, String> {
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut last_err = String::new();
+    for attempt in 1..=MAX_ATTEMPTS {
+        match invoke_vault_once(player_address, fn_name, &extra_calldata).await {
+            Ok(tx) => return Ok(tx),
+            Err(e) => {
+                last_err = e.clone();
+                if is_nonce_race(&e) && attempt < MAX_ATTEMPTS {
+                    tracing::warn!(
+                        "[in-hand-lock] vault {fn_name} nonce race for {player_address} (attempt {attempt}/{MAX_ATTEMPTS}) — retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Err(last_err)
+}
+
+async fn invoke_vault_once(
+    player_address: &str,
+    fn_name: &str,
+    extra_calldata: &[Felt],
 ) -> Result<Felt, String> {
     let chain = super::chain().ok_or("starknet chain not initialized")?;
     let vault = vault_address()?;
@@ -288,7 +297,7 @@ async fn invoke_vault(
     let player = parse_felt(player_address)
         .ok_or_else(|| format!("player address invalid: {player_address}"))?;
     let mut calldata = vec![player];
-    calldata.extend(extra_calldata);
+    calldata.extend(extra_calldata.iter().cloned());
     let call = Call {
         to: vault,
         selector: selector(fn_name),
