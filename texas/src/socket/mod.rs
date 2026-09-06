@@ -275,31 +275,6 @@ pub(crate) struct ShuffleNoticePayload {
     pub shuffle_state: Option<ShufflePublicState>,
 }
 
-/// Plan D P2.1：Hand-batch 认可收集的请求/提交载荷。
-/// 客户端（useGameSocket）按 camelCase 读取，序列化须用 camelCase。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct EndorsementRequestPayload {
-    pub table_id: u32,
-    pub hand_id: u32,
-    /// 32B 大端 hand_binding（认可铸造的挑战域）
-    pub hand_binding_hex: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct EndorsementSubmitPayload {
-    pub wallet: String,
-    #[serde(alias = "tableId")]
-    pub table_id: u32,
-    #[serde(alias = "handId")]
-    pub hand_id: u32,
-    pub pk_x_hex: String,
-    pub pk_y_hex: String,
-    pub r_x_hex: String,
-    pub r_y_hex: String,
-    pub s_hex: String,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RevealNoticePayload {
     pub table_id: u32,
@@ -385,6 +360,10 @@ pub struct SocketState {
     pub state: RwLock<GameState>,
     pub config: Config,
     pub game_loop_registry: RwLock<GameLoopRegistry>,
+    /// C2 防重放：已接受的玩家动作 `(table_id, pk, seq)` 去重缓存。
+    /// 覆盖 seq 强制校验关闭的迁移窗口——该窗口内同 seq 的签名重放
+    /// 本会被二次接受；接受点标记 + 入口查重封堵此缺口。
+    pub processed_actions: std::sync::Arc<std::sync::RwLock<HashMap<String, ()>>>,
 }
 
 impl SocketState {
@@ -398,7 +377,33 @@ impl SocketState {
             }),
             config,
             game_loop_registry: RwLock::new(GameLoopRegistry::new()),
+            processed_actions: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
+    }
+
+    /// C2：该 `(table_id, pk, seq)` 的动作是否已被接受过（入口查重）。
+    pub fn is_action_processed(&self, table_id: u32, pk: &str, seq: u64) -> bool {
+        let key = format!("{table_id}_{pk}_{seq}");
+        self.processed_actions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&key)
+    }
+
+    /// C2：在动作接受点标记 `(table_id, pk, seq)`。超过 [`MAX_PROCESSED_ACTIONS`]
+    /// 时整体清空（防无界增长；清空后的残余重放仍被 seq 单调校验兜底）。
+    pub fn mark_action_processed(&self, table_id: u32, pk: &str, seq: u64) {
+        const MAX_PROCESSED_ACTIONS: usize = 10000;
+        let key = format!("{table_id}_{pk}_{seq}");
+        let mut processed = self
+            .processed_actions
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if processed.len() >= MAX_PROCESSED_ACTIONS {
+            tracing::warn!("dedup cache overflow, clearing all entries");
+            processed.clear();
+        }
+        processed.insert(key, ());
     }
 
     /// 已弃用：原从 relayer 缓存同步 deck 的逻辑。
@@ -678,7 +683,7 @@ impl SocketState {
                         return Ok((true, JoinResult::JoinedAndShuffled));
                     } else {
                         tracing::info!("[SHUFFLE] Player {} joined and shuffled, but not enough players to start,shuffle cnt {}", pk_hex, table.complete_shuffle_player_count());
-                        table.complete_or_continue_next_shuffler();
+                        table.advance_turn_pointer_only();
                     }
                 }
                 Ok((false, JoinResult::JoinedAndShuffled))
@@ -737,7 +742,7 @@ impl SocketState {
                                 // 外部调用方需据此 broadcast reveal notice
                                 Ok(table.reveal_token_state.is_active())
                             } else {
-                                table.complete_or_continue_next_shuffler();
+                                table.advance_turn_pointer_only();
                                 Ok(false)
                             }
                         }

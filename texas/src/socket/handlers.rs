@@ -582,9 +582,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         let table_id = payload.table_id;
         s.join(table_room_name(table_id));
         tracing::info!("join_table: {} {}", payload.pk_hex, table_id);
-        // 客户端（重新）进房即重投该桌未收齐认可的待结算手：ENDORSEMENT_REQUEST
-        // 会随重投重播给刚进房的新 socket（否则错过单次广播的客户端永远补不上，
-        // 结算被静默跳过——2026-09-04 线上复现）。
+        // 客户端（重新）进房即重投该桌待上链的待结算手（legacy 重投，
+        // 上一手结算失败后进房即触发补偿）。
         tokio::spawn(crate::starknet::hooks::retry_pending_settlement(table_id));
         let socket_id = s.id.to_string();
         // let join_msg = {
@@ -1208,44 +1207,6 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         ).await;
     });
 
-    // Plan D P2.1：Hand-batch 认可提交（客户端本地铸造的成品认可；
-    // 服务器 on-curve/域校验后入 registry，结算聚合时取用）。
-    socket.on(actions::ENDORSEMENT_SUBMIT, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, _state: State<Arc<SocketState>>| {
-        let payload = parse_payload!(actions::ENDORSEMENT_SUBMIT, payload_raw, crate::socket::EndorsementSubmitPayload);
-        let socket_id = s.id.to_string();
-        let session_wallet = _state.state.read().await
-            .players.get(&socket_id).map(|p| p.wallet_address.to_string());
-        // 会话钱包一致性：声明的 wallet 必须与 WS 会话登录钱包一致
-        // （生产可再叠加钱包签名；会话绑定已阻断跨玩家代提交）。
-        if session_wallet.as_deref() != Some(payload.wallet.as_str()) {
-            tracing::warn!(
-                "[ENDORSEMENT_SUBMIT] wallet mismatch: session={:?} declared={}",
-                session_wallet,
-                payload.wallet
-            );
-            return;
-        }
-        match crate::starknet::dual_settle::register_client_endorsement(
-            &payload.wallet,
-            payload.hand_id,
-            &payload.pk_x_hex,
-            &payload.pk_y_hex,
-            &payload.r_x_hex,
-            &payload.r_y_hex,
-            &payload.s_hex,
-        ) {
-            Ok(()) => tracing::info!(
-                "[ENDORSEMENT_SUBMIT] registered wallet={} hand={}",
-                payload.wallet,
-                payload.hand_id
-            ),
-            Err(e) => tracing::warn!(
-                "[ENDORSEMENT_SUBMIT] rejected wallet={} hand={}: {e}",
-                payload.wallet,
-                payload.hand_id
-            ),
-        }
-    });
     socket.on(actions::REVEAL_SUBMIT, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let payload = parse_payload!(actions::REVEAL_SUBMIT, payload_raw, RevealSubmitPayload);
         // tracing::info!("[REVEAL_SUBMIT] Received RevealSubmitPayload: {:?}", payload);

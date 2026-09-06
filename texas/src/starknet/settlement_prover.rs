@@ -117,9 +117,11 @@ pub fn build_request(
     // registered_digest = poseidon_hash_many([hand_id] ++ Σ(player, sign, |delta|)
     // ++ [action_log_digest])（与 submit.rs / 合约 compute_settlement_digest
     // 逐字段一致；#18 Phase B 尾词 = 动作日志哈希）。
-    let mut fields = Vec::with_capacity(2 + 3 * MAX_PARTICIPANTS);
+    // 2026-09-06 修复：按**实际参与人数**折叠（此前补零到 8 槽，n<8 时
+    // segment 摘要与链上注册值必然不匹配 → 零明文结算 revert）。
+    let mut fields = Vec::with_capacity(2 + 3 * players.len());
     fields.push(Ff::from(hand_id));
-    for i in 0..MAX_PARTICIPANTS {
+    for i in 0..players.len() {
         fields.push(Ff::from_bytes_be(&padded_players[i]).map_err(|e| e.to_string())?);
         fields.push(Ff::from(u64::from(signs[i])));
         fields.push(Ff::from(magnitudes[i]));

@@ -304,8 +304,15 @@ impl Table {
         )
     }
 
-    #[deprecated(note = "use advance_shuffle instead")]
-    pub fn complete_or_continue_next_shuffler(&mut self) {
+    /// 仅推进洗牌轮转指针（轻量版，勿与 [`Self::advance_shuffle`] 混用）：
+    /// - `pending` 为空且完成人数 ≥ MIN_START_NUM → 仅把 `phase` 置 `None`；
+    /// - 否则把 `current_shuffler` 指到 `pending[0]`。
+    ///
+    /// 刻意不发任何事件、不触发发牌/盲注/reveal——供 join 与洗牌提交路径在
+    /// "人未凑够/尚未全部洗完" 时推进轮转。开局驱动统一走
+    /// [`Self::advance_shuffle`]（Move 对齐，含 transition_to(PreFlop)、
+    /// start_preflop_reveal_phase、record_hand_start 与事件广播）。
+    pub fn advance_turn_pointer_only(&mut self) {
         if self.shuffle_state.pending_players.is_empty() && self.complete_shuffle_player_count() >= MIN_START_NUM as usize {
             self.shuffle_state.phase = ShufflePhase::None;
         } else if let Some(next_pk) = self.shuffle_state.pending_players.first() {

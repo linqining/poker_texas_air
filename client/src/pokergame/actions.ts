@@ -42,5 +42,3 @@ export const CRYPTO_EVENT = 'crypto_event' as const;
 // 后端在 on-chain 模式下 emit 的签名请求事件，前端收到后执行 sponsored tx 签名流程
 export const ACTION_SIGNING_REQUEST = 'action_signing_request' as const;
 
-export const ENDORSEMENT_REQUEST = 'ENDORSEMENT_REQUEST';
-export const ENDORSEMENT_SUBMIT = 'ENDORSEMENT_SUBMIT';

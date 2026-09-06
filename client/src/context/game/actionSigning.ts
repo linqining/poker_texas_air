@@ -2,7 +2,7 @@
  * #16 抗审查动作签名（客户端侧）。
  *
  * 以牌局身份 SK（PlayerContext 的 skHex，Stark curve）对动作
- * (tableId, seq, action, amount) 做 wasm 签名；seq 按桌持久化在
+ * (tableId, handId, seq, action, amount) 做 wasm 签名；seq 按桌持久化在
  * localStorage（`poker.actionSeq:{tableId}`），保证服务端看到的
  * 每座位 seq 严格单调。
  *
@@ -17,7 +17,7 @@ interface ActionSigResult {
   s_hex: string;
 }
 
-let wasmSign: ((sk: string, tableId: number, seq: bigint, action: string, amount: bigint) => ActionSigResult) | null = null;
+let wasmSign: ((sk: string, tableId: number, handId: number, seq: bigint, action: string, amount: bigint) => ActionSigResult) | null = null;
 let wasmProbed = false;
 
 async function loadWasmSign(): Promise<typeof wasmSign> {
@@ -29,8 +29,8 @@ async function loadWasmSign(): Promise<typeof wasmSign> {
     if (typeof fn !== 'function') {
       return null; // pkg 构建早于 #16：无动作签名导出
     }
-    wasmSign = (sk: string, tableId: number, seq: bigint, action: string, amount: bigint) =>
-      fn(sk, tableId, seq, action, amount) as ActionSigResult;
+    wasmSign = (sk: string, tableId: number, handId: number, seq: bigint, action: string, amount: bigint) =>
+      fn(sk, tableId, handId, seq, action, amount) as ActionSigResult;
   } catch {
     wasmSign = null;
   }
@@ -58,15 +58,19 @@ export interface AttachedActionSig {
 export async function signTableAction(
   skHex: string | null,
   tableId: number | string,
+  handId: number | null | undefined,
   action: 'fold' | 'check' | 'call' | 'raise',
   amount = 0,
 ): Promise<AttachedActionSig | null> {
   if (!skHex) return null;
+  // v2：hand_id 在签名域内——缺失（未拿到开局广播）时无法产出有效签名，
+  // 返回 null（动作以未签名形态发出，服务端 enforcement 决定去留）。
+  if (!handId) return null;
   const sign = await loadWasmSign();
   if (!sign) return null;
   try {
     const seq = nextSeq(tableId);
-    const out = sign(skHex, Number(tableId), BigInt(seq), action, BigInt(amount));
+    const out = sign(skHex, Number(tableId), Number(handId), BigInt(seq), action, BigInt(amount));
     if (!out || typeof out.r_hex !== 'string' || typeof out.s_hex !== 'string') return null;
     return { seq, rHex: out.r_hex, sHex: out.s_hex };
   } catch {

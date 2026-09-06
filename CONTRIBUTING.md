@@ -28,7 +28,30 @@ skipped by default. Three layers:
 | --- | --- | --- |
 | Dev loop | `cargo test` | everything except the ignored slow prove tests |
 | Dev loop, this workspace only | `cargo test-fast` | same, skipping vendored flock's own unit tests |
+| Dev loop, faster execution | `cargo test-nextest` | same crate set via nextest (parallel, isolated; no doctests) |
 | Full gate (pre-merge) | `cargo test-all` (or `cargo test --workspace -- --include-ignored`) | every test, including the slow prove roundtrips |
+
+Build-speed notes that keep the dev loop usable:
+
+- `[profile.dev] debug = "line-tables-only"` and `debug = false` for
+  dependencies keep backtraces readable (file:line for workspace code) while
+  avoiding full DWARF — the previous `debug = 2` default produced 200 MB+
+  rlibs and multi-minute links. Do not raise debuginfo back without measuring.
+- Touching a shared workspace crate rebuilds every dependent test binary.
+  During iteration, scope the run: `cargo test -p <crate>`.
+- Stale artifacts from old profiles linger until cargo GC; `cargo gc` (nightly)
+  or removing `target/debug` reclaims disk if it grows past ~10 GB.
+
+`cargo test-fast` / `cargo test-all` cover the main workspace only. The
+`client-wasm` crate is a standalone Cargo workspace (wasm-pack target `web`);
+run its checks separately from that directory:
+
+```bash
+cd client-wasm && cargo check && cargo test
+```
+
+CI builds it via the `client-wasm (wasm-pack)` job; there is no cross-workspace
+alias because Cargo aliases cannot span workspaces.
 
 CI's `Workspace tests` job and the weekly coverage job run the full gate, so
 the ignored tests stay covered; do not delete an `#[ignore]` to "fix" a slow

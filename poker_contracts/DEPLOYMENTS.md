@@ -297,3 +297,27 @@ approve+deposit_for、1=领取 burn_chips+回池）。新增内容：
 
 （中途一次部署 `0x3854d580...` 因 owner=UDC 缺陷作废，未授权、不可用。）
 
+
+## PokerDualSettlement v4 — P2-M4 双证明私密结算（2026-09-06）
+
+新增 `verify_and_settle_dapv_proved_private(hand_binding, hand_id, segment, p_batch_commitment, p_batch_len)`
+（hand_verify + stark verify 双 fact 认证）与 `register_hand_proved`（钉住
+p_batch 承诺/长度）、`set_hand_verify_program_hash`；双 fact：
+`poseidon([hand_verify_program_hash, p_batch_commitment])` +
+`poseidon([circuit_program_hash, segment])`。派奖与 v2 private 相同
+（金额藏 cm，escrow 按公开段 total_winnings 划转）。snforge 92/92。
+
+| 项 | 值 |
+| --- | --- |
+| class | `0x02c73f48a7b6e1f615e972525fc25c677aa1937234b5fe7aa9fe7c402072cf6b` |
+| 地址 | `0xbfc7046b6a855a2c6a144441370e9cee27caf57a9aaf4708d8b48fa8640eb8` |
+| declare TX | `0x12499773ffb7d3f416e6d9381bb597b2b7bf0960e9b8a4e6b2f7760e3677082`（casm Actual `0x74e1aadc...` 重试后落地） |
+| deploy TX | `0x3a9610e5aeaee41caff5a6910fb76397074047a12562515748722aa4530b06a` |
+| 构造参数 | owner=deployer(`0x6e37...c782`) vault=`0x0629385f...`(v3) initial_prover=deployer |
+| set_claim_helper | `0x37d9a110...` → `0x60a4c474...`（SettlementPayoutAnonymizer） |
+| set_circuit_program_hash | `0x4d46cb37...` → `0x744d16d3...`（#18 Phase C 切片 2 电路） |
+| set_hand_verify_program_hash | `0x21cfd7c4...` → `0x303029d8...`（hand-verify-native form-② composed） |
+| 回执 | 四笔均 SUCCEEDED；`circuit_program_hash` 视图已验证 |
+
+（部署脚本 `scripts/deploy_sepolia_v4.sh`；旧 dual v3.x `0x55784c90...` 保留服务
+历史已结算手的认领，`.env` 已切换指向 v4。）

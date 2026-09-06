@@ -58,7 +58,8 @@ fn main() {
             *w = 0x0123_4567_89ab_cdefu64.wrapping_mul(i as u64 + 1);
         }
         bench("keccak-f[1600]   (scalar)", 1.0, || {
-            keccak::f1600(&mut st);
+            // keccak 0.2：自由函数 f1600 改为 Keccak 句柄的闭包 API
+            keccak::Keccak::new().with_f1600(|f| f(&mut st));
             black_box(&st);
         });
     }

@@ -124,6 +124,15 @@ codegen-units = 1
 # debuggable without a second artifact.
 strip = "debuginfo"
 
+# Dev-loop build speed: full `debug = 2` DWARF was the dominant cost —
+# 21 GB of deps artifacts and 200 MB+ rlibs made every link (and thus every
+# `cargo test`) crawl. `line-tables-only` keeps file:line in backtraces for
+# workspace code at a fraction of the size; dependencies drop debuginfo
+# entirely (their frames show up symbolicated without line numbers, which is
+# fine for a dev loop — `cargo test-all`/CI run in release where needed).
+[profile.dev]
+debug = "line-tables-only"
+
 # Tests spend almost all their time inside dependency code — stwo's SIMD
 # field math, circle FFT, FRI and Merkle commitments — which at dev
 # opt-level 0 makes the poseidon252 prove tests tens of times slower.
@@ -131,3 +140,4 @@ strip = "debuginfo"
 # this crate itself at fast-compile opt-level 0 for quick iteration.
 [profile.dev.package."*"]
 opt-level = 3
+debug = false

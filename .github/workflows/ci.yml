@@ -20,11 +20,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly-2026-04-15
-      # `--all-targets` also builds the vendored flock benchmark, which is
-      # excluded from this workspace but is pulled in as a path dependency and
-      # currently targets an incompatible optional keccak API. Check production
-      # libraries and binaries here; run vendored benchmarks in their own CI.
-      - run: cargo check --release --workspace --lib --bins
+      # `--all-targets` includes benches; the vendored flock benchmark
+      # (native_hash) was migrated to the keccak 0.2 closure API and compiles.
+      - run: cargo check --release --workspace --lib --bins --tests --benches
+
+  docs-ratchet:
+    name: missing_docs ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-04-15
+      # 渐进消化 missing_docs：预算制棘轮，只拦新增；补文档后调低
+      # scripts/missing_docs_budget.txt（见脚本头注）。
+      - run: ./scripts/missing_docs_ratchet.sh
 
   test:
     name: Workspace tests

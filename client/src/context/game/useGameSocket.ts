@@ -37,8 +37,6 @@ import { logger } from '../../helpers/logger';
 import { useContentContext } from '../content/contentContext';
 import { useContext } from 'react';
 import authContext from '../auth/authContext';
-import { ENDORSEMENT_REQUEST, ENDORSEMENT_SUBMIT } from '../../pokergame/actions';
-import { mintEndorsement } from './endorsementClient';
 
 export interface UseGameSocketParams {
   socket: Socket | null;
@@ -112,7 +110,6 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
   // TABLE_UPDATED reconstruct fallback 去重：同一 reconstruct 轮（coefficient + pending 数）只补交一次。
   const reconstructFallbackKeyRef = useRef<string | null>(null);
 
-  const endorsedHandIdsRef = useRef<Set<number>>(new Set());
   useEffect(() => {
     // StrictMode dev 双挂载会把 isUnmountingRef 置 true 且无人复位，导致
     // 之后每次依赖变化（服务端 TABLE_UPDATED 广播）的 cleanup 都误发
@@ -240,34 +237,6 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
             })();
           }
         }
-      });
-
-      // Plan D P2.1：Hand-batch 认可收集——服务器每手结算时广播请求，
-      // 本地 wasm 铸造后交回成品（私钥不出客户端）。wasm pkg 未包含
-      // 认可导出时 mintEndorsement 返回 null，静默跳过（Hand-batch 结算
-      // 由服务器超时降级，legacy 结算不受影响）。
-      // 同一手只铸造/提交一次：服务器 DAPV 重投会重播请求（每 3.5s 一次），
-      // 无去重会导致浏览器反复做 wasm 铸造把页面卡死。
-      const endorsedHandIds = endorsedHandIdsRef.current;
-      socket.on(ENDORSEMENT_REQUEST, async (data: { tableId: number; handId: number; handBindingHex: string }) => {
-        logger.log('[ENDORSEMENT_REQUEST]', data);
-        if (endorsedHandIds.has(data.handId)) {
-          logger.log('[ENDORSEMENT_REQUEST] already endorsed hand', data.handId);
-          return;
-        }
-        endorsedHandIds.add(data.handId);
-        const submission = await mintEndorsement(data.handBindingHex);
-        if (!submission) {
-          logger.warn('[ENDORSEMENT_REQUEST] wasm endorsement capability unavailable — skipping');
-          return;
-        }
-        socket.emit(ENDORSEMENT_SUBMIT, {
-          wallet: walletAddress,
-          tableId: data.tableId,
-          handId: data.handId,
-          ...submission,
-        });
-        logger.log('[ENDORSEMENT_REQUEST] submitted client-minted endorsement for hand', data.handId);
       });
 
       socket.on(TABLE_JOINED, ({ table, message, from }: TableJoinedPayload) => {

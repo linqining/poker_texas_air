@@ -67,6 +67,8 @@ export interface ShuffleState {
   aggregate_pk: string;
   completed_players: string[];
   pending_players: string[];
+  /** 本手 id（动作签名域 v2；开局广播分配） */
+  hand_id: number;
   /** 当前洗牌者是否需补自身密钥层（waiting 入座玩家）——true 时走 join_game_and_shuffle。 */
   needs_join_layer?: boolean;
   /** 聚合公钥减去当前洗牌者公钥（join_game_and_shuffle 的 curr_share_pk）。 */

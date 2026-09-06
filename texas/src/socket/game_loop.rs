@@ -980,6 +980,14 @@ use crate::pokergame::receipts;
 }
 
 pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, req: ActionRequest) {
+    // C2 防重放入口查重：带 seq 的动作若已被接受过，直接丢弃（覆盖
+    // enforcement off 迁移窗口；enforcement on 时 seq 单调校验本已兜底）。
+    if let Some(seq) = req.seq {
+        if state.is_action_processed(table_id, &req.pk_hex.0, seq) {
+            tracing::info!("[process_action] duplicate action dropped: table={table_id} pk={} seq={seq}", req.pk_hex.0);
+            return;
+        }
+    }
     // #17：在状态写锁内只收集回执 payload，锁释放后统一广播
     //（此前在锁内 await 读锁 → 死锁，表现为下注面板点击无响应）。
     let mut pending_receipts: Vec<serde_json::Value> = Vec::new();
@@ -1060,6 +1068,8 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                             // seq 只前进不回退（未签名迁移动作保持 accepted 单调）
                             let seq = req.seq.unwrap_or(0).max(table.accepted_seq_of(seat));
                             table.record_action(seat, seq, &req.action, amount_for_sig, false, sig_ok);
+                            // C2：接受点标记，入口查重据此拦截同 (table, pk, seq) 重放
+                            state.mark_action_processed(table_id, &req.pk_hex.0, seq);
                             pending_receipts.push(build_action_receipt_payload(table_id, &req.pk_hex, seq, &req.action, amount_for_sig, "accepted", ""));
                         }
                     }

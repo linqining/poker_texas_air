@@ -22,9 +22,6 @@ pub const SITTING_IN: &str = "SITTING_IN";
 pub const SHUFFLE_SUBMIT: &str = "SHUFFLE_SUBMIT";
 pub const SHUFFLE_NOTICE: &str = "SHUFFLE_NOTICE";
 pub const REVEAL_SUBMIT: &str = "REVEAL_SUBMIT";
-// Plan D P2.1：Hand-batch 认可收集（客户端本地铸造，服务器只收成品）
-pub const ENDORSEMENT_REQUEST: &str = "ENDORSEMENT_REQUEST";
-pub const ENDORSEMENT_SUBMIT: &str = "ENDORSEMENT_SUBMIT";
 pub const REVEAL_NOTICE: &str = "REVEAL_NOTICE";
 pub const HAND_REVEAL_RESULT: &str = "HAND_REVEAL_RESULT";
 pub const COMMUNITY_REVEAL_RESULT: &str = "COMMUNITY_REVEAL_RESULT";

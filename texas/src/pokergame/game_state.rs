@@ -98,6 +98,9 @@ pub struct ShuffleState {
     pub timeout_seconds: u64,
     pub completed_players: Vec<GamePkHex>,
     pub pending_players: Vec<GamePkHex>,
+    /// 本手 id（动作签名域 v2；开局分配，随状态广播到客户端）。
+    #[serde(default)]
+    pub hand_id: u32,
 }
 
 impl ShuffleState {
@@ -109,6 +112,7 @@ impl ShuffleState {
             timeout_seconds: 45,
             completed_players: Vec::new(),
             pending_players: Vec::new(),
+            hand_id: 0,
         }
     }
 

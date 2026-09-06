@@ -249,21 +249,24 @@ fn play_full_hand_artifacts(
     assert_ne!(settlement.aggregate_digest, [0u8; 32]);
 
     // ---- Hand-batch（PokerDualSettlement）：hand_binding + hand-bound 认可批次 ----
-    // P2.1 后服务器不持有认可密钥：测试在 host 侧生成密钥并铸造（角色
-    // 等价于客户端 wasm endorsement_mint），再走客户端构建路径。
+    // 认可提交通道已删除：测试在 host 侧生成密钥并铸造（将来 ownership 桶
+    // 重接动作签名），直接走构建路径。
     let binding = super::dual_settle::prepare_handbatch_binding(&mirror, &settlement)?;
-    let endorsements: Vec<super::dual_settle::ClientEndorsement> = settlement
+    let endorsements: Vec<super::dual_settle::Endorsement> = settlement
         .players_remapped
         .iter()
         .map(|_p| {
             let sk = <super::dual_settle::Sc as CurveScalar>::random(&mut rand::rngs::OsRng);
             let pk = <poker_protocol::crypto::curve::StarkCurve as Curve>::base_g() * sk;
-            let e = super::dual_settle::mint_endorsement(&sk, &pk, &binding.hand_id_bytes);
-            super::dual_settle::ClientEndorsement { pk: e.pk, r: e.r, s: e.s }
+            super::dual_settle::mint_endorsement(&sk, &pk, &binding.hand_id_bytes)
         })
         .collect();
-    let dual = super::dual_settle::build_dual_settlement_from_client(&mirror, &settlement, &endorsements)
-        .map_err(|e| format!("dapv build: {e}"))?;
+    let dual = super::dual_settle::build_dual_settlement_with(
+        &mirror,
+        &settlement,
+        &|_hb, _players| Ok(endorsements.clone()),
+    )
+    .map_err(|e| format!("dapv build: {e}"))?;
     assert_ne!(dual.hand_binding, starknet_ff::FieldElement::ZERO);
     assert_eq!(dual.batch_words.len(), 5 + 5 * settlement.players_remapped.len());
     // #18 Phase B：register 7 felt（+动作日志承诺）、settle 前缀 +1 标量。
@@ -919,19 +922,21 @@ async fn sepolia_settle_smoke() {
 
     // 5. dapv 上链：register_hand（含 action_log 承诺）+ verify_and_settle_dapv_stark。
     let binding = super::dual_settle::prepare_handbatch_binding(&mirror, &settlement).expect("binding");
-    let endorsements: Vec<super::dual_settle::ClientEndorsement> = settlement
+    let endorsements: Vec<super::dual_settle::Endorsement> = settlement
         .players_remapped
         .iter()
         .map(|_p| {
             let sk = <super::dual_settle::Sc as CurveScalar>::random(&mut OsRng);
             let pk = <poker_protocol::crypto::curve::StarkCurve as Curve>::base_g() * sk;
-            let e = super::dual_settle::mint_endorsement(&sk, &pk, &binding.hand_id_bytes);
-            super::dual_settle::ClientEndorsement { pk: e.pk, r: e.r, s: e.s }
+            super::dual_settle::mint_endorsement(&sk, &pk, &binding.hand_id_bytes)
         })
         .collect();
-    let dual =
-        super::dual_settle::build_dual_settlement_from_client(&mirror, &settlement, &endorsements)
-            .expect("dual build");
+    let dual = super::dual_settle::build_dual_settlement_with(
+        &mirror,
+        &settlement,
+        &|_hb, _players| Ok(endorsements.clone()),
+    )
+    .expect("dual build");
     let (register_tx, settle_tx) =
         super::dual_settle::submit_dual_settlement(
             &dual,

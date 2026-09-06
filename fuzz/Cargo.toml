@@ -13,7 +13,6 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 borsh = "1.7"
 poker_texas_air = { path = ".." }
-poker_l1 = { path = "../poker_l1" }
 
 [[bin]]
 name = "settlement_statement"

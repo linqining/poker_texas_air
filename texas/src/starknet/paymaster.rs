@@ -147,44 +147,6 @@ pub async fn relay(Json(body): Json<Value>) -> Response {
 // ============================================================
 
 /// 客户端认可注册请求体（P2.1）。
-#[derive(Debug, serde::Deserialize)]
-pub struct EndorsementRegistration {
-    pub wallet: String,
-    pub hand_id: u32,
-    pub pk_x_hex: String,
-    pub pk_y_hex: String,
-    pub r_x_hex: String,
-    pub r_y_hex: String,
-    pub s_hex: String,
-}
-
-/// POST /starknet/endorsement：玩家客户端提交其本地铸造的 hand-bound
-/// 认可（STARK 曲线）。服务器仅做 on-curve/域校验并缓存，结算聚合时
-/// 取用——私钥永不出客户端。
-/// 生产加固 TODO：请求须附钱包签名（session key / typed-data）证明
-/// wallet 归属；当前信任调用方声明的 wallet（与 WS 会话同源时安全）。
-pub async fn register_endorsement(Json(body): Json<EndorsementRegistration>) -> Response {
-    match super::dual_settle::register_client_endorsement(
-        &body.wallet,
-        body.hand_id,
-        &body.pk_x_hex,
-        &body.pk_y_hex,
-        &body.r_x_hex,
-        &body.r_y_hex,
-        &body.s_hex,
-    ) {
-        Ok(()) => {
-            tracing::info!(
-                "[endorsement] registered client endorsement wallet={} hand={}",
-                body.wallet,
-                body.hand_id
-            );
-            Json(serde_json::json!({ "ok": true })).into_response()
-        }
-        Err(e) => (axum::http::StatusCode::BAD_REQUEST, e).into_response(),
-    }
-}
-
 // ============================================================
 // #30 签名加固：executeTransaction 的用户签名本地验证
 // ============================================================

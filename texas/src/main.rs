@@ -82,7 +82,6 @@ async fn main() -> std::io::Result<()> {
         db: socket_state.db.clone(),
         config: config.clone(),
         socket_state: socket_state.clone(),
-        processed_actions: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
     });
 
     let mut api_routes = Router::new()
@@ -108,11 +107,6 @@ async fn main() -> std::io::Result<()> {
             "/starknet/paymaster/status",
             routing::get(starknet::paymaster::status),
         )
-        // Plan D P2.1：客户端 Hand-batch 认可注册（私钥不出客户端）。
-        .route(
-            "/starknet/endorsement",
-            routing::post(starknet::paymaster::register_endorsement),
-        )
         // G17：/api 限流（10s 窗口 200 次/IP，超限 429）
         .layer(axum::middleware::from_fn(ratelimit::limit));
 
@@ -137,8 +131,6 @@ async fn main() -> std::io::Result<()> {
         )
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
-    // Part A Phase 1：dev 联调钱包的认可托管（生产不配置该环境变量）
-    crate::starknet::hooks::register_dev_endorsement_wallets();
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     tracing::info!("Secret Poker Server (Rust) starting on port {}", port);

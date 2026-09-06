@@ -196,6 +196,8 @@ pub struct Table {
     /// 跨手累积便于追溯，审计摘要只覆盖本手窗口。
     #[serde(skip)]
     pub hand_log_start: usize,
+    /// 本手 id（开局时分配；动作签名域 v2 与结算记账同源）。
+    pub current_hand_id: u32,
     /// #20 Phase 2：本手证明输入日志（HandStart 快照 + 已接受命令）。
     /// 结算时一次性重放为 ProveTask 链（取代常驻 mirror 第二本账）。
     /// `record_hand_start`（deck 终局时）整体重置。
@@ -307,7 +309,9 @@ impl Table {
         self.mental_poker_game.key_manager.get_aggregated_pk()
     }
 
-    /// #16 动作签名验证（服务端口径）：pk/seq/action/amount 全部进签名域。
+    /// #16 动作签名验证（服务端口径）：table_id/hand_id/seq/action/amount
+    /// 全部进签名域（v2）。hand_id 取开局分配值（`hand_proof_log.start`）；
+    /// 未开局（无 HandStartData）时无从绑定手上下文，一律拒绝。
     pub fn verify_action_sig(
         &self,
         pk_hex: &GamePkHex,
@@ -316,9 +320,13 @@ impl Table {
         amount: u64,
         sig: &crate::pokergame::actions::ActionSig,
     ) -> bool {
+        let Some(hand_id) = self.hand_proof_log.start.as_ref().map(|s| s.hand_id) else {
+            return false;
+        };
         poker_protocol::z_poker::protocol::verify_game_action_hex(
             &pk_hex.0,
             self.summary.id,
+            hand_id,
             seq,
             action,
             amount,
@@ -499,6 +507,7 @@ impl Table {
             action_log: Vec::new(),
             hand_proof_log: crate::starknet::prove_log::HandProofLog::default(),
             hand_log_start: 0,
+            current_hand_id: 0,
         }
     }
 
@@ -790,6 +799,9 @@ mod tests {
         use poker_protocol::crypto::curve::StarkCurve;
 
         let mut table = make_test_table();
+        // v2：签名域含 hand_id——夹具注入开局 HandStartData（hand_id=9）
+        table.hand_proof_log =
+            crate::starknet::prove_log::HandProofLog::with_hand_start_for_test(9);
         let sk = StarkCurve::hash_to_scalar(b"seat-sk");
         let pk = StarkCurve::base_g() * sk;
         let pk_hex = hex::encode(pk.compress().as_ref());
@@ -799,7 +811,7 @@ mod tests {
         let sig_s_hex;
         {
             let (r_hex, s_hex) = poker_protocol::z_poker::protocol::sign_game_action(
-                &sk, table.summary.id, 1, "raise", 320, &mut rand::rngs::OsRng,
+                &sk, table.summary.id, 9, 1, "raise", 320, &mut rand::rngs::OsRng,
             );
             sig_r_hex = r_hex;
             sig_s_hex = s_hex;

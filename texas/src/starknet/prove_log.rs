@@ -44,6 +44,9 @@ pub enum HandCommand {
 /// HandStart 快照：deck 终局时刻的手牌静态事实（全部在盲注扣除前采集）。
 #[derive(Debug, Clone)]
 pub struct HandStartData {
+    /// 本手 id——开局时分配（`next_hand_id`），动作签名挑战域与结算
+    /// 记账共用同一值；结算侧不再另行分配。
+    pub hand_id: u32,
     /// 按游戏座位号升序的参与者（与 VM DealHole 升序座位规范对齐）。
     pub participants: Vec<HandParticipant>,
     /// 按参与者序列中按钮的序号（VM post_blinds 据此对齐盲注位）。
@@ -82,6 +85,22 @@ pub struct HandProofLog {
 }
 
 impl HandProofLog {
+    /// 测试夹具：仅含开局 hand_id 的日志（动作签名域 v2 的验证前置）。
+    #[cfg(test)]
+    pub fn with_hand_start_for_test(hand_id: u32) -> Self {
+        Self {
+            start: Some(HandStartData {
+                hand_id,
+                participants: Vec::new(),
+                button_rank: 0,
+                small_blind: 10,
+                deck: Vec::new(),
+            }),
+            commands: Vec::new(),
+            seen_reveals: std::collections::HashSet::new(),
+        }
+    }
+
     fn hash_reveal(pk_hex: &str, tokens: &[poker_protocol::z_poker::protocol::RevealToken]) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -115,6 +134,26 @@ pub fn record_join(table_id: u32, wallet: &str, pk_hex: &str, proof_bytes: Vec<u
 /// deck 终局（advance_shuffle 完成、盲注未扣）时采集 HandStart 快照。
 /// 任何参与者缺 join 证明 → 本手不记录（结算时显式跳过并告警），
 /// 与旧 mirror_begin_reveal 的放弃语义一致，绝不阻塞牌局。
+/// 每桌单调递增的 hand_id。种子取 unix 秒：服务器重启后仍满足链上
+/// register_aggregate 的 first_hand_id 严格递增校验。
+static HAND_ID_SEQ: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u32, u32>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn next_hand_id(table_id: u32) -> u32 {
+    let m = HAND_ID_SEQ.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(1);
+    let mut g = match m.lock() {
+        Ok(g) => g,
+        Err(_) => return unix,
+    };
+    let e = g.entry(table_id).or_insert(0);
+    *e = (*e + 1).max(unix);
+    *e
+}
+
 pub fn record_hand_start(table: &mut Table) {
     let table_id = table.summary.id;
     let sb = table.summary.min_bet.max(1);
@@ -183,6 +222,7 @@ pub fn record_hand_start(table: &mut Table) {
 
     table.hand_proof_log = HandProofLog {
         start: Some(HandStartData {
+            hand_id: table.current_hand_id,
             participants: plan.into_iter().map(|(_, p)| p).collect(),
             button_rank,
             small_blind: sb,

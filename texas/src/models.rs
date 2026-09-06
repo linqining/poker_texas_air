@@ -43,16 +43,6 @@ impl Database {
         self.users.read().await.get(id).cloned()
     }
 
-    pub async fn find_user_by_address(&self, address: &str) -> Option<User> {
-        let lower = address.to_lowercase();
-        self.users
-            .read()
-            .await
-            .values()
-            .find(|u| u.address.to_lowercase() == lower)
-            .cloned()
-    }
-
     pub async fn save_user(&self, user: &User) -> Result<(), String> {
         let mut users = self.users.write().await;
         users.insert(user.id.clone(), user.clone());
@@ -89,9 +79,6 @@ impl Database {
         None
     }
 
-    pub async fn get_locked_chips(&self, id: &str) -> i64 {
-        self.users.read().await.get(id).map(|u| u.locked_chips).unwrap_or(0)
-    }
 }
 
 impl Default for Database {

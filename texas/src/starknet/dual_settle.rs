@@ -40,10 +40,9 @@
 //!   曲线（EC_OP 原生，是全残差批次唯一可负担的路线）；secp256k1 保留
 //!   为 EVM ecrecover 互操作备选。当前批次仍承载每座位的 hand-bound
 //!   所有权认可（secp256k1）。
-//! - 认可密钥目前由服务器在入座时生成托管（bot 路径经
-//!   `hooks::register_bot_endorsement_key`；dev 钱包经
-//!   `register_dev_endorsement_wallets`）。生产形态：认可私钥由玩家
-//!   钱包/客户端持有，结算时经签名请求铸造（与游戏密钥同分布）。
+//! - 2026-09-06：客户端认可提交通道（ENDORSEMENT_SUBMIT/registry）已删除——
+//!   ownership 认可改由**动作签名**承担（游戏 SK，`zgame.action-sig.v2`
+//!   域含 hand_id，开局即随动作铸造）；批次/折叠机器保留待重接。
 
 use poker_protocol_core::{Curve, CurvePoint, CurveScalar, StarkCurve};
 use starknet::accounts::Account;
@@ -60,117 +59,6 @@ use super::submit::{ff_to_felt, i128_to_ff, HandSettlement};
 
 pub type Sc = <StarkCurve as Curve>::Scalar;
 pub type Pt = <StarkCurve as Curve>::Point;
-
-/// 客户端提交的成品认可（P2.1：私钥在玩家客户端，服务器只中继）。
-#[derive(Debug, Clone)]
-pub struct ClientEndorsement {
-    pub pk: Pt,
-    pub r: Pt,
-    pub s: Sc,
-}
-
-/// wallet → hand_id → 客户端铸造的认可。由 `register_client_endorsement`
-/// 填充；结算时 hooks 优先取用，齐全则跳过服务器铸造路径。
-static CLIENT_ENDORSEMENTS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<u32, ClientEndorsement>>>,
-> = std::sync::OnceLock::new();
-
-/// 注册/查询两侧共用的钱包键：统一按 Felt `{:#x}` 规范化（去前导零）。
-/// 客户端上报地址常带补零（如 0x017cfd...），而 Felt 格式化为 0x17cfd...——
-/// 两侧键不一致曾让认可查找永远 MISS、DAPV 链上结算被静默跳过（结算少了
-/// = 牌局输赢从未上链；2026-09-04 线上复现并修复）。
-fn canonical_wallet_key(wallet: &str) -> Option<String> {
-    let t = wallet.trim();
-    let hex = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X"))?;
-    let felt = Ff::from_hex_be(&format!("0x{hex}")).ok()?;
-    Some(format!("{felt:#x}"))
-}
-
-/// 客户端提交其铸造的认可（hand-bound）。点坐标做 on-curve 校验，
-/// 标量做域校验；重复提交同一 (wallet, hand_id) 覆盖（幂等）。
-/// 生产形态：请求须附钱包签名（session key / typed-data）证明身份；
-/// 当前过渡实现信任 WS 会话钱包标识（见 hooks 的 wallet 来源）。
-pub fn register_client_endorsement(
-    wallet: &str,
-    hand_id: u32,
-    pk_x_hex: &str,
-    pk_y_hex: &str,
-    r_x_hex: &str,
-    r_y_hex: &str,
-    s_hex: &str,
-) -> Result<(), String> {
-    fn parse_point(x_hex: &str, y_hex: &str) -> Result<Pt, String> {
-        let x = hex::decode(x_hex).map_err(|e| format!("x hex: {e}"))?;
-        let y = hex::decode(y_hex).map_err(|e| format!("y hex: {e}"))?;
-        if x.len() != 32 || y.len() != 32 {
-            return Err("point coordinates must be 32 bytes".into());
-        }
-        let mut xb = [0u8; 32];
-        xb.copy_from_slice(&x);
-        let mut yb = [0u8; 32];
-        yb.copy_from_slice(&y);
-        point_from_words(&xb, &yb).ok_or_else(|| "point not on curve".into())
-    }
-    let pk = parse_point(pk_x_hex, pk_y_hex)?;
-    let r = parse_point(r_x_hex, r_y_hex)?;
-    let mut s_bytes = [0u8; 32];
-    let s_raw = hex::decode(s_hex).map_err(|e| format!("s hex: {e}"))?;
-    if s_raw.len() != 32 {
-        return Err("s must be 32 bytes".into());
-    }
-    s_bytes.copy_from_slice(&s_raw);
-    let s = Sc::from_canonical_bytes(&s_bytes).ok_or("s out of range")?;
-
-    let key = canonical_wallet_key(wallet)
-        .ok_or_else(|| format!("wallet address invalid: {wallet}"))?;
-    let registry = CLIENT_ENDORSEMENTS.get_or_init(|| std::sync::Mutex::new(Default::default()));
-    registry
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) // 锁污染不连锁 panic（audit M1）
-        .entry(key)
-        .or_default()
-        .insert(hand_id, ClientEndorsement { pk, r, s });
-    Ok(())
-}
-
-/// 进程内 bot 认可注册（bot 无 WS 会话，由服务器代持认可私钥后本地铸造；
-/// 与 `register_client_endorsement` 等价，只是免去 hex 往返）。
-pub fn register_client_endorsement_raw(wallet: &str, hand_id: u32, e: Endorsement) {
-    // bot 钱包来自服务器配置（非客户端上报），解析失败按原样兜底
-    let key = canonical_wallet_key(wallet).unwrap_or_else(|| wallet.to_string());
-    let registry = CLIENT_ENDORSEMENTS.get_or_init(|| std::sync::Mutex::new(Default::default()));
-    registry
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) // 锁污染不连锁 panic（audit M1）
-        .entry(key)
-        .or_default()
-        .insert(hand_id, ClientEndorsement { pk: e.pk, r: e.r, s: e.s });
-}
-
-/// 取客户端已提交的认可（结算聚合用）；缺失返回 None。
-pub fn take_client_endorsements(
-    wallets: &[Ff],
-    hand_id: u32,
-) -> Option<Vec<ClientEndorsement>> {
-    let registry = CLIENT_ENDORSEMENTS.get()?;
-    let guard = registry.lock().unwrap_or_else(|e| e.into_inner()); // 锁污染不连锁 panic（audit M1）
-    let mut out = Vec::with_capacity(wallets.len());
-    for w in wallets {
-        let key = format!("{w:#x}");
-        let entry = match guard.get(&key).map(|m| m.get(&hand_id)) {
-            Some(Some(e)) => e.clone(),
-            _ => {
-                tracing::info!(
-                    "[starknet-settle] take: MISSING endorsement wallet={key} hand={hand_id} (registry has {} wallets)",
-                    guard.len()
-                );
-                return None;
-            }
-        };
-        out.push(entry);
-    }
-    Some(out)
-}
 
 /// 取（首次则生成并托管）钱包的 secp256k1 认可密钥对。
 ///
@@ -520,7 +408,7 @@ pub fn prepare_handbatch_binding(
     })
 }
 
-fn build_dual_settlement_with(
+pub fn build_dual_settlement_with(
     mirror: &TableMirror,
     settlement: &HandSettlement,
     produce: &dyn Fn(&[u8; 32], &[Ff]) -> Result<Vec<Endorsement>, String>,
@@ -639,33 +527,14 @@ fn build_dual_settlement_with(
         Felt::ZERO,
         Felt::ZERO,
     ];
-    let mut proved_settle_calldata = Vec::with_capacity(6 + 32 + 2 * settlement.players_remapped.len());
-    proved_settle_calldata.push(hb_felt);
-    proved_settle_calldata.push(Felt::from(32u64));
-    for b in hand_id_bytes {
-        proved_settle_calldata.push(Felt::from(u64::from(b)));
-    }
-    proved_settle_calldata.push(Felt::from(u64::from(settlement.hand_id)));
-    proved_settle_calldata.push(ff_to_felt(settlement.action_log_digest));
-    proved_settle_calldata.push(Felt::from(settlement.players_remapped.len() as u64));
-    for p in &settlement.players_remapped {
-        proved_settle_calldata.push(ff_to_felt(*p));
-    }
-    proved_settle_calldata.push(Felt::from(settlement.deltas.len() as u64));
-    for d in &settlement.deltas {
-        let wei = d
-            .checked_mul(DAPV_WEI_PER_CHIP)
-            .ok_or("delta wei overflow")?;
-        proved_settle_calldata.push(ff_to_felt(i128_to_ff(wei)));
-    }
-    // 无 p_batch：只有承诺 + 词数。
-    proved_settle_calldata.push(ff_to_felt(p_batch_commitment));
-    proved_settle_calldata.push(p_batch_len_felt);
+    // settle calldata 不在此构建：P2-M4 的 proved_private 入口需要
+    // settlement_private 公开段（含赢家 payout commitment 的 claim cm），
+    // 在 submit_dual_settlement 里由 prepare_request 的结果填充。
     let proved = ProvedSettlement {
         p_batch_commitment,
         p_batch_len: batch_words.len(),
         register_calldata: proved_register_calldata,
-        settle_calldata: proved_settle_calldata,
+        settle_calldata: Vec::new(),
     };
 
     Ok(DualSettlement {
@@ -919,26 +788,6 @@ fn assemble_batch(endorsements: &[Endorsement], recon: &[HandBatchEquation]) -> 
 
 /// P2.1 客户端认可路径：用玩家客户端铸造并提交的成品认可构建结算，
 /// 服务器全程不接触认可私钥。数量必须与参与者一致。
-pub fn build_dual_settlement_from_client(
-    mirror: &TableMirror,
-    settlement: &HandSettlement,
-    client_endorsements: &[ClientEndorsement],
-) -> Result<DualSettlement, String> {
-    if client_endorsements.len() != settlement.players_remapped.len() {
-        return Err(format!(
-            "dapv: client endorsement count {} != participants {}",
-            client_endorsements.len(),
-            settlement.players_remapped.len()
-        ));
-    }
-    let endorsements: Vec<Endorsement> = client_endorsements
-        .iter()
-        .map(|c| Endorsement { pk: c.pk, r: c.r, s: c.s })
-        .collect();
-    // 与服务器铸造路径完全相同的构建（hand_binding/g_attestation/calldata）
-    build_dual_settlement_with(mirror, settlement, &|_hb, _players| Ok(endorsements.clone()))
-}
-
 /// 解析 hand_batch 载荷为折叠项（与 Cairo 端 ownership_terms 同构；
 /// 当前批次只含 ownership）。跨手重放检测与篡改检测的测试入口。
 pub fn parse_batch_terms(_hand_binding: &[u8; 32], batch_words: &[[u8; 32]]) -> Option<Vec<HandBatchEquation>> {
@@ -1217,6 +1066,8 @@ pub async fn submit_dual_settlement(
         export_prover_workload(dual, std::path::Path::new(&chain.config.prover_work_dir));
         // P2-M2：settlement-private 电路 inputs 导出 + prover attestation。
         // best-effort：任何失败只告警，绝不阻塞结算（与 batch prover 同语义）。
+        // P2-M4：请求成功时同时构建 proved_private 公开段（15 felt）。
+        let mut proved_private_settle: Option<Vec<Felt>> = None;
         {
             let settlement_prover = super::settlement_prover::HttpSettlementProver::new(
                 chain.config.prover_url.clone(),
@@ -1237,6 +1088,19 @@ pub async fn submit_dual_settlement(
                             &req,
                             std::path::Path::new(&chain.config.prover_work_dir),
                         );
+                        // P2-M4：calldata = [hand_binding, hand_id, segment(15),
+                        // p_batch_commitment, p_batch_len]——合约
+                        // verify_and_settle_dapv_proved_private（双 fact 认证）。
+                        let segment = req.public_segment_felts();
+                        let mut calldata = Vec::with_capacity(2 + segment.len() + 2);
+                        calldata.push(ff_to_felt(dual.hand_binding));
+                        calldata.push(Felt::from(u64::from(dual.hand_id)));
+                        for f in &segment {
+                            calldata.push(ff_to_felt(*f));
+                        }
+                        calldata.push(ff_to_felt(dual.proved.p_batch_commitment));
+                        calldata.push(Felt::from(dual.proved.p_batch_len as u64));
+                        proved_private_settle = Some(calldata);
                         match settlement_prover.prove_settlement_private(&req).await {
                             Ok(att) => tracing::info!(
                                 "[settlement-private] attested (program {})",
@@ -1260,18 +1124,30 @@ pub async fn submit_dual_settlement(
             batch_words: dual.batch_words.clone(),
             p_batch_commitment: dual.proved.p_batch_commitment,
         };
-        let resolved = resolve_settle_mode_with_prover(&prover, &workload).await;
-        if resolved == SettleMode::Proved {
-            tracing::info!(
-                "[dapv-proved] table settling via proved entry (commitment {:#x}, {} words)",
+        let mut resolved = resolve_settle_mode_with_prover(&prover, &workload).await;
+        // P2-M4：Proved 结算走 proved_private 入口——公开段构建失败（赢家
+        // payout commitment 缺失等）则降级 linear，绝不发不完整 calldata。
+        match proved_private_settle {
+            Some(_) if resolved == SettleMode::Proved => tracing::info!(
+                "[dapv-proved] table settling via proved_private entry (commitment {:#x}, {} words)",
                 dual.proved.p_batch_commitment,
                 dual.proved.p_batch_len
-            );
+            ),
+            Some(_) => {}
+            None => {
+                if resolved == SettleMode::Proved {
+                    tracing::warn!(
+                        "[dapv-proved] settlement segment unavailable — falling back to linear"
+                    );
+                    resolved = SettleMode::Linear;
+                }
+            }
         }
-        resolved
+        (resolved, proved_private_settle)
     } else {
-        SettleMode::Linear
+        (SettleMode::Linear, None)
     };
+    let (mode, proved_private_settle) = mode;
 
     // Part A Phase 1：STARKNET_SETTLE_PRIVATE=true 时走隐私结算入口
     // （赢家派奖进认领托管而非公开 chip 余额；输家仍公开扣款）。
@@ -1288,8 +1164,8 @@ pub async fn submit_dual_settlement(
             SettleMode::Proved => (
                 "register_hand_proved",
                 dual.proved.register_calldata.clone(),
-                "verify_and_settle_dapv_proved",
-                dual.proved.settle_calldata.clone(),
+                "verify_and_settle_dapv_proved_private",
+                proved_private_settle.unwrap_or_default(),
             ),
             SettleMode::Linear => (
                 "register_hand",
@@ -2631,32 +2507,33 @@ mod settle_mode_tests {
         let mirror = TableMirror::new(7, "test", [0xAA; 20], 9, 10, 20, [0xAA; 20]);
         let settlement = synthetic_settlement();
         let binding = prepare_handbatch_binding(&mirror, &settlement).expect("binding");
-        let endorsements: Vec<ClientEndorsement> = (0..2)
+        let endorsements: Vec<Endorsement> = (0..2)
             .map(|_| {
                 let sk = random_scalar();
                 let pk = StarkCurve::base_g() * sk;
-                let e = mint_endorsement(&sk, &pk, &binding.hand_id_bytes);
-                ClientEndorsement { pk: e.pk, r: e.r, s: e.s }
+                mint_endorsement(&sk, &pk, &binding.hand_id_bytes)
             })
             .collect();
-        build_dual_settlement_from_client(&mirror, &settlement, &endorsements).expect("dual build")
+        build_dual_settlement_with(&mirror, &settlement, &|_hb, _players| {
+            Ok(endorsements.clone())
+        })
+        .expect("dual build")
     }
 
     // ---- 错误/缺失语句的 fail-closed 场景 ----
     //
-    // 场景：玩家客户端提交了错误（坏签名/错绑定）或缺失的 ownership 认可。
+    // 场景：结算聚合时混入错误（坏签名/错绑定）或缺失的 ownership 认可。
     // 回归点：坏批次必须在**构建阶段**被拦（host fold parity），永远到不了
     // register_hand 上链——链上因此不会出现「settle revert → binding 已注册
-    // 却永远无法结算」的卡死状态；缺语句由数量闸门拒绝，hooks 保留待投递
-    // 等补交重试（retry_later），结算失败是链下可恢复的，不是链上毒药。
+    // 却永远无法结算」的卡死状态。（认可提交通道已删除；将来 ownership 桶
+    // 重接动作签名时，数量闸门在合约 n_own == players.len() 一侧。）
 
-    fn client_endorsements_for(binding: &HandBatchBinding, n: usize) -> Vec<ClientEndorsement> {
+    fn endorsements_for(binding: &HandBatchBinding, n: usize) -> Vec<Endorsement> {
         (0..n)
             .map(|i| {
                 let sk = <Sc as CurveScalar>::from_u64(9100 + i as u64);
                 let pk = StarkCurve::base_g() * sk;
-                let e = mint_endorsement(&sk, &pk, &binding.hand_id_bytes);
-                ClientEndorsement { pk: e.pk, r: e.r, s: e.s }
+                mint_endorsement(&sk, &pk, &binding.hand_id_bytes)
             })
             .collect()
     }
@@ -2668,17 +2545,21 @@ mod settle_mode_tests {
         let binding = prepare_handbatch_binding(&mirror, &settlement).expect("binding");
 
         // 诚实控制：同一夹具下两人的成品认可构建成功。
-        let honest = client_endorsements_for(&binding, 2);
-        build_dual_settlement_from_client(&mirror, &settlement, &honest)
-            .expect("honest endorsements must build");
+        let honest = endorsements_for(&binding, 2);
+        build_dual_settlement_with(&mirror, &settlement, &|_hb, _players| {
+            Ok(honest.clone())
+        })
+        .expect("honest endorsements must build");
 
-        // 篡改一位玩家的 s（等价于客户端交来一份坏语句）：该方程残差
+        // 篡改一位玩家的 s（等价于聚合进一份坏语句）：该方程残差
         // s'·G − R − c·pk = G ≠ O，fold 失败，构建必须 Err。
         let mut tampered = honest;
         tampered[1].s = tampered[1].s + <Sc as CurveScalar>::one();
-        let err = build_dual_settlement_from_client(&mirror, &settlement, &tampered)
-            .err()
-            .expect("tampered endorsement must fail closed");
+        let err = build_dual_settlement_with(&mirror, &settlement, &|_hb, _players| {
+            Ok(tampered.clone())
+        })
+        .err()
+        .expect("tampered endorsement must fail closed");
         assert!(
             err.contains("host fold parity"),
             "expected host fold gate, got: {err}"
@@ -2686,29 +2567,16 @@ mod settle_mode_tests {
     }
 
     #[test]
-    fn missing_endorsement_is_count_gated_not_fold_gated() {
+    fn fold_check_cannot_detect_missing_endorsements() {
         let mirror = TableMirror::new(7, "test", [0xAA; 20], 9, 10, 20, [0xAA; 20]);
         let settlement = synthetic_settlement();
         let binding = prepare_handbatch_binding(&mirror, &settlement).expect("binding");
 
-        // 缺席玩家：2 人只交 1 份，数量闸门在构建入口直接拒绝。
-        let short = client_endorsements_for(&binding, 1);
-        let err = build_dual_settlement_from_client(&mirror, &settlement, &short)
-            .err()
-            .expect("missing endorsement must fail the count gate");
-        assert!(
-            err.contains("count 1 != participants 2"),
-            "expected count gate, got: {err}"
-        );
-
         // 文档性断言：fold 校验**检测不到缺席**——剩下的每条方程各自有效，
-        // Σ ρⁱ·Lᵢ 仍为 O。缺席的守卫是数量（构建入口 count 检查 + 合约侧
-        // n_own == players.len()），两层缺一不可。
-        let endorsements: Vec<Endorsement> = short
-            .iter()
-            .map(|c| Endorsement { pk: c.pk, r: c.r, s: c.s })
-            .collect();
-        let words = assemble_batch(&endorsements, &[]);
+        // Σ ρⁱ·Lᵢ 仍为 O。缺席的守卫是数量（合约侧 n_own == players.len()），
+        // host 侧构建/折叠对此不设防；重接动作签名桶时保持同一不变式。
+        let short = endorsements_for(&binding, 1);
+        let words = assemble_batch(&short, &[]);
         let parsed = parse_batch_terms(&binding.hand_id_bytes, &words)
             .expect("short batch still parses");
         assert!(
@@ -2794,17 +2662,11 @@ mod settle_mode_tests {
         assert_eq!(pr[7], Felt::ZERO);
         assert_eq!(pr[8], Felt::ZERO);
 
-        // verify_and_settle_dapv_proved：与 linear 同前缀（binding、bytes、
-        // hand_id、action_log、players、deltas），尾部是 [commitment, len]
-        // ——**无 p_batch**。
-        let ps = &dual.proved.settle_calldata;
-        let prefix_len = 1 + 1 + 32 + 1 + 1
-            + 1 + settlement.players_remapped.len()
-            + 1 + settlement.deltas.len();
-        assert_eq!(ps.len(), prefix_len + 2, "proved settle = prefix + commitment + len");
-        assert_eq!(ps[..prefix_len], dual.settle_calldata[..prefix_len], "shared prefix");
-        assert_eq!(ps[prefix_len], ff_to_felt(commitment));
-        assert_eq!(ps[prefix_len + 1], Felt::from(dual.batch_words.len() as u64));
+        // P2-M4：settle calldata 改为 verify_and_settle_dapv_proved_private
+        // ——在 submit_dual_settlement 里由 settlement_private 公开段构建
+        // （[hand_binding, hand_id, segment(15), commitment, len]），构建期
+        // 留空（赢家 payout commitment 需 async 查 vault）。
+        assert!(dual.proved.settle_calldata.is_empty(), "filled at submit time");
         // 承诺与结构字段一致
         assert_eq!(dual.proved.p_batch_commitment, commitment);
         assert_eq!(dual.proved.p_batch_len, dual.batch_words.len());
@@ -2891,37 +2753,3 @@ mod settle_mode_tests {
     }
 }
 
-#[cfg(test)]
-mod endorsement_key_tests {
-    use super::canonical_wallet_key;
-
-    /// 2026-09-04 线上复现：客户端补零地址注册，Felt 格式化查询必须命中
-    ///（此前键不一致 → 认可永远 MISS → DAPV 静默跳过 → 输赢不上链）。
-    #[test]
-    fn padded_wallet_matches_felt_format() {
-        let padded = "0x017cfd337939d62ecd2e8f6340a33ea341366e15c58a092c392664289cfd706e";
-        let key = canonical_wallet_key(padded).unwrap();
-        assert_eq!(
-            key,
-            "0x17cfd337939d62ecd2e8f6340a33ea341366e15c58a092c392664289cfd706e"
-        );
-    }
-
-    #[test]
-    fn padding_and_case_normalize_identically() {
-        let a = canonical_wallet_key(
-            "0x6e37d33462f7319261396d7d7f669d147e40cdef91c6a8305cfde771805c782",
-        )
-        .unwrap();
-        let b = canonical_wallet_key(
-            "0X06E37D33462F7319261396D7D7F669D147E40CDEF91C6A8305CFDE771805C782",
-        )
-        .unwrap();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn invalid_wallet_rejected() {
-        assert!(canonical_wallet_key("not-an-address").is_none());
-    }
-}

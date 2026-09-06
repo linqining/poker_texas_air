@@ -7,7 +7,6 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::auth;
@@ -26,40 +25,6 @@ pub struct AppState {
     pub db: Database,
     pub config: Config,
     pub socket_state: Arc<SocketState>,
-    /// C2 去重：已处理的玩家行动事件去重缓存。
-    /// key 为 `(table_id, seat_index, action, round_state)`。
-    pub processed_actions: Arc<std::sync::RwLock<HashSet<String>>>,
-}
-
-/// processed_actions 的最大容量，超过后清空重建。
-const MAX_PROCESSED_ACTIONS: usize = 10000;
-
-impl AppState {
-    /// C2 修复：检查并标记玩家行动事件是否已处理。
-    /// 返回 `true` 表示首次处理（已写入缓存），`false` 表示重复事件（应跳过）。
-    pub fn check_and_mark_action(
-        &self,
-        table_id: &str,
-        seat_index: u64,
-        action: &str,
-        round_state: u8,
-    ) -> bool {
-        let key = format!("{}_{}_{}_{}", table_id, seat_index, action, round_state);
-        let mut processed = self
-            .processed_actions
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        if processed.contains(&key) {
-            return false;
-        }
-        // 容量控制：超过上限时清空（简单策略，避免无界增长）
-        if processed.len() >= MAX_PROCESSED_ACTIONS {
-            tracing::warn!("dedup cache overflow, clearing all entries");
-            processed.clear();
-        }
-        processed.insert(key);
-        true
-    }
 }
 
 pub fn get_token_from_headers(headers: &HeaderMap) -> Option<String> {

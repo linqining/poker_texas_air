@@ -42,12 +42,11 @@ fn settle_attempts_bumped_max(table_id: u32, mirror_hand: u32) -> bool {
     *n > 5
 }
 
-/// 待投递结算：按桌保留**构建时快照**（HandSettlement + binding + mirror 克隆）。
+/// 待投递结算：按桌保留**构建时快照**（HandSettlement + mirror 克隆）。
 /// 链上提交失败（nonce 竞争/RPC 抖动）时由 game_loop tick 用同一快照重投，
 /// 绝不读取已被新手替换的 mirror 活状态（避免跨手状态污染）。
 struct PendingSettle {
     settlement: super::submit::HandSettlement,
-    binding: Option<super::dual_settle::HandBatchBinding>,
     mirror: TableMirror,
     attempts: u32,
 }
@@ -57,26 +56,6 @@ static PENDING_SETTLE: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 const MAX_SETTLE_ATTEMPTS: u32 = 8;
-
-/// 每桌单调递增的 mirror hand_id。种子取 unix 秒：服务器重启后仍满足
-/// 链上 register_aggregate 的 first_hand_id 严格递增校验。
-static HAND_ID_SEQ: OnceLock<std::sync::Mutex<std::collections::HashMap<u32, u32>>> =
-    OnceLock::new();
-
-fn next_hand_id(table_id: u32) -> u32 {
-    let m = HAND_ID_SEQ.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(1);
-    let mut g = match m.lock() {
-        Ok(g) => g,
-        Err(_) => return unix,
-    };
-    let e = g.entry(table_id).or_insert(0);
-    *e = (*e + 1).max(unix);
-    *e
-}
 
 /// 错误文本是否表示"本手已在链上结算过"（幂等重放）。
 fn is_already_settled_error(e: &str) -> bool {
@@ -107,7 +86,8 @@ pub fn on_hand_complete(table: &Table) {
 async fn settle_hand_from_log(input: super::prove_log::HandSettleInput) {
     let table_id = input.table_id;
     let Some(start) = input.log.start.clone() else { return };
-    let hand_id = next_hand_id(table_id);
+    // hand_id 在开局时由 record_hand_start 分配（动作签名挑战域同源）。
+    let hand_id = start.hand_id;
 
     // 一次性构建（取代常驻 mirror）：按记录序重放已接受命令，产出
     // ProveTask 链 + pre-payout 快照。重放输入与游戏层接受输入逐字节相同，
@@ -134,10 +114,6 @@ async fn settle_hand_from_log(input: super::prove_log::HandSettleInput) {
         );
         return;
     }
-
-    let (try_dapv, _dual_addr) = super::chain()
-        .map(|c| (c.config.try_dapv(), c.config.dual_settlement_address.clone()))
-        .unwrap_or((false, String::new()));
 
     // 台费接收方：平台 treasury 地址（STARKNET_TREASURY_ADDRESS），
     // 未配置时缺省 operator（#27 遗留注释已实现，2026-09-04 清理）。
@@ -197,38 +173,9 @@ async fn settle_hand_from_log(input: super::prove_log::HandSettleInput) {
         hex_encode(&settlement.aggregate_digest)
     );
 
-    let binding = if try_dapv {
-        match super::dual_settle::prepare_handbatch_binding(&mirror, &settlement) {
-            Ok(b) => {
-                // bot 认可由服务器代铸；真实客户端经 ENDORSEMENT_REQUEST 铸造。
-                mint_bot_endorsements(&b.hand_id_bytes, settlement.hand_id, &settlement.players_remapped);
-                if let Some(io) = crate::socket::get_socket_io() {
-                    let request = crate::socket::EndorsementRequestPayload {
-                        table_id,
-                        hand_id: settlement.hand_id,
-                        hand_binding_hex: hex_encode(&b.hand_id_bytes),
-                    };
-                    let room = crate::socket::table_room_name(table_id);
-                    let _ = io.to(room).emit(crate::pokergame::actions::ENDORSEMENT_REQUEST, &request).await;
-                    tracing::info!(
-                        "[starknet-settle] table {table_id} hand {} endorsement request broadcast",
-                        settlement.hand_id
-                    );
-                }
-                Some(b)
-            }
-            Err(e) => {
-                tracing::warn!("[starknet-settle] table {table_id} hand {} dapv binding prepare failed: {e}", settlement.hand_id);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     PENDING_SETTLE
         .lock()
-        .map(|mut g| g.insert(table_id, PendingSettle { settlement, binding, mirror, attempts: 0 }))
+        .map(|mut g| g.insert(table_id, PendingSettle { settlement, mirror, attempts: 0 }))
         .ok();
     run_settle_attempt(table_id).await;
 }
@@ -298,8 +245,8 @@ fn hand_wallet_map(start: &super::prove_log::HandStartData) -> Vec<(poker_l1::Ad
     out
 }
 
-/// 一次投递尝试：DAPV 优先（认可等待 3s），失败/不可用回退 legacy（按模式）。
-/// 成功（含链上幂等重放）则清除待投递条目并标记 SETTLE_OK。
+/// 一次投递尝试：legacy 结算上链。成功（含链上幂等重放）则清除待投递
+/// 条目并标记 SETTLE_OK。
 async fn run_settle_attempt(table_id: u32) {
     let Some(mut pending) = PENDING_SETTLE.lock().ok().and_then(|mut g| g.remove(&table_id)) else {
         return;
@@ -308,101 +255,6 @@ async fn run_settle_attempt(table_id: u32) {
     let settlement = &pending.settlement;
 
     let Some(chain) = super::chain() else { return };
-    let dual_addr = chain.config.dual_settlement_address.clone();
-
-    // DAPV 路径：重发认可请求（重投时客户端可能已重新就绪）→ 短暂等待收齐
-    // → 构建并提交 dual。
-    if chain.config.try_dapv() && pending.binding.is_some() {
-        let binding_bytes: [u8; 32] = pending
-            .binding
-            .as_ref()
-            .map(|b| b.hand_id_bytes)
-            .unwrap_or([0u8; 32]);
-        // 重投节流：客户端每手只需回应一次（有 per-hand 去重），但请求本身
-        // 每次尝试都重发——客户端恰好在刷新/重连窗口错过单次广播会永久
-        // 丢失请求，导致认可永远收不齐、结算被静默跳过（2026-09-04 线上
-        // 复现）。客户端去重保证重播不会重复铸造。
-        if let Some(io) = crate::socket::get_socket_io() {
-            let hand_binding_hex = hex_encode(&binding_bytes);
-            if !hand_binding_hex.is_empty() {
-                let request = crate::socket::EndorsementRequestPayload {
-                    table_id,
-                    hand_id: settlement.hand_id,
-                    hand_binding_hex: hand_binding_hex.clone(),
-                };
-                let room = crate::socket::table_room_name(table_id);
-                let _ = io.to(room).emit(crate::pokergame::actions::ENDORSEMENT_REQUEST, &request).await;
-            }
-        }
-        mint_bot_endorsements(
-            &binding_bytes,
-            settlement.hand_id,
-            &settlement.players_remapped,
-        );
-        // 认可等待窗口：10s（刷新页面/后台标签页的客户端靠重播请求补交，
-        // 3s 对手动钱包确认场景太紧——线上复现收不齐即被跳过）。
-        let deadline = std::time::Duration::from_secs(10);
-        let start = std::time::Instant::now();
-        while start.elapsed() < deadline {
-            if super::dual_settle::take_client_endorsements(
-                &settlement.players_remapped,
-                settlement.hand_id,
-            ).is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        }
-        if let Some(endorsed) = super::dual_settle::take_client_endorsements(
-            &settlement.players_remapped,
-            settlement.hand_id,
-        ) {
-            match super::dual_settle::build_dual_settlement_from_client(
-                &pending.mirror,
-                settlement,
-                &endorsed,
-            ) {
-                Ok(dual) => match super::dual_settle::submit_dual_settlement(&dual, &dual_addr, &settlement.players_remapped, &settlement.deltas).await {
-                    Ok((register_hash, settle_hash)) => {
-                        let _ = settle_ok_once(table_id, settlement.hand_id);
-                        tracing::info!(
-                            "[starknet-settle] table {table_id} hand {} dapv on-chain: binding={:#x} register={register_hash} settle={settle_hash}",
-                            settlement.hand_id,
-                            dual.hand_binding
-                        );
-                        refresh_settlement_sessions(&settlement.players_remapped).await;
-                        return;
-                    }
-                    Err(e) if is_already_settled_error(&e) => {
-                        let _ = settle_ok_once(table_id, settlement.hand_id);
-                        tracing::info!(
-                            "[starknet-settle] table {table_id} hand {} already settled on-chain (dapv replay suppressed)",
-                            settlement.hand_id
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "[starknet-settle] table {table_id} hand {} dapv submit failed: {e}",
-                            settlement.hand_id
-                        );
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!("[starknet-settle] table {table_id} hand {} dapv build failed: {e}", settlement.hand_id);
-                }
-            }
-        } else {
-            tracing::warn!(
-                "[starknet-settle] table {table_id} hand {} endorsements incomplete — DAPV skipped this attempt",
-                settlement.hand_id
-            );
-        }
-        // dapv 严格模式不回退：保留待投递，等下一次尝试（认可可能迟到）。
-        if !chain.config.dapv_fallback_legacy() {
-            retry_later(pending, table_id);
-            return;
-        }
-    }
 
     // legacy 结算（settlement_address 为空 = dev 模式只记日志）。
     let Some(addr) = (!chain.config.settlement_address.is_empty())
@@ -486,69 +338,6 @@ async fn refresh_settlement_sessions(players_remapped: &[starknet_ff::FieldEleme
 
 
 use crate::pokergame::table::Table;
-
-/// 进程内 bot 的通知（endorsement）私钥注册表：wallet → StarkCurve sk。
-/// bot 是服务器自己的测试玩家，认可私钥托管在服务器（与真实客户端把私钥
-/// 保持在浏览器 localStorage 等价）。
-static BOT_ENDORSEMENT_SKS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, super::dual_settle::Sc>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
-pub fn register_bot_endorsement_key(wallet: &str, sk: super::dual_settle::Sc) {
-    if let Ok(mut map) = BOT_ENDORSEMENT_SKS.lock() {
-        map.insert(wallet.to_string(), sk);
-    }
-}
-
-/// 启动时为 STARKNET_DEV_ENDORSEMENT_WALLETS（逗号分隔）注册服务端托管的
-/// 认可私钥：dev 联调中这些钱包的对局也走 DAPV 结算（与 bot 同机制）。
-/// 生产环境不要配置该变量——真实玩家的认可私钥必须留在客户端。
-pub fn register_dev_endorsement_wallets() {
-    let list = match std::env::var("STARKNET_DEV_ENDORSEMENT_WALLETS") {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => return,
-    };
-    use poker_protocol::crypto::curve::CurveScalar;
-    for wallet in list.split(',') {
-        let wallet = wallet.trim();
-        if wallet.is_empty() {
-            continue;
-        }
-        let sk = <super::dual_settle::Sc as CurveScalar>::random(&mut rand::rngs::OsRng);
-        register_bot_endorsement_key(wallet, sk);
-        tracing::info!("[starknet-settle] dev endorsement wallet registered: {wallet}");
-    }
-}
-
-/// 为所有已注册且参与本手的 bot 钱包本地铸造认可并写入收集注册表。
-fn mint_bot_endorsements(
-    hand_binding_bytes: &[u8; 32],
-    hand_id: u32,
-    players_remapped: &[starknet_ff::FieldElement],
-) {
-    use poker_protocol::crypto::curve::Curve;
-    use poker_protocol::crypto::curve::StarkCurve;
-    use std::format as fmt;
-
-    let Ok(map) = BOT_ENDORSEMENT_SKS.lock() else { return };
-    for (wallet, sk) in map.iter() {
-        // 只为参与本手的 bot 钱包铸造（键格式与 take_client_endorsements 一致）
-        let normalized = fmt!("{:#x}", {
-            let f = super::chain::parse_felt(wallet);
-            match f {
-                Some(f) => f,
-                None => continue,
-            }
-        });
-        if !players_remapped.iter().any(|p| fmt!("{p:#x}") == normalized) {
-            continue;
-        }
-        let pk = <StarkCurve as Curve>::base_g() * sk;
-        let e = super::dual_settle::mint_endorsement(sk, &pk, hand_binding_bytes);
-        super::dual_settle::register_client_endorsement_raw(wallet, hand_id, e);
-        tracing::info!("[starknet-settle] bot endorsement minted for {wallet} hand {hand_id}");
-    }
-}
 
 /// 平台 treasury 钱包（抽水接收方）：settle calldata 的玩家地址只有 20 字节
 /// 截断，上链前经 seat_wallet_remaps 还原为全精度 felt；treasury 不是牌手，

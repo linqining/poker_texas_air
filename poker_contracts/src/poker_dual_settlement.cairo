@@ -138,6 +138,43 @@ pub trait IPokerDualSettlement<TContractState> {
     fn circuit_program_hash(self: @TContractState) -> felt252;
     /// View: fact 是否已登记。
     fn settlement_fact(self: @TContractState, fact: felt252) -> bool;
+    /// Owner-gated: 钉死 hand_verify（hand_batch σ 批量校验 STARK）的
+    /// program hash——proved_private 双证明之一的绑定根（换 hand_verify
+    /// 电路须重设）。
+    fn set_hand_verify_program_hash(ref self: TContractState, program_hash: felt252);
+    /// Proved 私密结算注册：除常规注册字段外钉住 (p_batch_commitment,
+    /// p_batch_len)——p_batch 全文不上链，由 hand_verify 证明在承诺下
+    /// 背书。prover-gated，与 register_hand 同门；期望桶计数沿用
+    /// register calldata 形状（proved 结算不上链批次，仅作注册侧留痕）。
+    fn register_hand_proved(
+        ref self: TContractState,
+        hand_binding: felt252,
+        settlement_digest: felt252,
+        g_attestation: felt252,
+        action_log_digest: felt252,
+        p_batch_commitment: felt252,
+        p_batch_len: felt252,
+        expected_n_reveal: felt252,
+        expected_n_leave: felt252,
+        expected_n_recon: felt252,
+    );
+    /// P2-M4：proved × private 双证明结算入口（hand_verify + stark verify）。
+    /// 双 fact 认证：
+    ///   (a) hand_verify：fact = poseidon([hand_verify_program_hash,
+    ///       p_batch_commitment])——外部 hand_verify 证明「注册的 p_batch
+    ///       承诺下的 hand_batch σ 批量校验成立」（p_batch 全文不上链）；
+    ///   (b) stark verify：fact = poseidon([circuit_program_hash, segment])——
+    ///       settlement_private 电路对公开段的证明（与 v2 同锚）。
+    /// 派奖与 v2 private 相同：金额藏在公开段 cm（claim 承诺），escrow 按
+    /// 公开段 total_winnings 划转，players/deltas 不出现。
+    fn verify_and_settle_dapv_proved_private(
+        ref self: TContractState,
+        hand_binding: felt252,
+        hand_id: u64,
+        segment: Span<felt252>,
+        p_batch_commitment: felt252,
+        p_batch_len: u32,
+    );
     /// View: 该手是否为 v2（金额藏在 cm 中，consume_claim 走隐藏模式）。
     fn amounts_hidden(self: @TContractState, hand_binding: felt252) -> bool;
     /// Owner-gated: set the claim escrow helper that receives the winners'
@@ -392,6 +429,11 @@ fn dapv_prelude(
         settlement_facts: Map<felt252, bool>,
         /// P2-M3：v2 手的金额藏在 cm 中（consume_claim 走隐藏模式）。
         amounts_hidden: Map<felt252, bool>,
+        /// register_hand_proved 钉住的 p_batch 承诺/长度（hand_verify 绑定根）。
+        p_batch_commitments: Map<felt252, felt252>,
+        p_batch_lens: Map<felt252, u32>,
+        /// hand_verify（hand_batch σ 批量校验 STARK）的 program hash。
+        hand_verify_program_hash: felt252,
         /// #18 Phase B：注册时钉住的每手动作日志承诺
         /// （v2 公开段尾词必须逐 felt 等于该值）。
         action_logs: Map<felt252, felt252>,
@@ -412,6 +454,7 @@ fn dapv_prelude(
         ClaimConsumed: ClaimConsumed,
         SettlementFactRegistered: SettlementFactRegistered,
         DualProofSettledPrivateV2: DualProofSettledPrivateV2,
+        DualProofSettledProvedPrivate: DualProofSettledProvedPrivate,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -444,6 +487,15 @@ fn dapv_prelude(
         hand_binding: felt252,
         settlement_digest: felt252,
         participant_count: u32,
+        total_winnings: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct DualProofSettledProvedPrivate {
+        hand_binding: felt252,
+        settlement_digest: felt252,
+        participant_count: u32,
+        p_batch_commitment: felt252,
         total_winnings: u256,
     }
 
@@ -789,6 +841,138 @@ fn dapv_prelude(
             self.amounts_hidden.read(hand_binding)
         }
 
+        /// Owner-gated：钉死 hand_verify（hand_batch σ 批量校验）program hash。
+        fn set_hand_verify_program_hash(ref self: ContractState, program_hash: felt252) {
+            self.ownable.assert_only_owner();
+            self.hand_verify_program_hash.write(program_hash);
+        }
+
+        /// Proved 私密结算注册：与 register_hand 同门（prover-gated）、
+        /// 同一 write_registration（一次性），另钉 (p_batch_commitment,
+        /// p_batch_len)。calldata 形状与 Rust ProvedSettlement.register_calldata
+        /// 逐字对齐：[binding, digest, g_att, action_log, commitment, len,
+        /// exp_reveal, exp_leave, exp_recon]。
+        fn register_hand_proved(
+            ref self: ContractState,
+            hand_binding: felt252,
+            settlement_digest: felt252,
+            g_attestation: felt252,
+            action_log_digest: felt252,
+            p_batch_commitment: felt252,
+            p_batch_len: felt252,
+            expected_n_reveal: felt252,
+            expected_n_leave: felt252,
+            expected_n_recon: felt252,
+        ) {
+            let caller = starknet::get_caller_address();
+            assert!(self.provers.read(caller), "Caller not authorized prover");
+            assert!(hand_binding != 0, "Zero binding");
+            write_registration(
+                ref self,
+                hand_binding,
+                settlement_digest,
+                g_attestation,
+                action_log_digest,
+                expected_n_reveal,
+                expected_n_leave,
+                expected_n_recon,
+            );
+            let len: u32 = p_batch_len.try_into().expect('batch len fits u32');
+            self.p_batch_commitments.write(hand_binding, p_batch_commitment);
+            self.p_batch_lens.write(hand_binding, len);
+        }
+
+        /// P2-M4：proved × private 双证明结算入口。
+        /// (a) hand_verify fact = poseidon([hand_verify_program_hash,
+        ///     p_batch_commitment])——校验「承诺下的 hand_batch σ 批量校验」
+        ///     已由授权 prover 登记（证明工件在链下，fact 上链）；
+        /// (b) stark verify fact = poseidon([circuit_program_hash, segment])——
+        ///     settlement_private 电路对公开段的证明（与 v2 同锚）。
+        /// 其余校验与派奖与 verify_and_settle_dapv_stark_private_v2 一致。
+        fn verify_and_settle_dapv_proved_private(
+            ref self: ContractState,
+            hand_binding: felt252,
+            hand_id: u64,
+            segment: Span<felt252>,
+            p_batch_commitment: felt252,
+            p_batch_len: u32,
+        ) {
+            assert!(hand_binding != 0, "Zero binding");
+            assert!(
+                !self.settled_bindings.read(hand_binding),
+                "Hand already settled"
+            );
+            assert!(segment.len() == SETTLEMENT_SEGMENT_LEN, "Segment length mismatch");
+            assert!(
+                *segment.at(0) == SETTLEMENT_SEGMENT_MAGIC,
+                "Segment magic mismatch"
+            );
+            assert!(*segment.at(1) == hand_id.into(), "Segment hand_id mismatch");
+            assert!(*segment.at(4) == hand_binding, "Segment binding mismatch");
+            let n: u32 = (*segment.at(3)).try_into().expect('n fits u32');
+            assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
+            let registered_digest = read_registered_digest(@self, hand_binding);
+            assert!(*segment.at(2) == registered_digest, "Segment digest mismatch");
+            assert!(
+                *segment.at(14) == self.action_logs.read(hand_binding),
+                "Segment action log mismatch"
+            );
+
+            // —— 双证明之一：hand_verify 绑定到注册的 p_batch 承诺 ——
+            let registered_commitment = self.p_batch_commitments.read(hand_binding);
+            assert!(registered_commitment != 0, "p_batch commitment not registered");
+            assert!(
+                p_batch_commitment == registered_commitment,
+                "p_batch commitment mismatch"
+            );
+            let registered_len: u32 = self.p_batch_lens.read(hand_binding);
+            assert!(p_batch_len == registered_len, "p_batch length mismatch");
+            let hv_program = self.hand_verify_program_hash.read();
+            assert!(hv_program != 0, "Hand verify program hash not set");
+            let mut hf = PoseidonTrait::new();
+            hf = hf.update(hv_program);
+            hf = hf.update(p_batch_commitment);
+            assert!(
+                self.settlement_facts.read(hf.finalize()),
+                "Hand verify fact not registered"
+            );
+
+            // —— 双证明之二：stark verify 锚定公开段 ——
+            let program_hash = self.circuit_program_hash.read();
+            assert!(program_hash != 0, "Circuit program hash not set");
+            let fact = fact_for_segment(program_hash, segment);
+            assert!(
+                self.settlement_facts.read(fact),
+                "Settlement fact not registered"
+            );
+
+            // —— 私密派奖（与 v2 private 相同）——
+            let total_u128: u128 = (*segment.at(13)).try_into().expect('total fits u128');
+            let total_winnings: u256 = total_u128.into();
+            assert!(total_winnings > 0_u256, "No winnings to escrow");
+            let vault_addr = self.vault_address.read();
+            let helper = self.claim_helper.read();
+            assert!(!helper.is_zero(), "Claim helper not set");
+            let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
+            vault.settlement_fund_escrow(helper, hand_binding, total_winnings);
+            let mut i: u32 = 0;
+            while i < 8_u32 {
+                self.claim_cms.write((hand_binding, i), *segment.at(5 + i));
+                i += 1;
+            }
+            self.amounts_hidden.write(hand_binding, true);
+            self.settled_bindings.write(hand_binding, true);
+            self.emit(
+                DualProofSettledProvedPrivate {
+                    hand_binding,
+                    settlement_digest: registered_digest,
+                    participant_count: n,
+                    p_batch_commitment,
+                    total_winnings,
+                },
+            );
+        }
+
         /// P2-M3：零明文结算（见接口文档）。digest 取注册值，托管金额与
         /// claim_cms 全部来自已证明的公开段。
         fn verify_and_settle_dapv_stark_private_v2(
@@ -1088,6 +1272,193 @@ mod settlement_private_v2_tests {
     }
 }
 
+// ============================================================
+// Tests (snforge): P2-M4 proved × private 双证明结算——hand_verify
+// （绑定 p_batch 承诺）+ stark verify（绑定公开段）双 fact，派奖与 v2 同。
+// ============================================================
+
+#[cfg(test)]
+mod settlement_proved_private_tests {
+    use core::hash::HashStateTrait;
+    use core::poseidon::PoseidonTrait;
+    use starknet::{ContractAddress, get_contract_address};
+    use snforge_std::{ContractClassTrait, DeclareResultTrait, declare};
+
+    use super::mock_vault::IMockVaultDispatcherTrait;
+    use super::mock_vault::IMockVaultDispatcher;
+    use super::{
+        IPokerDualSettlement, IPokerDualSettlementDispatcher,
+        IPokerDualSettlementDispatcherTrait,
+    };
+
+    const MAGIC: felt252 = 0x5350324d5f4f4b;
+    const PROGRAM_HASH: felt252 = 0xabcdef;
+    const HAND_VERIFY_PROGRAM_HASH: felt252 = 0x1234;
+
+    fn deploy_contract(name: ByteArray, calldata: @Array<felt252>) -> ContractAddress {
+        let class = declare(name).unwrap().contract_class();
+        let (address, _) = class.deploy(calldata).unwrap();
+        address
+    }
+
+    struct Setup {
+        dual: IPokerDualSettlementDispatcher,
+        vault: IMockVaultDispatcher,
+        hand_binding: felt252,
+        segment: Array<felt252>,
+        total: felt252,
+        /// 注册并进入 hand_verify fact 的 p_batch 承诺。
+        p_commitment: felt252,
+        batch_len: u32,
+    }
+
+    /// 部署 mock vault + dual（test 合约为 owner 与 initial_prover），
+    /// register_hand_proved 钉 (p_commitment, batch_len)，双 program hash
+    /// 就位；`with_hand_fact`/`with_settlement_fact` 控制两个 fact 的登记。
+    fn setup(with_hand_fact: bool, with_settlement_fact: bool) -> Setup {
+        let test_addr = get_contract_address();
+        let vault = deploy_contract("MockVault", @array![]);
+        let dual_addr = deploy_contract(
+            "PokerDualSettlement",
+            @array![test_addr.into(), vault.into(), test_addr.into()],
+        );
+        let dual = IPokerDualSettlementDispatcher { contract_address: dual_addr };
+        dual.set_claim_helper(test_addr);
+        dual.set_circuit_program_hash(PROGRAM_HASH);
+        dual.set_hand_verify_program_hash(HAND_VERIFY_PROGRAM_HASH);
+
+        let hand_binding: felt252 = 0xCCCC;
+        let hand_id: u64 = 43;
+        let digest: felt252 = 0x9900;
+        let action_log: felt252 = 0xA11CE;
+        let p_commitment: felt252 = 0xC0BA;
+        let batch_len: u32 = 37;
+
+        dual.register_hand_proved(
+            hand_binding, digest, 0, action_log,
+            p_commitment, batch_len.into(), 0, 0, 0,
+        );
+
+        // 公开段（与 v2 测试同构：赢家 seat0 +3000，输家 seat1/2；
+        // claim cm 的承诺根 = 赢家 payout commitment 0x21）
+        let payout_commitment: felt252 = 0x21;
+        let mut cms = array![];
+        let mut total: felt252 = 0;
+        let mut i: u32 = 0;
+        while i < 8_u32 {
+            let (s, m): (felt252, felt252) = if i == 0 {
+                (1, 3000)
+            } else if i == 1 {
+                (0, 2000)
+            } else if i == 2 {
+                (0, 1000)
+            } else {
+                (1, 0)
+            };
+            i += 1;
+            if s == 1 {
+                if m != 0 {
+                    total += m;
+                    let mut ch = PoseidonTrait::new();
+                    ch = ch.update(payout_commitment);
+                    ch = ch.update(hand_binding);
+                    ch = ch.update(m);
+                    ch = ch.update(0);
+                    cms.append(ch.finalize());
+                } else {
+                    cms.append(0);
+                };
+            } else {
+                cms.append(0);
+            };
+        }
+
+        let mut segment = array![MAGIC, hand_id.into(), digest, 3, hand_binding];
+        let mut w: u32 = 0;
+        while w < 8_u32 {
+            segment.append(*cms.at(w));
+            w += 1;
+        };
+        segment.append(total);
+        segment.append(action_log);
+
+        if with_settlement_fact {
+            let mut f = PoseidonTrait::new();
+            f = f.update(PROGRAM_HASH);
+            let mut w2: u32 = 0;
+            while w2 < segment.len() {
+                f = f.update(*segment.at(w2));
+                w2 += 1;
+            }
+            dual.register_settlement_fact(f.finalize());
+        }
+        if with_hand_fact {
+            let mut hf = PoseidonTrait::new();
+            hf = hf.update(HAND_VERIFY_PROGRAM_HASH);
+            hf = hf.update(p_commitment);
+            dual.register_settlement_fact(hf.finalize());
+        }
+
+        Setup {
+            dual,
+            vault: IMockVaultDispatcher { contract_address: vault },
+            hand_binding,
+            segment,
+            total,
+            p_commitment,
+            batch_len,
+        }
+    }
+
+    #[test]
+    fn proved_private_honest_double_fact_settles() {
+        let s = setup(true, true);
+        s.dual.verify_and_settle_dapv_proved_private(
+            s.hand_binding, 43, s.segment.span(), s.p_commitment, s.batch_len,
+        );
+        assert!(s.dual.hand_settled(s.hand_binding), "hand must be settled");
+        assert!(s.dual.amounts_hidden(s.hand_binding), "amounts hidden");
+        let total_u256: u256 = s.total.into();
+        assert!(
+            s.vault.escrowed_for(s.hand_binding) == total_u256,
+            "escrow must equal total_winnings"
+        );
+        let mut ch = PoseidonTrait::new();
+        ch = ch.update(0x21);
+        ch = ch.update(s.hand_binding);
+        ch = ch.update(3000);
+        ch = ch.update(0);
+        assert!(s.dual.claim_cm(s.hand_binding, 0) == ch.finalize(), "winner cm");
+        assert!(s.dual.claim_cm(s.hand_binding, 1) == 0, "non-winner cm must be zero");
+    }
+
+    #[test]
+    #[should_panic(expected: "p_batch commitment mismatch")]
+    fn proved_private_rejects_wrong_commitment() {
+        let s = setup(true, true);
+        s.dual.verify_and_settle_dapv_proved_private(
+            s.hand_binding, 43, s.segment.span(), s.p_commitment + 1, s.batch_len,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected: "Hand verify fact not registered")]
+    fn proved_private_requires_hand_verify_fact() {
+        let s = setup(false, true);
+        s.dual.verify_and_settle_dapv_proved_private(
+            s.hand_binding, 43, s.segment.span(), s.p_commitment, s.batch_len,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected: "Settlement fact not registered")]
+    fn proved_private_requires_settlement_fact() {
+        let s = setup(true, false);
+        s.dual.verify_and_settle_dapv_proved_private(
+            s.hand_binding, 43, s.segment.span(), s.p_commitment, s.batch_len,
+        );
+    }
+}
 /// P2-M3 测试用 MockVault：记录 escrow 划转，payout_commitment 返回常数。
 #[cfg(test)]
 mod mock_vault {
@@ -1162,4 +1533,6 @@ mod mock_vault {
             }
         }
     }
+
+
 }

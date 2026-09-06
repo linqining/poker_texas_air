@@ -737,124 +737,29 @@ pub fn encrypt_plaintext(plaintext_hex: &str, pk_hex: &str) -> Result<JsValue, J
 }
 
 
-// ============================================================
-// Plan D P2.1：Hand-batch 认可密钥客户端化
-//
-// 认可（ownership endorsement）私钥由玩家客户端生成并持有，服务器
-// 不再托管（服务器托管的密钥只能证明"服务器背书"）。客户端经
-// endorsement_keypair 生成 STARK 曲线 Schnorr 密钥对，结算时用
-// endorsement_mint 对 hand_binding 域铸造认可，把 (pk, R, s) 提交
-// 给服务器中继进 hand_batch 载荷。challenge 公式与服务端
-// dual_settle::mint_endorsement 逐字节一致（domain = keccak256(
-// "poker/hand-batch/proto" ‖ hand_binding)，c = H(domain ‖ G ‖ pk ‖ R)）。
-// ============================================================
-
-/// 生成 STARK 曲线认可密钥对。返回 JSON {"sk_hex", "pk_hex"}（33B SEC1
-/// 兼容压缩十六进制；pk 与服务端 hand_batch 载荷的 (pk_x, pk_y) 字对齐）。
-#[wasm_bindgen]
-pub fn endorsement_keypair() -> Result<JsValue, JsValue> {
-    use poker_protocol::crypto::curve::{Curve, CurveScalar};
-    use poker_protocol::crypto::curve::StarkCurve;
-
-    let sk = <StarkCurve as Curve>::Scalar::random(&mut rand_core::OsRng);
-    let pk = <StarkCurve as Curve>::base_g() * sk;
-    let sk_hex: String = {
-            let bytes = poker_protocol::crypto::curve::CurveScalar::as_bytes(&sk);
-            hex::encode(bytes)
-        };
-    let (x, y) = pk
-        .to_affine_parts()
-        .ok_or_else(|| JsValue::from_str("identity key"))?;
-    let payload = serde_json::json!({
-        "sk_hex": sk_hex,
-        "pk_x_hex": hex::encode(x.to_bytes_be()),
-        "pk_y_hex": hex::encode(y.to_bytes_be()),
-    });
-    serde_json::to_value(&payload)
-        .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
-        .map(|v| serde_wasm_bindgen::to_value(&v).unwrap_or(JsValue::NULL))
-}
-
-/// 对 hand_binding 域铸造 hand-bound 认可。返回 JSON
-/// {"pk_x_hex","pk_y_hex","r_x_hex","r_y_hex","s_hex"}，即 hand_batch
-/// 载荷的每座位五字（服务器只中继，不持有 sk）。
+/// #16 抗审查动作签名：以牌局身份 SK 对 (table_id, hand_id, seq, action,
+/// amount) 签名（Starknet-Poseidon 域分离同族：`zgame.action-sig.v2`，与
+/// texas 服务端 `game_action.rs` 验签口径逐字节一致）。返回 `{ r_hex, s_hex }`
+/// ——客户端把 `(seq, r_hex, s_hex)` 附在动作消息上；服务端按座位 pk 验签。
+/// v2：hand_id 进签名域，签名升级为逐手归属凭证（endorsement 通道已删除）。
 ///
-/// `hand_binding_hex`: 32 字节 hand_binding 大端十六进制（与 register_hand
-/// calldata 的 hand_binding 完全一致，保证挑战域绑定）。
-#[wasm_bindgen]
-pub fn endorsement_mint(sk_hex: &str, hand_binding_hex: &str) -> Result<JsValue, JsValue> {
-    use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar};
-    use poker_protocol::crypto::curve::StarkCurve;
-
-    let sk_bytes = hex::decode(sk_hex).map_err(|e| JsValue::from_str(&format!("sk hex: {e}")))?;
-    let sk = <StarkCurve as Curve>::Scalar::from_canonical_bytes(&sk_bytes)
-        .ok_or_else(|| JsValue::from_str("sk out of range"))?;
-    let pk = <StarkCurve as Curve>::base_g() * sk;
-
-    let binding_bytes =
-        hex::decode(hand_binding_hex).map_err(|e| JsValue::from_str(&format!("binding hex: {e}")))?;
-    if binding_bytes.len() != 32 {
-        return Err(JsValue::from_str("hand_binding must be 32 bytes"));
-    }
-
-    // 挑战 = core 规范的 felt 直通 Poseidon（gas 压缩版），与
-    // dual_settle::mint_endorsement / hand_batch_stark.cairo 复刻同式。
-    let mut binding_word = [0u8; 32];
-    binding_word.copy_from_slice(&binding_bytes);
-
-    let g = <StarkCurve as Curve>::base_g();
-    loop {
-        let w = <StarkCurve as Curve>::Scalar::random(&mut rand_core::OsRng);
-        if w == <StarkCurve as Curve>::Scalar::zero() {
-            continue;
-        }
-        let r = g * w;
-        if r.is_identity() {
-            continue;
-        }
-        let c = poker_protocol_core::stark_curve::handbatch_endorsement_challenge(
-            &binding_word, &g, &pk, &r,
-        );
-        let s = w + c * sk;
-        let (pk_x, pk_y) = pk
-            .to_affine_parts()
-            .ok_or_else(|| JsValue::from_str("identity pk"))?;
-        let (r_x, r_y) = r
-            .to_affine_parts()
-            .ok_or_else(|| JsValue::from_str("identity r"))?;
-        let payload = serde_json::json!({
-            "pk_x_hex": hex::encode(pk_x.to_bytes_be()),
-            "pk_y_hex": hex::encode(pk_y.to_bytes_be()),
-            "r_x_hex": hex::encode(r_x.to_bytes_be()),
-            "r_y_hex": hex::encode(r_y.to_bytes_be()),
-            "s_hex": hex::encode(poker_protocol::crypto::curve::CurveScalar::as_bytes(&s)),
-        });
-        return serde_json::to_value(&payload)
-            .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
-            .map(|v| serde_wasm_bindgen::to_value(&v).unwrap_or(JsValue::NULL));
-    }
-}
-
-/// #16 抗审查动作签名：以牌局身份 SK 对 (table_id, seq, action, amount) 签名
-/// （Starknet-Poseidon 域分离同族：`zgame.action-sig.v1`，与 texas 服务端
-/// `game_action.rs` 验签口径逐字节一致）。返回 `{ r_hex, s_hex }`——客户端把
-/// `(seq, r_hex, s_hex)` 附在动作消息上；服务端按座位 pk 验签。
-///
-/// `sk_hex` 为 ClientPlayer 的 sk（32 字节大端 hex，localStorage `sk` 同源）。
+/// `sk_hex` 为 ClientPlayer 的 sk（32 字节大端 hex，localStorage `sk` 同源）；
+/// `hand_id` 为开局广播分配的本手 id。
 #[wasm_bindgen]
 pub fn sign_action(
     sk_hex: &str,
     table_id: u32,
+    hand_id: u32,
     seq: u64,
     action: &str,
     amount: u64,
 ) -> Result<JsValue, JsValue> {
-    // #16：游戏身份 SK 在 Stark curve 上（与座位 pk / 认可同域）
+    // #16：游戏身份 SK 在 Stark curve 上（与座位 pk 同域）
     let sk_bytes = hex::decode(sk_hex).map_err(|e| JsValue::from_str(&format!("sk hex: {e}")))?;
     let sk = <poker_protocol::crypto::curve::StarkCurve as poker_protocol::crypto::curve::Curve>::Scalar::from_canonical_bytes(&sk_bytes)
         .ok_or_else(|| JsValue::from_str("sk out of range"))?;
     let (r_hex, s_hex) = poker_protocol::z_poker::protocol::sign_game_action(
-        &sk, table_id, seq, action, amount, &mut rand_core::OsRng,
+        &sk, table_id, hand_id, seq, action, amount, &mut rand_core::OsRng,
     );
     serde_json::to_value(serde_json::json!({ "r_hex": r_hex, "s_hex": s_hex }))
         .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
