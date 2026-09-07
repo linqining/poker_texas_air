@@ -59,6 +59,110 @@
   续钟 → 离桌 TTL 解锁。链上强制已实测（2026-09-04 冒烟通过：lock→精确
   回滚→force_unlock），本条纯联调，配合 #34 切换后的实机环境一起做。
 
+- [x] **35. #33 离桌快解锁 + 结算原子锁账（2026-09-07 完成，生产多场验证）**
+
+  **漏洞闭环史**（每个都线上实锤后修复）：
+  1. 结算链路整体失效：legacy PokerSettlement 是 8-31 旧 4 参 ABI（#18
+     Phase B 只改源码未重部署）且绑定旧 vault v2 → param #3 反序列化必拒；
+     vault v3 的 settlement_contract 从未指向 v4/v5。修复：vault 重指 dual
+     v5（TX `0x6e80a2bc...`）+ 回退腿改 dual 线性结算（`submit_dual_fallback`）。
+  2. 逃单窗口（用户发现）：`apply_settlement` 正向 delta 不加锁，赢额从
+     结算落地起永远可提，提走后下一手结算 `Insufficient chip balance` 必
+     revert 且拖垮全手（含赢家）。修复：结算 bundle 原子串入 `lock(赢家)`。
+  3. 空批次假失败：动作无签名时 materials 为空 → handbatch 零方程
+     `Truncated`。修复：hooks 真实跳过 + 语义回归测试钉死。
+
+  **终态模型（零合约改动，operator = vault owner = 结算 prover）**：
+  每手结算 = 单笔 `__execute__` 原子 bundle：`register_hand → settle →
+  lock(赢额) → refresh_session(有 session 者) → force_unlock(本手离桌者)`——
+  任一子调用 revert 整笔回滚，"结算落地→回锁落地"的异步窗口在根上不存在。
+  离桌释放五路径全闭环：①牌局未开始离开→已结算即释；②手尾离桌→搭 bundle
+  原子释放；③bundle 启动后才注册离桌（0.1s 竞态，线上实锤
+  departed-released=0）→ bundle 后兜底 flush（独立交易补放）；
+  ④nonce 竞争（线上实锤 NonceTooOld 丢释放）→ `invoke_vault` 统一入口
+  3 次退避重试；⑤中止手（refund_all_bets 六调用点）/结算构建失败手（board-0
+  线上实锤）→ abort_flush 钩子（这类手永不 settle，不 flush 则滞留到 TTL）。
+  在座不变式：`locked == chips`（入座锁全额、赢额回锁、输额扣锁），在座
+  可提差额恒为 0。
+
+  **已知边界**：释放权威在服务端内存簿记（重启丢挂起 → TTL 自助解锁兜底
+  `unlock_after_deadline`）；多手并发时 `hand_id ==` 精确匹配是序依赖的
+  （正确版应为"该玩家 ≤ 最后一手的未结算手集合为空"，单桌串行下窗口未
+  打开）；释放/锁生命周期整体在证明体系之外——终态应把"玩家 P 离桌、
+  最后一手 H"做成 leave receipt 进 settlement digest（P 层 KIND_LEAVE 基础
+  设施已在），随 P4 证明化结算一起做，现在做是给弱门上强锁（operator 在
+  线性路径本可伪造零和 deltas）。
+
+- [x] **36. SHUFFLE_NOTICE 双通道重复推送修复（2026-09-07 完成）**
+
+  线上实锤：同一次洗牌状态经 TableEvent 消费者与 game_loop/handlers 直接
+  调用两条路径**同毫秒双发**（23:06:57.690709/.690720）→ 客户端双重
+  SHUFFLE_SUBMIT（第二次被 `Shuffle not active` 拒绝，全会话 145 次幂等
+  拒绝），zk 面板误报"proof verification failed"。修复：服务端
+  `send_shuffle_notice` 出口按桌签名去重（签名 = 当前洗牌者 + deck 长度 +
+  首张密牌 c1，250ms 窗口，状态真变必改签名不误杀）；客户端 SHUFFLE_NOTICE
+  同签名去重（纵深防御）；zk 面板事件文案区分 `rejected (state)`（状态机
+  拒绝：重复/迟到/非当前洗牌者）与 `proof verification failed`（真密码学
+  失败）。顺带发现客户端 ShuffleState 类型 `deck_encrypted: string[][]` 是
+  陈旧声明（wire 实际 `{c1_hex,c2_hex}`）。待观察：22:23 物化失败 /
+  board-0 手牌损坏与双推同族，去重后若仍出现需深挖重构管线。
+
+- [x] **37. 私密领取守恒修复（2026-09-07 完成，用户实测通过）**
+
+  漏洞（比赛 STRK20 主径，用户报告"池内余额不足 3.0 < 5.75"）：anonymizer
+  `OP_WITHDRAW` 用 `burn_chips`（无代币移动）+ 要求用户先用池内余额自筹
+  注资——每领 X 销毁 X 价值（chips 烧掉、vault 背书 STRK 滞留无人可领、
+  输出 note 全额来自用户自己的钱），且把"池内屏蔽余额 ≥ 领取额"错立为
+  硬前置。修复：`OP_WITHDRAW` 改 `vault.withdraw_to`（烧筹码 + vault 释放
+  背书 STRK 给 helper，输出 note 由 vault 出资）——零池内预存要求，chips
+  −X / note +X 分文不丢。新 anonymizer `0x7ee059dd...3ad9dd`（class
+  `0x525646bd...`），vault `set_unshield_helper` 重指（TX `0x18fbf4fa...`），
+  snforge 91/91（withdraw 三负例改守恒语义）；前端删自筹 withdraw 桥 +
+  屏蔽余额前置检查，`.env` 已切新地址。Pool viewing key 注册不受影响
+  （note 归属识别的前提，注册 = 拥有收 note 的池身份，一次性 0.01 shield）。
+  修复后池内余额会真实增加领取额（vault 出资新 note 归用户）。
+
+- [ ] **38（设计待办）. 释放权威的证明化与序无关化（#35 已知边界的终态）**
+
+  **背景**（2026-09-07 设计评审，用户两问）：①释放（abort_flush 等）该不该
+  受 AIR 约束；②多手结算顺序是否影响释放结果。
+
+  **① AIR 绑定**：当前释放决策全在服务端内存簿记（pending 注册表 +
+  settle_ok + 中止钩子），链上门禁只有 `assert_only_owner`。恶意 operator
+  场景下绑 AIR 无意义——线性结算路径本身是 operator 信任的（p_batch 为
+  操作员自铸方程、合约只验形状、Stwo 验证在链下 host），operator 今天已可
+  伪造零和 deltas 任意挪筹码，弱门后上强锁是不一致的安全。真实威胁是
+  "诚实 operator + bug 过早释放"（第三方伤害：被释放者提走筹码 → 旧手
+  apply_settlement revert → 赢家受损）。**终态设计**：把"玩家 P 在状态 S
+  离桌、最后一手 H"做成 leave receipt 进 settlement digest（P 层
+  KIND_LEAVE 一等语句基础设施已在），合约释放入口对该承诺做与
+  apply_settlement 同级验证——释放与结算同管线，天然搭结算 bundle。
+  时机：P4 证明化结算激活之后。
+
+  **② 顺序敏感**：两个独立点。a) `apply_settlement` 对输额断言
+  `chips ≥ amount`——deltas 可交换、断言不可交换（余额 4，手 A 输 5、
+  手 B 赢 3：B 先落 ✓ / A 先落必 revert）；单桌串行自然保序，多桌玩家/
+  重试队列/nonce 竞争重发会打开倒序窗口。b) 释放条件 `hand_id ==` 精确
+  匹配是序依赖的，正确版本是序无关的"该玩家所有 ≤ 最后一手的未结算手
+  都已结算"。**修方向**：每玩家记未结算手集合（结算/中止时移除，集合空
+  且已离桌才释放），或按玩家/桌串行化结算提交（顺带解决 a）。
+  当前未炸的原因：单桌 + snip36 一次性提交（失败即弃、无迟到落地）。
+
+  **一句话**：释放的正确性目前靠事件顺序的巧合而非不变式——短期序无关
+  条件加固，长期随 P4 进证明体系。
+
+- [ ] **39. 待查：牌桌完整性（22:23 物化失败 + hand 1788734417 board-0）**
+
+  两起手牌损坏（摊牌物化 FAILED tokens=3 / derive_settlement_plan
+  board 5 张得 0 张）疑与 SHUFFLE_NOTICE 双推同族（重复触发在重构/reveal
+  路径同样存在，reveal 幂等门挡住了但重构管线未知）。#36 去重上线后
+  观察是否复现：不复现 = 双推是根因，结案；复现 = 深挖 reconstruct/
+  deal 竞态。fail-fast 安全网（退款中止/结算拒绝）两起都正确兜底，
+  无资金影响，但手会白打。
+  同批待查：客户端动作签名仍缺席（`no signed actions` 持续 → snip36
+  证明主腿未激活；结算由 bundle 保底不受影响），需浏览器现场单步
+  getPlayerKeys/wasm sign_action 链路。
+
 ## 二、功能开发（P1）
 
 - [x] **18（Phase C）. 电路内"合法默认"约束（主网上线门槛）——完成（2026-09-05）**
@@ -177,5 +281,10 @@
 | 27 | hooks 结算参数 TODO 注释清理（STARKNET_TREASURY_ADDRESS 已实现） | 2026-09-04 |
 | 30 | paymaster 生产加固（SNIP-12 本地验签，`STARKNET_PAYMASTER_SIG_REQUIRED`） | 2026-09-03 |
 | 33 | 在局锁定：vault v3（locked/session/TTL/force_unlock）+ 服务端接线 + 链上强制实测（剩应用内 e2e → 一） | 2026-09-03/04 |
+| 35 | **#33 离桌快解锁 + 结算原子锁账**：结算 bundle 原子串 lock(赢额)/refresh/force_unlock(离桌)；释放五路径闭环（bundle 搭车/兜底 flush/nonce 重试/中止钩子/构建失败钩子）；回退腿 dual 线性结算 + vault 重指 dual v5；赢额回锁关闭逃单窗口 | 2026-09-07 |
+| 36 | **SHUFFLE_NOTICE 双通道去重**：服务端出口签名去重（250ms）+ 客户端同签名去重；zk 面板区分 state-rejected 与 proof-failed | 2026-09-07 |
+| 37 | **私密领取守恒修复**（STRK20 比赛主径）：anonymizer OP_WITHDRAW 改 withdraw_to（vault 出资，零池内预存），v4 `0x7ee059dd...` 上线，用户实测通过；前端删自筹桥与余额前置 | 2026-09-07 |
+| 38 | 设计待办：释放权威证明化（leave receipt 进 settlement digest，随 P4）+ 序无关释放条件/结算串行化（多桌/重试窗口） | 2026-09-07 |
+| 39 | 待查：牌桌完整性（物化失败/board-0，去重后观察）；客户端动作签名缺席（snip36 主腿未激活） | 2026-09-07 |
 | — | 文档治理：8 份历史文档归档 docs/archive/、10+ 份头注/内容修订、STATUS.md 重写、本 TODO 重梳 | 2026-09-05 |
 | 35 | 旧测试清理：删除根 `tests/`（11 个 BLS precompile/链机制时代集成测试，Phase 1 起编译不过、拖红 CI `cargo test -p poker_texas_air --tests`）；fuzz/ 两个死 target（proof_wire/tx_decode 引用已删模块）重写为 settlement_statement/digest_felts 现役解析面，fuzz.yml 同步 | 2026-09-05 |
