@@ -7,7 +7,6 @@ coverage.lcov
 .DS_Store
 .zcode/
 .vscode/
-target-bench/
 /poker_contracts/target/*
 /poker_contracts/.snfoundry_cache/*
 .env.mainnet
@@ -24,10 +23,6 @@ poker_protocol_lean/.lake/
 texas/.env
 .vite
 src/airs_lean/.lake/
-hand-verify-native/target/
-hand-verify-native/output/
 poker_contracts/hand-verify-native/parity-checker/target/
-hand-verify-native/output/
 poker_contracts/hand-verify-native/output/
-hand-verify-native/parity-checker/target/
 deploy/
