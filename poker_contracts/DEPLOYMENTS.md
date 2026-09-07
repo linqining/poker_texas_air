@@ -347,6 +347,69 @@ fact 降级 / 错 program hash 拒 / 错消息哈希拒）。
 SNIP-36 参考实现为口径——首个真实 SNIP-36 证明提交前需用 sepolia 真实
 proof_facts 样本对拍一次（执行计划 G2 门）。
 
+## 主网部署准备（2026-09-07，待执行）
+
+在用合约 5 个（`strk20.json` 已同步清理：pSTRK/PokerSwap/CashoutUnshieldHelper 退役）：
+PokerVault / PokerSettlement(legacy 兜底) / PokerDualSettlement(v5) /
+PokerVaultAnonymizer(v4) / SettlementPayoutAnonymizer。
+
+### 主网常量（已核对）
+
+| 项 | 值 | 来源 |
+| --- | --- | --- |
+| canonical STRK | `0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d` | mainnet=sepolia 同址 |
+| STRK20 privacy pool | `0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a` | strk20-by-example.org/contract-addresses（2026-09-03 验证） |
+| chain id | `SN_MAIN`（client hex `0x534e5f4d41494e`） | — |
+| 电路 program hash | `0x744d16d382e7940b7b93c0a069ab0df04704c5b28d6476d23cca6c2370a7ad4` | #18 Phase C 切片 2（与 sepolia v5 同版） |
+| hand-verify program hash | `0x303029d8ce0ec1d0295e4037fc7f87a1ada0c27423cc99bcd080d25b1c6829f` | 同上 |
+
+⚠️ anonymizer 的 pool 地址构造时写死（v4 只有 `set_vault` 无 `set_pool`；
+SettlementPayoutAnonymizer 无任何 setter）——STRK20 池升级需重部署 helper。
+
+### 费用估算（2026-09-07 主网 RPC 真实模拟，simulateTransactions pre_confirmed）
+
+方法：`starknet_simulateTransactions` 捆绑 [DECLARE + UDC deployContract INVOKE]
+逐合约模拟，SKIP_VALIDATE/SKIP_FEE_CHARGE，gas 价快照 l2=2.76e10 fri、
+l1_data=2.77e10 fri（Starknet 0.14.3，block ≈14,478,000）。declare 费用
+以 l2_gas 为主（节点只对 declare 计 192 l1_data 单位）。
+
+| 合约 | sierra / casm | declare | deploy(UDC) | 小计 |
+| --- | --- | --- | --- | --- |
+| PokerVault | 9,868 KB / 17,682 felts | 28.19 STRK | 0.016 | 28.21 |
+| PokerSettlement | 4,726 KB / 8,559 felts | 14.11 STRK | 0.016 | 14.12 |
+| PokerDualSettlement | 18,192 KB / 36,508 felts | 59.07 STRK | 0.016 | 59.09 |
+| PokerVaultAnonymizer | 1,982 KB / 3,230 felts | 6.31 STRK | 0.016 | 6.32 |
+| SettlementPayoutAnonymizer | 1,975 KB / 4,017 felts | 7.16 STRK | 0.016 | 7.18 |
+| **合计** | | **114.84** | **0.08** | **114.92 STRK** |
+
+- 接线 5 笔 owner invoke（set_settlement_contract / set_unshield_helper /
+  set_claim_helper / 两个 program hash）合计 < 0.1 STRK。
+- deployer 账户若未部署（OZ account declare+deploy）另需 ≈0.5 STRK。
+- **建议部署账户充值 ≥ 130 STRK**（估算 115 + gas 价波动缓冲）。
+
+已知坑（模拟时确认，主网 publicnode/Juno 同样存在）：节点重算的
+compiled-class-hash 与本地 cairo 2.19.4 可能不一致（报
+`Mismatch compiled class hash … Expected: 0x…`）——`deploy_mainnet.sh`
+沿用了 snops 的 `--compiled-hash <Expected>` 自动重试。模拟端点曾把
+sierra abi 按字符串序列化重算出不同 sierra hash，不影响费用结论
+（费用只随 calldata 大小变化）；真实 declare 由 snops/starknet-rs
+发送原生格式，sepolia v5 实测无此问题。
+
+### 执行
+
+```bash
+cd poker_contracts && PATH="$HOME/.local/opt/toolchains/scarb-2.19.4/bin:$PATH" scarb build
+cargo build -p texas --bin snops
+# .env.mainnet 写入 ADDRESS/PRIVATE_KEY（主网 deployer，≥130 STRK）
+CONFIRM_MAINNET=yes ./scripts/deploy_mainnet.sh
+```
+
+脚本顺序：declare×5 → vault(owner, STRK, settlement=0) → settlement(owner,
+vault, prover) → dual(owner, vault, prover) → anonymizer(owner, vault, pool) →
+payout(vault, pool, dual) → 接线（vault.settlement=dual、vault.unshield_helper=
+anonymizer、dual.claim_helper=payout、dual 两个 program hash）→ 链上回读。
+部署后回填 strk20.json / 本文档 / texas `.env` / client `.env.production`。
+
 ## PokerVaultAnonymizer v4 — 私密领取守恒修复（2026-09-07）
 
 OP_WITHDRAW 从 `burn_chips`（无代币移动 + 用户池内自筹注资——每领 X 销毁
