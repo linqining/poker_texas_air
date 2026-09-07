@@ -56,7 +56,18 @@ pub async fn verify_wallet_signature(
 
     let result = chain
         .call_contract(addr, is_valid_signature_selector(), calldata)
-        .await?;
+        .await
+        .map_err(|e| {
+            // 未部署账户：钱包能本地签名但链上没有账户合约可验签
+            // （starknet-rs 报 Contract not found / Contract not registered）。
+            if e.to_ascii_lowercase().contains("not found")
+                || e.to_ascii_lowercase().contains("not registered")
+            {
+                "钱包地址尚未在当前网络激活（无账户合约）。请在钱包中先完成任意一笔交易以部署账户，再重新登录".to_string()
+            } else {
+                e
+            }
+        })?;
 
     // Argent/Braavos 约定：VALID = felt 短串 "VALID"（0x00...56414c4944）。
     // Argent 旧版 camelCase 入口（isValidSignature）按合约源码语义：

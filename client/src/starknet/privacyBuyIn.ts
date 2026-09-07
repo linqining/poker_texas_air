@@ -22,7 +22,7 @@
 
 import { constants, type AccountInterface } from 'starknet';
 import { logger } from '../helpers/logger';
-import { starknetConfig } from './config';
+import { starknetConfig, toWalletFeltHex } from './config';
 import { getProvider } from './contracts';
 
 const SDK_MODULE = '@starkware-libs/starknet-privacy-sdk';
@@ -121,12 +121,12 @@ function loadSdk(): Promise<SDKModule | null> {
 // 后端实现
 // ------------------------------------------------------------
 
-/** u256 → [low, high] 两个 0x 十六进制 felt（Ready 的 payload schema 只认
- * 0x hex，十进制字符串会被 INVALID_REQUEST_PAYLOAD 拒绝；SDK CallData 两者
- * 皆收）。 */
+/** u256 → [low, high] 两个 0x 十六进制 felt（钱包 payload schema 只认
+ * 规范化 0x hex：十进制串、前导零、'0x' 空 hex 都会被
+ * INVALID_REQUEST_PAYLOAD 拒绝；SDK CallData 两者皆收）。 */
 function splitU256(wei: bigint): [string, string] {
   const mask = (1n << 128n) - 1n;
-  return ['0x' + (wei & mask).toString(16), '0x' + (wei >> 128n).toString(16)];
+  return [toWalletFeltHex(wei & mask), toWalletFeltHex(wei >> 128n)];
 }
 
 /** helper 的 privacy_invoke operation：0 = 买入（STRK → 筹码）。 */
@@ -199,7 +199,7 @@ async function walletApiBackend(account: AccountInterface, wei: bigint): Promise
       type: 'invoke',
       contract: starknetConfig.privacy.anonymizerAddress,
       // privacy_invoke(operation=0 买入, player, amount:u256, change_note_id)
-      calldata: [OP_BUY_IN, account.address, low, high, OPEN_NOTE_PLACEHOLDER],
+      calldata: [OP_BUY_IN, toWalletFeltHex(account.address), low, high, OPEN_NOTE_PLACEHOLDER],
     },
   ];
   const res = await acct.strk20InvokeTransaction(actions);

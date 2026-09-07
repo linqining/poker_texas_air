@@ -13,7 +13,7 @@
 // 能力探测按官方指引只用 `supportedWalletApi` 版本查询（≥0.10.3），绝不
 // 用 strk20Balances 之类的数据调用做探测——那会触发钱包授权弹窗。
 
-import { starknetConfig } from './config';
+import { starknetConfig, toWalletFeltHex } from './config';
 import { getProvider } from './contracts';
 import { logger } from '../helpers/logger';
 import type { TxResult } from './starknetGameActions';
@@ -648,9 +648,11 @@ export async function claimRewardsPrivate(
   // Ready 的 payload schema 对 felt 只认规范化 0x 十六进制
   // （^0x(0|[a-fA-F1-9]{1}[a-fA-F0-9]{0,62})$，0 必须是 '0x0'），十进制字符串
   // 直接 INVALID_REQUEST_PAYLOAD(114)——线上实测；u256 拆 lo/hi 都转 hex。
-  const lo = '0x' + (amount & 0xffffffffffffffffffffffffffffffffn).toString(16);
-  const hi = '0x' + (amount >> 128n).toString(16);
-  const player = acct.address;
+  // 2026-09-07 主网实测补充：带前导零的地址（0x01fa…/0x00cb…）同样被 schema
+  // 拒绝，player/recipient/lo/hi 一律走 toWalletFeltHex 规范化。
+  const lo = toWalletFeltHex(amount & 0xffffffffffffffffffffffffffffffffn);
+  const hi = toWalletFeltHex(amount >> 128n);
+  const player = toWalletFeltHex(acct.address);
   // 隐私池内流转的资产是原生 STRK（pSTRK/PokerToken 已弃用——官方 Sepolia
   // 隐私池面向 STRK，钱包侧对未入池 token 直接拒绝 INVALID_REQUEST_PAYLOAD）
   const { CANONICAL_STRK_ADDRESS } = await import('./starknetGameActions');

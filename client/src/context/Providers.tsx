@@ -22,6 +22,7 @@ import {
   injected,
 } from '@starknet-react/core';
 import { sepolia, mainnet } from '@starknet-react/chains';
+import { starknetConfig } from '../starknet/config';
 
 const queryClient = new QueryClient();
 
@@ -49,7 +50,12 @@ const provider = jsonRpcProvider({
   },
 });
 
-const chains = [sepolia, mainnet];
+// starknet-react 以数组首项为默认链：按构建时 chainId 排序，
+// 主网构建默认 mainnet，否则 dApp 会反过来要求钱包切到 Sepolia。
+const chains =
+  starknetConfig.chainId === '0x534e5f4d41494e'
+    ? [mainnet, sepolia]
+    : [sepolia, mainnet];
 
 interface ProvidersProps {
   children: React.ReactNode;

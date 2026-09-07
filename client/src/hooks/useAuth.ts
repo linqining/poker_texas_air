@@ -227,6 +227,16 @@ const useAuth = (): UseAuthReturn => {
       }
     } catch (error) {
       logger.error('[Auth] Wallet authentication failed:', error);
+      // 后端校验失败原因（如"钱包地址尚未激活"）直接透出给用户，
+      // 否则签名失败只有控制台日志，用户无从知晓。
+      const backendMsg =
+        error && typeof error === 'object' && 'response' in error
+          ? (error as { response?: { data?: { error?: string } } }).response?.data
+              ?.error
+          : undefined;
+      if (backendMsg) {
+        window.alert(backendMsg);
+      }
     }
     setIsLoading(false);
   };

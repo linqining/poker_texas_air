@@ -116,6 +116,17 @@ function buildRpcUrls(chainId: string): string[] {
   return [...new Set([primary, ...fallbacks.filter((u) => u !== primary)])];
 }
 
+/**
+ * STRK20 Wallet API 的 felt 规范化：去前导零的 0x hex（0 → '0x0'）。
+ * 钱包 schema（^0x(0|[a-fA-F1-9][a-fA-F0-9]{0,62})$）会拒绝
+ * '0x01fa…' 这类前导零形式和 '0x' 空 hex（INVALID_REQUEST_PAYLOAD 114）；
+ * 地址、u256 lo/hi 进入 payload 前都必须过这一层。
+ */
+export function toWalletFeltHex(v: bigint | string): string {
+  const b = typeof v === 'bigint' ? v : BigInt(v);
+  return '0x' + b.toString(16);
+}
+
 const chainId = readEnv(
   'VITE_STARKNET_CHAIN_ID',
   '0x534e5f5345504f4c4941',
