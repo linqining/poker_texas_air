@@ -5,10 +5,12 @@
 # 用法：URL=https://starknet-sepolia-rpc.publicnode.com ./scripts/deploy_sepolia_full.sh
 # 可选环境变量：
 set -euo pipefail
-SNOPS=/Users/mac/projects/zgame/target/debug/snops
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# snops = 本仓库 cargo build -p texas --bin snops 的产物，可用 SNOPS= 覆盖
+SNOPS="${SNOPS:-$ROOT/target/debug/snops}"
 URL="${URL:-https://starknet-sepolia-rpc.publicnode.com}"
-ART=/Users/mac/projects/poker_texas_air/poker_contracts/target/dev
-ENV_ROOT=/Users/mac/projects/poker_texas_air
+ART="$ROOT/poker_contracts/target/dev"
+ENV_ROOT="$ROOT"
 
 # shellcheck disable=SC1091
 . "$ENV_ROOT/.env.dev"

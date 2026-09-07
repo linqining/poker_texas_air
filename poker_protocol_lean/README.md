@@ -62,7 +62,7 @@ shuffle re-randomizer, so that the accumulated `r` is hidden.
 ## Build and audit
 
 ```bash
-cd /Users/mac/projects/zgame/poker_protocol_lean
+cd poker_protocol_lean
 lake build PokerProtocolLean
 bash scripts/count_sorries.sh
 ```

@@ -7,8 +7,7 @@
 //! 建议使用标准描述："ρ-folded Schnorr ownership endorsement batch
 //! + host-verified STARK attestation"。
 //!
-//! 完整设计文档在外部结算 workspace：
-//! `/Users/mac/projects/poker_texas_air/{DUAL_PROOF_PROTOCOL.md,
+//! 完整设计文档在仓库根：`{DUAL_PROOF_PROTOCOL.md,
 //! DAPV_SOUNDNESS.md}`（v2.8；含 hand_batch.cairo 的 Cairo 侧规范）。
 //! 概要：
 //! - **P 层**：每座位一条 hand-bound secp256k1 Schnorr 认可（ownership

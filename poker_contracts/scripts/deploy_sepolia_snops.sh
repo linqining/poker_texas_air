@@ -10,10 +10,12 @@
 #   INITIAL_SUPPLY=1000000000000000000000   # 1000 STRK（wei）
 #   USE_DUAL=1                              # 同时部署 PokerDualSettlement
 set -euo pipefail
-SNOPS=/Users/mac/projects/zgame/target/debug/snops
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# snops = 本仓库 cargo build -p texas --bin snops 的产物，可用 SNOPS= 覆盖
+SNOPS="${SNOPS:-$ROOT/target/debug/snops}"
 URL="${URL:-https://starknet-sepolia-rpc.publicnode.com}"
 INITIAL_SUPPLY="${INITIAL_SUPPLY:-1000000000000000000000}"
-ART=/Users/mac/projects/poker_texas_air/poker_contracts/target/dev
+ART="$ROOT/poker_contracts/target/dev"
 ENV_OUT=/tmp/starknet_sepolia_env
 
 # shellcheck disable=SC1091
@@ -89,9 +91,10 @@ EOF
 cat "$ENV_OUT"
 
 # 5) server .env
-python3 - << 'PY'
+REPO_ROOT="$ROOT" python3 - << 'PY'
+import os
 env = dict(l.strip().split('=', 1) for l in open('/tmp/starknet_sepolia_env') if '=' in l)
-p = '/Users/mac/projects/zgame/texas/.env'
+p = os.path.join(os.environ['REPO_ROOT'], 'texas', '.env')
 lines = [l.rstrip('\n') for l in open(p)]
 want = ['STARKNET_RPC_URL', 'STARKNET_STRK_ADDRESS', 'STARKNET_VAULT_ADDRESS',
         'STARKNET_SETTLEMENT_ADDRESS', 'STARKNET_OPERATOR_ADDRESS', 'STARKNET_OPERATOR_PRIVATE_KEY']
@@ -106,9 +109,10 @@ print('server .env updated')
 PY
 
 # 6) client .env.local
-python3 - << 'PY'
+REPO_ROOT="$ROOT" python3 - << 'PY'
+import os
 env = dict(l.strip().split('=', 1) for l in open('/tmp/starknet_sepolia_env') if '=' in l)
-p = '/Users/mac/projects/zgame/client/.env.local'
+p = os.path.join(os.environ['REPO_ROOT'], 'client', '.env.local')
 lines = [l.rstrip('\n') for l in open(p)]
 setk = {
     'VITE_STARKNET_RPC_URL': env['STARKNET_RPC_URL'],
@@ -132,10 +136,10 @@ print('client .env.local updated')
 PY
 
 # 7) strk20.json 回填
-python3 - << 'PY'
-import json
+REPO_ROOT="$ROOT" python3 - << 'PY'
+import json, os
 env = dict(l.strip().split('=', 1) for l in open('/tmp/starknet_sepolia_env') if '=' in l)
-p = '/Users/mac/projects/poker_texas_air/strk20.json'
+p = os.path.join(os.environ['REPO_ROOT'], 'strk20.json')
 d = json.load(open(p))
 d['rpc_url'] = env['STARKNET_RPC_URL']
 m = {'poker_token': 'STARKNET_STRK_ADDRESS', 'poker_vault': 'STARKNET_VAULT_ADDRESS',

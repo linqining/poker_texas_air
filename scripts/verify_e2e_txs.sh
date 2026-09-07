@@ -13,8 +13,10 @@ D2="0x283008305b515ead456b621d41f232d1c650c882c550d465b3fc5c83eee98e4"   # Poker
 CHIP_BAL_SEL="0x19924a03080ce6052c19197f7a89c3f2ff2a7260c79410f273d07dd6802aa4a"   # chip_balance
 PCOMMIT_SEL="0x5cd65940e6b3edea8b5cf1ea5fef37c1ac1e0d0fdc7131e6c7f45a9dbee45e21"   # payout_commitment
 
-# vault 读取走 snops（publicnode 对长 calldata felt 的解析不稳定）
-S="${SNOPS:-/Users/mac/projects/zgame/target/debug/snops}"
+# vault 读取走 snops（publicnode 对长 calldata felt 的解析不稳定）；
+# snops = 本仓库 cargo build -p texas --bin snops 的产物，可用 SNOPS= 覆盖
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+S="${SNOPS:-$ROOT/target/debug/snops}"
 
 echo "== 1. vault v2 筹码余额 =="
 CHIPS_HEX=$("$S" --url "$URL" call --contract "$V2" --fn chip_balance --calldata "$ADDR" 2>/dev/null | grep -oE "OUT=0x[0-9a-f]+" | head -1 | cut -d= -f2 || true)

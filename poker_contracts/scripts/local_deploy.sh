@@ -2,13 +2,15 @@
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 URL="${URL:-http://127.0.0.1:5051}"
-SNOPS=/Users/mac/projects/zgame/target/debug/snops
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# snops = 本仓库 cargo build -p texas --bin snops 的产物，可用 SNOPS= 覆盖
+SNOPS="${SNOPS:-$ROOT/target/debug/snops}"
 OWNER="${OWNER:?Set OWNER}"
 OPKEY="${OPKEY:?Set OPKEY}"
-ART=/Users/mac/projects/poker_texas_air/poker_contracts/target/dev
-TX_OF() { echo "$1" | python3 /Users/mac/projects/poker_texas_air/poker_contracts/scripts/parse_out.py tx; }
-ADDR_OF() { echo "$1" | python3 /Users/mac/projects/poker_texas_air/poker_contracts/scripts/parse_out.py addr; }
-CLASS_OF() { echo "$1" | python3 /Users/mac/projects/poker_texas_air/poker_contracts/scripts/parse_out.py class; }
+ART="$ROOT/poker_contracts/target/dev"
+TX_OF() { echo "$1" | python3 "$ROOT/poker_contracts/scripts/parse_out.py" tx; }
+ADDR_OF() { echo "$1" | python3 "$ROOT/poker_contracts/scripts/parse_out.py" addr; }
+CLASS_OF() { echo "$1" | python3 "$ROOT/poker_contracts/scripts/parse_out.py" class; }
 
 declare_one() {
   local name=$1
@@ -17,7 +19,7 @@ declare_one() {
   local out
   out=$($SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" declare --class "$class" --compiled "$compiled" 2>&1) || {
     # 已声明过则从错误中提取 class hash
-    echo "$out" | python3 /Users/mac/projects/poker_texas_air/poker_contracts/scripts/parse_out.py already
+    echo "$out" | python3 "$ROOT/poker_contracts/scripts/parse_out.py" already
     return 0
   }
   CLASS_OF "$out"

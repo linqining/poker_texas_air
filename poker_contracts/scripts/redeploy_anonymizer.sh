@@ -3,10 +3,12 @@
 # 并把 vault 的 authorized_helper 指到新 helper。
 # 用法：URL=https://starknet-sepolia-rpc.publicnode.com ./scripts/redeploy_anonymizer.sh <VAULT> <POOL>
 set -euo pipefail
-SNOPS=/Users/mac/projects/zgame/target/debug/snops
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# snops = 本仓库 cargo build -p texas --bin snops 的产物，可用 SNOPS= 覆盖
+SNOPS="${SNOPS:-$ROOT/target/debug/snops}"
 URL="${URL:-https://starknet-sepolia-rpc.publicnode.com}"
-ART=/Users/mac/projects/poker_texas_air/poker_contracts/target/dev
-ENV_ROOT=/Users/mac/projects/poker_texas_air
+ART="$ROOT/poker_contracts/target/dev"
+ENV_ROOT="$ROOT"
 VAULT="${1:?VAULT address required}"
 POOL="${2:?POOL address required}"
 

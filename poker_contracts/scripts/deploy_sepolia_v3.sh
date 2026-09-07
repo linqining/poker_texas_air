@@ -8,7 +8,7 @@
 #   ./scripts/deploy_sepolia_v3.sh
 #
 # 依赖：/.env.dev（PRIVATE_KEY/ADDRESS = poker-deployer）、scarb build 产物、
-# zgame/target/debug/snops。
+# 仓库根 target/debug/snops（cargo build -p texas --bin snops）。
 #
 # ⚠️ 已知坑（2026-09-03）：sepolia 当前 Starknet 版本的 compiled-class hash
 # 方案与本地 cairo 2.11.4 计算不一致——declare 会报
@@ -24,8 +24,9 @@
 # gas 预算：declare 该 class 约需 l2_gas 2.86e9 单位（当前价格 ≈142 STRK），
 # 部署账户余额不足时先去水龙头补充 STRK。
 set -euo pipefail
-ROOT=/Users/mac/projects/poker_texas_air
-SNOPS=/Users/mac/projects/zgame/target/debug/snops
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# snops = 本仓库 cargo build -p texas --bin snops 的产物，可用 SNOPS= 覆盖
+SNOPS="${SNOPS:-$ROOT/target/debug/snops}"
 URL="${URL:-https://starknet-sepolia-rpc.publicnode.com}"
 ART="$ROOT/poker_contracts/target/dev"
 # HELPER = SettlementPayoutAnonymizer 合约地址（认领托管 helper，是合约不是

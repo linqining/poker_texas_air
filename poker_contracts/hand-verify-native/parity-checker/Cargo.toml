@@ -8,7 +8,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-poker-protocol-core = { path = "/Users/mac/projects/poker_texas_air/poker-protocol-core" }
+poker-protocol-core = { path = "../../../poker-protocol-core" }
 crypto-bigint = "0.5.5"
 
 [profile.release]
