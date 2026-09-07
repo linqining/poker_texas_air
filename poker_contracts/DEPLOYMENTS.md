@@ -347,7 +347,7 @@ fact 降级 / 错 program hash 拒 / 错消息哈希拒）。
 SNIP-36 参考实现为口径——首个真实 SNIP-36 证明提交前需用 sepolia 真实
 proof_facts 样本对拍一次（执行计划 G2 门）。
 
-## 主网部署准备（2026-09-07，待执行）
+## 主网部署准备（2026-09-07，待执行）→ ✅ 已部署（同日）
 
 在用合约 5 个（`strk20.json` 已同步清理：pSTRK/PokerSwap/CashoutUnshieldHelper 退役）：
 PokerVault / PokerSettlement(legacy 兜底) / PokerDualSettlement(v5) /
@@ -409,6 +409,45 @@ vault, prover) → dual(owner, vault, prover) → anonymizer(owner, vault, pool)
 payout(vault, pool, dual) → 接线（vault.settlement=dual、vault.unshield_helper=
 anonymizer、dual.claim_helper=payout、dual 两个 program hash）→ 链上回读。
 部署后回填 strk20.json / 本文档 / texas `.env` / client `.env.production`。
+
+### ✅ 主网部署完成（2026-09-07）
+
+deployer/owner/operator = `.env.mainnet` 账户 `0x412e4d43...46121a6`
+（snops gen-key 离线生成，OZ class `0x05b4b537...`，充值 200 STRK）。
+账户部署 TX `0x4512a29d...`；全量脚本 `CONFIRM_MAINNET=yes ./scripts/deploy_mainnet.sh`。
+
+| 合约 | 主网地址 | class hash |
+| --- | --- | --- |
+| PokerVault | `0x3f4ef706ae2dc00ac685afffc05e5f1e1e9ab5aacf99c3205d2067e061cbb45` | `0x7c74ca1a...` |
+| PokerSettlement (legacy) | `0x2bf6a09c0aaea154de34745056e7534f58fa0805c12afe18cf22a9bc66ee7a8` | `0x6f2e01a6...` |
+| PokerDualSettlement (v5) | `0x1d39b80b990038ceeeaf3d39e83cb83031be95c0d0ccca5d18c5faea29aef6d` | `0x047e91d5...`（与 sepolia v5 同 class） |
+| PokerVaultAnonymizer (v4) | `0x88c1f843588d1498fcd3f780fa7cf86ada18cd416754c77149a8c14e492877` | `0x525646bd...`（与 sepolia v4 同 class） |
+| SettlementPayoutAnonymizer | `0x402372930ea52cccbafa459169b3dae3d67051ed741e9af7da669a0f1fbb308` | `0x7c11073c...`（当前源码新 class） |
+
+- 接线验证（链上回读）：vault.token=canonical STRK ✓、vault.unshield_helper=
+  anonymizer ✓、settlement.vault=vault ✓、dual.claim_helper=payout ✓、
+  dual.circuit_program_hash=`0x744d16d3...` ✓；hand_verify_program_hash 无
+  getter——幂等重设一次 SUCCEEDED（TX `0x1ddcf414...`）确认为 `0x303029d8...`。
+- 实际花费 **122.37 STRK**（200 − 77.63，含账户部署+15 笔部署/接线+1 笔幂等重设；
+  对比估算 115.5，gas 价波动内）。
+- 主网 STRK20 池 `0x040337b1...` 已绑入两个 anonymizer 构造。
+- 服务端/前端切换（改 env 后重启生效）：
+
+```
+texas/.env: STARKNET_RPC_URL=https://starknet-rpc.publicnode.com
+            STARKNET_CHAIN_ID=SN_MAIN
+            STARKNET_STRK_ADDRESS=0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d
+            STARKNET_VAULT_ADDRESS=0x3f4ef706...
+            STARKNET_SETTLEMENT_ADDRESS=0x2bf6a09c...
+            STARKNET_DUAL_SETTLEMENT_ADDRESS=0x1d39b80b...
+            STARKNET_CLAIM_HELPER_ADDRESS=0x40237293...
+client/.env.production: VITE_STARKNET_CHAIN_ID=0x534e5f4d41494e
+            VITE_STRK_TOKEN_ADDRESS=<canonical STRK 同上>
+            VITE_POKER_VAULT_ADDRESS=0x3f4ef706...
+            VITE_POKER_SETTLEMENT_ADDRESS=0x2bf6a09c...
+            VITE_POKER_VAULT_ANONYMIZER_ADDRESS=0x88c1f843...
+            VITE_STRK20_POOL_ADDRESS=0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a
+```
 
 ## PokerVaultAnonymizer v4 — 私密领取守恒修复（2026-09-07）
 

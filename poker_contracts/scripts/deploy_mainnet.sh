@@ -114,7 +114,7 @@ do_deploy() {
 
 echo "== mainnet deployer: $OWNER (rpc: $URL)"
 BAL=$($SNOPS --url "$URL" call --contract "$STRK" --fn balance_of --calldata "$OWNER" 2>/dev/null | head -1 | grep -oE '0x[0-9a-f]+' || echo 0x0)
-echo "   STRK balance(low word) = $BAL（≥130 方可覆盖估算 115 + 缓冲）"
+echo "   STRK balance(low word) = ${BAL} (need >=130 for est.115 + buffer)"
 
 echo "== [1/7] declare 5 classes"
 CLS_VAULT=$(do_declare PokerVault)         || exit 1; echo "vault class   = $CLS_VAULT"
@@ -126,11 +126,11 @@ CLS_PAYOUT=$(do_declare SettlementPayoutAnonymizer) || exit 1; echo "payout clas
 echo "== [2/7] deploy PokerVault(owner, STRK, settlement=0 占位)"
 VAULT=$(do_deploy vault "$CLS_VAULT" "$OWNER,$STRK,0x0") || exit 1; echo "VAULT=$VAULT"
 
-echo "== [3/7] deploy PokerSettlement + PokerDualSettlement（prover=$OWNER）"
+echo "== [3/7] deploy PokerSettlement + PokerDualSettlement (prover=${OWNER})"
 SETTLE=$(do_deploy settlement "$CLS_SETTLE" "$OWNER,$VAULT,$OWNER") || exit 1; echo "SETTLEMENT=$SETTLE"
 DUAL=$(do_deploy dual "$CLS_DUAL" "$OWNER,$VAULT,$OWNER") || exit 1; echo "DUAL=$DUAL"
 
-echo "== [4/7] deploy anonymizers（pool=$POOL）"
+echo "== [4/7] deploy anonymizers (pool=${POOL})"
 ANON=$(do_deploy anonymizer "$CLS_ANON" "$OWNER,$VAULT,$POOL") || exit 1; echo "ANONYMIZER=$ANON"
 PAYOUT=$(do_deploy payout "$CLS_PAYOUT" "$VAULT,$POOL,$DUAL") || exit 1; echo "PAYOUT_ANONYMIZER=$PAYOUT"
 

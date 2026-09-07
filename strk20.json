@@ -78,8 +78,40 @@
     "mainnet_address": "0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a",
     "note": "STRK20 privacy pool (starkware-libs/starknet-privacy). External dependency — constructor arg for both anonymizers; not deployed by us. Mainnet address verified 2026-09-03 via strk20-by-example.org/contract-addresses."
   },
+  "mainnet": {
+    "deployed": "2026-09-07",
+    "chain_id": "SN_MAIN",
+    "rpc_url": "https://starknet-rpc.publicnode.com",
+    "explorer_url": "https://starkscan.co",
+    "deployer_owner": "0x412e4d435b98fa7112bf6a61eed6cf38694278af3072cddd2efade2e46121a6",
+    "contracts": {
+      "poker_vault": "0x3f4ef706ae2dc00ac685afffc05e5f1e1e9ab5aacf99c3205d2067e061cbb45",
+      "poker_settlement": "0x2bf6a09c0aaea154de34745056e7534f58fa0805c12afe18cf22a9bc66ee7a8",
+      "poker_dual_settlement": "0x1d39b80b990038ceeeaf3d39e83cb83031be95c0d0ccca5d18c5faea29aef6d",
+      "poker_vault_anonymizer": "0x88c1f843588d1498fcd3f780fa7cf86ada18cd416754c77149a8c14e492877",
+      "settlement_payout_anonymizer": "0x402372930ea52cccbafa459169b3dae3d67051ed741e9af7da669a0f1fbb308"
+    },
+    "class_hashes": {
+      "PokerVault": "0x7c74ca1a5a308dd487f7e7bbb794ad7a39e81d12f34ac1a345dbcef43eaaf6e",
+      "PokerSettlement": "0x6f2e01a61b9fa6d73f1730b87ae39fbe1e9d553327a864b3acb755792a10440",
+      "PokerDualSettlement": "0x047e91d54d171401a314a591ab1b67d3259e09b9f90c0036675829f533884cf8",
+      "PokerVaultAnonymizer": "0x525646bdab97344307b3bd4cbb80344ee26415366743d181e52c61f1a250c81",
+      "SettlementPayoutAnonymizer": "0x7c11073c06be83e2a4990554b9318e2d43ff04552f24892477b374eac006a79"
+    },
+    "wiring_verified": {
+      "vault.token": "canonical STRK 0x04718f5a...",
+      "vault.unshield_helper": "poker_vault_anonymizer",
+      "vault.settlement_contract": "poker_dual_settlement",
+      "settlement.vault": "poker_vault",
+      "dual.claim_helper": "settlement_payout_anonymizer (view read-back ✓)",
+      "dual.circuit_program_hash": "0x744d16d3... (view read-back ✓)",
+      "dual.hand_verify_program_hash": "0x303029d8... (no getter; idempotent re-set SUCCEEDED)"
+    },
+    "fees": "total spend 122.37 STRK (200 funded - 77.63 left): account deploy + 5 declares + 5 UDC deploys + 5 wiring invokes + 1 idempotent re-set; vs 115.5 estimate",
+    "note": "Fresh deploy of current source (dual class == sepolia v5 0x047e91d5..., anonymizer == v4 0x525646bd...). STRK20 pool mainnet 0x040337b1... bound in both anonymizer constructors."
+  },
   "mainnet_prep": {
-    "status": "pending",
+    "status": "deployed",
     "deploy_script": "poker_contracts/scripts/deploy_mainnet.sh",
     "deploy_order": [
       "declare x5 (PokerVault / PokerSettlement / PokerDualSettlement v5 / PokerVaultAnonymizer v4 / SettlementPayoutAnonymizer)",
