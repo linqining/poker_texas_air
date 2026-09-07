@@ -392,6 +392,16 @@ async fn submit_dual_fallback(
             // 兜底：结算流程启动后才注册离桌的玩家在此补放（独立交易，
             // invoke_vault 内置 nonce 重试）。
             super::lock::flush_leave_releases(settlement.hand_id).await;
+            // 续钟移出 bundle 后的独立补钟：refresh_session 的
+            // "No active session" 断言曾把整笔原子结算拖回滚
+            // （2026-09-08 hand 1788812613）。独立交易失败只告警
+            // （invoke_vault 带 nonce 重试），不影响已落地的结算。
+            for p in &settlement.players_remapped {
+                let wallet = super::lock::wallet_of_felt(p);
+                if super::lock::vault_session_active(&wallet).await {
+                    super::lock::refresh_player_session(&wallet).await;
+                }
+            }
         }
         Err(e) if is_already_settled_error(&e) => {
             let _ = settle_ok_once(table_id, settlement.hand_id);

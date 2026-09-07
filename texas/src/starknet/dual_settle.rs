@@ -1283,19 +1283,10 @@ pub async fn submit_dual_settlement(
             });
             notes.push("win-relock");
         }
-        // 续钟（仅确有活跃 session 的参与者；无 session 的 refresh 会
-        // 断言 revert 拖垮整笔）。
-        for p in players_remapped {
-            let wallet = super::lock::wallet_of_felt(p);
-            if super::lock::vault_session_active(&wallet).await {
-                calls.push(Call {
-                    to: vault,
-                    selector: starknet_keccak(b"refresh_session"),
-                    calldata: vec![ff_to_felt(*p)],
-                });
-                notes.push("refresh");
-            }
-        }
+        // 续钟不进 bundle：vault_session_active 检查与链上执行之间存在
+        // 竞态，"No active session" 断言会让整笔原子结算回滚（2026-09-08
+        // hand 1788812613 线上：结算丢失）。结算成功后由 hooks 用
+        // invoke_vault（带重试、失败仅告警）逐个续钟。
         // 离桌释放（force_unlock 无断言，空锁调用只是写零）。
         for w in departed {
             if let Some(f) = super::chain::parse_felt(w) {
