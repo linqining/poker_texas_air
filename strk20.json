@@ -104,7 +104,9 @@
   "transactions": [
     "0xcd9b13ececa4649ce5f6e7ad80acf80e1ab03a57190e4035e7240369152a4b",
     "0x1daa47a0efde4fad6bbf3d81f88af40ed3951a946b3ece84ac06f6fbb6e7e04",
-    "0x639263f89bccef1bef806409da74962d7e7829043deb153fb0ea2e5ddbdab69"
+    "0x639263f89bccef1bef806409da74962d7e7829043deb153fb0ea2e5ddbdab69",
+    "0x7edf5045bcc1aab3f748d503611c8a2c73b15c5cac0224e4dbf4a4801358982",
+    "0x6fe8e61e009ad5168c683fb2560c73fba4a92e9eba723455c3557bd6e79d6cc"
   ],
   "demo_video": "https://www.youtube.com/watch?v=uqtrvw_bR4w",
   "demo_url": "https://strk.secretpokers.com/",
