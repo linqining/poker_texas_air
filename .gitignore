@@ -30,3 +30,4 @@ poker_contracts/hand-verify-native/parity-checker/target/
 hand-verify-native/output/
 poker_contracts/hand-verify-native/output/
 hand-verify-native/parity-checker/target/
+deploy/

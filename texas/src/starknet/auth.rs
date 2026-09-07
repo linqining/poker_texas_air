@@ -59,11 +59,14 @@ pub async fn verify_wallet_signature(
         .await?;
 
     // Argent/Braavos 约定：VALID = felt 短串 "VALID"（0x00...56414c4944）。
+    // Argent 旧版 camelCase 入口（isValidSignature）按合约源码语义：
+    // 有效返回 1，无效 panic（不返回 VALID magic）——两种都要认。
     let ok = result
         .first()
         .and_then(|f| starknet::core::utils::parse_cairo_short_string(f).ok())
         .map(|s| s == "VALID")
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || result.first().map(|f| *f == Felt::ONE).unwrap_or(false);
     if ok {
         Ok(())
     } else {

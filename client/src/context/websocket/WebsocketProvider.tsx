@@ -63,8 +63,10 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       if (!socketRef.current) {
         logger.log('[WebSocketProvider] Creating new socket to:', config.socketURI);
         const newSocket = io(config.socketURI, {
-          transports: ['websocket'],
-          upgrade: false,
+          // websocket 优先但保留 polling 降级：直连/nginx 支持 WS 升级，
+          // Vercel 等只代理 HTTP 的托管下降级到 polling 仍可玩
+          transports: ['websocket', 'polling'],
+          upgrade: true,
           reconnection: true,
           reconnectionAttempts: 10,
           reconnectionDelay: 1000,

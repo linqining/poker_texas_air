@@ -90,6 +90,8 @@ pub fn parse_felt(s: &str) -> Option<Felt> {
     if s.is_empty() {
         return None;
     }
-    Felt::from_hex(s).ok()
+    // 钱包端签名数组以十进制字符串序列化（bigint.toString()），且十进制
+    // 数字串当 hex 解析会超出域大小而失败，故两种进制都要支持。
+    Felt::from_hex(s).ok().or_else(|| Felt::from_dec_str(s).ok())
 }
 
