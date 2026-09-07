@@ -70,16 +70,25 @@ export async function signTableAction(
   if (!sign) return null;
   try {
     const seq = nextSeq(tableId);
-    const out = sign(skHex, Number(tableId), Number(handId), BigInt(seq), action, BigInt(amount));
-    if (!out || typeof out.r_hex !== 'string' || typeof out.s_hex !== 'string') return null;
-    return { seq, rHex: out.r_hex, sHex: out.s_hex };
+    const out = sign(skHex, Number(tableId), Number(handId), BigInt(seq), action, BigInt(amount)) as unknown;
+    // serde_wasm_bindgen 把 JSON 对象序列化成 JS Map（非普通对象）——
+    // 直接 out.r_hex 恒为 undefined，签名被静默丢弃（2026-09-08 线上
+    // "no signed actions" 根因）。两种形状都兼容。
+    const rHex = out instanceof Map ? out.get('r_hex') : (out as Record<string, unknown> | null)?.r_hex;
+    const sHex = out instanceof Map ? out.get('s_hex') : (out as Record<string, unknown> | null)?.s_hex;
+    if (typeof rHex !== 'string' || typeof sHex !== 'string') return null;
+    return { seq, rHex, sHex };
   } catch {
     return null;
   }
 }
 
-/** 把签名展开为 socket 消息字段（fold/check/call/raise 通吃）。 */
+/** 把签名展开为 socket 消息字段（fold/check/call/raise 通吃）。
+ * 形状必须与服务端 SimpleActionPayload / RaisePayload 对齐：
+ * 嵌套 `sig: { rHex, sHex }`——平铺 rHex/sHex 会被服务端
+ * #[serde(default)] 静默丢弃，动作以未签名落账（snip36 "no signed
+ * actions"，2026-09-08 线上）。 */
 export function sigToPayloadFields(sig: AttachedActionSig | null): Record<string, unknown> {
   if (!sig) return {};
-  return { seq: sig.seq, rHex: sig.rHex, sHex: sig.sHex };
+  return { seq: sig.seq, sig: { rHex: sig.rHex, sHex: sig.sHex } };
 }

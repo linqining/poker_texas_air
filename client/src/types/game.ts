@@ -114,6 +114,9 @@ export interface Table {
   chainTableId?: string;
   seats: Record<number, Seat>;
   roundState: RoundStateType;
+  /** 本手 id（动作签名域 v2）。洗牌结束后 shuffleState 为 null，下注阶段
+   * 的动作签名从这里取 hand_id（服务端 ClientTable.hand_id）。 */
+  handId?: number;
   shuffleState: ShuffleState | null;
   revealTokenState: RevealTokenState | null;
   reconstructState?: ReconstructState | null;

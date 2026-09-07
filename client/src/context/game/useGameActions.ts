@@ -473,7 +473,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     const t = currentTableRef?.current;
     if (!t || !socket) return;
     void (async () => {
-      const sig = await signTableAction(actionSkHex(), t.id, t.shuffleState?.hand_id, 'fold');
+      const sig = await signTableAction(actionSkHex(), t.id, (t.shuffleState?.hand_id ?? t.handId), 'fold');
       socket?.emit(FOLD, { tableId: t.id, ...sigToPayloadFields(sig) });
     })();
   };
@@ -482,7 +482,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     const t = currentTableRef?.current;
     if (!t || !socket) return;
     void (async () => {
-      const sig = await signTableAction(actionSkHex(), t.id, t.shuffleState?.hand_id, 'check');
+      const sig = await signTableAction(actionSkHex(), t.id, (t.shuffleState?.hand_id ?? t.handId), 'check');
       socket?.emit(CHECK, { tableId: t.id, ...sigToPayloadFields(sig) });
     })();
   };
@@ -491,7 +491,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     const t = currentTableRef?.current;
     if (!t || !socket) return;
     void (async () => {
-      const sig = await signTableAction(actionSkHex(), t.id, t.shuffleState?.hand_id, 'call');
+      const sig = await signTableAction(actionSkHex(), t.id, (t.shuffleState?.hand_id ?? t.handId), 'call');
       socket?.emit(CALL, { tableId: t.id, ...sigToPayloadFields(sig) });
     })();
   };
@@ -500,7 +500,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     const t = currentTableRef?.current;
     if (!t || !socket) return;
     void (async () => {
-      const sig = await signTableAction(actionSkHex(), t.id, t.shuffleState?.hand_id, 'raise', amount);
+      const sig = await signTableAction(actionSkHex(), t.id, (t.shuffleState?.hand_id ?? t.handId), 'raise', amount);
       socket?.emit(RAISE, { tableId: t.id, amount, ...sigToPayloadFields(sig) });
     })();
   };

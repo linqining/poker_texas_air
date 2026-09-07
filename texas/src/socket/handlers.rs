@@ -500,8 +500,9 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         // tracing::info!("on_connect FETCH_LOBBY_INFO: {} old_sid={:?}", claims.user.id.clone(), old_player.as_ref().map(|p| p.socket_id.clone()));
 
         // 这个替换seat里面的player
-        let (table_ids_to_broadcast, is_reconnect) = if let Some(old_player) = old_player {
+        let (table_ids_to_broadcast, is_reconnect, reconnect_wallet) = if let Some(old_player) = old_player {
             tracing::info!("[RECONNECT] user {} found disconnected seat, old_sid={}, new_sid={}", user_id, old_player.socket_id.clone(), new_socket_id);
+            let reconnect_wallet = old_player.wallet_address.clone();
             {
                 let mut gs = state.state.write().await;
                 if let Some(cancel_tx) = gs.disconnect_cancellers.remove(&old_player.socket_id) {
@@ -533,9 +534,9 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 gs.players.remove(&old_player.socket_id);
             }
 
-            (reconnected_table_ids, true)
+            (reconnected_table_ids, true, Some(reconnect_wallet))
         }else{
-            (Vec::new(), false)
+            (Vec::new(), false, None)
         };
 
         // 这个替换players里面的player
@@ -569,7 +570,14 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
 
         for tid in &table_ids_to_broadcast {
-            broadcast::broadcast_to_table(&io, &state, *tid, None).await;
+            if let Some(wallet) = reconnect_wallet.as_ref() {
+                // 重连单次快照：一条 TABLE_UPDATED 携带该玩家的私人可读
+                // 底牌（其余 socket 收普通视图）——底牌只在事件流里、错过
+                // 即永久不可见（2026-09-08 线上"手牌看不见"），不做二次推送。
+                broadcast::broadcast_to_table_with_snapshot(&io, &state, *tid, wallet).await;
+            } else {
+                broadcast::broadcast_to_table(&io, &state, *tid, None).await;
+            }
         }
 
         if !is_reconnect {
@@ -843,6 +851,8 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                         table: table_view,
                         message: Some(payload.message.clone()),
                         from: Some(payload.from.clone()),
+                        readable_cards: None,
+                        deck_plaintext: None,
                     };
                     if let Ok(sid) = sid_str.parse::<socketioxide::socket::Sid>() {
                         if let Some(socket) = io.get_socket(sid) {
@@ -1544,9 +1554,14 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 }
                 let pk = wallet_address.as_ref().and_then(|wa| table.get_pk_hex_by_wallet_address(wa));
                 if table.is_playing() {
-                    tracing::info!("[DISCONNECT] Table {}: {} disconnecting while hand in progress, marking sitting_out", table_id, socket_id);
+                    tracing::info!("[DISCONNECT] Table {}: {} disconnecting while hand in progress, marking disconnected (stays in hand; timeout folds)", table_id, socket_id);
+                    // 局中断线只记 disconnected——见 mark_player_disconnected_mid_hand：
+                    // 局中 sitting_out 会让 tick 判 unfolded≤1 直接重置手牌，无 fold
+                    // 记录 → 结算 build failed、上手牌消失（2026-09-08 hand 1788804569）。
+                    if let Some(ref pk_str) = pk {
+                        table.mark_player_disconnected_mid_hand(pk_str);
+                    }
                     affected.push(*table_id);
-                    sitting_out_tables.push(*table_id);
                 } else {
                     if let Some(ref pk_str) = pk {
                         if table.mark_player_disconnected(pk_str).is_some() {

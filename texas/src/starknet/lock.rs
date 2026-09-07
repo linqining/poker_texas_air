@@ -152,12 +152,43 @@ pub fn abort_flush_leave_releases(hand_id: u32) {
     }
 }
 
+/// 结算构建永久失败（一次性、无重试）的手。此后挂到这些手上的离桌
+/// 释放不能等结算——注册时直接释放。兜底 abort_flush 与 leave 注册
+/// 的时序竞态：flush 先于注册到达时条目滞留到 TTL（2026-09-08
+/// hand 1788804610：flush 先于注册 1s → 双钱包滞留）。
+fn failed_hands() -> &'static std::sync::Mutex<std::collections::HashSet<u32>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+pub fn mark_hand_settlement_failed(hand_id: u32) {
+    failed_hands()
+        .lock()
+        .map(|mut g| {
+            // 手牌 id 单调递增；上限防无限增长（清空的只会是久远旧手，
+            // 其挂起释放早已被 TTL 兜底）。
+            if g.len() > 4096 {
+                g.clear();
+            }
+            g.insert(hand_id);
+        })
+        .ok();
+}
+
+pub fn hand_settlement_failed(hand_id: u32) -> bool {
+    failed_hands()
+        .lock()
+        .map(|g| g.contains(&hand_id))
+        .unwrap_or(false)
+}
+
 /// 离桌时排程释放。`hand_settled` = 该玩家最后一手是否已结算成功
 /// （hooks::settle_ok_already）：是则立即释放，否则挂起等那手 settle
 /// （随该手的结算交易同笔原子释放，见 dual_settle 的线性编排）。
 pub async fn schedule_leave_release(wallet: &str, last_hand_id: u32, hand_settled: bool) {
     let wallet = normalize_wallet(wallet);
-    if hand_settled {
+    if hand_settled || hand_settlement_failed(last_hand_id) {
         release_player_lock(&wallet).await;
     } else {
         pending_leave_releases()
@@ -258,7 +289,10 @@ pub async fn vault_session_active(wallet: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn is_nonce_race(err: &str) -> bool {
+/// operator 账户 nonce 竞态判定（结算 bundle / vault 调用共用）：
+/// 相邻两手结算或结算与释放并发时，后一笔按旧 nonce 构建会被内存池
+/// 拒绝——可退避重试（重发会按链上最新 nonce 重建）。
+pub(crate) fn is_nonce_race(err: &str) -> bool {
     err.contains("NonceTooOld") || err.contains("DuplicateNonce")
 }
 

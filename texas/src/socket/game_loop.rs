@@ -939,13 +939,28 @@ pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>,
     let result = {
         let mut gs = state.state.write().await;
         if let Some(table) = gs.tables.get_mut(&table_id) {
-            if table.unfolded_players().len() <= 1 {
+            if table.reveal_token_state.is_active() {
+                // 揭牌仪式进行中不推进 turn/phase。此时 betting_round 是上一街
+                // 的陈旧轮（street 完成从不清掉），is_betting_round_complete 在
+                // tick/兜底路径上会误判为 true 而二次 advance_to_next_phase——
+                // 多发一张公共牌并跳街（2026-09-07 线上复现：hand 1788801359
+                // 重复 check 触发二次推进，证明日志无法被镜像 VM 重放）。
+                // 仪式的推进由 on_reveal_complete 链条独立驱动。
+                tracing::debug!(
+                    "[handle_turn_advance] table {} reveal ceremony active — skip",
+                    table_id
+                );
+            } else if table.unfolded_players().len() <= 1 {
                 table.end_without_showdown();
             } else if table.is_betting_round_complete() {
+                // 下注轮结束即清行动指针：turn 若停留在最后一个行动人身上，
+                // 仪式期间的重复动作会通过轮次校验进入 handle_* 并被记入
+                // 证明日志；auto/timeout 代打也会在非行动窗口开火。下一街
+                // 首行动人由 set_blinds / start_betting_round 重新设置。
+                table.set_turn(None);
                 table.advance_to_next_phase();
                 // advance_to_next_phase 启动 reveal phase，turn 由 on_reveal_complete 设置。
                 // 仅在 Showdown（无 reveal）时不需要设置 turn。
-                // 注意：不再手动设置 turn，因为 reveal 期间无行动者。
             } else {
                 let last_turn = table.turn().unwrap_or(1);
                 table.set_turn(table.next_unfolded_player(last_turn, 1));
@@ -1019,6 +1034,10 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
     // #17：在状态写锁内只收集回执 payload，锁释放后统一广播
     //（此前在锁内 await 读锁 → 死锁，表现为下注面板点击无响应）。
     let mut pending_receipts: Vec<serde_json::Value> = Vec::new();
+    // 入口轮次校验是否通过——check 失败兜底推进仅在此为 true 时生效，
+    // 否则仪式/非本回合被拒的 check 也会推进 turn/phase（陈旧下注轮上
+    // 会二次 advance，多发公共牌并跳街）。
+    let mut gate_passed = false;
     let result = {
         let mut gs = state.state.write().await;
         if let Some(table) = gs.tables.get_mut(&table_id) {
@@ -1026,7 +1045,12 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
             // the game is in a betting phase before processing any action.
             let is_betting_phase = matches!(table.round_state(),
                 RoundState::PreFlop | RoundState::Flop | RoundState::Turn | RoundState::River);
-            let is_valid_turn = is_betting_phase && table.turn().map_or(false, |turn_id| {
+            // 揭牌仪式（翻前底牌/公共牌/摊牌）期间拒绝一切下注动作：该窗口内
+            // betting_round 是上一街的陈旧轮、turn 仍指向上一个行动人，仅凭
+            // 轮次校验会误放行——动作会带着陈旧轮语义改写底池并被记入证明日志，
+            // 镜像 VM（严格轮转）无法重放 → 结算 build failed。
+            let ceremony_active = table.reveal_token_state.is_active();
+            let is_valid_turn = !ceremony_active && is_betting_phase && table.turn().map_or(false, |turn_id| {
                 table.seats().get(&turn_id).map_or(false, |seat| {
                     seat.player.as_ref().map_or(false, |p| p.pk_hex == req.pk_hex)
                         && !seat.folded
@@ -1043,6 +1067,7 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                 pending_receipts.push(build_action_receipt_payload(table_id, &req.pk_hex, req.seq.unwrap_or(0), &req.action, req.amount.unwrap_or(0), "rejected", "not_turn_or_phase"));
                 None
             } else {
+                gate_passed = true;
                 // F9 fix: only clear sitting_out after turn validation passes.
                 // (A valid turn implies the player is not sitting_out, but we
                 // keep this for safety in case of race conditions.)
@@ -1122,7 +1147,7 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
     if let Some(res) = result {
         broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
         handle_turn_advance(io, state, table_id).await;
-    } else if req.action == "check" {
+    } else if gate_passed && req.action == "check" {
         // check 成功但无消息（handle_check 返回 None）：仍需推进 turn/round，
         // 否则两人互相 check 时 turn 永不轮转、30 秒下注超时废掉整手。
         handle_turn_advance(io, state, table_id).await;

@@ -93,6 +93,13 @@ pub(crate) struct TableUpdatePayload {
     pub table: ClientTable,
     pub message: Option<String>,
     pub from: Option<String>,
+    /// 重连单次快照扩展：该玩家自己的可读底牌 + 牌组明文（仅重连定向
+    /// 推送携带，普通 TABLE_UPDATED 不序列化）。数据形状与
+    /// HandRevealResultPayload 同源，客户端走同一条处理路径。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readable_cards: Option<Vec<ElGamalCiphertextJson>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deck_plaintext: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

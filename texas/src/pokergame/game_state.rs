@@ -361,6 +361,10 @@ pub struct ShufflePublicState {
     /// 聚合公钥减去当前洗牌者公钥（join_game_and_shuffle 需要的 curr_share_pk）。
     #[serde(default)]
     pub share_pk: Option<String>,
+    /// 本手 id（动作签名域 v2）。洗牌结束后 shuffleState 整体置 null，
+    /// 下注阶段的签名改取 ClientTable.hand_id——此字段仅供洗牌期一致视图。
+    #[serde(default)]
+    pub hand_id: u32,
 }
 
 

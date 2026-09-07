@@ -1,7 +1,18 @@
 use super::*;
 
 impl Table {
+    /// 揭牌仪式（翻前底牌/公共牌/摊牌 reveal）期间拒绝下注动作：此时
+    /// betting_round 是上一街的陈旧轮，validate_* 会用陈旧 current_bet
+    /// 误判合法性并改写底池。process_action 入口已挡客户端路径，此处
+    /// 兜底 auto/timeout 等进程内调用方。
+    fn reject_during_reveal_ceremony(&self) -> bool {
+        self.reveal_token_state.is_active()
+    }
+
     pub fn handle_fold(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
+        if self.reject_during_reveal_ceremony() {
+            return None;
+        }
         let seat = self.find_player_by_pk(pk)?;
         let seat_id = seat.id;
         let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
@@ -25,6 +36,9 @@ impl Table {
     }
 
     pub fn handle_call(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
+        if self.reject_during_reveal_ceremony() {
+            return None;
+        }
         let seat = self.find_player_by_pk(pk)?;
         let seat_id = seat.id;
         let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
@@ -55,6 +69,9 @@ impl Table {
     }
 
     pub fn handle_check(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
+        if self.reject_during_reveal_ceremony() {
+            return None;
+        }
         let seat = self.find_player_by_pk(pk)?;
         let seat_id = seat.id;
         let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
@@ -76,6 +93,9 @@ impl Table {
     }
 
     pub fn handle_raise(&mut self, pk: &GamePkHex, amount: u64) -> Option<ActionResult> {
+        if self.reject_during_reveal_ceremony() {
+            return None;
+        }
         let seat = self.find_player_by_pk(pk)?;
         let seat_id = seat.id;
         let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();

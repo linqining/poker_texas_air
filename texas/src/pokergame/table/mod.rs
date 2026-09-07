@@ -135,6 +135,10 @@ pub struct ClientTable {
     pub accepted_seqs: Vec<AcceptedSeqEntry>,
     pub history: Vec<serde_json::Value>,
     pub round_state: RoundState,
+    /// 本手 id（动作签名域 v2）。洗牌结束后 shuffleState 置 null，下注阶段
+    /// 客户端动作签名（snip36 递归证明材料）从这里取 hand_id。
+    #[serde(default)]
+    pub hand_id: u32,
     pub shuffle_state: Option<ShufflePublicState>,
     pub reveal_token_state: Option<RevealTokenPublicState>,
     pub reconstruct_state: Option<ReconstructPublicState>,
@@ -417,6 +421,7 @@ impl Table {
             },
             history: self.summary.history.clone(),
             round_state: self.round_state(),
+            hand_id: self.current_hand_id,
             shuffle_state: self.get_shuffle_public_state(),
             reveal_token_state: self.get_reveal_token_public_state(),
             reconstruct_state: self.get_reconstruct_public_state(),

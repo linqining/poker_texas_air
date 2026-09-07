@@ -409,6 +409,19 @@ fn apply_pending_final_fold(snap: &TexasPokerTable, seat: u8) -> TexasPokerTable
     if let Some(target) = table.seats.get_mut(usize::from(seat)) {
         target.set_status(poker_l1::vm::contracts::texas_poker::types::SeatStatus::Folded);
     }
+    // 对齐 VM end_without_showdown 的第一步：把本轮在途 bet（含翻前盲注）
+    // 收进 pot。快照打在终局 fold 之前，盲注/当街下注尚未收集——
+    // derive_fold_win_plan 守卫要求 Σ total_bet == table.pot，翻前
+    // fold 的手必然 0 ≠ 盲注总和（2026-09-08 hand 1788804610：
+    // contribution 200 vs pot 0）。river fold 的手因各街已在
+    // advance_round 收集而碰巧通过。
+    let total: u64 = table.seats.iter().map(|s| s.bet()).sum();
+    for s in table.seats.iter_mut() {
+        if s.bet() > 0 {
+            let _ = s.set_bet(0);
+        }
+    }
+    table.pot += total;
     table
 }
 
@@ -452,7 +465,7 @@ mod tests {
         assert!(folded.seats[1].is_folded());
         // 派发守卫的精确形态：恰一名未弃牌 → fold 计划路径。
         assert_eq!(unfolded.len(), 1);
-        // 财务字段不被补弃牌动作触碰。
+        // 财务守卫：Σ total_bet == pot（本例在途 bet=0，pot 不变）。
         assert_eq!(folded.pot, 400);
         assert_eq!(folded.seats[0].total_bet(), 300);
         assert_eq!(folded.seats[1].total_bet(), 100);
@@ -468,6 +481,44 @@ mod tests {
             .expect("fold plan derives after final fold applied");
         assert_eq!(plan.rake, 10, "400 - 200 uncalled = 200 contested * 5%");
         assert_eq!(plan.awards[0], 390);
+    }
+
+    /// 2026-09-08（hand 1788804610 线上）：翻前 fold 的快照里盲注还在
+    /// 在途 bet、pot=0——补弃牌必须把它们收进 pot，否则
+    /// derive_fold_win_plan 守卫 Σ total_bet == pot 必然失败
+    /// （"contribution 200 does not match table pot 0"）。
+    #[test]
+    fn pending_final_fold_collects_preflop_blinds_into_pot() {
+        use poker_l1::object_model::ObjectID;
+        use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xF3; 20], 0),
+            "preflop-fold-snapshot-test".into(),
+            [0xEF; 20],
+            2,
+            1,
+            2,
+        );
+        table.seats[0].fixture_set_player([1; 20]);
+        table.seats[1].fixture_set_player([2; 20]);
+        for (i, blind) in [100u64, 100] .iter().enumerate() {
+            table.seats[i].fixture_set_total_bet(*blind);
+            table.seats[i].set_bet(*blind).unwrap();
+            table.seats[i].set_status(SeatStatus::Active);
+        }
+        table.pot = 0;
+
+        let folded = apply_pending_final_fold(&table, 1);
+
+        assert!(folded.seats[1].is_folded());
+        assert_eq!(folded.pot, 200, "in-flight blinds must be collected into pot");
+        assert!(folded.seats.iter().all(|s| s.bet() == 0), "bets drained");
+        let sum: u64 = folded.seats.iter().map(|s| s.total_bet()).sum();
+        assert_eq!(sum, folded.pot, "Σ total_bet == pot after collection");
+        let plan = poker_l1::vm::contracts::texas_poker::settlement::derive_fold_win_plan(&folded)
+            .expect("preflop fold-win plan must derive (no board → no rake)");
+        assert_eq!(plan.rake, 0, "no flop, no drop");
+        assert_eq!(plan.awards[0], 200);
     }
 
     #[test]

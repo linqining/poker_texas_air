@@ -343,6 +343,7 @@ impl Table {
                 aggregate_pk: ecpoint_to_hex(&self.mental_poker_game.key_manager.get_aggregated_pk()),
                 needs_join_layer,
                 share_pk,
+                hand_id: self.current_hand_id,
             })
         } else {
             None

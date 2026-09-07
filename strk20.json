@@ -102,12 +102,11 @@
   "rfp_id": "RFP-03",
   "rfp_title": "Provably fair poker where cheating is mathematically impossible",
   "transactions": [
-    "0x49085e4ace816d6a20159b649df083d7c4ab19c2847e7c9cfe51735c3514f5d",
-    "0x4b5e8b8d32a660f2cc913c9979cda10c5475034826682c1bfeaecf4d5a1168c",
-    "0x3fe8b60b8249f74f9b2b0ff8919ec997109351787c0fb41cf4385dc0e2ef0f3",
-    "0x1190a407decaadb0c3d0dd6ecc6ef73735b621db5cf11e2e51348cb06b42bdb"
+    "0xcd9b13ececa4649ce5f6e7ad80acf80e1ab03a57190e4035e7240369152a4b",
+    "0x1daa47a0efde4fad6bbf3d81f88af40ed3951a946b3ece84ac06f6fbb6e7e04",
+    "0x639263f89bccef1bef806409da74962d7e7829043deb153fb0ea2e5ddbdab69"
   ],
-  "demo_video": "",
+  "demo_video": "https://www.youtube.com/watch?v=uqtrvw_bR4w",
   "demo_url": "https://strk.secretpokers.com/",
   "contracts": [
       "0x3f4ef706ae2dc00ac685afffc05e5f1e1e9ab5aacf99c3205d2067e061cbb45",

@@ -511,7 +511,32 @@ impl TableMirror {
 ///
 /// `hand_id` 由调用方（hooks 的单调序列）分配，满足链上 register_aggregate
 /// 的 first_hand_id 严格递增校验。
+/// 重放构建入口：失败时把完整命令日志落盘（Debug 格式，含全部令牌），
+/// 供离线复现相位失步（目录可用 TEXAS_REPLAY_DUMP_DIR 覆盖）。
 pub fn build_from_log(
+    table_id: u32,
+    start: &super::prove_log::HandStartData,
+    commands: &[super::prove_log::HandCommand],
+    hand_id: u32,
+) -> Result<TableMirror, String> {
+    if let Err(e) = build_from_log_inner(table_id, start, commands, hand_id) {
+        let dir = std::env::var("TEXAS_REPLAY_DUMP_DIR")
+            .unwrap_or_else(|_| "/tmp/texas-replay-failures".to_string());
+        let _ = std::fs::create_dir_all(&dir);
+        let path = format!("{dir}/table{table_id}-hand{hand_id}-{}.txt", now_ms());
+        let body = format!(
+            "error: {e}\n\nstart: {start:#?}\n\ncommands ({}):\n{commands:#?}\n",
+            commands.len()
+        );
+        let _ = std::fs::write(&path, body);
+        tracing::warn!("[mirror-replay] failure forensics dumped to {path}");
+        Err(e)
+    } else {
+        build_from_log_inner(table_id, start, commands, hand_id)
+    }
+}
+
+fn build_from_log_inner(
     table_id: u32,
     start: &super::prove_log::HandStartData,
     commands: &[super::prove_log::HandCommand],
@@ -541,19 +566,37 @@ pub fn build_from_log(
         .begin_reveal_hand(start.deck.clone(), &plan, start.button_rank, hand_id)
         .map_err(|e| format!("begin_reveal: {e}"))?;
 
+    // 游戏层接受异步乱序提交（reveal 令牌可晚于下注到达），而 VM 重放是
+    // 相位序敏感的。重放分两遍（2026-09-08 线上 4/7 手 "not in betting
+    // round" / "reveal phase is NONE" / pot 不匹配均源于乱序）：
+    //   1) 先按日志序应用全部 reveal——当前窗口内的立即生效并推进相位；
+    //      相位不匹配的进缓冲（属于尚未到达的窗口）；
+    //   2) 再按日志序重放 Bet/ForceFold，每条前后冲刷缓冲：下注完成推进
+    //      街道时，对应窗口打开，缓冲中的 board/showdown reveal 随之消化。
+    let mut deferred_reveals: Vec<(u8, &[poker_protocol::z_poker::protocol::RevealToken])> =
+        Vec::new();
+
+    for cmd in commands {
+        if let super::prove_log::HandCommand::RevealTokens { pk_hex, tokens } = cmd {
+            let Some(addr) = by_pk.get(pk_hex.as_str()) else {
+                return Err(format!("reveal from unknown pk {pk_hex}"));
+            };
+            let Some(seat) = mirror.seat_index_of(*addr) else {
+                return Err(format!("reveal from non-participant pk {pk_hex}"));
+            };
+            if let Err(e) = mirror.apply_recorded_reveal(seat, tokens) {
+                tracing::debug!(
+                    "[mirror-replay] reveal seat {seat} deferred (phase mismatch): {e}"
+                );
+                deferred_reveals.push((seat, tokens.as_slice()));
+            } else {
+                flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
+            }
+        }
+    }
+
     for cmd in commands {
         match cmd {
-            super::prove_log::HandCommand::RevealTokens { pk_hex, tokens } => {
-                let Some(addr) = by_pk.get(pk_hex.as_str()) else {
-                    return Err(format!("reveal from unknown pk {pk_hex}"));
-                };
-                let Some(seat) = mirror.seat_index_of(*addr) else {
-                    return Err(format!("reveal from non-participant pk {pk_hex}"));
-                };
-                mirror
-                    .apply_recorded_reveal(seat, tokens)
-                    .map_err(|e| format!("reveal replay (seat {seat}): {e}"))?;
-            }
             super::prove_log::HandCommand::Bet { pk_hex, action, total_bet } => {
                 let Some(addr) = by_pk.get(pk_hex.as_str()) else {
                     return Err(format!("bet from unknown pk {pk_hex}"));
@@ -561,9 +604,12 @@ pub fn build_from_log(
                 let Some(seat) = mirror.seat_index_of(*addr) else {
                     return Err(format!("bet from non-participant pk {pk_hex}"));
                 };
+                // 先冲刷缓冲 reveal：可能正是补齐当前窗口、解锁下注相位的那条。
+                flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
                 mirror
                     .apply_recorded_bet(seat, action, *total_bet)
                     .map_err(|e| format!("bet replay ({action} seat {seat}): {e}"))?;
+                flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
             }
             super::prove_log::HandCommand::ForceFold { wallet } => {
                 let Some(addr) = by_wallet.get(wallet.as_str()) else {
@@ -571,9 +617,20 @@ pub fn build_from_log(
                 };
                 if let Some(seat) = mirror.seat_index_of(*addr) {
                     mirror.apply_recorded_force_fold(seat);
+                    flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
                 }
             }
+            super::prove_log::HandCommand::RevealTokens { .. } => {} // 已在第一遍处理
         }
+    }
+    // 收尾再冲刷一次；仍未消化的 reveal 属于真正无法重放的提交（如跨手
+    // 残留），告警放行——相位完整性由后续 pre-payout/证明检查兜底。
+    flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
+    if !deferred_reveals.is_empty() {
+        tracing::warn!(
+            "[mirror-replay] {} deferred reveal(s) never matched a VM window — dropped",
+            deferred_reveals.len()
+        );
     }
 
     // 摊牌展示期 → 派奖前快照 + 推进 VM 复位（与旧 game_loop tick 的
@@ -633,6 +690,28 @@ pub mod conv {
     ) -> Result<PtxRevealTokenProof<PtxCurve>, String> {
         let bytes = borsh::to_vec(proof).map_err(|e| e.to_string())?;
         borsh::from_slice(&bytes).map_err(|e| format!("reveal token proof borsh bridge: {e}"))
+    }
+}
+
+/// 冲刷缓冲的乱序 reveal：反复尝试直到一轮内无进展（应用一条 reveal
+/// 可能推进相位、解锁另一条）。
+fn flush_deferred_reveals(
+    mirror: &mut TableMirror,
+    deferred: &mut Vec<(u8, &[poker_protocol::z_poker::protocol::RevealToken])>,
+) {
+    let mut progressed = true;
+    while progressed {
+        progressed = false;
+        let mut i = 0;
+        while i < deferred.len() {
+            let (seat, tokens) = deferred[i];
+            if mirror.apply_recorded_reveal(seat, tokens).is_ok() {
+                deferred.remove(i);
+                progressed = true;
+            } else {
+                i += 1;
+            }
+        }
     }
 }
 

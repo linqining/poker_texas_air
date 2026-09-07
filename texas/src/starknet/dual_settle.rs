@@ -1317,29 +1317,44 @@ pub async fn submit_dual_settlement(
         // 整笔因 "already registered" revert 时，去掉 register 重发。
         attempts.push(calls.clone());
         let mut last_err = String::new();
-        for (i, bundle) in attempts.iter().enumerate() {
-            match operator.execute_v3(bundle.clone()).send().await {
-                Ok(r) => {
-                    let hash = format!("{:#x}", r.transaction_hash);
-                    tracing::info!(
-                        "[dapv] atomic settle bundle (register+settle+{} extras: {}) tx={hash}",
-                        notes.len(),
-                        notes.iter().fold(std::collections::HashMap::<&'static str, usize>::new(), |mut m, n| { *m.entry(n).or_default() += 1; m })
-                            .iter()
-                            .map(|(k, v)| format!("{k}x{v}"))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    );
-                    let _ = i;
-                    return Ok((hash.clone(), hash));
-                }
-                Err(e) => {
-                    let text = format!("{e}");
-                    last_err = text.clone();
-                    if text.contains("already registered") || text.contains("Hand already settled") {
-                        continue; // 已注册/已结算：下一组（去 register）重试
+        // nonce 竞态退避重试：相邻两手（或结算与离桌释放）并发提交时，
+        // 后一笔按旧 nonce 构建会被内存池拒（不上链不花 gas）——2026-09-07
+        // 线上：hand 1788803579 结算因此永久丢失，随 bundle 的离桌释放
+        // 一并滞留。重发按链上最新 nonce 重建，等对方交易落地即可成功。
+        const MAX_NONCE_RETRIES: u32 = 5;
+        const NONCE_RETRY_BACKOFF_SECS: u64 = 4;
+        'bundle: for (i, bundle) in attempts.iter().enumerate() {
+            for nonce_try in 1..=MAX_NONCE_RETRIES {
+                match operator.execute_v3(bundle.clone()).send().await {
+                    Ok(r) => {
+                        let hash = format!("{:#x}", r.transaction_hash);
+                        tracing::info!(
+                            "[dapv] atomic settle bundle (register+settle+{} extras: {}) tx={hash}",
+                            notes.len(),
+                            notes.iter().fold(std::collections::HashMap::<&'static str, usize>::new(), |mut m, n| { *m.entry(n).or_default() += 1; m })
+                                .iter()
+                                .map(|(k, v)| format!("{k}x{v}"))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        );
+                        let _ = i;
+                        return Ok((hash.clone(), hash));
                     }
-                    return Err(format!("atomic settle bundle failed: {e}"));
+                    Err(e) => {
+                        let text = format!("{e}");
+                        last_err = text.clone();
+                        if text.contains("already registered") || text.contains("Hand already settled") {
+                            continue 'bundle; // 已注册/已结算：下一组（去 register）重试
+                        }
+                        if super::lock::is_nonce_race(&text) && nonce_try < MAX_NONCE_RETRIES {
+                            tracing::warn!(
+                                "[dapv] settle bundle nonce race (variant {i}, try {nonce_try}/{MAX_NONCE_RETRIES}) — backing off {NONCE_RETRY_BACKOFF_SECS}s"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(NONCE_RETRY_BACKOFF_SECS)).await;
+                            continue; // 同一 bundle 重建重发（取新 nonce）
+                        }
+                        return Err(format!("atomic settle bundle failed: {e}"));
+                    }
                 }
             }
         }

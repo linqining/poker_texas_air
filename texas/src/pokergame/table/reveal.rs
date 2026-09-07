@@ -585,4 +585,36 @@ mod reveal_invariant_tests {
             }
         }
     }
+
+    /// 回归（2026-09-07 线上 hand 1788801359）：揭牌仪式期间 betting_round
+    /// 是上一街的陈旧轮、turn 停留在最后一个行动人身上——任何下注动作都
+    /// 必须被拒绝。否则动作会带着陈旧轮语义改写底池并被记入证明日志，
+    /// 镜像 VM（严格轮转）无法重放 → 结算 build failed。
+    #[test]
+    fn betting_actions_rejected_during_reveal_ceremony() {
+        let mut table = make_test_table();
+        let pks: Vec<String> = (1..=2).map(|i| register_and_seat(&mut table, i)).collect();
+        deal_hands(&mut table);
+        table.mental_poker_game.deal_community_cards_encrypted(5);
+
+        // 复现生产状态：盲注已发（turn 有值、下注在场）→ 转入揭牌仪式，
+        // betting_round/turn 残留为陈旧值。
+        table.set_blinds();
+        assert!(table.turn().is_some(), "fixture: blinds must set first actor");
+        table.start_community_reveal_phase();
+        assert!(
+            table.reveal_token_state.is_active(),
+            "fixture: ceremony must be active"
+        );
+
+        let pot_before = table.pot();
+        for pk_hex in &pks {
+            let pk = GamePkHex::new(pk_hex.clone());
+            assert!(table.handle_check(&pk).is_none(), "check must be rejected during ceremony");
+            assert!(table.handle_call(&pk).is_none(), "call must be rejected during ceremony");
+            assert!(table.handle_raise(&pk, 220).is_none(), "raise must be rejected during ceremony");
+            assert!(table.handle_fold(&pk).is_none(), "fold must be rejected during ceremony");
+        }
+        assert_eq!(table.pot(), pot_before, "rejected actions must not touch the pot");
+    }
 }

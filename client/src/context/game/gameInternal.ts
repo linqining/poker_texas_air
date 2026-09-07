@@ -65,6 +65,10 @@ export interface TableUpdatedPayload {
   table: Table;
   message?: string;
   from?: string;
+  /** 重连单次快照：自己的可读底牌 + 牌组明文（仅重连定向推送携带；
+   * 形状与 HandRevealResultData 同源，走同一条解密路径）。 */
+  readableCards?: unknown[];
+  deckPlaintext?: string[];
 }
 
 export interface TableJoinedPayload {

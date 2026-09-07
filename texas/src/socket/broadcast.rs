@@ -41,6 +41,8 @@ pub(crate) async fn broadcast_to_table(io: &SocketIo, state: &Arc<SocketState>, 
             table: table_view,
             message: message.map(|s| s.to_string()),
             from: None,
+            readable_cards: None,
+            deck_plaintext: None,
         };
         if let Ok(sid) = sid_str.parse::<socketioxide::socket::Sid>() {
             if let Some(socket) = io.get_socket(sid) {
@@ -61,6 +63,8 @@ pub(crate) async fn broadcast_to_table(io: &SocketIo, state: &Arc<SocketState>, 
         table: spectator_view,
         message: message.map(|s| s.to_string()),
         from: None,
+        readable_cards: None,
+        deck_plaintext: None,
     };
     for sid_str in spectator_sids {
         if let Ok(sid) = sid_str.parse::<socketioxide::socket::Sid>() {
@@ -73,13 +77,93 @@ pub(crate) async fn broadcast_to_table(io: &SocketIo, state: &Arc<SocketState>, 
     }
 }
 
+/// 重连单次快照：一张 TABLE_UPDATED 打包"该玩家的定制视图 + 自己的
+/// 可读底牌 + 牌组明文"。底牌可读牌只存在于事件流（HAND_REVEAL_RESULT
+/// 按当时活跃 socket 定向发送），断线/刷新/多标签竞争错过即永久不可见
+/// （2026-09-08 线上"手牌看不见"）——重连必须一次给全，客户端单事件
+/// 单入口重建状态，不做第二条推送。
+pub(crate) async fn broadcast_to_table_with_snapshot(
+    io: &SocketIo,
+    state: &Arc<SocketState>,
+    table_id: u32,
+    reconnect_wallet: &WalletAddress,
+) {
+    let (table_views, spectator_sids, spectator_view, snapshot_cards, deck_plaintext) = {
+        let gs = state.state.read().await;
+        let Some(table) = gs.tables.get(&table_id) else { return };
+        let base_client_table = table.to_client();
+        let table_views = table.players().iter()
+            .flat_map(|(_game_pk, wallet_addr)| {
+                let view = hide_opponent_cards(&base_client_table, wallet_addr);
+                gs.players.values()
+                    .filter(|p| p.wallet_address.0.eq_ignore_ascii_case(&wallet_addr.0))
+                    .map(move |p| (p.socket_id.clone(), view.clone(), wallet_addr.0.clone()))
+            })
+            .collect::<Vec<_>>();
+        let player_sids: std::collections::HashSet<String> =
+            table_views.iter().map(|(sid, _, _)| sid.clone()).collect();
+        let spectator_view = hide_opponent_cards(&base_client_table, &WalletAddress::new(String::new()));
+        let spectator_sids = io.within(table_room_name(table_id))
+            .sockets()
+            .into_iter()
+            .map(|s| s.id.to_string())
+            .filter(|sid| !player_sids.contains(sid))
+            .collect::<Vec<String>>();
+        // 重连者的私人可读牌（pk 按钱包反查；旁观/未入座时为空）。
+        let snapshot_cards = table
+            .get_pk_hex_by_wallet_address(&reconnect_wallet.0)
+            .and_then(|pk| table.mental_poker_game.get_player_readable_tokens().remove(&pk.0))
+            .map(|cards| cards.iter().map(ElGamalCiphertextJson::from_ciphertext).collect::<Vec<_>>());
+        let deck_plaintext = table.deck_plaintext().iter().map(ecpoint_to_hex).collect::<Vec<String>>();
+        (table_views, spectator_sids, spectator_view, snapshot_cards, deck_plaintext)
+    };
+
+    for (sid_str, table_view, wallet) in table_views {
+        let is_reconnector = wallet.eq_ignore_ascii_case(&reconnect_wallet.0);
+        let payload = TableUpdatePayload {
+            table: table_view,
+            message: None,
+            from: None,
+            readable_cards: if is_reconnector { snapshot_cards.clone() } else { None },
+            deck_plaintext: if is_reconnector { Some(deck_plaintext.clone()) } else { None },
+        };
+        if let Ok(sid) = sid_str.parse::<socketioxide::socket::Sid>() {
+            if let Some(socket) = io.get_socket(sid) {
+                if let Err(e) = socket.emit(actions::TABLE_UPDATED, &payload) {
+                    tracing::warn!("broadcast_to_table_with_snapshot emit failed for {}: {:?}", sid_str, e);
+                }
+            }
+        }
+    }
+
+    if spectator_sids.is_empty() {
+        return;
+    }
+    let payload = TableUpdatePayload {
+        table: spectator_view,
+        message: None,
+        from: None,
+        readable_cards: None,
+        deck_plaintext: None,
+    };
+    for sid_str in spectator_sids {
+        if let Ok(sid) = sid_str.parse::<socketioxide::socket::Sid>() {
+            if let Some(socket) = io.get_socket(sid) {
+                if let Err(e) = socket.emit(actions::TABLE_UPDATED, &payload) {
+                    tracing::warn!("broadcast_to_table_with_snapshot spectator emit failed for {}: {:?}", sid_str, e);
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn join_table_push(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, wallet: WalletAddress) {
     // G18 修复：原实现使用 io.emit 广播给所有 socket，但 table_view 是为该 wallet
     // 定制的（hide_opponent_cards 隐藏对手手牌），广播会导致其他玩家看到错误的 view。
     // 改为只 emit 给加入的 socket。
     tracing::info!("[join_table_push] enter, table_id={}, wallet={}", table_id, wallet.0);
 
-    let (socket_id_opt, table_view) = {
+    let (socket_id_opt, table_view, snapshot_cards, deck_plaintext) = {
         let gs = state.state.read().await;
         let Some(table) = gs.tables.get(&table_id) else { return };
         let base_client_table = table.to_client();
@@ -88,13 +172,22 @@ pub(crate) async fn join_table_push(io: &SocketIo, state: &Arc<SocketState>, tab
         let sid = gs.players.values()
             .find(|p| p.wallet_address.0.eq_ignore_ascii_case(&wallet.0))
             .map(|p| p.socket_id.clone());
-        (sid, view)
+        // 进桌单次快照：该玩家的私人可读底牌（在局中重进桌时恢复显示），
+        // 与重连快照同一条单推送原则。
+        let snapshot_cards = table
+            .get_pk_hex_by_wallet_address(&wallet.0)
+            .and_then(|pk| table.mental_poker_game.get_player_readable_tokens().remove(&pk.0))
+            .map(|cards| cards.iter().map(ElGamalCiphertextJson::from_ciphertext).collect::<Vec<_>>());
+        let deck_plaintext = table.deck_plaintext().iter().map(ecpoint_to_hex).collect::<Vec<String>>();
+        (sid, view, snapshot_cards, deck_plaintext)
     };
 
     let payload = TableUpdatePayload {
         table: table_view,
         message: Some("".to_string()),
         from: None,
+        readable_cards: snapshot_cards,
+        deck_plaintext: Some(deck_plaintext),
     };
 
     let Some(sid_str) = socket_id_opt else {

@@ -173,11 +173,16 @@ async fn settle_hand_from_log(mut input: super::prove_log::HandSettleInput) {
                 // 上链（无 debit/credit，零和守恒），挂在该手上的离桌释放
                 // 不能等 settle，在此 flush（与 refund_all_bets 中止路径
                 // 同语义；2026-09-07 hand 1788734417 board-0 线上盲区）。
+                // 先登记失败手：flush 之后才注册的离桌（时序竞态）在
+                // schedule_leave_release 里据此直接释放（2026-09-08
+                // hand 1788804610 双钱包滞留）。
+                super::lock::mark_hand_settlement_failed(hand_id);
                 super::lock::abort_flush_leave_releases(hand_id);
                 return;
             }
             Err(join_err) => {
                 tracing::error!("[starknet-settle] table {table_id} hand {hand_id} settlement build task panicked: {join_err}");
+                super::lock::mark_hand_settlement_failed(hand_id);
                 super::lock::abort_flush_leave_releases(hand_id);
                 return;
             }

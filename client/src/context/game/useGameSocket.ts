@@ -34,6 +34,7 @@ import {
   ShuffleHandleResult,
 } from './gameInternal';
 import { logger } from '../../helpers/logger';
+import { PlayerStorage } from '../player/playerStorage';
 import { useContentContext } from '../content/contentContext';
 import { useContext } from 'react';
 import authContext from '../auth/authContext';
@@ -134,7 +135,7 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       // 公共牌、亮牌清理、winMessage 都以服务器 TABLE_UPDATED 为准补齐——
       // 仅靠事件流（COMMUNITY_REVEAL_RESULT 等）会让中途进桌的围观者看不到。
       const lastWinMessagesRef = { current: [] as string[] };
-      socket.on(TABLE_UPDATED, ({ table, message, from }: TableUpdatedPayload) => {
+      socket.on(TABLE_UPDATED, ({ table, message, from, readableCards, deckPlaintext }: TableUpdatedPayload) => {
         (window as unknown as Record<string, unknown>).__sockDebug = {
           ...(window as unknown as Record<string, unknown>).__sockDebug as object,
           tu: Date.now(),
@@ -169,6 +170,24 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
         setCurrentTable(table);
         logger.log("table updated:", table);
         message && addMessage(message);
+
+        // 重连单次快照：私人可读底牌随 TABLE_UPDATED 直达（错过
+        // HAND_REVEAL_RESULT 即永久不可见，2026-09-08 线上），走同一
+        // 条解密/锚点路径。手已结束/未发牌时快照不带牌，自然跳过。
+        if (Array.isArray(readableCards) && readableCards.length > 0 && !table.handOver) {
+          const currentPkHex = pkHex || PlayerStorage.getPk();
+          if (currentPkHex) {
+            const redealInfo = handleHandRevealResult({
+              tableId: table.id,
+              playerPk: currentPkHex,
+              readableCards,
+              deckPlaintext,
+            });
+            if (redealInfo) {
+              addMessage(`重连快照解密失败 ${redealInfo.failedCards?.length || 0} 张牌`);
+            }
+          }
+        }
 
         // Fallback reveal trigger for missed REVEAL_NOTICE
         const revealState = table.revealTokenState;

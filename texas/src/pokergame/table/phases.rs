@@ -63,10 +63,23 @@ impl Table {
     /// Rust 额外做玩家登记/清理（remove_inactive_players/register_waiting_players/clear_waiting_flags），
     /// 这些在 Move 中由 join/leave 时维护，Rust 在此统一处理。
     pub fn start_preflop_shuffle(&mut self) {
-        // Rust 特有：清理不活跃玩家、登记 waiting 玩家、清除 waiting 标记
+        // Rust 特有：清理不活跃玩家、登记 waiting 玩家、清除 waiting 标记，
+        // 然后把仍未重连的断线玩家转为 sitting_out（局中断线只记
+        // disconnected，筹码留在局内由超时 fold 收尾；此刻上手已结束，
+        // 未归者不再参与下一手发牌——2026-09-08 断线重置手牌修复）。
         let removed = self.remove_inactive_players();
         if !removed.is_empty() {
             tracing::info!("[SHUFFLE] hand start removed inactive players: {:?}", removed);
+        }
+        let mut newly_sitting_out = 0u32;
+        for seat in self.local_seats.values_mut() {
+            if seat.disconnected && !seat.sitting_out {
+                seat.sitting_out = true;
+                newly_sitting_out += 1;
+            }
+        }
+        if newly_sitting_out > 0 {
+            tracing::info!("[SHUFFLE] {newly_sitting_out} disconnected player(s) moved to sitting_out for new hand");
         }
         self.register_waiting_players();
         self.clear_waiting_flags();

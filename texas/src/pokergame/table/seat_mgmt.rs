@@ -411,6 +411,28 @@ impl Table {
         false
     }
 
+    /// 手牌进行中断线：只记 disconnected，**不**置 sitting_out。
+    /// sitting_out 会被 unfolded_players/is_betting_round_complete 当作
+    /// "已出局"过滤——局中置位会让 tick 把手牌直接重置（unfolded≤1 →
+    /// end_without_showdown，无 fold 记录），结算走 showdown 计划但
+    /// 公共牌不满 5 张 → build failed，客户端上手牌凭空消失
+    /// （2026-09-08 hand 1788804569 线上）。局内筹码由 30s 下注超时
+    /// 正常 fold（有 record_bet 记录，可证明）；下一手开始时仍未重连
+    /// 才由 start_preflop_shuffle 转 sitting_out。
+    pub fn mark_player_disconnected_mid_hand(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
+        let seat = self.find_player_by_pk(pk)?;
+        let seat_id = seat.id;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Some(seat) = self.local_seats.get_mut(&seat_id) {
+            seat.disconnected = true;
+            seat.disconnected_at = Some(now);
+        }
+        None
+    }
+
     pub fn is_player_disconnected_by_pk(&self, pk: &GamePkHex) -> bool {
         self.seats().values()
             .any(|s| s.player.as_ref().map_or(false, |p| &p.pk_hex == pk) && s.disconnected)
