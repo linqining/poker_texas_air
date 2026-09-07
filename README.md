@@ -24,13 +24,13 @@ transacting.
 No Ready wallet? The [video](https://www.youtube.com/watch?v=uqtrvw_bR4w) walks
 the full mainnet loop in 3 minutes.
 
-<!-- TODO: drop 1–3 product screenshots into docs/assets/ (table view with encrypted
-hands, proof-verification panel, settlement tx on Starkscan) and uncomment:
 <p align="center">
-  <img src="docs/assets/table.png" width="45%" alt="Game table — encrypted dealing">
-  <img src="docs/assets/proofs.png" width="45%" alt="Sigma-proof verification panel">
+  <img src="docs/game_live.gif" width="820" alt="A live hand — encrypted dealing, joint shuffle, every proof verified in-browser as it arrives">
 </p>
--->
+<p align="center">
+  <img src="docs/secret_poker_game.png" width="400" alt="Game table with the ZK Crypto Events panel — each shuffle/reveal sigma proof arrives and verifies in green">
+  <img src="docs/claim_private.png" width="400" alt="Claim rewards modal — private claim into a STRK20 pool note, or plain public withdrawal">
+</p>
 
 ## Highlights
 
@@ -284,6 +284,48 @@ verification key and constraints become chain facts. Design details:
 This is a large repo (11 workspace crates, ~320 first-party Rust source files
 plus the vendored StarkWare proving stack, 25 Cairo contract files, 33 Lean
 files). It is organized in five layers, bottom-up:
+
+```mermaid
+flowchart TD
+    subgraph browser["Browser — every player"]
+        UI["client/<br>React + Ready Wallet"]
+        WASM["client-wasm/<br>verifies every sigma proof<br>& STARK in-browser"]
+    end
+
+    subgraph host["Game host — texas/ (sees only ciphertext)"]
+        LOOP["game loop · socket.io · settlement<br>recursive prover: 15–17 s/hand, async"]
+        SIDE["payout-sidecar/<br>jittered private payouts"]
+    end
+
+    subgraph proving["Proving stack — hand-written"]
+        G["src/ Texas AIR + Stwo circle-STARK<br>(proving-tool/ · hand-verify-native/)"]
+    end
+
+    subgraph chain["Starknet mainnet"]
+        DUAL["PokerDualSettlement<br>EC_OP sigma checks + SNIP-36 gate"]
+        VAULT["PokerVault — 1 STRK : 1 chip"]
+        BUY["PokerVaultAnonymizer<br>private buy-in"]
+        PAY["SettlementPayoutAnonymizer<br>private payouts"]
+        POOL[("STRK20 privacy pool (external)")]
+    end
+
+    UI <-->|"ElGamal deck, joint shuffle —<br>the host never sees a card"| LOOP
+    UI --> WASM
+    UI -.->|"privacy_invoke (private)"| BUY
+    UI -.->|"deposit (public fallback)"| VAULT
+    G -.->|"recursive proofs"| LOOP
+    LOOP -->|"settle on commitments"| DUAL
+    LOOP --> SIDE
+    SIDE --> PAY
+    BUY --> VAULT
+    BUY --> POOL
+    PAY --> POOL
+    DUAL -->|"net chip deltas"| VAULT
+```
+
+*Run-time view: the browser verifies everything it receives, the host moves only
+ciphertext, the chain settles only on commitments. Offline, `poker_protocol_lean/`
+machine-checks the reconstruction theorems behind this crypto.*
 
 **Pick a reading path:**
 

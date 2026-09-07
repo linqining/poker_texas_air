@@ -1,7 +1,7 @@
 > ⚠️ **历史存档(2026-09-05 归档)**:Ristretto host-zero 迁移路线已关闭——
 > Plan D(2026-09-05)后协议唯一曲线为 Stark 曲线(blst/BLS12-381 全量移除),
 > Path A 递归信封与 admission AIR 族代码已删除(v2.7/`b274483`)。
-> 现行架构见 `docs/design/DUAL_PROOF_PROTOCOL.md` 与 `docs/starknet-plan-d-stark-curve.md`。
+> 现行架构见 `docs/design/DUAL_PROOF_PROTOCOL.md`（曲线迁移终态 Plan D 的政策文档已删除，见 git 历史）。
 > 文中 shuffle/player-sigma 两节描述的 `src/ristretto_shuffle_air.rs` 等 4 个
 > 曲线泛型残存文件仍存在,是这些 wire 路线的唯一说明。
 

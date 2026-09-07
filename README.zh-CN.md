@@ -20,12 +20,13 @@ Starknet 主网**：5 个合约，完整筹码回路（存入 → 结算 → 私
 
 没有 Ready 钱包？[视频](https://www.youtube.com/watch?v=uqtrvw_bR4w) 3 分钟走完整条主网回路。
 
-<!-- TODO: 截图 1–3 张放入 docs/assets/（牌桌面密文手牌、证明校验面板、Starkscan 结算交易）后取消注释：
 <p align="center">
-  <img src="docs/assets/table.png" width="45%" alt="牌桌面——加密发牌">
-  <img src="docs/assets/proofs.png" width="45%" alt="Sigma 证明校验面板">
+  <img src="docs/game_live.gif" width="820" alt="实牌对局——加密发牌、联合洗牌，每个证明到达即在浏览器内校验">
 </p>
--->
+<p align="center">
+  <img src="docs/secret_poker_game.png" width="400" alt="牌桌与 ZK Crypto Events 面板——每个洗牌/开牌 sigma 证明到达即绿色通过">
+  <img src="docs/claim_private.png" width="400" alt="领取奖励弹窗——经 STRK20 池私密领取，或公开提款">
+</p>
 
 ## 亮点速览
 
@@ -251,6 +252,47 @@ verifier——让验证密钥与约束成为链上事实。
 这是一个大仓库（11 个 workspace crate、约 320 个一方 Rust 源文件，另有
 vendored 的 StarkWare proving 栈、25 个 Cairo 合约文件、33 个 Lean 文件）。
 自底向上分五层组织：
+
+```mermaid
+flowchart TD
+    subgraph browser["浏览器——每位玩家"]
+        UI["client/<br>React + Ready 钱包"]
+        WASM["client-wasm/<br>逐条校验 sigma 证明与 STARK"]
+    end
+
+    subgraph host["游戏服务端——texas/（只见密文）"]
+        LOOP["游戏主循环 · socket.io · 结算<br>递归证明：15–17 秒/手，异步"]
+        SIDE["payout-sidecar/<br>抖延时的私密派奖"]
+    end
+
+    subgraph proving["证明栈——从零手写"]
+        G["src/ Texas AIR + Stwo circle-STARK<br>(proving-tool/ · hand-verify-native/)"]
+    end
+
+    subgraph chain["Starknet 主网"]
+        DUAL["PokerDualSettlement<br>EC_OP sigma 校验 + SNIP-36 双门"]
+        VAULT["PokerVault——1 STRK : 1 筹码"]
+        BUY["PokerVaultAnonymizer<br>私密买入"]
+        PAY["SettlementPayoutAnonymizer<br>私密派奖"]
+        POOL[("STRK20 隐私池（外部）")]
+    end
+
+    UI <-->|"ElGamal 牌堆、联合洗牌——<br>服务端看不到任何一张牌"| LOOP
+    UI --> WASM
+    UI -.->|"privacy_invoke（私密）"| BUY
+    UI -.->|"deposit（公开回退）"| VAULT
+    G -.->|"递归证明"| LOOP
+    LOOP -->|"只上链承诺的结算"| DUAL
+    LOOP --> SIDE
+    SIDE --> PAY
+    BUY --> VAULT
+    BUY --> POOL
+    PAY --> POOL
+    DUAL -->|"筹码净额变动"| VAULT
+```
+
+*运行时视图：浏览器验证收到的一切，服务端只搬运密文，链上只结算承诺。
+线下由 `poker_protocol_lean/` 机器验证上述密码学背后的重构定理。*
 
 **先选一条阅读路径：**
 

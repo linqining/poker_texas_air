@@ -1,6 +1,6 @@
 # hand_verify 递归证明 —— Cairo 路线调研与选型（2026-09-06）
 
-> 任务来源:`docs/plan-snip36-execution.md`(P3.3 双证明合一/ADR-2026-09-06-1)
+> 任务来源:`docs/plan-snip36-execution.md` P3.3 双证明合一/ADR-2026-09-06-1（该执行计划已删除，见 git 历史）
 > + spike README 的 v2 升级路径(「sigma 证明递归聚合」)。结论先行:
 > **递归证明 = Cairo 路线递归信封(本仓库 `cairo/src/recursion.cairo` +
 > `src/recurse.rs`)**,生产聚合升级路径 = vendored proving 栈的

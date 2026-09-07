@@ -54,7 +54,8 @@ export interface PaymasterRelayConfig {
 
 /**
  * Plan B 私密买入（STRK20 privacy pool + PokerVaultAnonymizer）。
- * 全部就绪才启用；否则买入自动走公开路径（Plan C paymaster/直签）。
+ * wallet-api 后端就绪（enabled + 池 + anonymizer 地址）即启用；否则买入
+ * 自动走公开路径（Plan C paymaster/直签）。SDK 后端还需 proving/discovery URL。
  */
 export interface PrivacyBuyInConfig {
   /** 总开关（VITE_PRIVACY_BUYIN_ENABLED）。默认 false = 公开路径。 */

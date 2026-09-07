@@ -1,8 +1,15 @@
 {
-  "network": "sepolia",
-  "chain_id": "SN_SEPOLIA",
-  "rpc_url": "https://starknet-sepolia-rpc.publicnode.com",
-  "explorer_url": "https://sepolia.starkscan.co",
+  "network": "mainnet",
+  "chain_id": "SN_MAIN",
+  "rpc_url": "https://starknet-rpc.publicnode.com",
+  "explorer_url": "https://starkscan.co",
+  "testnet": {
+    "network": "sepolia",
+    "chain_id": "SN_SEPOLIA",
+    "rpc_url": "https://starknet-sepolia-rpc.publicnode.com",
+    "explorer_url": "https://sepolia.starkscan.co",
+    "note": "Testnet history (devnet → Sepolia) in poker_contracts/DEPLOYMENTS.md; all submission transactions are mainnet."
+  },
   "retired_contracts": {
     "poker_token": "pSTRK test token 0x4bfad561... (class 0x5d745b51...) — retired 2026-09: chips anchor to canonical STRK directly; vault v3 token() = canonical STRK.",
     "poker_swap": "PokerSwap 0x45a5d045... (class 0x682e1568...) — pSTRK/swap offline; poker_swap.cairo deleted from source (2026-09-07).",

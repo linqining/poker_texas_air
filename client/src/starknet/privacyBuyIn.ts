@@ -20,7 +20,7 @@
 // 服务端校验不变：SIT_DOWN_V2 带 depositTxHash（私密买入为空），
 // chips.verify_deposit 以 vault.chip_balance(player) 为权威。
 
-import { constants, type AccountInterface } from 'starknet';
+import { type AccountInterface } from 'starknet';
 import { logger } from '../helpers/logger';
 import { starknetConfig, toWalletFeltHex } from './config';
 import { getProvider } from './contracts';
@@ -41,12 +41,15 @@ export interface PrivateBuyInResult {
   error?: string;
 }
 
-/** 配置层面是否启用私密买入（不含 SDK/钱包能力探测）。 */
+/**
+ * 配置层面是否启用私密买入（不含 SDK/钱包能力探测）。
+ * wallet-api 后端只需池 + anonymizer 地址（证明由钱包内部完成）；
+ * proving/discovery URL 仅 SDK 后端需要（需自建服务，主网无公开端点），
+ * 缺省时 buyInPrivately 跳过 SDK 路径，不影响 wallet-api。
+ */
 export function isPrivateBuyInConfigured(): boolean {
   const p = starknetConfig.privacy;
-  return (
-    p.enabled && !!p.poolAddress && !!p.anonymizerAddress && !!p.provingUrl && !!p.discoveryUrl
-  );
+  return p.enabled && !!p.poolAddress && !!p.anonymizerAddress;
 }
 
 // ------------------------------------------------------------
@@ -243,7 +246,7 @@ async function sdkBackend(account: AccountInterface, wei: bigint): Promise<Priva
     viewingKeyProvider: {
       getViewingKey: async () => BigInt(await getViewingKey(account.address)),
     },
-    provingProvider: { url: cfg.provingUrl, chainId: constants.StarknetChainId.SN_SEPOLIA },
+    provingProvider: { url: cfg.provingUrl, chainId: starknetConfig.chainId },
     discoveryProvider: { url: cfg.discoveryUrl },
     poolContractAddress: cfg.poolAddress,
   });
@@ -324,8 +327,11 @@ export async function buyInPrivately(
 ): Promise<PrivateBuyInResult> {
   const backends: Array<[PrivateBuyInResult['backend'], () => Promise<PrivateBuyInResult>]> = [
     ['wallet-api', () => walletApiBackend(account, wei)],
-    ['sdk', () => sdkBackend(account, wei)],
   ];
+  // SDK 后端需要自建 proving/discovery 服务（主网无公开端点）；未配置即跳过。
+  if (starknetConfig.privacy.provingUrl && starknetConfig.privacy.discoveryUrl) {
+    backends.push(['sdk', () => sdkBackend(account, wei)]);
+  }
   let lastError: unknown;
   for (const [name, run] of backends) {
     try {

@@ -391,4 +391,4 @@ canonical context 防止 proof、receipt、table 或 call scope 被替换。它�
 
 字段删除/合并、Seat bit/status、phase tagged union、`normalize_until_blocked`、tick/auto-fold
 归一化和 heterogeneous method batch 的实施边界，见
-[`TEXAS_SOURCE_SLIMMING_AND_BATCH_DESIGN.md`](../TEXAS_SOURCE_SLIMMING_AND_BATCH_DESIGN.md)。
+`TEXAS_SOURCE_SLIMMING_AND_BATCH_DESIGN.md`（已删除，见 git 历史）。
