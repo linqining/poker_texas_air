@@ -1,5 +1,15 @@
 # 双证明结算架构重构方案（poker_protocol direct-sigma + 牌局过程 STARK）
 
+> **Summary (EN).** Live target architecture for dual-proof settlement:
+> P-layer sigma proofs verified on-chain (EC_OP) + G-layer canonical STARK.
+> The **v2.9 revision header below is the current truth** and supersedes the
+> body where they conflict: curve world = Stark curve only; production P layer
+> = `dual::hand_batch_stark` (EC_OP, Poseidon challenges/ρ, 32-byte points);
+> settlement digest = `poseidon([hand_id] ++ Σ(player, sign, |delta|) ++
+> [action_log_digest])`; the resident mirror is removed (prove_log + one-shot
+> rebuild); legacy `PokerSettlement` is fallback only. The body is the Chinese
+> working spec with the full derivation history.
+
 状态：设计稿 v2.9（2026-09-05 修订）。本文档取代 admission-AIR（Path A
 递归信封）作为「链上可验证结算」的目标架构。
 

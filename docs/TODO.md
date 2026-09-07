@@ -12,27 +12,27 @@
 | 文档 | 角色 |
 | --- | --- |
 | `README.md` / `README.zh-CN.md` | 项目入口、信任模型、Roadmap |
+| `docs/README.md` | 文档地图（现状 / 设计 / 运维分类） |
+| `docs/design/DUAL_PROOF_PROTOCOL.md` | 结算目标架构（v2.9 头注对齐 Plan D / #18 Phase B；英文 TL;DR 在头部） |
 | `docs/design/SETTLEMENT_PRIVACY_PLAN.md` | 结算隐私 P2 权威方案（digest 公式已按 #18 Phase B 更新） |
 | `docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` | 抗审查唯一设计文档（主体已实施，状态见头注；§8.2 仍为主网门槛规格） |
-| `docs/design/DUAL_PROOF_PROTOCOL.md` | 结算目标架构（v2.9 头注对齐 Plan D / #18 Phase B） |
-| `docs/design/DAPV_SOUNDNESS.md` | DAPV 可靠性论证（v1.2 头注：生产 = Stark EC_OP + Poseidon） |
 | `docs/design/TEXAS_TAGGED_AIR.md` | tagged/canonical AIR 能力边界（29 selectors） |
-| `docs/PERFORMANCE_FOLLOWUPS.md` | 性能候选项门槛方法论（处置结论见 #24） |
+| `docs/design/SNIP36_INTEGRATION.md` | SNIP-36 唯一设计文档（dual v5 双门已上主网） |
+| `docs/SOUNDNESS.md` | 健全性最终状态（Lean / DAPV / AIR 三支柱；合并原 DAPV_SOUNDNESS 与 SOUNDNESS_FIXES） |
+| `docs/PERFORMANCE.md` | 性能最终记录（release 基线 + 生产流水线 + 主网 gas 校准 + 已裁决非目标） |
 | `docs/STATUS.md` | **canonical AIR 覆盖/缺口权威表述源**（2026-09-05 按现状重写） |
-| `docs/plan_d_perf.md` | Plan D 后唯一性能基线（7 项） |
-| `docs/plan-d-p3-metrics.md` §3b | 主网 gas 校准唯一数据（§1 旧基线已标失效） |
-| `docs/starknet-plan-b/c/d-*.md` | 匿名化 / 执行层 / 曲线迁移政策（头注标终态） |
 | `docs/MAINNET_TX_GUIDE.md` | #28 主网交易唯一操作指引 |
-| `docs/RFP03_ALIGNMENT.md` · `docs/starknet-rfp-submission.md` | 对外对齐 |
 | `poker_contracts/DEPLOYMENTS.md` | 合约部署地址/接线权威账本 |
-| `docs/TEXAS_SOURCE_SLIMMING_AND_BATCH_DESIGN.md` | poker_l1 合约库 schema v3→v30 唯一设计史 |
 
 **历史存档**（`docs/archive/`，均已加头注，仅史料价值）：
 `HOST_ZERO_RISTRETTO_AIR`（Ristretto 宪章，路线已关闭）、`PERFORMANCE_REPORT`、
-`PERFORMANCE_V2_PROTOCOL`（旧世界性能，被 plan_d_perf 取代）、
-`TRUST_MODEL_NO_TRANSACTION_REPLAY`（链交易重放模型已废）、`SOUNDNESS_FIXES`、
+`PERFORMANCE_V2_PROTOCOL`（旧世界性能，被 docs/PERFORMANCE.md 取代）、
+`TRUST_MODEL_NO_TRANSACTION_REPLAY`（链交易重放模型已废）、
 `EXECUTION_PLAN`（迁移蓝图已执行完）、`MIRROR_UNIFICATION_PLAN`（被 #20 Phase 2
-取代）、`PO5_PO6_DESIGN_NOTES`（VM 架构快照）。
+取代）、`PO5_PO6_DESIGN_NOTES`（VM 架构快照）。已删除的过程文档
+（plan_d_perf / plan-d-p3-metrics / PERFORMANCE_FOLLOWUPS / plan-b/c/d /
+poseidon / snip36-execution / MIGRATION / deadlock-review / RFP 对齐等）
+在 git 历史。
 
 ---
 
@@ -224,8 +224,8 @@
 - [ ] **5（遗留）. `set_authorized_helper` owner 单点**：冷存储 / 时间锁
   （运维动作，随下一轮合约运维窗口）。
 - [ ] **24⑤. 错误分类**：error.rs 字符串→稳定类别（低优持续项，外部输入
-  边界先行）。其余 ①-④⑥ 的处置结论直接落在 `docs/PERFORMANCE_FOLLOWUPS.md`
-  头注（2026-09-05）。
+  边界先行）。其余 ①-④⑥ 的处置结论落在 `docs/PERFORMANCE.md`「已裁决的
+  非目标」节（2026-09-05）。
 
 ## 三、结算隐私（剩余——多为实机/外部依赖）
 
@@ -234,7 +234,8 @@
   见 `docs/design/SETTLEMENT_PRIVACY_PLAN.md` §实机端到端剩余一步）。
 - [ ] **12-15. sidecar 链**：维持推迟——官方 STRK20 Privacy SDK 未上 npm
   （#26 持续跟踪）；v2 escrow 输家扣款/现金出口修复启用前无消费方。解锁后
-  按 `docs/starknet-plan-b-anonymizer.md` §SDK_SEAM 开工：M2 赔付路由 →
+  按 `client/src/starknet/privacyBuyIn.ts`（Plan B 通道，wallet-api/SDK 双后端
+  已实现）续接：M2 赔付路由 →
   M3 通知 UX → M4 合规加固。C5「池费运行时读取」随 #12 一并交付（非独立任务）。
 - [ ] **26. STRK20 官方 SDK 跟踪**（持续）：上 npm 后核对 `tryComposeInvoke`。
 

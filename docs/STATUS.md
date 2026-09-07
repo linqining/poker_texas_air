@@ -100,7 +100,7 @@ the hand's action log (`action_log_digest` tail word, #18 Phase B).
      + 2^16/2^12 范围表；非线性代数经 96 坐标 LogUp 链接元组下放。
      实测：e2e prove+verify **2.91s**（≈237×），五组件 rowcheck 全过，
      篡改负例三连全拒，原生层与 starknet_crypto 位精确等价保持。
-     设计与实施细节 `docs/plan-poseidon252-v2.md`；v1 单体组件
+     实施细节见 git 历史（原 `docs/plan-poseidon252-v2.md` 已删除）；v1 单体组件
      （`poseidon252_air_component`）已整体移除（2026-09-06：`--include-ignored`
      全量门禁会复活其失败测试；对照价值在 git 历史）。
    - **#22⑤ 字节 scope 组合——完成（2026-09-06）**：v2 验证路径不再做任何
@@ -153,7 +153,7 @@ selectors; no-seat sentinel for seatless micro-steps).
 
 ## Layered soundness record
 
-- DAPV (P layer) soundness: `docs/design/DAPV_SOUNDNESS.md` (theorems 1/2, ρ-binding
+- DAPV (P layer) soundness: `docs/SOUNDNESS.md` (theorems 1/2, ρ-binding
   lemma; production instantiation = Stark curve EC_OP + Poseidon challenges).
 - Settlement privacy: `docs/design/SETTLEMENT_PRIVACY_PLAN.md` (P2-M1..M4 done; v2
   zero-plaintext settle contract deployed sepolia, server-side enablement
@@ -161,9 +161,9 @@ selectors; no-seat sentinel for seatless micro-steps).
 - Censorship resistance: `docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md`
   (#16/#17/#18 Phase A+B wired; in-circuit legal-default constraints remain
   the mainnet gate).
-- Performance baselines: `docs/plan_d_perf.md` (post-Plan-D release numbers;
-  older reports archived).
+- Performance baselines: `docs/PERFORMANCE.md` (release numbers, production
+  pipeline, on-chain gas; older reports archived).
 - Historical design archive: `docs/archive/` (host-zero Ristretto charter,
   old perf reports, trust-model/replay essays, migration blueprints).
 
-Downstream migration notes: [`MIGRATION.md`](MIGRATION.md).
+Document map: [`docs/README.md`](README.md).

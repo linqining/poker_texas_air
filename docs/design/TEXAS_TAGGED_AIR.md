@@ -1,5 +1,11 @@
 # Texas Tagged Transition AIR
 
+> **Summary (EN).** Capability boundary of the tagged/canonical transition
+> AIR: 29 selectors (`CanonicalTransitionKind` 0..=28) over a fixed-width ABI
+> — which relations compose in the AIR today and which stay fail-closed. The
+> authoritative live coverage/gap status is maintained in
+> [docs/STATUS.md](../STATUS.md); this document specifies the AIR mechanics.
+
 The independent `poker_texas_air` workspace has two direct, transaction-free paths:
 
 - `src/texas_tagged.rs` is the mature, deliberately narrow projected AIR. It accepts a fixed-width `TexasTransitionWitness`

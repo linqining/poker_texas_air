@@ -1,5 +1,5 @@
 //! Poseidon252 chain AIR, v2 — the cairo-air-style component decomposition
-//! (see `docs/plan-poseidon252-v2.md`).
+//! (see `git 历史（原 docs/plan-poseidon252-v2.md）`).
 //!
 //! Instead of one monolithic component, the chain statement is proven by five
 //! components, each with a single log size:

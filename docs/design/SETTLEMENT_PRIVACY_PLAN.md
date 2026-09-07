@@ -1,4 +1,11 @@
-# 结算隐私方案（STRK20 Private Settlement）— Private Sprint 参赛设计
+# 结算隐私方案（STRK20 Private Settlement）
+
+> **Summary (EN).** Authoritative plan for STRK20 private settlement:
+> zero-plaintext dual-proof settlement, SNIP-36 settlement mode with legacy
+> fallback, and the payout-anonymizer conservation fix. Status: P2-M1..M4
+> done; the v5 contract lineage is live on Starknet mainnet (2026-09-07);
+> remaining items (one live end-to-end rehearsal, server enablement bits) are
+> tracked in `docs/TODO.md`. Chinese is the working language of this spec.
 
 > 目标：**链上看不出一手牌结算给了谁、谁领走了钱**；牌桌密钥层
 > （Part B）看不出玩家是哪个钱包。
@@ -588,7 +595,9 @@ viewing key 与 note 由钱包托管，relayer 提交，链上不见赢家
 - 前提：赢家注册过 viewing key（钱包首次使用时自动注册；App 在首次买
   入时引导"启用私密赔付"）。注册事件公开——但那只说明"该钱包用
   STRK20"，不绑定任何牌局（运营方 shield 不点名收款人）。
-- 服务端成本：Stwo 证明（文档口径 ~29s/12 核，批量摊销）+ 每笔 flat
+- 服务端成本：Stwo 证明（文档口径 ~29s/12 核，批量摊销；2026-09 更新：递归
+  路线线上实测 **15–17s/手**，含 Cairo 编译，异步不阻塞对局——
+  `texas/src/starknet/recursion_prover.rs`）+ 每笔 flat
   池费（从浮存扣，赔付前查 `get_fee_amount`）。
 
 > **状态（2026-09-03）**：需求前提已按 strk20-by-example.org 官方文档复核——

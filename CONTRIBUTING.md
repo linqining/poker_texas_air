@@ -90,7 +90,7 @@ configuration above is present.
 
 ## Benchmarks
 
-Performance baselines live in `docs/plan_d_perf.md` (post-Plan-D release
+Performance baselines live in `docs/PERFORMANCE.md` (post-Plan-D release
 numbers; the repro commands are in `poker-protocol-proofs/tests/plan_d_perf.rs`).
 Run them with:
 

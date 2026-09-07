@@ -795,7 +795,7 @@ pub struct Poseidon252Trace {
     pub multiplicities16: Vec<u32>,
     /// 2^12 range-table multiplicities.
     pub multiplicities12: Vec<u32>,
-    /// v2 coprocessor rows (see docs/plan-poseidon252-v2.md): active rows
+    /// v2 coprocessor rows (see git 历史（原 docs/plan-poseidon252-v2.md）): active rows
     /// only; the component layers pad to their own power-of-two domains
     /// with enabler-zero rows.
     pub mul_rows: Vec<MulRow>,

@@ -4,7 +4,7 @@
  * 背景：reveal 的三阶段编排由服务器驱动，客户端按 REVEAL_NOTICE 下发的
  * assignment 盲目出 token。恶意服务器若在非 ShowdownReveal 阶段把玩家
  * 自己的手牌密文混进该玩家的 assignment，玩家交出自己的解密份额后，
- * 服务器即集齐 N 份份额解密底牌（详见 docs/starknet-plan-d-stark-curve.md
+ * 服务器即集齐 N 份份额解密底牌（详见 原 docs/starknet-plan-d-stark-curve.md（git 历史）
  * §0.2 —— 这是 "no admin can peek at cards" 唯一的主动攻击面）。
  *
  * 机制：玩家自己的手牌密文只会通过 HAND_REVEAL_RESULT 定向推送（c1 在

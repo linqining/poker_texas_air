@@ -79,10 +79,10 @@
     }
   },
   "proof_policy": {
-    "on_chain_verification": "sigma_p_equations_on_chain_secp256k1_ecop__g_registered_attestation_phase1",
+    "on_chain_verification": "sigma_p_equations_on_chain_stark_curve_ecop__g_registered_attestation_phase1",
     "residual_trust": "operator attests G-STARK validity until Phase 2 on-chain STARK verification",
     "dual_proof": {
-      "p": "secp256k1 direct-sigma (ownership/shuffle/fold/reveal), challenge = keccak256, scalar = little-endian mod n, verified on-chain via the EC_OP builtin",
+      "p": "stark-curve direct-sigma (ownership/shuffle/fold/reveal), challenge/rho = Poseidon, production P layer = dual::hand_batch_stark, verified on-chain via the EC_OP builtin",
       "g": "stwo circle-stark (canonical tagged batches), host-verified; commitments bound via hand_binding"
     },
     "off_chain_trust": "operator_must_verify_stwo_outer_aggregate_before_register_aggregate",
@@ -97,7 +97,7 @@
     "delta_encoding": "i128 felt; negative values encoded as modular complement; magnitude bounded to u64",
     "calldata_builder": "poker_texas_air::starknet_settlement::{RegisterAggregateCalldata, SettleHandCalldata}",
     "hand_binding_encoding": "single felt252; poseidon_hash_many over the DUAL_PROOF_PROTOCOL.md §6 field order (domain tag poker_dual_hand_binding_v1, table/hand/players/deck-chain/reveal/state/settlement); rust: poker_texas_air::hand_binding",
-    "dual_ownership_proof_encoding": "per player: 1 kind felt (=1) + 5 u256 (pk_x, pk_y, r_x, r_y, s); challenge derived on-chain as keccak256(G_compressed ‖ pk_compressed ‖ R_compressed) little-endian mod n; curve CurveId::Secp256k1 = 5, transcript TranscriptId::Keccak256 = 7"
+    "dual_ownership_proof_encoding": "production P layer = dual::hand_batch_stark: stark-curve direct-sigma (ownership/shuffle/fold/reveal), 32-byte compressed points, felt252-range u256 payload words; challenges and rho = Poseidon (NOT keccak), host mints via poker-protocol-core::StarkCurve::hash_to_scalar; curve CurveId::StarkCurve = 6; see docs/design/DUAL_PROOF_PROTOCOL.md v2.9 and poker_contracts/src/dual/hand_batch_stark.cairo header"
   },
   "rfp_id": "RFP-03",
   "rfp_title": "Provably fair poker where cheating is mathematically impossible",

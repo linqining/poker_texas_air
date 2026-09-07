@@ -8,7 +8,7 @@
 //! + host-verified STARK attestation"。
 //!
 //! 完整设计文档：`{docs/design/DUAL_PROOF_PROTOCOL.md,
-//! docs/design/DAPV_SOUNDNESS.md}`（v2.8；含 hand_batch.cairo 的 Cairo 侧规范）。
+//! docs/SOUNDNESS.md}`（v2.8；含 hand_batch.cairo 的 Cairo 侧规范）。
 //! 概要：
 //! - **P 层**：每座位一条 hand-bound secp256k1 Schnorr 认可（ownership
 //!   endorsement），全部残差方程在链上以 ρ 折叠成单点校验
@@ -35,7 +35,7 @@
 //!   （原生，最便宜）；secp256k1/r1 经 OS 级 mul syscall（中档）；BLS12-381
 //!   无原生支持（需 Garaga 纯 Cairo 模拟，最贵）——所以 BLS 点的
 //!   reveal/fold 残差暂不能进本手批次（载荷格式已支持）。
-//!   迁移目标见 docs/starknet-plan-d-stark-curve.md：协议本体迁 STARK
+//!   迁移目标见 docs/design/DUAL_PROOF_PROTOCOL.md v2.9（Plan D）：协议本体迁 STARK
 //!   曲线（EC_OP 原生，是全残差批次唯一可负担的路线）；secp256k1 保留
 //!   为 EVM ecrecover 互操作备选。当前批次仍承载每座位的 hand-bound
 //!   所有权认可（secp256k1）。
@@ -1060,7 +1060,7 @@ async fn winners_registered(players_remapped: &[Ff], deltas: &[i128]) -> bool {
 /// - `snip36`：`verify_and_settle_dapv_stark_private_v3`——SNIP-36
 ///   proof_facts 优先 + fact-registry 降级双门，calldata 与 v2 同形
 ///   （**合约侧随 cairo ≥2.12 迁移上链后生效**，见
-///   docs/SNIP36_INTEGRATION.md §4；选中未上链的入口会 revert）。
+///   docs/design/SNIP36_INTEGRATION.md §4；选中未上链的入口会 revert）。
 ///
 /// 三个入口共用 register_hand_proved 注册（bindings/action_logs 同写）与
 /// 同一公开段；差异只在 fact 消费方式与 calldata 尾部。

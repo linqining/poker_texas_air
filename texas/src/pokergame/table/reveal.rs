@@ -411,7 +411,7 @@ impl Table {
 // 放进该玩家在非 ShowdownReveal 阶段的 assignment，客户端会交出
 // 自己的解密份额，服务器即可集齐 N 份解密底牌——这是
 // "no admin can peek at cards" 的唯一主动攻击面（见
-// docs/starknet-plan-d-stark-curve.md §0.2）。以下测试把它钉死：
+// 原 docs/starknet-plan-d-stark-curve.md（git 历史） §0.2）。以下测试把它钉死：
 // - HandReveal / CommunityReveal：assignment 不得包含 assignee 自己
 //   的 hand_encrypted；
 // - ShowdownReveal：assignment 必须恰好是自己的 hand_encrypted。

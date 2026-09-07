@@ -1,4 +1,4 @@
-# 主网 STRK20 交易操作指引（TODO #28，黑客松硬性要求）
+# 主网 STRK20 交易操作指引（TODO #28）
 
 > 目标：在 Starknet **主网**完成 ≥1 笔 STRK20 交易，交易哈希回填 `strk20.json`。
 > 该步骤需要**人工钱包操作**（私钥不出本机），脚本无法代办。
@@ -13,9 +13,9 @@
 | A. 直接 STRK20 转账（推荐先行） | 钱包内发起一笔 STRK 转账（可自转账） | 主网钱包 + 少量 STRK（转账额 + gas） | 最低 |
 | B. PokerVault 主网最小部署 + deposit | sncast declare + deploy + deposit | 主网账户（deployer 私钥）+ gas | declare/deploy gas 较高 |
 
-黑客松要求「不必是完整游戏，deposit + withdraw 即可」——方案 A 用钱包原生
-STRK20 转账即满足「一笔主网 STRK20 交易」；若评审叙事需要 Vault 买入闭环，
-再补方案 B。
+最小口径：deposit + withdraw 即可——方案 A 用钱包原生 STRK20 转账即可满足
+「一笔主网 STRK20 交易」；若需要 Vault 买入闭环，再补方案 B。
+（2026-09-07 主网全量合约已部署并完成真实交易回路，本指南保留作操作参考。）
 
 ## 方案 A：直接转账（约 5 分钟）
 
@@ -41,10 +41,10 @@ SNCAST_ACCOUNT="<主网 deployer 账户名>"   # sncast account add 导入
 
 1. `cd poker_contracts && scarb build`；
 2. declare `PokerVault`（**无需本地代币**——vault v3 起绑定 canonical STRK：
-   sepolia 现网 `vault.token()` 即原生 STRK，本地 pSTRK 已 retired，如需
-   1:1000 兑换另有 `PokerSwap`。主网部署以同一构造为准，执行前仍建议
+   sepolia 现网 `vault.token()` 即原生 STRK（本地 pSTRK 与 PokerSwap 均已
+   退役/移除，买入直接使用 STRK）。主网部署以同一构造为准，执行前仍建议
    核对 `poker_vault.cairo` 的 token_address 构造参数）；
-3. deploy `PokerVault` + `deposit` + `withdraw` 各一笔（黑客松口径的最小闭环）；
+3. deploy `PokerVault` + `deposit` + `withdraw` 各一笔（最小闭环）；
 4. 全部交易哈希回填 `strk20.json`。
 
 > ~~方案 B 会把「本地测试代币」暴露到主网~~（已不成立：vault v3 绑定

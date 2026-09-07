@@ -12,7 +12,7 @@
 //! The hand is accepted iff L is the identity — the group's own zero test,
 //! which is a coordinate comparison here (the pairing form e(L, H2) = 1 is
 //! algebraically equivalent and reserved for a future SNARK layer; see
-//! docs/design/DAPV_SOUNDNESS.md for the equivalence proof and the L==O decision).
+//! docs/SOUNDNESS.md for the equivalence proof and the L==O decision).
 //!
 //! The hand_id inside rho's input binds the transcript to one hand
 //! instance: a transcript minted for hand A folds to a non-zero L in hand
@@ -95,7 +95,7 @@ pub struct Term {
 /// another hand replays with wrong challenges here, so its residual is
 /// non-zero for ANY rho — this is what actually stops full-transcript
 /// replay (rho binding alone cannot: zero residuals fold to zero under
-/// every rho; docs/design/DAPV_SOUNDNESS.md §8).
+/// every rho; docs/SOUNDNESS.md §8).
 fn hand_transcript_domain(hand_id: Span<u8>) -> Array<u8> {
     let mut input: Array<u8> = array![];
     let prefix: Array<u8> = array![
@@ -137,7 +137,7 @@ fn append_be(ref out: Array<u8>, value: u256) {
 
 /// Ownership residual `s·G − R − c·pk`. The challenge is derived on-chain
 /// exactly like `verify_ownership` but **prepends the hand transcript
-/// domain** (docs/design/DAPV_SOUNDNESS.md §9-L2 / §14.1: without the hand context an
+/// domain** (docs/SOUNDNESS.md §9-L2 / §14.1: without the hand context an
 /// endorsement minted for hand A verifies unchanged under hand B — zero
 /// residuals stay zero for any rho, §8). One equation.
 fn ownership_terms(

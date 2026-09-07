@@ -5,7 +5,7 @@
 //! Why EC_OP: the STARK curve is the curve of the EC_OP builtin, so every
 //! point operation is one native builtin step — the full 9-player residual
 //! batch fits a single settlement transaction (see zgame
-//! docs/plan-d-p3-metrics.md for the host-measured budget).
+//! docs/PERFORMANCE.md for the host-measured budget).
 //!
 //! Relationship to the secp variant (same payload layout, same binding
 //! chain, different curve and challenge hash):

@@ -46,7 +46,7 @@ From the repo root (one command from a clean checkout — builds on first run):
 
 ```bash
 ./proving-tool/prove-hand.sh --scale small          # ~8-11 s prove
-./proving-tool/prove-hand.sh --scale full           # ~24-29 s prove (default)
+./proving-tool/prove-hand.sh --scale full           # ~24-29 s prove (default; the recursive production route measures 15-17 s/hand, see texas/src/starknet/recursion_prover.rs)
 ```
 
 or, equivalently, without the wrapper:

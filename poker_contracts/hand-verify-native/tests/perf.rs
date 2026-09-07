@@ -1,6 +1,6 @@
 //! Performance tests for the native-Stwo hand_verify spike.
 //!
-//! 纪律（延续主仓库 PERFORMANCE_FOLLOWUPS / plan_d_perf）：
+//! 纪律（延续主仓库 docs/PERFORMANCE.md）：
 //! - 整个文件在 debug 构建下编译排除（`cfg(not(debug_assertions))`），
 //!   证明类测试一律只在 pinned nightly + `--release` 下运行；
 //! - `perf_gate_single_hand` 是 release 下的常驻回归门槛（宽松阈值，

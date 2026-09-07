@@ -9,7 +9,7 @@
 //! Points use Jacobian coordinates with an explicit identity (Z = 0):
 //! doubling is dbl-2001-b (a = 1 folds its z⁴ term in), addition is the
 //! standard case-aware general Jacobian formulas. Performance is not the
-//! spike's goal (see `docs/plan_d_perf.md`: the host fold is ~19 µs per
+//! spike's goal (see `docs/PERFORMANCE.md`: the host fold is ~19 µs per
 //! scalar mul).
 //!
 //! Two fields must not be confused (same discipline as

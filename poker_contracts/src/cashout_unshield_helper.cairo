@@ -2,7 +2,7 @@
 //!
 //! 玩家在 vault 的筹码可以转换为 STRK20 池的 open note（归属由池隐藏），
 //! **不经过玩家公开钱包**——提现钱包地址与牌局赢家之间的最后一环被切断
-//! （`docs/starknet-plan-b-anonymizer.md` §已知 seam / TODO #25）。
+//! （`原 docs/starknet-plan-b-anonymizer.md（git 历史）` §已知 seam / TODO #25）。
 //!
 //! 流程（玩家本人发起，两笔链上调用）：
 //!   1. `vault.withdraw_to(player → helper, amount)`（vault 侧 unshield helper

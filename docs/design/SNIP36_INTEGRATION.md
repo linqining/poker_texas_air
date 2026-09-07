@@ -1,17 +1,27 @@
 # SNIP-36 接入设计（in-protocol proof verification → DAPV）
 
-> 状态：**Phase 1 落地中（2026-09-06，2026-09-06 二次核对修订）**——本文是该主题唯一设计文档。
+> **Summary (EN).** The single design doc for SNIP-36 integration; decision
+> record: dual-proof in one (§3). **Phase 1 is shipped** — dual v5
+> (`verify_and_settle_dapv_stark_private_v3`: in-protocol SNIP-36 verification
+> with fact-registry fallback) deployed on Starknet mainnet 2026-09-07, with
+> real SNIP-36 private transactions on mainnet; deployment/wiring details in
+> `poker_contracts/DEPLOYMENTS.md`. Remaining follow-ups (prover tooling, SNOS
+> form) are tracked in `docs/TODO.md`. Binding scheme and settlement
+> algorithm: see `docs/SOUNDNESS.md` (P-layer pillar). Chinese is the working
+> language of this spec.
+>
+> 状态：**Phase 1 已落地（dual v5，2026-09-07 主网）**——
+> `verify_and_settle_dapv_stark_private_v3`（SNIP-36 协议内验证 +
+> fact-registry 降级双门）已部署主网，主网已有真实 SNIP-36 私密交易。
 > 决策记录：hand_verify 形态裁决 = **双证明合一**（§3）。
 >
 > **2026-09-06 核对修订**：SNIP-36 **未被废弃**——已随 Shinobi 升级于
 > **2026-04-21 主网激活**（Starknet v0.14.2），现为 STRK20/strkBTC 隐私的
 > 核心基础设施。此前文档中"SNIP-36 新版本不支持"系对 prover 工具链版本
-> 问题的误传，不是协议状态；协议侧无等待项，缺口全部在我方（§5）。>
-> **执行计划**：`docs/plan-snip36-execution.md`（P0 瘦身实测 → P1 cairo
-> ≥2.12 → P2 v3 双门 → P3 SNOS 形态 → P4 提交工具 → P5 sepolia 全链路，
-> 3–5 周，P0/P1 可立即并行开始）。
-> 关联：`docs/design/DAPV_SOUNDNESS.md` §9-10（绑定方案/结算验证算法）、
-> `poker_contracts/DEPLOYMENTS.md`（dual v4 部署档案）、
+> 问题的误传，不是协议状态；协议侧无等待项，缺口全部在我方（§5）。
+> 原执行计划（`plan-snip36-execution.md`）已删除，见 git 历史。
+> 关联：`docs/SOUNDNESS.md`（绑定方案/结算验证算法，原 DAPV_SOUNDNESS §9-10）、
+> `poker_contracts/DEPLOYMENTS.md`（部署档案）、
 > `docs/TODO.md`（任务状态以 TODO 为准）。
 
 ## 1. SNIP-36 机制（与 fact-registry 的对照）

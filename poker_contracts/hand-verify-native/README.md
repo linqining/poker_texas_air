@@ -211,7 +211,7 @@ PCS 配置与主项目一致（pow_bits=10，30 FRI queries，blowup 1）。
   在 `perf_full_matrix`。
 - host 侧标量乘是朴素 case-aware Jacobian double-and-add：9p 手 ≈ 896 次
   标量乘 ÷ 71.5ms ≈ **80µs/次**；`poker-protocol-core` 后端实测
-  **19µs/次**（`docs/plan_d_perf.md` #1），同量手直验约 **4×**；叠加
+  **19µs/次**（`docs/PERFORMANCE.md` #1），同量手直验约 **4×**；叠加
   挑战阶段求逆批量化（Montgomery batch inversion，~1300 次单独求逆 → 1 次）
   与窗口法，合计接近一个量级。注意：换后端只影响 host 时延，不移动信任
   边界（AIR 不约束标量乘，见上文形态①说明）。

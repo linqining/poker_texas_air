@@ -6,7 +6,7 @@
 //
 // 余额读取、回执等待（含 paymaster 广播交易的等待）都经由 getProvider()
 // 获得该层；直签回退路径的交易本身由钱包/Controller 的 RPC 提交，不受此层
-// 管辖（见 docs/starknet-plan-c-execution.md 的边界说明）。
+// 管辖（见 原 docs/starknet-plan-c-execution.md（git 历史） 的边界说明）。
 
 import { RpcProvider } from 'starknet';
 import { logger } from '../helpers/logger';
