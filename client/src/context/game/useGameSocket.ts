@@ -132,7 +132,7 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
         reg: Date.now(),
         sid: (socket as unknown as { id?: string }).id ?? null,
       };
-      // 围观者/重连者的房间状态同步（SETTLEMENT_PRIVACY_PLAN.md 修复项）：
+      // 围观者/重连者的房间状态同步（docs/design/SETTLEMENT_PRIVACY_PLAN.md 修复项）：
       // 公共牌、亮牌清理、winMessage 都以服务器 TABLE_UPDATED 为准补齐——
       // 仅靠事件流（COMMUNITY_REVEAL_RESULT 等）会让中途进桌的围观者看不到。
       const lastWinMessagesRef = { current: [] as string[] };

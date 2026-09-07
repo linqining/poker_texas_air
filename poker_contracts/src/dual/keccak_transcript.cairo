@@ -1,5 +1,5 @@
 //! Keccak-256 Fiat–Shamir transcript replay in Cairo
-//! (DUAL_PROOF_PROTOCOL.md v2.3, §4.2).
+//! (docs/design/DUAL_PROOF_PROTOCOL.md v2.3, §4.2).
 //!
 //! Byte-for-byte mirror of `poker-protocol-proofs::transcript_ext::
 //! KeccakTranscript`:

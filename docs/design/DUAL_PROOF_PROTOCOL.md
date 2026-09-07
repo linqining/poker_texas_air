@@ -23,7 +23,7 @@
   仅 fallback。
 - **§7.3/§12/§7.4 中 poker_l1 链上验证路线**（zk_verify/gas 表/ZkVerifierRegistry）：
   poker_l1 已收缩为合约库，该路线前提消失，仅存档；链上验证路线以
-  `SETTLEMENT_PRIVACY_PLAN.md` 与 docs/TODO.md 为准。
+  `SETTLEMENT_PRIVACY_PLAN.md` 与 ../TODO.md 为准。
 
 v2.8 变更（重构成果总结 + DAPV 方向）：**Path A admission STARK 全族移除后，
 系统证明复杂度大幅简化**。前架构的 admission STARK 需要 log-16~21 的 FRI 域

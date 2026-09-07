@@ -8,7 +8,7 @@ pub mod zk_shuffle;
 pub mod z_poker;
 
 /// BN254 direct-sigma settlement route: canonical card derivation and curve
-/// re-exports (DUAL_PROOF_PROTOCOL.md). Curve-independent of protocol
+/// re-exports (docs/design/DUAL_PROOF_PROTOCOL.md). Curve-independent of protocol
 /// features — the sigma proofs themselves live in poker-protocol-proofs.
 pub mod bn254_sigma;
 

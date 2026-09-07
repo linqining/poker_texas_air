@@ -26,7 +26,7 @@ pre/post state root 投影、`(table_id, hand_id, call_seq, version)` 作用域
     padding 无法伪造一次合法转移。
 
 出处：`src/airs/common.rs:24-57`；`src/texas_canonical_air.rs`（9 个
-预处理列、call_seq 16-bit rollover）；`TEXAS_TAGGED_AIR.md` "The verifier
+预处理列、call_seq 16-bit rollover）；`docs/design/TEXAS_TAGGED_AIR.md` "The verifier
 reconstructs nine fixed preprocessed columns…"。
 -/
 

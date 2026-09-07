@@ -1,5 +1,5 @@
 //! BN254 direct-sigma instantiation of the curve-generic proof suite
-//! (DUAL_PROOF_PROTOCOL.md §3.3: the sigma stack is the production P-proof
+//! (docs/design/DUAL_PROOF_PROTOCOL.md §3.3: the sigma stack is the production P-proof
 //! stack, instantiated on BN254 G1 with the FiatShamirSha3 transcript).
 //!
 //! These tests are the Rust side of the Rust↔Cairo cross-validation plan

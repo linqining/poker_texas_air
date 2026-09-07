@@ -1,5 +1,5 @@
 //! On-chain P-proof verification via Starknet's native secp256k1 EC_OP
-//! builtin (DUAL_PROOF_PROTOCOL.md v2.2, §4).
+//! builtin (docs/design/DUAL_PROOF_PROTOCOL.md v2.2, §4).
 //!
 //! The protocol group is secp256k1 exactly so this verifier can use the VM's
 //! curve builtins — no custom field arithmetic, no Montgomery. Rust-side

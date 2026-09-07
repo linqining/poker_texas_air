@@ -1,4 +1,4 @@
-//! SECP256K1 direct-sigma settlement route (DUAL_PROOF_PROTOCOL.md §3.1/§D1(v2.2)).
+//! SECP256K1 direct-sigma settlement route (docs/design/DUAL_PROOF_PROTOCOL.md §3.1/§D1(v2.2)).
 //!
 //! Owns the canonical card derivation for the SECP256K1 G1 epoch and re-exports
 //! the curve for downstream consumers. Cards are deterministically derived

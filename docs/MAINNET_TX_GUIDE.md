@@ -2,7 +2,7 @@
 
 > 目标：在 Starknet **主网**完成 ≥1 笔 STRK20 交易，交易哈希回填 `strk20.json`。
 > 该步骤需要**人工钱包操作**（私钥不出本机），脚本无法代办。
-> 执行前重读 `SETTLEMENT_PRIVACY_PLAN.md` §7 验证清单(历史迁移计划见 docs/archive/EXECUTION_PLAN.md)
+> 执行前重读 `docs/design/SETTLEMENT_PRIVACY_PLAN.md` §7 验证清单(历史迁移计划见 docs/archive/EXECUTION_PLAN.md)
 > 「主网最小路径」：在「直接 STRK20 转账」与「PokerVault 主网最小部署」两案中
 > **选最简者**。
 

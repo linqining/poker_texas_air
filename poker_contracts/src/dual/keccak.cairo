@@ -1,4 +1,4 @@
-//! Keccak-256 via Starknet's native keccak builtin (DUAL_PROOF_PROTOCOL.md
+//! Keccak-256 via Starknet's native keccak builtin (docs/design/DUAL_PROOF_PROTOCOL.md
 //! v2.3, §4.2 transcript replay).
 //!
 //! The `keccak_syscall` absorbs pre-padded 1088-bit blocks (17 little-endian

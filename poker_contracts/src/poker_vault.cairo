@@ -101,7 +101,7 @@ pub trait IPokerVault<TContractState> {
     /// Whether the vault is paused.
     fn paused(self: @TContractState) -> bool;
     /// Register a payout claim commitment for the caller
-    /// (SETTLEMENT_PRIVACY_PLAN.md Part A Phase 1): `commitment =
+    /// (docs/design/SETTLEMENT_PRIVACY_PLAN.md Part A Phase 1): `commitment =
     /// poseidon(secret)` where `secret` is a client-side capability. Winners'
     /// settlements become claimable from the settlement escrow only by
     /// revealing `secret` with `hand_binding` and `amount` — the secret

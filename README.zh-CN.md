@@ -31,7 +31,7 @@
 ├── poker_contracts/        # Cairo 合约（Scarb）：Vault、Anonymizer、Settlement、DualSettlement、Swap
 ├── proving-tool/           # prove-hand CLI：Cairo1 → cairo-vm → Stwo 证明 → 验证（独立 workspace）
 ├── third_party/proving/    # vendored starkware-libs/proving（Apache-2.0，含本地补丁）
-├── docs/                   # 协议规范、计划、性能基线（历史文档在 docs/archive/）
+├── docs/                   # 协议规范、计划、性能基线（核心设计在 docs/design/，历史文档在 docs/archive/）
 └── strk20.json             # STRK20 黑客松 manifest（部署记录、证明策略）
 ```
 
@@ -47,7 +47,7 @@
 
 **本次提交不部署独立 prover 服务。** 运营方（host）使用 `proving-tool` 在本地生成 G 层证明（整手牌约 29 秒，证明约 1.5 MB）并对其有效性作出 attestation。这**不是**正确性上的信任要求：任何玩家都可以下载证明 bundle 在浏览器中验证（client-wasm），或用 Rust 验证器本地验证。host 只是*可用性*依赖，而非*正确性*依赖。这一阶段性姿态是 RFP-03 明文允许的——RFP 仅要求链上 STARK 验证器 "eventually"（最终）到位。
 
-路线图：**Phase 2** —— G-STARK 验证器合约上 Starknet（`cairo_verifier` 方向）；**Phase 3** —— 独立 prover 服务，届时完全移除 host attestation。设计细节见 [DUAL_PROOF_PROTOCOL.md](DUAL_PROOF_PROTOCOL.md)、[DAPV_SOUNDNESS.md](DAPV_SOUNDNESS.md)。
+路线图：**Phase 2** —— G-STARK 验证器合约上 Starknet（`cairo_verifier` 方向）；**Phase 3** —— 独立 prover 服务，届时完全移除 host attestation。设计细节见 [DUAL_PROOF_PROTOCOL.md](docs/design/DUAL_PROOF_PROTOCOL.md)、[DAPV_SOUNDNESS.md](docs/design/DAPV_SOUNDNESS.md)。
 
 ### 「对公开程序的已证执行」与「信任闭源合约」
 
@@ -134,8 +134,8 @@ export SNCAST_ACCOUNT=... SNCAST_URL=... OWNER=... PROVER=... INITIAL_SUPPLY=...
 
 ## 文档
 
-- [DUAL_PROOF_PROTOCOL.md](DUAL_PROOF_PROTOCOL.md) —— 双证明结算规范（v2.3，现行）
-- [TEXAS_TAGGED_AIR.md](TEXAS_TAGGED_AIR.md) —— 直接状态转移 AIR 路径
+- [DUAL_PROOF_PROTOCOL.md](docs/design/DUAL_PROOF_PROTOCOL.md) —— 双证明结算规范（v2.3，现行）
+- [TEXAS_TAGGED_AIR.md](docs/design/TEXAS_TAGGED_AIR.md) —— 直接状态转移 AIR 路径
 - [TRUST_MODEL_NO_TRANSACTION_REPLAY.md](docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md) —— 无交易重放信任边界(已被取代,现行见上文)
 - [docs/plan-d-*.md](docs/) —— STARK 曲线迁移计划与实测基线
 - [docs/STATUS.md](docs/STATUS.md) —— 历史技术状态叙述（过时章节已标注）

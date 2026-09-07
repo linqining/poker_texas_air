@@ -7,8 +7,8 @@
 //! 建议使用标准描述："ρ-folded Schnorr ownership endorsement batch
 //! + host-verified STARK attestation"。
 //!
-//! 完整设计文档在仓库根：`{DUAL_PROOF_PROTOCOL.md,
-//! DAPV_SOUNDNESS.md}`（v2.8；含 hand_batch.cairo 的 Cairo 侧规范）。
+//! 完整设计文档：`{docs/design/DUAL_PROOF_PROTOCOL.md,
+//! docs/design/DAPV_SOUNDNESS.md}`（v2.8；含 hand_batch.cairo 的 Cairo 侧规范）。
 //! 概要：
 //! - **P 层**：每座位一条 hand-bound secp256k1 Schnorr 认可（ownership
 //!   endorsement），全部残差方程在链上以 ρ 折叠成单点校验

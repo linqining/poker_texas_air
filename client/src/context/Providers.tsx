@@ -26,7 +26,7 @@ import { starknetConfig } from '../starknet/config';
 
 const queryClient = new QueryClient();
 
-// Connector list（SETTLEMENT_PRIVACY_PLAN.md Part C：Ready 唯一钱包）：
+// Connector list（docs/design/SETTLEMENT_PRIVACY_PLAN.md Part C：Ready 唯一钱包）：
 // Ready Wallet（注入钱包，STRK20 Wallet API 的官方测试基线）承担登录验证、
 // swap 兑换、买入扣款、私密领取奖励。Ready 的注入 id 历史上是 'argentX'，
 // 改版后可能注册 'ready'——两个都挂，LoginModal 按 available() 过滤。

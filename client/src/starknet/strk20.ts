@@ -1,4 +1,4 @@
-// STRK20 隐私领取（SETTLEMENT_PRIVACY_PLAN.md Part C3 / C5）。
+// STRK20 隐私领取（docs/design/SETTLEMENT_PRIVACY_PLAN.md Part C3 / C5）。
 //
 // 「领取奖励」两条路径，均通过连接的钱包（Ready / Cartridge）执行：
 //

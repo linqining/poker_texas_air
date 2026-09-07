@@ -1,4 +1,4 @@
-// Part C3.2-M1: 赔付 sidecar 队列（SETTLEMENT_PRIVACY_PLAN.md 排期 C3.2-M2）。
+// Part C3.2-M1: 赔付 sidecar 队列（docs/design/SETTLEMENT_PRIVACY_PLAN.md 排期 C3.2-M2）。
 //
 // 职责：接收游戏服务器的赔付入队请求，按「批量浮存 + 随机延迟抖动」的
 // 节奏把赢家赔付以 STRK20 加密 note 私密转账到赢家的 viewing key。

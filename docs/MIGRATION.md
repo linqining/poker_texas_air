@@ -33,4 +33,4 @@ old `poker_l1` types.
 
 The no-transaction-replay migration is independent of this source move. Its
 required receipt, proof, and finality changes are described in
-[`docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md`](docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md)(已被取代).
+[`archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md`](archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md)(已被取代).

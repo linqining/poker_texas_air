@@ -140,14 +140,14 @@ nonce——devnet 交易停留在 pre-confirmed，默认 latest 会拿到过期 
 ### 结算阻断点（遗留）
 
 mirror（poker_l1 证明层）走自治 deck 链，与游戏 deck 不同步（代码注释
-"deck 链无法逐字节同步…生产需客户端协议对齐，见 DUAL_PROOF_PROTOCOL.md
+"deck 链无法逐字节同步…生产需客户端协议对齐，见 docs/design/DUAL_PROOF_PROTOCOL.md
 §5.3"）。浏览器玩家无法产出 mirror 层的 reveal 份额（sk·c1_mirror），
 mirror DealHole 永远等不到人类份额 → `mirror has no provable activity`
 → settle 跳过。已尝试/已修的相关项：transcript 统一（Merlin→FiatShamir，
 poker_l1 + client.rs + dev_bot）、game_loop 每 tick 驱动 mirror
 deadline + 缺失份额服务端补齐（`mirror_fill_pending_reveals`，利用
 钱包确定性派生 sk）、mirror 下注缓冲重放。完整修复需按
-DUAL_PROOF_PROTOCOL.md §5.3 做客户端协议对齐（独立工作量）。
+docs/design/DUAL_PROOF_PROTOCOL.md §5.3 做客户端协议对齐（独立工作量）。
 
 ### 本次修复的其他 bug（影响 e2e 的真实缺陷）
 

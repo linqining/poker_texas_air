@@ -12,12 +12,12 @@
 | 文档 | 角色 |
 | --- | --- |
 | `README.md` / `README.zh-CN.md` | 项目入口、信任模型、Roadmap |
-| `SETTLEMENT_PRIVACY_PLAN.md` | 结算隐私 P2 权威方案（digest 公式已按 #18 Phase B 更新） |
-| `ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` | 抗审查唯一设计文档（主体已实施，状态见头注；§8.2 仍为主网门槛规格） |
-| `DUAL_PROOF_PROTOCOL.md` | 结算目标架构（v2.9 头注对齐 Plan D / #18 Phase B） |
-| `DAPV_SOUNDNESS.md` | DAPV 可靠性论证（v1.2 头注：生产 = Stark EC_OP + Poseidon） |
-| `TEXAS_TAGGED_AIR.md` | tagged/canonical AIR 能力边界（29 selectors） |
-| `PERFORMANCE_FOLLOWUPS.md` | 性能候选项门槛方法论（处置结论见 #24） |
+| `docs/design/SETTLEMENT_PRIVACY_PLAN.md` | 结算隐私 P2 权威方案（digest 公式已按 #18 Phase B 更新） |
+| `docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` | 抗审查唯一设计文档（主体已实施，状态见头注；§8.2 仍为主网门槛规格） |
+| `docs/design/DUAL_PROOF_PROTOCOL.md` | 结算目标架构（v2.9 头注对齐 Plan D / #18 Phase B） |
+| `docs/design/DAPV_SOUNDNESS.md` | DAPV 可靠性论证（v1.2 头注：生产 = Stark EC_OP + Poseidon） |
+| `docs/design/TEXAS_TAGGED_AIR.md` | tagged/canonical AIR 能力边界（29 selectors） |
+| `docs/PERFORMANCE_FOLLOWUPS.md` | 性能候选项门槛方法论（处置结论见 #24） |
 | `docs/STATUS.md` | **canonical AIR 覆盖/缺口权威表述源**（2026-09-05 按现状重写） |
 | `docs/plan_d_perf.md` | Plan D 后唯一性能基线（7 项） |
 | `docs/plan-d-p3-metrics.md` §3b | 主网 gas 校准唯一数据（§1 旧基线已标失效） |
@@ -184,7 +184,7 @@
   Phase C 后续可选加固（当前 seq 校验在服务端 + 收据举证）。
 
 - [x] **19. 实施前确认 4 个开放问题**（2026-09-05 定稿，决策全文 =
-  `ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §9）：① seq = per-table 单调、
+  `docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §9）：① seq = per-table 单调、
   跨手不重置（与现行实现一致，重置窗口即重放窗口）；② 电路内验签否决——
   现管线无 keccak/EC builtin，电路只约束日志哈希吸收 + "合法默认"规则，
   完整验签归上链验证路线（#22/M3）；③ replayer 最小数据集 =
@@ -224,14 +224,14 @@
 - [ ] **5（遗留）. `set_authorized_helper` owner 单点**：冷存储 / 时间锁
   （运维动作，随下一轮合约运维窗口）。
 - [ ] **24⑤. 错误分类**：error.rs 字符串→稳定类别（低优持续项，外部输入
-  边界先行）。其余 ①-④⑥ 的处置结论直接落在 `PERFORMANCE_FOLLOWUPS.md`
+  边界先行）。其余 ①-④⑥ 的处置结论直接落在 `docs/PERFORMANCE_FOLLOWUPS.md`
   头注（2026-09-05）。
 
 ## 三、结算隐私（剩余——多为实机/外部依赖）
 
 - [ ] 一笔真实零明文结算联调（原 #11 剩余；需实机对局，配合 #34）。
 - [ ] C5 Ready 实机端到端：登录→买入→对局→私密领取（剩人工钱包弹窗一步，
-  见 `SETTLEMENT_PRIVACY_PLAN.md` §实机端到端剩余一步）。
+  见 `docs/design/SETTLEMENT_PRIVACY_PLAN.md` §实机端到端剩余一步）。
 - [ ] **12-15. sidecar 链**：维持推迟——官方 STRK20 Privacy SDK 未上 npm
   （#26 持续跟踪）；v2 escrow 输家扣款/现金出口修复启用前无消费方。解锁后
   按 `docs/starknet-plan-b-anonymizer.md` §SDK_SEAM 开工：M2 赔付路由 →

@@ -39,7 +39,7 @@ impl ClientPlayer {
         Self { sk, pk }
     }
 
-    /// 口令派生身份（SETTLEMENT_PRIVACY_PLAN.md Part B1.5）：
+    /// 口令派生身份（docs/design/SETTLEMENT_PRIVACY_PLAN.md Part B1.5）：
     /// sk = KDF(口令)，KDF 参数（域名 "v1" + 迭代次数）一经发布冻结——
     /// 任何变化都会让全部口令用户静默换身份，只允许升 "v2" 并保留 v1。
     /// 同一口令在任何设备派生出同一 (sk, pk)，口令即身份备份；

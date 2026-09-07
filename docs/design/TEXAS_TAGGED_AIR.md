@@ -193,7 +193,7 @@ a future full transition circuit must bind these values to authenticated state
 openings and enforce every row's full state transition.
 
 The required no-replay trust-model migration is documented in
-`docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md`: immutable transition receipts, complete
+`../archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md`: immutable transition receipts, complete
 pre/post public statements, authority and manifest binding, historical
 state-root/receipt inclusion proofs, and coordinator admission from an
 `AuthenticatedTransitionReceipt`. Removing replay code before those pieces are

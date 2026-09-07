@@ -3,7 +3,7 @@ import AirsLean.Censorship.ActionLog
 /-!
 # AcceptedSeq — 收据与 accepted-seq 向量；审查检测
 
-`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §7.1：服务器对每个动作回签
+`docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §7.1：服务器对每个动作回签
 收据（accepted / autoAccepted / rejected + 理由），并在 settle 事件发布
 每玩家的 accepted-seq 向量——"本手我接受了你到第几号动作"。审查由此
 成为**可判定命题**：

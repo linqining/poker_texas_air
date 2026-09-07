@@ -1,4 +1,4 @@
-//! #17 签名回执（`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §7.1）。
+//! #17 签名回执（`docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §7.1）。
 //!
 //! 服务器对每个动作的"决定"（accepted / auto-accepted / rejected+reason）
 //! 回签收据 `Sig_operator(...)`，经 ACTION_RECEIPT 广播给全桌。玩家留存

@@ -38,7 +38,7 @@ reconstruction protocol (V3) for soundness.
 
 ## Evidence pointers
 
-- Protocol spec: [../DUAL_PROOF_PROTOCOL.md](../DUAL_PROOF_PROTOCOL.md) (v2.3)
+- Protocol spec: [docs/design/DUAL_PROOF_PROTOCOL.md](design/DUAL_PROOF_PROTOCOL.md) (v2.3)
 - On-chain proof policy: [../strk20.json](../strk20.json) `proof_policy`
 - Trust posture (no prover service; browser-verifiable G layer):
   README "Trust model & proof policy"

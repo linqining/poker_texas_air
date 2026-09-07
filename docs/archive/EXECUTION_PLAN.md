@@ -145,7 +145,7 @@ poker_texas_air/
 **P5 Lean + docs 合并（0.5 天，可与 P4 并行）**
 - 复制 `poker_protocol_lean/`（含 README、SECURITY_RECONSTRUCTION.md）；在主 README 的 Innovation 章节链接其结论（V2 不健全的机器检查反例 + V3 修复与 soundness 定理）。
 - 合并 zgame docs；把 `starknet-rfp-submission.md` 改写为 `docs/RFP03_ALIGNMENT.md`（§4 的映射表）。
-- 处理文档漂移：README 与 `HOST_ZERO_RISTRETTO_AIR.md` 仍描述已移除的 Ristretto 路径 → 标注 superseded/归档说明（活跃规范是 `DUAL_PROOF_PROTOCOL.md` v2.3）；修正 selector 数量不一致（20 vs 23）。
+- 处理文档漂移：README 与 `HOST_ZERO_RISTRETTO_AIR.md` 仍描述已移除的 Ristretto 路径 → 标注 superseded/归档说明（活跃规范是 `docs/design/DUAL_PROOF_PROTOCOL.md` v2.3）；修正 selector 数量不一致（20 vs 23）。
 
 **P6 全链路验证 + CI（0.5 天）**
 - `cargo test --release --workspace`（现有 ci.yml 口径）+ `scarb build/test`（poker_contracts）+ `wasm-pack` + `pnpm build` + `prove-hand` 冒烟。
@@ -197,7 +197,7 @@ poker_texas_air/
 1. **不部署独立 proved/prover 服务**。G 层 STARK 证明由 operator host 本地生成（`proving-tool`，实测整手约 29s、proof 1.5MB）并在 host 侧验证后，以 operator 签名/承诺的形式进入结算；链上只强验证 P 层 sigma（EC_OP）。
 2. **客户端可以独立验证，不必须信任 host**：`client-wasm` + `poker_protocol::browser_proof_bundle` 把证明 bundle 下发到浏览器本地验证（zgame 8/29 已落地 browser-verified WASM 路径）。任何人都能在本地复算 G 证明，把 host 信任降级为可用性依赖而非正确性依赖。
 3. **这是 RFP-03 明文允许的阶段性状态**：原文 "STARK verifier (the L2 doesn't need to be on mainnet yet — the RFP explicitly asks for it 'eventually')"。
-4. **路线图（README Roadmap + DUAL_PROOF_PROTOCOL.md 对齐）**：Phase 2 = G-STARK 验证器合约上链（cairo_verifier 方向）；Phase 3 = 独立 prover 服务（把 STARKNET_PROVER_URL 从 stub 变成真实端点），host attestation 随之移除。
+4. **路线图（README Roadmap + docs/design/DUAL_PROOF_PROTOCOL.md 对齐）**：Phase 2 = G-STARK 验证器合约上链（cairo_verifier 方向）；Phase 3 = 独立 prover 服务（把 STARKNET_PROVER_URL 从 stub 变成真实端点），host attestation 随之移除。
 
 **落地**：README 英/中文各一节 "Trust model & proof policy"，附上述 P/G 分层图；`strk20.json` 的 `proof_policy` 保持该口径并把 demo 指向"浏览器验证 G 证明"的录屏。
 
@@ -228,7 +228,7 @@ poker_texas_air/
 
 ## 5. README 双语，默认英文（要求 5）
 
-- `README.md`：**英文，默认入口**。顶部语言切换链接 `[English](README.md) | [简体中文](README.zh-CN.md)`。
+- `README.md`：**英文，默认入口**。顶部语言切换链接 `[English](../../README.md) | [简体中文](../../README.zh-CN.md)`。
 - `README.zh-CN.md`：完整中文翻译（同一结构，不是摘要）。
 - 结构大纲（两版一致）：
   1. 标题 + 一句话定位（呼应 RFP-03）+ badges（CI、license BUSL-1.1、RFP-03）

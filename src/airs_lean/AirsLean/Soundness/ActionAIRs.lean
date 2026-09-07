@@ -24,7 +24,7 @@ import AirsLean.Soundness.CommonColumns
   任何被跳过的座位都不可能是 Active。
 
 出处：`src/airs/actions/{fold,check,call,bet,raise}.rs`；
-`TEXAS_TAGGED_AIR.md` Covered transition。
+`docs/design/TEXAS_TAGGED_AIR.md` Covered transition。
 -/
 
 namespace AirsLean

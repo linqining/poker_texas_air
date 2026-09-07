@@ -10,7 +10,7 @@ const STORAGE_KEYS = {
   KEY_MODE: 'poker.keyMode',
 } as const;
 
-/** 牌桌身份密钥模式（SETTLEMENT_PRIVACY_PLAN.md Part B）。
+/** 牌桌身份密钥模式（docs/design/SETTLEMENT_PRIVACY_PLAN.md Part B）。
  * - random：CSPRNG 随机（默认），与钱包零派生关系，丢 localStorage 即丢身份；
  * - passphrase：口令派生（B1.5），凭口令跨设备恢复同一 pk；
  * - legacy：旧版钱包地址派生（存量用户，只读兼容）。 */

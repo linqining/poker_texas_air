@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ready 实机端到端交易核对（SETTLEMENT_PRIVACY_PLAN.md「实机端到端剩余一步」）
+# Ready 实机端到端交易核对（docs/design/SETTLEMENT_PRIVACY_PLAN.md「实机端到端剩余一步」）
 # 用法: ./scripts/verify_e2e_txs.sh <你的Ready钱包地址>
 # 功能: 1) vault v2 筹码余额  2) payout commitment 注册状态
 #       3) 最近 settle/claim 相关日志要点（需 /tmp/texas_server.log）

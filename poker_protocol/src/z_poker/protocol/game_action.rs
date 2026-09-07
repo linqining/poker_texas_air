@@ -1,4 +1,4 @@
-//! #16 抗审查动作签名（`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §2）。
+//! #16 抗审查动作签名（`docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §2）。
 //!
 //! 玩家以**牌局身份 SK**（Part B 随机密钥，与钱包零派生，Stark curve）
 //! 对动作签名（endorsement 通道删除后的唯一参与背书来源）：

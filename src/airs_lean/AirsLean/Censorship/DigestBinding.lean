@@ -3,7 +3,7 @@ import AirsLean.Censorship.AutoAction
 /-!
 # DigestBinding — 结算 digest 覆盖动作日志
 
-`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §3 第 1 层保障 + #18 Phase B/C：
+`docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §3 第 1 层保障 + #18 Phase B/C：
 settle digest 覆盖完整动作日志。#18 Phase C 切片 1 后，动作日志哈希
 从 keccak 链切换为 **Poseidon sponge**：
 

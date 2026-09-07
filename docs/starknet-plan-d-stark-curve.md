@@ -25,7 +25,7 @@
 | 4 | `Secp256k1Curve` 已是 core 完整后端，证明体系 curve-generic——迁移是"实现新后端+切换+重验"，非新密码学 | `poker-protocol-core/src/backend.rs:470`；`poker_protocol/ARCHITECTURE.md` |
 | 5 | 认可密钥服务器托管（结算时 OsRng 生成） | `texas/src/starknet/hooks.rs:83` |
 | 6 | `reveal_commitment` 为 keccak 占位，链上不重算 | `texas/src/starknet/dual_settle.rs`（已改注指向本计划） |
-| 7 | DAPV 是**项目内部术语**，文献无此方案；`DUAL_PROOF_PROTOCOL.md`/`DAPV_SOUNDNESS.md` 从未入库（git 全历史无） | commit e744c6b 仅含代码 |
+| 7 | DAPV 是**项目内部术语**，文献无此方案；`docs/design/DUAL_PROOF_PROTOCOL.md`/`docs/design/DAPV_SOUNDNESS.md` 从未入库（git 全历史无） | commit e744c6b 仅含代码 |
 | 8 | cash-out 仍为公开 `vault.withdraw` | plan-b 文档"已知 seam"第 3 条 |
 | 9 | blst（BLS12-381 C 依赖）无法编译 wasm32（Apple clang）——client-wasm **open blocker** | 迁移会话 sess_ef8bf73c 记录 |
 | 10 | 钱包（Ready 等注入钱包）密钥非 secp256k1（STARK 曲线）；钱包公钥**不可**复用为 ElGamal 公钥（API 取不到 `sk·c1`、无联合安全证明、隐私关联、无法 per-table 轮换） | 本计划 §5 |
@@ -69,7 +69,7 @@ EC_OP 原生可负担；secp syscall × 1400 大概率超预算——STARK 曲�
 |---|---|---|
 | 0.1 客户端 reveal 守卫 | 缓存"曾作为自己 readable cards 推送的密文的 `c1` 集合"（c1 全生命周期不变，天然锚点）；`handleReveal` 在非 `ShowdownReveal` 阶段，assignment 中任何密文 c1 命中该集合 → 拒绝出 token 并告警。守卫在 TS 层，WASM 不动 | 恶意 assignment 注入模拟测试：客户端拒绝、牌不泄露；正常流程全回归 |
 | 0.2 服务端不变量回归 | 测试断言：preflop/flop/turn/river 的 `player_assignments` 不得包含 assignee 自己的 `hand_encrypted`（防编排回归） | snforge/cargo 测试绿 |
-| 0.3 文档债 | ~~修正 dual_settle.rs EC_OP 错误~~（已完成）；DAPV 术语在头注释展开或补 `docs/DUAL_PROOF_PROTOCOL.md`；对外表述统一为"ρ-folded Schnorr endorsement batch + host-verified STARK attestation" | 评审者不依赖口头解释可理解 P/G 两层 |
+| 0.3 文档债 | ~~修正 dual_settle.rs EC_OP 错误~~（已完成）；DAPV 术语在头注释展开或补 `docs/docs/design/DUAL_PROOF_PROTOCOL.md`；对外表述统一为"ρ-folded Schnorr endorsement batch + host-verified STARK attestation" | 评审者不依赖口头解释可理解 P/G 两层 |
 | 0.4 边缘处理 | `HAND_REVEAL_RESULT` 未到达（无锚点）时守卫的保守行为：拒绝非 showdown 的手牌类 assignment 并告警 | 单测覆盖冷启动路径 |
 
 已知边界：守卫落地后，恶意服务器的隐私攻击只剩 griefing（踢人/
@@ -156,7 +156,7 @@ Rust/TS 集成面。unshield 方向的合约规范：
 | P1.1 StarkCurve 后端 | ✅ | `poker-protocol-core/src/stark_curve.rs`（Jacobian + mod-n 标量 + Poseidon 域）；core 35 测试 + oracle 对拍；proofs 回归 12 测试 |
 | P1.2 DefaultCurve 切换 + wasm | ✅ | `legacy-bls` feature 门控；`client-wasm` wasm32 check 通过（blst blocker 消除）；texas 过渡态编译通过 |
 | P1.3 双曲线共存 | ✅ | abi `CurveId::StarkCurve = 6`；texas 过渡态 legacy-bls 构建；新表默认 STARK 曲线 |
-| P1.4 链上验证 | ✅ | host 侧（认可 STARK 化、Poseidon reveal_commitment v2、parity 测试 5）+ **合约侧**：`poker_contracts/src/dual/hand_batch_stark.cairo`（EC_OP builtin 变体，Poseidon challenge/rho 复刻 host 分帧，snforge 5/5：honest/tamper×2/跨手重放/畸形）；`verify_and_settle_dapv_stark` 入口接入 PokerDualSettlement；实测 EC_OP 折叠步数 ≈ secp syscall 版的 1/5。**poker_l1 VM**：外部 core 移植 StarkCurve 后端（62 测试全绿）+ `stark-curve` feature 化；VM 层 14600 行 blstrs 硬绑定（85 处）+ AIR 耦合按 MIGRATION.md 分阶段（feature 已就绪，VM 体内迁移为外部 workspace 工程） |
+| P1.4 链上验证 | ✅ | host 侧（认可 STARK 化、Poseidon reveal_commitment v2、parity 测试 5）+ **合约侧**：`poker_contracts/src/dual/hand_batch_stark.cairo`（EC_OP builtin 变体，Poseidon challenge/rho 复刻 host 分帧，snforge 5/5：honest/tamper×2/跨手重放/畸形）；`verify_and_settle_dapv_stark` 入口接入 PokerDualSettlement；实测 EC_OP 折叠步数 ≈ secp syscall 版的 1/5。**poker_l1 VM**：外部 core 移植 StarkCurve 后端（62 测试全绿）+ `stark-curve` feature 化；VM 层 14600 行 blstrs 硬绑定（85 处）+ AIR 耦合按 docs/MIGRATION.md 分阶段（feature 已就绪，VM 体内迁移为外部 workspace 工程） |
 | P2.1 认可密钥客户端化 | ✅ 完成 | wasm `endorsement_keypair`/`endorsement_mint`；WS 双事件（`ENDORSEMENT_REQUEST` 广播 / `ENDORSEMENT_SUBMIT` 提交，会话钱包一致性校验）+ HTTP `POST /starknet/endorsement`；hooks 两阶段（prepare_dapv_binding 提前派生 → 广播 → spawn 收集 10s 超时 → build_from_client）；**服务器托管路径已删除**（ENDORSEMENT_KEYS/endorsement_keys_for/build_dual_settlement 移除，收不齐仅走 legacy 结算并日志降级）；客户端 `endorsementClient.ts` 能力探测 + sk 本地持久化 |
 | P2.2 cash-out | ✅ 完成 | vault `burn_chips`（仅授权 helper，`set_authorized_helper` owner 门控）+ anonymizer `privacy_withdraw`（pool-only，烧筹码 1:1，输出 note 给出金地址）+ snforge 4 测试（happy/未授权/非池/超额）；客户端 `withdrawViaPrivacyPool`（`VITE_UNSHIELD_ENABLED` 门控，ABI 已加 privacy_withdraw） |
 | P2.3 RFP 叙事 | ✅ | `docs/starknet-rfp-submission.md` |

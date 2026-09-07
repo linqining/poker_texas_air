@@ -1,5 +1,5 @@
 //! secp256k1 scalar-field (Fr) arithmetic mod n in Cairo
-//! (DUAL_PROOF_PROTOCOL.md — BG shuffle on-chain verification).
+//! (docs/design/DUAL_PROOF_PROTOCOL.md — BG shuffle on-chain verification).
 //!
 //! Multiplication rides `core::math::u256_mul_mod_n` (512-bit safe division
 //! under the hood); addition/subtraction are one conditional correction each.

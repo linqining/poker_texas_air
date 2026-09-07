@@ -40,7 +40,7 @@ pub enum CurveId {
     /// deliberately has a distinct 32-byte point encoding and must never be
     /// decoded as a legacy BLS request.
     Ristretto255 = 3,
-    /// BN254 G1 (direct-sigma settlement route, DUAL_PROOF_PROTOCOL.md §3.1).
+    /// BN254 G1 (direct-sigma settlement route, docs/design/DUAL_PROOF_PROTOCOL.md §3.1).
     ///
     /// Cofactor-1 curve: 32-byte compressed encodings, big-endian scalars,
     /// FiatShamirSha3 transcript. Never decodable as a legacy BLS request.
@@ -1024,7 +1024,7 @@ mod tests {
 
     #[test]
     fn bn254_sigma_combo_is_accepted_and_others_fail_closed() {
-        // The only admitted BN254 combination (DUAL_PROOF_PROTOCOL.md §3.1):
+        // The only admitted BN254 combination (docs/design/DUAL_PROOF_PROTOCOL.md §3.1):
         // (Bn254G1, BayerGrothV2, FiatShamirSha3), 32-byte encodings.
         let request = ShuffleVerifyRequest {
             curve: CurveId::Bn254G1,

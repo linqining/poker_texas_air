@@ -1,5 +1,5 @@
 //! secp256k1 direct-sigma instantiation of the curve-generic proof suite
-//! (DUAL_PROOF_PROTOCOL.md v2.2: the sigma stack is the production P-proof
+//! (docs/design/DUAL_PROOF_PROTOCOL.md v2.2: the sigma stack is the production P-proof
 //! stack, instantiated on secp256k1 with the FiatShamirSha3 transcript).
 //!
 //! These tests are the Rust side of the Rust↔Cairo cross-validation plan

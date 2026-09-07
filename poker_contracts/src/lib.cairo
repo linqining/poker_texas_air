@@ -5,12 +5,12 @@ mod poker_vault_anonymizer;
 mod poker_settlement;
 mod settlement_hash;
 
-/// Dual-proof settlement (DUAL_PROOF_PROTOCOL.md): on-chain BN254 sigma
+/// Dual-proof settlement (docs/design/DUAL_PROOF_PROTOCOL.md): on-chain BN254 sigma
 /// verification for the P track + Phase-1 G registration.
 mod dual;
 mod poker_dual_settlement;
 
-/// Part A Phase 1 (SETTLEMENT_PRIVACY_PLAN.md): winners claim escrowed
+/// Part A Phase 1 (docs/design/SETTLEMENT_PRIVACY_PLAN.md): winners claim escrowed
 /// payouts privately via secp256k1-signed STRK20 pool claims.
 mod settlement_payout_anonymizer;
 

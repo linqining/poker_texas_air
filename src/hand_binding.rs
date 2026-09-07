@@ -1,4 +1,4 @@
-//! Unified hand binding across the two proof tracks (DUAL_PROOF_PROTOCOL.md
+//! Unified hand binding across the two proof tracks (docs/design/DUAL_PROOF_PROTOCOL.md
 //! §6 — soundness core).
 //!
 //! The dual-proof settlement accepts a hand only when **both** proofs carry

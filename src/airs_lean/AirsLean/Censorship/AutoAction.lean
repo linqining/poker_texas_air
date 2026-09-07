@@ -3,7 +3,7 @@ import AirsLean.Censorship.AcceptedSeq
 /-!
 # AutoAction — 服务器代打的合法默认约束
 
-`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §7.2/§8.2 + `#18` 纯函数规则源：
+`docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §7.2/§8.2 + `#18` 纯函数规则源：
 服务器代打以玩家 seq 追加 `(auto, server_sig)` 标记动作，且必须满足
 **合法默认**规则——`texas/src/pokergame/actions.rs::legal_auto_action`
 （与电路合法性表达式共用同一规则源，输入为下注轮状态推导的

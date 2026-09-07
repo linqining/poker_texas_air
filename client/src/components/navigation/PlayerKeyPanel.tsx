@@ -1,4 +1,4 @@
-// 牌桌身份密钥面板（SETTLEMENT_PRIVACY_PLAN.md Part B / B1.5）。
+// 牌桌身份密钥面板（docs/design/SETTLEMENT_PRIVACY_PLAN.md Part B / B1.5）。
 //
 // 展示当前密钥模式与 pk 前缀，提供两种身份来源切换：
 // - 口令派生（可恢复）：同一口令在任何设备派生出同一 pk；口令即备份，

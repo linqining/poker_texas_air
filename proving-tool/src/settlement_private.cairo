@@ -25,7 +25,7 @@
 //!
 //! §8.2 状态（#18 Phase B）：动作日志哈希已进吸收链与公开段（列位零重排）；
 //! 电路内"合法默认"校验（零下注才可 auto-check 等）与 seq 单调仍待落地
-//! ——主网上线门槛（`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §8.2）。
+//! ——主网上线门槛（`docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §8.2）。
 
 use core::array::ArrayTrait;
 use core::num::traits::DivRem;

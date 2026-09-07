@@ -213,7 +213,7 @@ impl AsRef<[u8]> for BnCompressedPoint {
 /// BN254 G1 curve implementation (halo2curves bn256, direct-sigma settlement
 /// route).
 ///
-/// Serialization discipline (DUAL_PROOF_PROTOCOL.md §3.2): scalars are
+/// Serialization discipline (docs/design/DUAL_PROOF_PROTOCOL.md §3.2): scalars are
 /// 32-byte **big-endian** (same convention as the BLS12-381 backend), points
 /// are halo2curves' 32-byte compressed G1 encodings (cofactor is 1, so an
 /// on-curve check is sufficient for external points — no subgroup check).

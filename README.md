@@ -49,7 +49,7 @@ by construction, not by trusting a host.
 ├── poker_contracts/        # Cairo contracts (Scarb): Vault, Anonymizers, Settlement, DualSettlement, Swap
 ├── proving-tool/           # prove-hand CLI: Cairo1 → cairo-vm → Stwo prove → verify (separate workspace)
 ├── third_party/proving/    # Vendored starkware-libs/proving (Apache-2.0, with local patches)
-├── docs/                   # Protocol specs, plans, perf baselines (historical docs in docs/archive/)
+├── docs/                   # Specs, plans, perf baselines (core designs in docs/design/, history in docs/archive/)
 └── strk20.json             # STRK20 hackathon manifest (deployments, proof policy)
 ```
 
@@ -79,8 +79,8 @@ RFP-03, which asks for an on-chain STARK verifier only "eventually":
 Roadmap: **Phase 2** — G-STARK verifier contract on Starknet
 (`cairo_verifier` direction); **Phase 3** — standalone prover service, after
 which host attestation is removed entirely. Design details:
-[DUAL_PROOF_PROTOCOL.md](DUAL_PROOF_PROTOCOL.md),
-[DAPV_SOUNDNESS.md](DAPV_SOUNDNESS.md).
+[DUAL_PROOF_PROTOCOL.md](docs/design/DUAL_PROOF_PROTOCOL.md),
+[DAPV_SOUNDNESS.md](docs/design/DAPV_SOUNDNESS.md).
 
 ### Proven execution of an open program vs. trusting a closed contract
 
@@ -206,8 +206,8 @@ proven provenance, completeness, and soundness theorems
 
 ## Documentation
 
-- [DUAL_PROOF_PROTOCOL.md](DUAL_PROOF_PROTOCOL.md) — dual-proof settlement spec (v2.3, live)
-- [TEXAS_TAGGED_AIR.md](TEXAS_TAGGED_AIR.md) — direct state-transition AIR paths
+- [DUAL_PROOF_PROTOCOL.md](docs/design/DUAL_PROOF_PROTOCOL.md) — dual-proof settlement spec (v2.3, live)
+- [TEXAS_TAGGED_AIR.md](docs/design/TEXAS_TAGGED_AIR.md) — direct state-transition AIR paths
 - [TRUST_MODEL_NO_TRANSACTION_REPLAY.md](docs/archive/TRUST_MODEL_NO_TRANSACTION_REPLAY.md) — replay-free trust boundary (中文, superseded — 现行模型见上文)
 - [docs/plan-d-*.md](docs/) — STARK-curve migration plans and measured baselines
 - [docs/STATUS.md](docs/STATUS.md) — historical technical status narrative (superseded sections marked)

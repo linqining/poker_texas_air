@@ -1,4 +1,4 @@
-//! P2-M1 结算隐私电路（`SETTLEMENT_PRIVACY_PLAN.md` §开发排期 / P2-M1 电路规格，已定稿）。
+//! P2-M1 结算隐私电路（`docs/design/SETTLEMENT_PRIVACY_PLAN.md` §开发排期 / P2-M1 电路规格，已定稿）。
 //!
 //! 语句（公开输入）：`hand_binding, hand_id, registered_digest, n_participants`
 //! 见证（私密）：`players[8], deltas[8]`（i128 → (sign, |delta| u64) 对）

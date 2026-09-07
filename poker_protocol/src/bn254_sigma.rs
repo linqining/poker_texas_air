@@ -1,4 +1,4 @@
-//! BN254 direct-sigma settlement route (DUAL_PROOF_PROTOCOL.md §3.1/§D5).
+//! BN254 direct-sigma settlement route (docs/design/DUAL_PROOF_PROTOCOL.md §3.1/§D5).
 //!
 //! Owns the canonical card derivation for the BN254 G1 epoch and re-exports
 //! the curve for downstream consumers. Cards are deterministically derived

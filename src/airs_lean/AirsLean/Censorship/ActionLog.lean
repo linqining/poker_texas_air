@@ -21,7 +21,7 @@ import AirsLean.Censorship.ActionSig
 - `every_row_signed`：每条动作满足 `sigOk = true ∨ isAuto = true`——
   玩家动作必须验签通过（签名强制无条件），代打由服务器签名担保。
 
-出处：`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §2/§8.2；
+出处：`docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §2/§8.2；
 `texas/src/pokergame/actions.rs`（`ActionLogEntry`、`action_entry_word`、
 `ACTION_LOG_MAX_ENTRIES`）；`texas/src/pokergame/table/mod.rs`。
 -/

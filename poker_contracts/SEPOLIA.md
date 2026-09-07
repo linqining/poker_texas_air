@@ -15,7 +15,7 @@ Rust `OuterAggregateBundle` before calling `register_aggregate`.
 - `PokerSettlement`: authorized-prover registration of aggregate digests,
   monotonic hand ranges, Poseidon settlement commitments, zero-sum checks, and
   replay-protected vault deltas.
-- `PokerDualSettlement` (dual-proof route, DUAL_PROOF_PROTOCOL.md v2.3):
+- `PokerDualSettlement` (dual-proof route, docs/design/DUAL_PROOF_PROTOCOL.md v2.3):
   verifies the **secp256k1 sigma ownership proofs on-chain** through the
   Starknet EC_OP builtin (`dual/secp256k1_verifier.cairo`; the challenge
   `keccak256(G‖pk‖R) mod n` is derived inside the contract, never submitted),

@@ -10,7 +10,7 @@
 > **执行计划**：`docs/plan-snip36-execution.md`（P0 瘦身实测 → P1 cairo
 > ≥2.12 → P2 v3 双门 → P3 SNOS 形态 → P4 提交工具 → P5 sepolia 全链路，
 > 3–5 周，P0/P1 可立即并行开始）。
-> 关联：`DAPV_SOUNDNESS.md` §9-10（绑定方案/结算验证算法）、
+> 关联：`docs/design/DAPV_SOUNDNESS.md` §9-10（绑定方案/结算验证算法）、
 > `poker_contracts/DEPLOYMENTS.md`（dual v4 部署档案）、
 > `docs/TODO.md`（任务状态以 TODO 为准）。
 

@@ -106,7 +106,7 @@ fn print_hand_batch_cairo_vectors() {
 
     // ---------- hand construction ----------
     // hand_id must be fixed BEFORE minting: the ownership challenge is
-    // hand-bound (DAPV_SOUNDNESS.md §9-L2): c = H(hand_proto ‖ G ‖ pk ‖ R).
+    // hand-bound (docs/design/DAPV_SOUNDNESS.md §9-L2): c = H(hand_proto ‖ G ‖ pk ‖ R).
     let hand_id: [u8; 32] = {
         use sha3::Digest;
         let mut h = sha3::Keccak256::new();

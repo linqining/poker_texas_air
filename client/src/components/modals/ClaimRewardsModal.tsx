@@ -1,4 +1,4 @@
-// 私密领取奖励弹窗（SETTLEMENT_PRIVACY_PLAN.md Part C3）。
+// 私密领取奖励弹窗（docs/design/SETTLEMENT_PRIVACY_PLAN.md Part C3）。
 //
 // 赢家筹码在 PokerVault 上，「领取」把筹码换成 STRK：
 // - 私密领取（首选）：Ready 等 STRK20 钱包的两动作模式 —— 池内 burn

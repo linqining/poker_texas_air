@@ -1,5 +1,5 @@
 /// SettlementPayoutAnonymizer — Part A Phase 1 private payout claim
-/// (SETTLEMENT_PRIVACY_PLAN.md §4 Phase 1 + Part C3).
+/// (docs/design/SETTLEMENT_PRIVACY_PLAN.md §4 Phase 1 + Part C3).
 ///
 /// The dual settlement contract funds this helper with each hand's winners'
 /// pot (`vault.settlement_fund_escrow`) and pins one claim commitment per

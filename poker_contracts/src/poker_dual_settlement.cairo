@@ -1,4 +1,4 @@
-//! Dual-proof settlement contract (DUAL_PROOF_PROTOCOL.md §7.1, MVP).
+//! Dual-proof settlement contract (docs/design/DUAL_PROOF_PROTOCOL.md §7.1, MVP).
 //!
 //! Two proof tracks must agree before chips move:
 //!
@@ -79,7 +79,7 @@ pub trait IPokerDualSettlement<TContractState> {
     /// (#18 Phase B; 0 for bindings registered before it existed).
     fn hand_action_log(self: @TContractState, binding: felt252) -> felt252;
 
-    /// Part A Phase 1（SETTLEMENT_PRIVACY_PLAN.md §4）：隐私结算入口。
+    /// Part A Phase 1（docs/design/SETTLEMENT_PRIVACY_PLAN.md §4）：隐私结算入口。
     /// 与 `verify_and_settle_dapv_stark` 相同的 DAPV 校验与 digest 断言，
     /// 但派奖方式不同：
     /// - 输家（delta < 0）仍经 vault.apply_settlement 公开扣款
@@ -104,7 +104,7 @@ pub trait IPokerDualSettlement<TContractState> {
         p_batch: Span<felt252>,
     );
 
-    /// P2-M3（SETTLEMENT_PRIVACY_PLAN.md §4 Phase 2）：零明文结算入口。
+    /// P2-M3（docs/design/SETTLEMENT_PRIVACY_PLAN.md §4 Phase 2）：零明文结算入口。
     /// calldata 只含 (hand_binding, hand_id, segment)，**不含 players/deltas**；
     /// segment 是 settlement_private 电路（program_hash 钉死）的公开段：
     /// `[MAGIC, hand_id, digest, n, binding, cm_0..cm_7, total_winnings,
@@ -116,7 +116,7 @@ pub trait IPokerDualSettlement<TContractState> {
     /// segment 尾词（动作日志哈希）必须等于注册承诺——把零明文结算锚定到
     /// 带审计日志的完整动作序列。
 
-    /// P2-M3（SETTLEMENT_PRIVACY_PLAN.md §4 Phase 2）：零明文结算入口。
+    /// P2-M3（docs/design/SETTLEMENT_PRIVACY_PLAN.md §4 Phase 2）：零明文结算入口。
     /// calldata 只含 (hand_binding, hand_id, segment)，**不含 players/deltas**；
     /// segment 是 settlement_private 电路（program_hash 钉死）的公开段：
     /// `[MAGIC, hand_id, digest, n, binding, cm_0..cm_7, total_winnings]`。

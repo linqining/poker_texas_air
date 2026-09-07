@@ -2,7 +2,7 @@
 //! proofs on BN254.
 //!
 //! Hand transcript (9-max Texas Hold'em, mirroring the settlement surface of
-//! DUAL_PROOF_PROTOCOL.md):
+//! docs/design/DUAL_PROOF_PROTOCOL.md):
 //!   - 9  x PKOwnershipProof       (1  group equation each)
 //!   - 9  x Bayer-Groth V2 shuffle (8  group equations + 2 field checks each)
 //!   - 33 x RevealTokenProof       (2  group equations each)

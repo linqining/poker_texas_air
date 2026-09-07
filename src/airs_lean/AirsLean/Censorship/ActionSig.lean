@@ -3,7 +3,7 @@ import AirsLean.Custody.WithdrawBound
 /-!
 # ActionSig — 动作签名模型与不可伪造性
 
-按 `ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §2 建模：签名者 = 玩家的
+按 `docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §2 建模：签名者 = 玩家的
 牌局身份 SK，消息域 = `(table_id, hand_id, seq, action, payload)`。
 签名方案为抽象结构；EUF-CMA 不可伪造性以 `Authentic` 谓词为显式假设
 （登记于 `Top/Assumptions.lean`；具体实例化依赖 DLP + ROM，与
@@ -16,7 +16,7 @@ poker_protocol_lean 的 Schnorr/FS 层衔接）。
   签名域内，跨手/跨序号的消息互不相同（域分离的结构基础；重放的
   排除在 D2 的 seq 单调约束给出）。
 
-出处：`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §2；
+出处：`docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §2；
 `client-wasm/src/lib.rs`（`sign_action`）；
 `texas/src/pokergame/actions.rs`（服务器验签 + seq 单调）。
 -/

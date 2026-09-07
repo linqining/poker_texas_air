@@ -103,7 +103,7 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
     logger.log('[PlayerContext] Cleared all player data');
   }, []);
 
-  // 密钥来源分发（SETTLEMENT_PRIVACY_PLAN.md Part B）：
+  // 密钥来源分发（docs/design/SETTLEMENT_PRIVACY_PLAN.md Part B）：
   // - 默认 new_random()：CSPRNG 随机，与钱包零派生关系（对手不可从钱包
   //   地址算出 pk）；
   // - 旧 wasm pkg 无 new_random 导出时回退钱包派生（迁移期兼容）；

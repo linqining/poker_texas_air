@@ -153,12 +153,12 @@ selectors; no-seat sentinel for seatless micro-steps).
 
 ## Layered soundness record
 
-- DAPV (P layer) soundness: `DAPV_SOUNDNESS.md` (theorems 1/2, ρ-binding
+- DAPV (P layer) soundness: `docs/design/DAPV_SOUNDNESS.md` (theorems 1/2, ρ-binding
   lemma; production instantiation = Stark curve EC_OP + Poseidon challenges).
-- Settlement privacy: `SETTLEMENT_PRIVACY_PLAN.md` (P2-M1..M4 done; v2
+- Settlement privacy: `docs/design/SETTLEMENT_PRIVACY_PLAN.md` (P2-M1..M4 done; v2
   zero-plaintext settle contract deployed sepolia, server-side enablement
   pending).
-- Censorship resistance: `ACTION_SIGNING_CENSORSHIP_RESISTANCE.md`
+- Censorship resistance: `docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md`
   (#16/#17/#18 Phase A+B wired; in-circuit legal-default constraints remain
   the mainnet gate).
 - Performance baselines: `docs/plan_d_perf.md` (post-Plan-D release numbers;
@@ -166,4 +166,4 @@ selectors; no-seat sentinel for seatless micro-steps).
 - Historical design archive: `docs/archive/` (host-zero Ristretto charter,
   old perf reports, trust-model/replay essays, migration blueprints).
 
-Downstream migration notes: [`../MIGRATION.md`](../MIGRATION.md).
+Downstream migration notes: [`MIGRATION.md`](MIGRATION.md).

@@ -161,7 +161,7 @@ src/airs_lean/AirsLean/
 - [x] **定理 `version_bumps`**：`post_version = pre_version + 1`
 - [x] padding 行为全零后缀 ⇒ **定理 `no_all_padding_trace`**（trace 非平凡）
 - 出处：`src/airs/common.rs:24-57`；`src/texas_canonical_air.rs`（预处理器 9 列、
-  call_seq 回绕）；`TEXAS_TAGGED_AIR.md` "The verifier reconstructs nine fixed
+  call_seq 回绕）；`docs/design/TEXAS_TAGGED_AIR.md` "The verifier reconstructs nine fixed
   preprocessed columns…"
 
 ### S2 `Soundness/ActionAIRs.lean` — 玩家动作 AIR（fold/check/call/bet/raise）
@@ -177,7 +177,7 @@ src/airs_lean/AirsLean/
 - [x] **定理 `raise_reopen_rule`**：Raise 重开当且仅当加注增量 ≥ pre `min_raise`；
       子最小加注 all-in 保持其余座位 acted 标志（TDA #41）
 - [x] **定理 `next_seat_no_skip`**：轮转后继不跳过任何 Active 座位（canonical 环形扫描）
-- 出处：`src/airs/actions/{fold,check,call,bet,raise}.rs`；`TEXAS_TAGGED_AIR.md` Covered transition
+- 出处：`src/airs/actions/{fold,check,call,bet,raise}.rs`；`docs/design/TEXAS_TAGGED_AIR.md` Covered transition
 
 ### S3 `Soundness/FundsAIRs.lean` — 资金 AIR（join/addon/rebuy）
 
@@ -293,7 +293,7 @@ src/airs_lean/AirsLean/
 
 ## 5. 命题 1：抗审查（`Censorship/`，六个文件）
 
-**命题陈述**（ACTION_SIGNING_CENSORSHIP_RESISTANCE.md §3/§7/§8）：
+**命题陈述**（docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md §3/§7/§8）：
 服务器对动作的（i）伪造不可能、（ii）篡改/重排可检测、（iii）丢弃可举证
 （accepted-seq 缺口 = 链上可验证的审查证明）、（iv）代打（auto）受"合法默认"约束。
 
@@ -305,7 +305,7 @@ src/airs_lean/AirsLean/
 - [x] **定理 `genuine_action`**（原 `no_forge`）：验签通过 ⇒ 签名由持 sk 方产生（条件于 EUF-CMA 抽象假设）
       必由持 sk 方签名——服务器不能凭空捏造玩家动作（攻击表第 1 行）
 - [x] 域分离引理：`(hand_id, seq)` 在签名域内 ⇒ 跨手重放/重排使验签失败
-- 出处：`ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §2（消息格式）；
+- 出处：`docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §2（消息格式）；
   `client-wasm/src/lib.rs`（`sign_action`）；`texas/src/pokergame/actions.rs`（服务器验签）
 
 ### D2 `Censorship/ActionLog.lean` — 动作日志与 seq 单调

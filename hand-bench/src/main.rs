@@ -776,7 +776,7 @@ fn full_hand_v2_nine() {
 }
 
 /// Nine-player complete hand on the secp256k1 direct-sigma settlement route
-/// (DUAL_PROOF_PROTOCOL.md v2.2): the same mental-poker flow as
+/// (docs/design/DUAL_PROOF_PROTOCOL.md v2.2): the same mental-poker flow as
 /// `full_hand_v2_nine` but every P proof is the curve-generic sigma suite
 /// instantiated on secp256k1 with the FiatShamirSha3 transcript — the exact
 /// proof batch a `PokerDualSettlement.verify_and_settle` call will carry
