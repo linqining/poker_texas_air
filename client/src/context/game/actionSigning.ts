@@ -45,6 +45,21 @@ function nextSeq(tableId: number | string): number {
   return next;
 }
 
+/**
+ * 从服务端动作回执 ratchet 本地 seq：服务端 auto 代打会自增 seq
+ * （accepted = max(client_seq, server_accepted)），客户端 localStorage
+ * 不跟进就会越落越后——签名有效也过不了 seq 单调性
+ * （2026-09-08 线上：sig_ok=true seq_ok=false, 101 < 104）。
+ */
+export function observeServerSeq(tableId: number | string, serverSeq: number) {
+  if (!Number.isFinite(serverSeq) || serverSeq <= 0) return;
+  const key = `poker.actionSeq:${tableId}`;
+  const current = Number(localStorage.getItem(key) ?? '0') || 0;
+  if (serverSeq > current) {
+    localStorage.setItem(key, String(serverSeq));
+  }
+}
+
 export interface AttachedActionSig {
   seq: number;
   rHex: string;
@@ -62,12 +77,23 @@ export async function signTableAction(
   action: 'fold' | 'check' | 'call' | 'raise',
   amount = 0,
 ): Promise<AttachedActionSig | null> {
-  if (!skHex) return null;
+  // 诊断告警：四条降级路径都必须在控制台可见——静默降级让
+  // "no signed actions" 无法归因（2026-09-08 线上排查记录）。
+  if (!skHex) {
+    console.warn('[action-sig] unsigned: no sk (playerKeys missing)');
+    return null;
+  }
   // v2：hand_id 在签名域内——缺失（未拿到开局广播）时无法产出有效签名，
   // 返回 null（动作以未签名形态发出，服务端 enforcement 决定去留）。
-  if (!handId) return null;
+  if (!handId) {
+    console.warn('[action-sig] unsigned: no handId (shuffleState.hand_id and table.handId both missing)');
+    return null;
+  }
   const sign = await loadWasmSign();
-  if (!sign) return null;
+  if (!sign) {
+    console.warn('[action-sig] unsigned: wasm sign_action unavailable');
+    return null;
+  }
   try {
     const seq = nextSeq(tableId);
     const out = sign(skHex, Number(tableId), Number(handId), BigInt(seq), action, BigInt(amount)) as unknown;
@@ -76,9 +102,14 @@ export async function signTableAction(
     // "no signed actions" 根因）。两种形状都兼容。
     const rHex = out instanceof Map ? out.get('r_hex') : (out as Record<string, unknown> | null)?.r_hex;
     const sHex = out instanceof Map ? out.get('s_hex') : (out as Record<string, unknown> | null)?.s_hex;
-    if (typeof rHex !== 'string' || typeof sHex !== 'string') return null;
+    if (typeof rHex !== 'string' || typeof sHex !== 'string') {
+      console.warn('[action-sig] unsigned: sign_action returned unexpected shape', out);
+      return null;
+    }
+    console.log(`[action-sig] signed action=${action} tableId=${Number(tableId)} handId=${Number(handId)} seq=${seq} amount=${amount}`);
     return { seq, rHex, sHex };
-  } catch {
+  } catch (e) {
+    console.warn('[action-sig] unsigned: sign_action threw', e);
     return null;
   }
 }

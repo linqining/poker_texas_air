@@ -35,6 +35,7 @@ import {
 } from './gameInternal';
 import { logger } from '../../helpers/logger';
 import { PlayerStorage } from '../player/playerStorage';
+import { observeServerSeq } from './actionSigning';
 import { useContentContext } from '../content/contentContext';
 import { useContext } from 'react';
 import authContext from '../auth/authContext';
@@ -260,6 +261,16 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
               }
             })();
           }
+        }
+      });
+
+      // #17 动作回执：自己的 accepted/autoAccepted 回执里带服务端分配的
+      // seq——据此 ratchet 本地计数器，避免服务端 auto 代打自增后客户端
+      // seq 落后、签名有效却被 seq 单调性拒掉（2026-09-08 线上）。
+      socket.on('ACTION_RECEIPT', (data: { receipt?: { tableId?: number; playerPk?: string; seq?: number } }) => {
+        const r = data?.receipt;
+        if (r && typeof r.seq === 'number' && r.playerPk && pkHex && r.playerPk === pkHex) {
+          observeServerSeq(r.tableId ?? currentTableRef.current?.id ?? 1, r.seq);
         }
       });
 

@@ -151,9 +151,12 @@ async fn settle_hand_from_log(mut input: super::prove_log::HandSettleInput) {
         .expect("action log digest is a canonical felt");
     // settle_hand 为同步 CPU 重活（prove 约 2s/手），按其调用方约定放
     // spawn_blocking，避免占死一个 tokio worker。mirror 移入闭包借用后
-    // 原样带回（后续还要进 PENDING_SETTLE），action_log 取走所有权。
+    // 原样带回（后续还要进 PENDING_SETTLE）。action_log 只克隆不 take：
+    // 后续 snip36 阶段的 action_sig_materials 还要读它——take 会把
+    // input.action_log 掏空，递归证明恒报 no signed actions
+    // （2026-09-08 线上：entries=0 但 #18 审计显示 actions=8）。
     let (settlement, mirror) = {
-        let action_log = std::mem::take(&mut input.action_log);
+        let action_log = input.action_log.clone();
         match tokio::task::spawn_blocking(move || {
             let result = super::submit::settle_hand(
                 &mirror,
@@ -251,8 +254,15 @@ async fn snip36_settle_flow(
     let materials =
         super::recursion_prover::action_sig_materials(&input.action_log, &start.participants);
     if materials.is_empty() {
+        // 区分性计数：entries=0 → 结算输入窗口空；sig_ok=0 → 验签全败/无签名；
+        // with_sig=0 但 sig_ok>0 → 入库丢了签名本体（2026-09-08 hand
+        // 1788809743 线上：sig_ok=true 的动作存在，结算仍报 no signed
+        // actions——用计数定位丢在哪一环）。
+        let n = input.action_log.len();
+        let ok = input.action_log.iter().filter(|e| e.sig_ok).count();
+        let sig = input.action_log.iter().filter(|e| e.sig.is_some()).count();
         tracing::warn!(
-            "[snip36] table {table_id} hand {hand_id}: no signed actions — proof skipped"
+            "[snip36] table {table_id} hand {hand_id}: no signed actions — proof skipped (entries={n} sig_ok={ok} with_sig={sig})"
         );
     }
 

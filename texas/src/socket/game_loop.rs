@@ -1103,9 +1103,18 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
                     None
                 } else {
                     if !sig_ok || !seq_ok {
+                        // 区分性诊断：验签失败 vs seq 回退，附服务端视角的
+                        // 域值（座位已接受 seq / 证明日志 hand_id）——客户端
+                        // 签名域任一值不一致都会表现为 sig_ok=false
+                        // （2026-09-08 hand 1788808419 seq 82 线上排查）。
                         tracing::warn!(
-                            "[process_action] action {} seat {:?} seq {:?}: sig/seq check failed — accepted unsigned (enforcement off)",
-                            req.action, seat_id, req.seq
+                            "[process_action] action {} seat {:?} seq {:?}: sig_ok={sig_ok} seq_ok={seq_ok} (server accepted_seq={}, proof_log_hand_id={:?}, table_id={}) — accepted unsigned (enforcement off)",
+                            req.action,
+                            seat_id,
+                            req.seq,
+                            seat_id.map(|s| table.accepted_seq_of(s)).unwrap_or(0),
+                            table.hand_proof_log_start_hand_id(),
+                            table_id
                         );
                     }
                     let action_result = match req.action.as_str() {

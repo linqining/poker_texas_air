@@ -789,5 +789,27 @@ mod curve_hex_tests {
         assert!(hex_to_ecpoint(&"00".repeat(48)).is_err(), "BLS-era 48B must be rejected");
         assert!(hex_to_ecpoint(&"00".repeat(33)).is_err(), "bad point rejected");
     }
+
+    /// 2026-09-08 回归：客户端签名 → 服务端验签的全链路（hex 编码穿过
+    /// wasm/serde 边界）。线上复现：签名已到达服务端但 verify_action_sig
+    /// 失败（hand 1788808419，seq 82 的 check）。
+    #[test]
+    fn sign_action_verifies_through_hex() {
+        let player = ClientPlayer::new();
+        let pk_hex = ecpoint_to_hex(&player.pk);
+        let sk_hex = scalar_to_hex(&player.sk);
+        // 复刻 wasm sign_action 的内部路径（sk hex → scalar → sign）
+        let sk_bytes = hex::decode(&sk_hex).expect("sk hex");
+        let sk = <Scalar as CurveScalar>::from_canonical_bytes(&sk_bytes).expect("sk range");
+        let (r_hex, s_hex) = poker_protocol::z_poker::protocol::sign_game_action(
+            &sk, 1, 1788808419, 82, "check", 0, &mut rand_core::OsRng,
+        );
+        assert!(
+            poker_protocol::z_poker::protocol::verify_game_action_hex(
+                &pk_hex, 1, 1788808419, 82, "check", 0, &r_hex, &s_hex
+            ),
+            "sign→verify roundtrip through hex must hold (domain: table_id, hand_id, seq, action, amount)"
+        );
+    }
 }
 

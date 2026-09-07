@@ -222,6 +222,10 @@ impl Table {
     pub fn button(&self) -> Option<u32> {
         if self.summary.meta.button == 0 { None } else { Some(self.summary.meta.button as u32) }
     }
+    /// 诊断辅助：当前证明日志的手 id（动作签名域 hand_id 的服务端视角）。
+    pub fn hand_proof_log_start_hand_id(&self) -> Option<u32> {
+        self.hand_proof_log.start.as_ref().map(|s| s.hand_id)
+    }
     pub fn set_button(&mut self, v: Option<u32>) {
         self.summary.meta.button = v.map(|x| x as u64).unwrap_or(0);
     }

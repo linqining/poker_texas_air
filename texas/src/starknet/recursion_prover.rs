@@ -146,3 +146,38 @@ pub fn prove_batch_blocking(
         elapsed_ms: outcome.total_ms as u64,
     })
 }
+
+#[cfg(test)]
+mod sig_materials_tests {
+    use super::*;
+
+    /// 2026-09-08 线上：sig_ok=true 的动作入库后结算仍报
+    /// "no signed actions"（hand 1788809743）——用真实签名全链路
+    /// 验证 action_sig_materials 的每一步过滤。
+    #[test]
+    fn action_sig_materials_from_real_signatures() {
+        use poker_protocol::z_poker::protocol::{sign_game_action, ClientPlayer};
+        let player = ClientPlayer::new();
+        let pk_hex = poker_protocol::z_poker::convert::ecpoint_to_hex(&player.pk);
+        let sk_hex = poker_protocol::z_poker::convert::scalar_to_hex(&player.sk);
+        let sk_bytes = hex::decode(&sk_hex).unwrap();
+        let sk = <<poker_protocol::crypto::DefaultCurve as poker_protocol::crypto::curve::Curve>::Scalar as poker_protocol::crypto::curve::CurveScalar>::from_canonical_bytes(&sk_bytes).unwrap();
+        let (r_hex, s_hex) = sign_game_action(&sk, 1, 42, 7, "check", 0, &mut rand_core::OsRng);
+
+        let participants = vec![crate::starknet::prove_log::HandParticipant {
+            seat: 3,
+            wallet: "0xabc".into(),
+            pk_hex: pk_hex.clone(),
+            pk: crate::starknet::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(player.pk)).unwrap(),
+            pk_ownership_proof: vec![],
+            stack: 1000,
+        }];
+        let action_log = vec![crate::pokergame::actions::ActionLogEntry {
+            seat: 3, seq: 7, action: "check".into(), amount: 0, auto: false,
+            sig_ok: true, owed: 0, my_bet: 0, big_blind: 100,
+            sig: Some(crate::pokergame::actions::ActionSig { r_hex, s_hex }),
+        }];
+        let mats = action_sig_materials(&action_log, &participants);
+        assert!(!mats.is_empty(), "materials must be non-empty for a valid signed entry (pk_hex_len={})", pk_hex.len());
+    }
+}

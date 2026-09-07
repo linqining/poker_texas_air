@@ -125,7 +125,13 @@ fn default_prove_hand() -> PathBuf {
 }
 
 fn cairo_recursion_src() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cairo/src/recursion.cairo")
+    // 部署环境（服务器）没有编译期仓库路径——HAND_VERIFY_RECURSION_SRC
+    // 指向部署的 cairo 源码（递归证明 2026-09-08 上线时引入）。
+    std::env::var("HAND_VERIFY_RECURSION_SRC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cairo/src/recursion.cairo")
+        })
 }
 
 /// `tasks` Span 的 wire 摊平：`[n_tasks, (hand_binding, payload_len, words)*]`。
@@ -236,6 +242,11 @@ pub fn prove_layer(
         .arg(&inputs_path)
         .arg("--out-dir")
         .arg(out_dir);
+    // corelib 与 prove-hand 同仓的编译期路径在服务器上不存在——部署时用
+    // HAND_VERIFY_CORELIB 显式指定（与 HAND_VERIFY_PROVE_HAND 同组）。
+    if let Ok(corelib) = std::env::var("HAND_VERIFY_CORELIB") {
+        cmd.arg("--corelib").arg(corelib);
+    }
     if let Some(params) = params_path {
         cmd.arg("--params").arg(params);
     }

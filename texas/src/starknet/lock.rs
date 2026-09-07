@@ -291,9 +291,14 @@ pub async fn vault_session_active(wallet: &str) -> bool {
 
 /// operator 账户 nonce 竞态判定（结算 bundle / vault 调用共用）：
 /// 相邻两手结算或结算与释放并发时，后一笔按旧 nonce 构建会被内存池
-/// 拒绝——可退避重试（重发会按链上最新 nonce 重建）。
+/// 拒绝——可退避重试（重发会按链上最新 nonce 重建）。注意执行期错误
+/// 文本是 "Invalid transaction nonce"（TransactionExecutionError），
+/// 提交期才是 "NonceTooOld"/"DuplicateNonce"——两者都要匹配
+/// （2026-09-08 线上：leave release 因此丢弃重试、滞留到 TTL）。
 pub(crate) fn is_nonce_race(err: &str) -> bool {
-    err.contains("NonceTooOld") || err.contains("DuplicateNonce")
+    err.contains("NonceTooOld")
+        || err.contains("DuplicateNonce")
+        || err.contains("Invalid transaction nonce")
 }
 
 /// wei → u256 calldata（lo, hi）。

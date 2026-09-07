@@ -92,6 +92,25 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
   const connected = useAccount();
   // dev 直签账户（VITE_DEV_ACCOUNT_*，testnet 联调）优先于连接的钱包
   const account = activeAccount(connected.account);
+  // useAccount 的值在闭包里是渲染时快照——sitDown 异步等待账户时必须
+  // 读最新值（钱包扩展重连慢/刷新后立刻点入座时快照还是 null，
+  // 2026-09-08 线上 "[SitDown] No Starknet account available"）。
+  const accountRef = useRef(account);
+  accountRef.current = account;
+
+  /**
+   * 等待 starknet-react 完成钱包账户水合（刷新/重连后扩展回连有几秒
+   * 延迟）。返回 null = 超时，调用方给出可操作提示。
+   */
+  const waitForAccount = async (timeoutMs = 6000): Promise<typeof account | null> => {
+    if (accountRef.current) return accountRef.current;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 300));
+      if (accountRef.current) return accountRef.current;
+    }
+    return null;
+  };
 
   /**
    * 当玩家在手牌进行中且未 fold 时点击离开，置为 true 以触发确认弹窗。
@@ -249,15 +268,18 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
       addMessage('Cannot sit down: no wallet connected');
       return;
     }
-    if (!account) {
-      logger.error('[SitDown] No Starknet account available');
-      addMessage('Cannot sit down: no Starknet account');
+    // 钱包账户可能还在水合（刷新后扩展回连有几秒延迟）——短暂等待
+    // 而不是立刻失败；超时才提示重连。
+    const readyAccount = await waitForAccount();
+    if (!readyAccount) {
+      logger.error('[SitDown] No Starknet account available (waited 6s)');
+      addMessage('钱包账户未就绪：请在钱包扩展中确认已连接后重试');
       return;
     }
 
     // ----- Starknet 买入（一次性）：私密路径优先（Plan B），公开路径回退 -----
     addMessage('Submitting the STRK20 buy-in...');
-    const depositResult = await submitBuyIn(account, amount);
+    const depositResult = await submitBuyIn(readyAccount, amount);
     if (!depositResult.success) {
       const failMsg = depositResult.error || 'Buy-in deposit failed';
       logger.error('[SitDown] vault.deposit failed:', failMsg);
