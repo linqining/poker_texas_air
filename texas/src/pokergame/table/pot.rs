@@ -273,12 +273,17 @@ impl Table {
         if eligible_ids.len() == 1 {
             let winner_id = eligible_ids[0];
             let win_amount = amount;
+            let wallet = self.local_seats.get(&winner_id)
+                .and_then(|s| s.player.as_ref().map(|p| p.wallet_address.0.clone()));
             if let Some(seat) = self.local_seats.get_mut(&winner_id) {
                 let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                 seat.win_hand(win_amount);
                 if win_amount > 0 {
                     self.summary.win_messages.push(format!("{} wins ${:.2}", player_name, win_amount));
                 }
+            }
+            if let Some(w) = wallet {
+                crate::starknet::prove_log::record_payout(self, &w, win_amount);
             }
             self.update_history();
             return;
@@ -293,8 +298,11 @@ impl Table {
             // instead of silently dropping the pot.
             let win_amount = amount / eligible_ids.len() as u64;
             let remainder = amount % eligible_ids.len() as u64;
+            let mut payouts: Vec<(String, u64)> = Vec::new();
             for (idx, winner_id) in eligible_ids.iter().enumerate() {
                 let extra = if idx < remainder as usize { 1 } else { 0 };
+                let wallet = self.local_seats.get(winner_id)
+                    .and_then(|s| s.player.as_ref().map(|p| p.wallet_address.0.clone()));
                 if let Some(seat) = self.local_seats.get_mut(winner_id) {
                     let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                     seat.win_hand(win_amount + extra);
@@ -302,6 +310,12 @@ impl Table {
                         self.summary.win_messages.push(format!("{} wins ${:.2}", player_name, win_amount + extra));
                     }
                 }
+                if let Some(w) = wallet {
+                    payouts.push((w, win_amount + extra));
+                }
+            }
+            for (w, amt) in payouts {
+                crate::starknet::prove_log::record_payout(self, &w, amt);
             }
             self.update_history();
             return;
@@ -314,8 +328,11 @@ impl Table {
             .collect();
         let win_amount = amount / winners.len() as u64;
         let remainder = amount % winners.len() as u64;
+        let mut payouts: Vec<(String, u64)> = Vec::new();
         for (idx, winner_id) in winners.iter().enumerate() {
             let extra = if idx < remainder as usize { 1 } else { 0 };
+            let wallet = self.local_seats.get(winner_id)
+                .and_then(|s| s.player.as_ref().map(|p| p.wallet_address.0.clone()));
             if let Some(seat) = self.local_seats.get_mut(winner_id) {
                 let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                 seat.win_hand(win_amount + extra);
@@ -323,6 +340,12 @@ impl Table {
                     self.summary.win_messages.push(format!("{} wins ${:.2} with {}", player_name, win_amount + extra, best_rank.name()));
                 }
             }
+            if let Some(w) = wallet {
+                payouts.push((w, win_amount + extra));
+            }
+        }
+        for (w, amt) in payouts {
+            crate::starknet::prove_log::record_payout(self, &w, amt);
         }
         self.update_history();
     }

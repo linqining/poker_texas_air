@@ -37,9 +37,13 @@ use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use super::constants::{FOLD_REASON_FORCE_ADMIN, KICK_REASON_ADMIN};
 use super::events::TexasPokerEvent;
 use super::state_machine::{self, AdvanceDeadlineExecution, NormalizationReport};
-use super::types::{Seat, SeatStatus, TexasPokerTable};
+use super::types::TexasPokerTable;
+#[cfg(test)]
+use super::types::SeatStatus;
 use crate::Address;
+use crate::ChainId;
 use crate::error::{PokerL1Error, PokerL1Result};
+use crate::object_model::ObjectID;
 use crate::vm::contracts::dispatch::{DispatchContext, DispatchResult};
 
 /// 方法选择器长度（32 字节 = blake2b_256 输出）。
@@ -713,6 +717,71 @@ pub fn dispatch(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     dispatch_with_execution_trace(context, table, selector, args).map(|(result, _)| result)
+}
+
+/// 签名交易消息域（P0-2 缺口修复：caller 签名绑定接线）。
+pub const TX_SIGNING_DOMAIN: &[u8] = b"zchain.tx.v1";
+
+/// 构造签名交易消息哈希：绑定链 ID、表对象、caller、方法与载荷、nonce。
+///
+/// nonce 绑定进签名消息 = 每条签名只能用于特定序列槽（配合 runtime 层的
+/// applied-nonce 集合实现防重放）。客户端与 runtime 必须使用同一公式。
+pub fn tx_message_hash(
+    chain_id: ChainId,
+    table_id: &ObjectID,
+    caller: &Address,
+    selector: &[u8; 32],
+    args: &[u8],
+    nonce: u64,
+) -> [u8; 32] {
+    let mut hasher = Blake2bVar::new(32).expect("blake2b-256 initialized");
+    Update::update(&mut hasher, TX_SIGNING_DOMAIN);
+    Update::update(&mut hasher, &chain_id.to_be_bytes());
+    Update::update(&mut hasher, table_id.to_bytes().as_slice());
+    Update::update(&mut hasher, caller.as_slice());
+    Update::update(&mut hasher, selector);
+    Update::update(&mut hasher, args);
+    Update::update(&mut hasher, &nonce.to_be_bytes());
+    let mut out = [0u8; 32];
+    hasher
+        .finalize_variable(&mut out)
+        .expect("32-byte blake2b output");
+    out
+}
+
+/// 一条已签名交易（`dispatch_signed` 消费）。
+#[derive(Debug, Clone, Copy)]
+pub struct SignedTx<'a> {
+    pub selector: &'a [u8; 32],
+    pub args: &'a [u8],
+    /// 钱包签名：ed25519 = 64B（R||S）/ secp256k1 = 65B（r||s||v），
+    /// 按 `context.caller_pubkey` 的 tag 路由验证。
+    pub signature: &'a [u8],
+    /// 发送方 nonce（进签名消息；重放策略由 runtime 门面管理）。
+    pub nonce: u64,
+}
+
+/// 签名认证分发：先验证 `context.caller_pubkey` 对 (chain, table, caller,
+/// selector, args, nonce) 的签名（caller 身份不再盲信 host 上下文），通过后
+/// 执行普通 dispatch。
+///
+/// 注意：本函数只做认证，不做重放策略——nonce 去重由 [`super::table_runtime`]
+/// 的 applied-nonce 集合管理；直接调用方须自行实现等价策略。
+pub fn dispatch_signed(
+    context: &DispatchContext,
+    table: &mut TexasPokerTable,
+    tx: SignedTx,
+) -> PokerL1Result<DispatchResult> {
+    let msg_hash = tx_message_hash(
+        context.chain_id,
+        &table.id,
+        &context.caller,
+        tx.selector,
+        tx.args,
+        tx.nonce,
+    );
+    crate::signature::verify_signature(&context.caller_pubkey, tx.signature, &msg_hash)?;
+    dispatch(context, table, tx.selector, tx.args)
 }
 
 /// Execute the canonical VM transition and return its exact native execution trace.
@@ -1648,31 +1717,15 @@ fn dispatch_create_table(
     _events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: CreateTableArgs = decode_args(args, "create_table")?;
-    if !(2..=9).contains(&input.max_players) {
-        return Err(PokerL1Error::Serialization(format!(
-            "max_players {} out of range [2, 9]",
-            input.max_players
-        )));
-    }
-    if input.big_blind == 0 {
-        return Err(PokerL1Error::Serialization("big_blind must > 0".into()));
-    }
-    if input.small_blind > input.big_blind {
-        return Err(PokerL1Error::Serialization(
-            "small_blind must <= big_blind".into(),
-        ));
-    }
-    let id = table.id;
-    // P0-2：记录 creator 为调用方，作为后续管理类方法的权限基准。
-    *table = TexasPokerTable::new(
-        id,
-        input.name,
+    // 语义校验 + creator 登记在 core::apply_create_table（2026-09-09 下沉）。
+    state_machine::apply_create_table(
+        table,
         context.caller,
+        input.name,
         input.max_players,
         input.small_blind,
         input.big_blind,
-    );
-    Ok(())
+    )
 }
 
 /// `fold_with_proof` — 带 proof 的局中 fold（剥离加密层 + 退出后续 reveal）。
@@ -1711,78 +1764,21 @@ fn dispatch_join_table(
 ) -> PokerL1Result<()> {
     let input: JoinTableArgs = decode_args(args, "join_table")?;
     // 入座方法：校验 caller == input.player（座位尚空，无法用 seat.player() 校验）
+    // ——认证留在 runtime；其余语义在 core::apply_join_table（2026-09-09 下沉）。
     if input.player != context.caller {
         return Err(PokerL1Error::Serialization(format!(
             "join_table: caller {:?} != player {:?}",
             context.caller, input.player
         )));
     }
-    if !state_machine::can_join_state(table) {
-        return Err(PokerL1Error::Serialization(
-            "not in WAITING state, cannot join_table".into(),
-        ));
-    }
-    // ECPoint → G1Projective（state_machine::is_pk_registered / Seat.pk 使用裸 G1Projective）
-    let pk: G1Projective = *input.pk;
-    if super::utils::g1_is_identity(&pk) {
-        return Err(PokerL1Error::Serialization(
-            "join_table public key cannot be identity".into(),
-        ));
-    }
-    if !super::utils::verify_pk_ownership(&pk, &input.pk_ownership_proof) {
-        return Err(PokerL1Error::Serialization(
-            "join_table PK ownership proof verification failed".into(),
-        ));
-    }
-    if state_machine::is_pk_registered(&table.seats, &pk) {
-        return Err(PokerL1Error::Serialization(
-            "pk already registered at this table".into(),
-        ));
-    }
-    if input.buy_in < table.big_blind {
-        return Err(PokerL1Error::Serialization(format!(
-            "buy_in {} < big_blind {}",
-            input.buy_in, table.big_blind
-        )));
-    }
-    let post_chip_pool = table
-        .chip_pool
-        .checked_add(input.buy_in)
-        .ok_or_else(|| PokerL1Error::Serialization("chip_pool overflow on join_table".into()))?;
-    if post_chip_pool > super::constants::MAX_TOTAL_BET {
-        return Err(PokerL1Error::Serialization(format!(
-            "join_table chip_pool {post_chip_pool} exceeds MAX_TOTAL_BET {}",
-            super::constants::MAX_TOTAL_BET
-        )));
-    }
-    let seat_idx = table
-        .find_empty_seat()
-        .ok_or_else(|| PokerL1Error::Serialization("no empty seat available".into()))?;
-    table.set_seat_acted_this_round(seat_idx, false);
-    table.set_seat_wants_leave(seat_idx, false);
-    table.seats[seat_idx as usize] = Seat::occupied(
-        context.caller,
+    state_machine::apply_join_table(
+        table,
+        input.player,
         input.buy_in,
-        ECPoint(pk),
-        SeatStatus::Waiting,
-    )?; // waiting-for-BB：先入座等待，盲注位（大盲）到达时才参与发牌
-
-    // P0 修复：与 apply_join_shuffle 保持一致的资金记账——buy_in 必须进入 chip_pool，
-    // 否则离座退款时 chip_pool 会出现负差额（资金凭空多退）。
-    table.chip_pool = post_chip_pool;
-    table.add_deck_contributor(seat_idx)?;
-
-    // 座位已设置完毕后再统计活跃人数（与 apply_join_shuffle 一致，不再 +1）。
-    let active_count_after = state_machine::count_active_occupied(&table.seats) as u64;
-    events.push(TexasPokerEvent::PlayerJoined {
-        table_id: table.id,
-        seat_index: seat_idx,
-        player: context.caller,
-        buy_in: input.buy_in,
-        is_waiting: true,
-        active_count_after,
-    });
-    Ok(())
+        *input.pk,
+        &input.pk_ownership_proof,
+        events,
+    )
 }
 
 /// `leave_table` — 简单离座（仅 WAITING 状态）。
@@ -1794,49 +1790,9 @@ fn dispatch_leave_table(
 ) -> PokerL1Result<()> {
     let input: LeaveTableArgs = decode_args(args, "leave_table")?;
     let seat_index = resolve_caller_seat(context, table, input.seat_index, "leave_table")?;
-    if !state_machine::can_leave_state(table) {
-        return Err(PokerL1Error::Serialization(
-            "not in WAITING state, cannot leave_table".into(),
-        ));
-    }
-    let seat = &table.seats[seat_index as usize];
-    if !seat.is_occupied() {
-        return Err(PokerL1Error::Serialization(
-            "seat not occupied, cannot leave".into(),
-        ));
-    }
-    // 退还 stack + pending_addon（玩家离开时未入账的 addon 也必须退还）
-    let refund_amt = seat
-        .stack()
-        .checked_add(seat.pending_addon())
-        .ok_or_else(|| PokerL1Error::Serialization("leave_table refund overflow".into()))?;
-    let post_chip_pool = table
-        .chip_pool
-        .checked_sub(refund_amt)
-        .ok_or_else(|| PokerL1Error::Serialization("leave_table chip_pool underflow".into()))?;
-    let player = seat.player();
-    if refund_amt > 0 {
-        // chip_pool 是总锁仓，必须扣除 stack + pending_addon 的完整退款。
-        table.chip_pool = post_chip_pool;
-    }
-    table.seats[seat_index as usize].vacate();
-    table.remove_deck_contributor(seat_index)?;
-
-    if refund_amt > 0 {
-        events.push(TexasPokerEvent::PlayerRefund {
-            table_id: table.id,
-            seat_index,
-            player,
-            amount: refund_amt,
-            refund_type: super::constants::REFUND_TYPE_STACK_ONLY,
-        });
-    }
-    events.push(TexasPokerEvent::PlayerLeft {
-        table_id: table.id,
-        seat_index,
-        player,
-    });
-    Ok(())
+    // 语义（WAITING 校验 / 退款 / 腾座 / 事件）在 core::apply_leave_table
+    // （2026-09-09 下沉）；caller 座位解析（认证）留在 runtime。
+    state_machine::apply_leave_table(table, seat_index, events)
 }
 
 /// `start_hand` — 开始新一局。

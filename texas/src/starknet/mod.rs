@@ -23,6 +23,7 @@ pub mod mirror;
 pub mod paymaster;
 pub mod prove_log;
 pub mod settlement_prover;
+pub mod shadow;
 pub mod submit;
 
 pub use chain::StarknetChain;

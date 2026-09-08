@@ -52,6 +52,10 @@ rand_core = "0.6"
 [features]
 default = []
 
+[dev-dependencies]
+# 链运行时 e2e：玩家钱包签名（dispatch_signed 认证路径）
+ed25519-dalek = { workspace = true }
+
 [[bin]]
 name = "snops"
 path = "src/bin/snops.rs"

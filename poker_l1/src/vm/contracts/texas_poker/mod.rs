@@ -5,19 +5,20 @@
 //! 通过 `PrecompileRegistry` 注册，ObjectID = `reserved::texas_poker_contract_id()`
 //! （`0xFF..02`）。
 //!
-//! # 模块结构
+//! # 分层结构（2026-09-09 划界，依赖方向恒为 runtime → core）
 //!
-//! - `constants`：状态常量（ROUND_*/SHUFFLE_PHASE_*/REVEAL_PHASE_*/...）
-//! - `card`：扑克牌数据结构（Card/PlayingCard + 花色映射）
-//! - `hand_evaluator`：7选5最佳手牌评估（10 种牌型）
-//! - `betting`：下注规则（BettingRound + all-in 处理）
-//! - `side_pot`：边池分层算法（统一 pots 结构 + 位掩码 eligible）
-//! - `settlement`：确定性结算计划（side-pot/rake/runout/winner/award）
-//! - `events`：40 种事件类型枚举
-//! - `types`：核心数据结构（TexasPokerTable/Seat/DeckState/ShuffleState/...）
-//! - `state_machine`：状态机推进 + deadline + reveal/reconstruct 编排
-//! - `dispatch`：19 个 active method selector 路由
-//! - `utils`：Mental Poker 密码学适配层（包 `poker_protocol` crate，提供 G1/Scalar 自由函数 + verify_or_skip）
+//! - [`core`]：**纯核心状态机**——状态类型、状态转移、下注规则、边池、
+//!   结算派生、牌力评估、交易载荷密码学验证。时钟参数注入、无 IO、
+//!   无随机数（cfg(test) 除外）。可独立嵌入合约移植 / bot / 模拟器 /
+//!   属性测试 / 形式化对齐。
+//! - [`runtime`]：**链运行时**——selector 路由与 borsh 解码、caller 认证、
+//!   `DispatchContext` 时钟供给、事务原子性、call_seq/hand_id 记账、
+//!   canonical 编解码与状态根（state_codec）、ProveTask 产出（→ L1 证明层）。
+//!
+//! 扁平路径兼容：下列 `pub use` 保持全部旧导入路径不变
+//! （`texas_poker::types::TexasPokerTable` 等），新代码请使用
+//! `texas_poker::core::*` / `texas_poker::runtime::*`。
+//! 核心纯度由 `poker_l1/tests/arch_core_purity.rs` 强制。
 //!
 //! # Mental Poker 协议
 //!
@@ -33,16 +34,16 @@
 //! 单元测试的密码学跳过是编译期 `cfg(test)` 行为，不属于桌台状态。生产、普通库和
 //! 集成测试构建始终执行真实密码学验证，状态/preimage 无法携带运行时绕过开关。
 
-pub mod betting;
-pub mod card;
-pub mod constants;
-pub mod events;
-pub mod hand_evaluator;
-pub mod settlement;
-pub mod settlement_fixture;
-pub mod side_pot;
-pub mod types;
-pub mod utils;
+// ===== 纯核心状态机（core/）=====
+pub mod core;
+
+// ===== 链运行时（runtime/）=====
+pub mod runtime;
+
+// ===== 扁平路径兼容 re-exports（旧导入路径保持不变）=====
+pub use core::{betting, card, constants, events, hand_evaluator, settlement, settlement_fixture};
+pub use core::{side_pot, state_machine, types, utils};
+pub use runtime::{dispatch, prove_task, state_codec};
 
 /// Canonical Object type tag for persisted Texas Poker table state.
 ///
@@ -87,17 +88,6 @@ pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 29;
 /// Runtime/proof snapshots use resolved schema v29. The v30 ObjectDb encoding combines immutable
 /// context commitments with the same physical tagged-seat and typed-reveal representation.
 pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 30;
-
-/// Versioned persisted-state codec and fail-closed legacy migrations.
-pub mod state_codec;
-
-// Phase 3: 状态机 + dispatch
-pub mod dispatch;
-pub mod state_machine;
-
-// Post-commit Prover：证明任务（return_value 的 prove_task 部分）。
-// 与 poker_texas_air::prove_task 保持 borsh 二进制兼容（MethodInput 共享自 vm-common）。
-pub mod prove_task;
 
 // Phase 3.3: TexasPokerPrecompile impl（待 state_machine/dispatch 完成后补）
 // pub struct TexasPokerPrecompile { ... }

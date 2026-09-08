@@ -404,7 +404,7 @@ pub fn i128_to_ff(value: i128) -> Ff {
 /// 打在 `fold(seat)` 应用之前，快照里该座位仍是未弃牌——派发前在副本上
 /// 落这记弃牌，`derive_fold_win_plan` 才能看到"恰好一名未弃牌"的终局形态。
 /// 座位越界时原样返回副本（防御，不 panic）。
-fn apply_pending_final_fold(snap: &TexasPokerTable, seat: u8) -> TexasPokerTable {
+pub(crate) fn apply_pending_final_fold(snap: &TexasPokerTable, seat: u8) -> TexasPokerTable {
     let mut table = snap.clone();
     if let Some(target) = table.seats.get_mut(usize::from(seat)) {
         target.set_status(poker_l1::vm::contracts::texas_poker::types::SeatStatus::Folded);

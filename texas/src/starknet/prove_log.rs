@@ -89,6 +89,10 @@ pub struct HandProofLog {
     /// `take_settle_input` 在派彩后执行：不快照则摊牌手的对账恒为
     /// "vm 累计 vs game 0" 必拒（2026-09-07 线上两手复现）。
     pub final_total_bets: Option<Vec<(String, u64)>>,
+    /// 本手派奖记录（wallet → 净得金额，含边池/主池多次累加）——
+    /// 派奖接受点（win_hand 调用处）采集。与 final_total_bets 一起
+    /// 构成游戏层净输赢对账基准：game_delta = Σpayouts − final_total_bet。
+    pub payouts: Vec<(String, u64)>,
 }
 
 impl HandProofLog {
@@ -106,6 +110,7 @@ impl HandProofLog {
             commands: Vec::new(),
             seen_reveals: std::collections::HashSet::new(),
             final_total_bets: None,
+            payouts: Vec::new(),
         }
     }
 
@@ -240,7 +245,12 @@ pub fn record_hand_start(table: &mut Table) {
         commands: Vec::new(),
         seen_reveals: std::collections::HashSet::new(),
         final_total_bets: None,
+        payouts: Vec::new(),
     };
+    // 影子证明机开局（Phase 1 观察性；开关关闭时为 no-op）。
+    if let Some(start) = table.hand_proof_log.start.as_ref() {
+        crate::starknet::shadow::hand_start(table_id, start);
+    }
 }
 
 /// 派彩前快照终局投入（摊牌/fold-win 两条终局路径各调用一次；重复调用
@@ -269,42 +279,70 @@ pub fn record_reveal(table: &mut Table, pk_hex: &str, tokens: &[poker_protocol::
     if tokens.is_empty() {
         return;
     }
-    let log = &mut table.hand_proof_log;
-    if log.start.is_none() {
-        return; // 未开局（如重建桌后的迟到提交）
-    }
-    let key = HandProofLog::hash_reveal(pk_hex, tokens);
-    if !log.seen_reveals.insert(key) {
-        return; // 幂等重试
-    }
-    log.commands.push(HandCommand::RevealTokens {
-        pk_hex: pk_hex.to_string(),
-        tokens: tokens.to_vec(),
-    });
+    let table_id = table.summary.id;
+    let cmd = {
+        let log = &mut table.hand_proof_log;
+        if log.start.is_none() {
+            return; // 未开局（如重建桌后的迟到提交）
+        }
+        let key = HandProofLog::hash_reveal(pk_hex, tokens);
+        if !log.seen_reveals.insert(key) {
+            return; // 幂等重试
+        }
+        let cmd = HandCommand::RevealTokens {
+            pk_hex: pk_hex.to_string(),
+            tokens: tokens.to_vec(),
+        };
+        log.commands.push(cmd.clone());
+        cmd
+    };
+    crate::starknet::shadow::on_command(table_id, &cmd);
 }
 
 /// 下注动作接受点（betting.rs 各 handle_* 成功后；auto 代打同一路径）。
 pub fn record_bet(table: &mut Table, pk_hex: &str, action: &'static str, total_bet: Option<u64>) {
+    let table_id = table.summary.id;
+    let cmd = {
+        let log = &mut table.hand_proof_log;
+        if log.start.is_none() {
+            return;
+        }
+        let cmd = HandCommand::Bet {
+            pk_hex: pk_hex.to_string(),
+            action,
+            total_bet,
+        };
+        log.commands.push(cmd.clone());
+        cmd
+    };
+    crate::starknet::shadow::on_command(table_id, &cmd);
+}
+
+/// 派奖接受点（determine_winner_by_ids / end_without_showdown 的
+/// win_hand 调用处；边池+主池多次派奖累加）。金额为净得（已扣台费）。
+pub fn record_payout(table: &mut Table, wallet: &str, amount: u64) {
     let log = &mut table.hand_proof_log;
     if log.start.is_none() {
         return;
     }
-    log.commands.push(HandCommand::Bet {
-        pk_hex: pk_hex.to_string(),
-        action,
-        total_bet,
-    });
+    log.payouts.push((wallet.to_string(), amount));
 }
 
 /// 手牌进行中移除玩家的强制弃牌接受点。
 pub fn record_force_fold(table: &mut Table, wallet: &str) {
-    let log = &mut table.hand_proof_log;
-    if log.start.is_none() {
-        return;
-    }
-    log.commands.push(HandCommand::ForceFold {
-        wallet: wallet.to_string(),
-    });
+    let table_id = table.summary.id;
+    let cmd = {
+        let log = &mut table.hand_proof_log;
+        if log.start.is_none() {
+            return;
+        }
+        let cmd = HandCommand::ForceFold {
+            wallet: wallet.to_string(),
+        };
+        log.commands.push(cmd.clone());
+        cmd
+    };
+    crate::starknet::shadow::on_command(table_id, &cmd);
 }
 
 /// 结算输入：日志克隆 + 游戏层终局事实（对账基准）。
@@ -315,6 +353,8 @@ pub struct HandSettleInput {
     pub rake_collected: u64,
     /// 每座位的本手总投入（wallet hex → total_bet）。
     pub total_bets: Vec<(String, u64)>,
+    /// 本手派奖（wallet hex → 累计净得，净输赢对账的另一半）。
+    pub payouts: Vec<(String, u64)>,
     /// 已亮公共牌数。
     pub board_len: usize,
     /// 本手动作日志哈希（#18 Phase C 切片 1 起 = Poseidon 吸收链根，
@@ -356,6 +396,7 @@ pub fn take_settle_input(table: &Table) -> Option<HandSettleInput> {
         log: table.hand_proof_log.clone(),
         rake_collected: table.summary.rake_collected,
         total_bets,
+        payouts: table.hand_proof_log.payouts.clone(),
         board_len: table.mental_poker_game.list_revealed_community_cards().len(),
         action_log_digest,
         action_log,

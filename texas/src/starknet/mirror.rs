@@ -536,10 +536,11 @@ pub fn build_from_log(
     }
 }
 
-fn build_from_log_inner(
+/// 影子表（shadow.rs）与结算重放共用的开局引导：按 HandStart 快照构建
+/// 镜像、按升序座位 join、注入终局 deck、直接进入 DealHole reveal 窗口。
+pub(crate) fn mirror_bootstrap(
     table_id: u32,
     start: &super::prove_log::HandStartData,
-    commands: &[super::prove_log::HandCommand],
     hand_id: u32,
 ) -> Result<TableMirror, String> {
     let bb = start.small_blind.saturating_mul(2);
@@ -553,6 +554,24 @@ fn build_from_log_inner(
         [0xC0; 20],
     );
     let mut plan: Vec<(poker_l1::Address, u64, PtxECPoint, Vec<u8>)> = Vec::new();
+    for p in &start.participants {
+        let addr = TableMirror::addr_from_starknet(&p.wallet)
+            .ok_or_else(|| format!("bad wallet felt: {}", p.wallet))?;
+        plan.push((addr, p.stack, p.pk.clone(), p.pk_ownership_proof.clone()));
+    }
+    mirror
+        .begin_reveal_hand(start.deck.clone(), &plan, start.button_rank, hand_id)
+        .map_err(|e| format!("begin_reveal: {e}"))?;
+    Ok(mirror)
+}
+
+fn build_from_log_inner(
+    table_id: u32,
+    start: &super::prove_log::HandStartData,
+    commands: &[super::prove_log::HandCommand],
+    hand_id: u32,
+) -> Result<TableMirror, String> {
+    let mut mirror = mirror_bootstrap(table_id, start, hand_id)?;
     let mut by_pk: std::collections::HashMap<&str, poker_l1::Address> = std::collections::HashMap::new();
     let mut by_wallet: std::collections::HashMap<&str, poker_l1::Address> = std::collections::HashMap::new();
     for p in &start.participants {
@@ -560,11 +579,7 @@ fn build_from_log_inner(
             .ok_or_else(|| format!("bad wallet felt: {}", p.wallet))?;
         by_pk.insert(p.pk_hex.as_str(), addr);
         by_wallet.insert(p.wallet.as_str(), addr);
-        plan.push((addr, p.stack, p.pk.clone(), p.pk_ownership_proof.clone()));
     }
-    mirror
-        .begin_reveal_hand(start.deck.clone(), &plan, start.button_rank, hand_id)
-        .map_err(|e| format!("begin_reveal: {e}"))?;
 
     // 游戏层接受异步乱序提交（reveal 令牌可晚于下注到达），而 VM 重放是
     // 相位序敏感的。重放分两遍（2026-09-08 线上 4/7 手 "not in betting
