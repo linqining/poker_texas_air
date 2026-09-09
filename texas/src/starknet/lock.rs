@@ -317,7 +317,16 @@ pub async fn vault_active_session_tx_pk(wallet: &str) -> Option<[u8; 32]> {
 /// 座位状态，成为该座 VM 层交易签名验证锚）；未声明 / 格式错 / 链上未
 /// 登记 / 不一致 → `None`（该参与者签名路径未激活——过渡期仅告警，
 /// TableRuntime 接线后对 None fail-closed）。
+/// P1-2 会话委托门的事件计数（监控/告警接线用；测试断言同源）。
+/// `mismatches` 是**攻击信号**（有人以该钱包名义声明了错误的钥），
+/// `unregistered` 是旧客户端/未登记的正常过渡态。
+pub static SESSION_TX_PK_MISMATCHES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static SESSION_TX_PK_UNREGISTERED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 pub async fn verify_session_tx_pk(wallet: &str, declared_hex: Option<&str>) -> Option<Vec<u8>> {
+    use std::sync::atomic::Ordering::Relaxed;
     let declared = declared_hex?.trim();
     if declared.is_empty() {
         return None;
@@ -326,20 +335,35 @@ pub async fn verify_session_tx_pk(wallet: &str, declared_hex: Option<&str>) -> O
     let bytes = match hex::decode(body) {
         Ok(b) if b.len() == 32 => b,
         _ => {
-            tracing::warn!("[session-tx-pk] {wallet} 声明的会话公钥格式非法（期望 32B hex）");
+            SESSION_TX_PK_MISMATCHES.fetch_add(1, Relaxed);
+            tracing::warn!(
+                target: "session_tx_pk_mismatch",
+                "[session-tx-pk] ATTACK SIGNAL: {wallet} 声明的会话公钥格式非法（期望 32B hex）— 计数 {}",
+                SESSION_TX_PK_MISMATCHES.load(Relaxed)
+            );
             return None;
         }
     };
     match vault_active_session_tx_pk(wallet).await {
         Some(onchain) if onchain.as_slice() == bytes.as_slice() => Some(bytes),
-        Some(_) => {
+        Some(onchain) => {
+            SESSION_TX_PK_MISMATCHES.fetch_add(1, Relaxed);
             tracing::warn!(
-                "[session-tx-pk] {wallet} 声明的会话公钥与链上 vault 登记不一致 — 未登记（按旧客户端处理）"
+                target: "session_tx_pk_mismatch",
+                "[session-tx-pk] ATTACK SIGNAL: {wallet} 声明 {}.. 与链上登记 {}.. 不一致 — 拒绝登记，计数 {}",
+                &declared[..8.min(declared.len())],
+                hex::encode(&onchain[..4]),
+                SESSION_TX_PK_MISMATCHES.load(Relaxed)
             );
             None
         }
         None => {
-            tracing::debug!("[session-tx-pk] {wallet} 链上未登记会话公钥（旧客户端/未买入登记）");
+            SESSION_TX_PK_UNREGISTERED.fetch_add(1, Relaxed);
+            tracing::debug!(
+                target: "session_tx_pk_unregistered",
+                "[session-tx-pk] {wallet} 链上未登记会话公钥（旧客户端/未买入登记）— 计数 {}",
+                SESSION_TX_PK_UNREGISTERED.load(Relaxed)
+            );
             None
         }
     }

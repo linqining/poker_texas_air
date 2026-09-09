@@ -905,6 +905,26 @@ mod curve_hex_tests {
         );
     }
 
+/// 跨 crate 已知答案向量（P2-2）：与 poker_l1 stark_scheme 测试同一
+    /// sk/msg/期望签名——两侧实现/域常量漂移时必有一侧失败。
+    /// sk = hash_to_scalar(b"zgame.tx-vector.kat.v1")。
+    #[test]
+    fn tx_session_known_answer_vector_matches_poker_l1() {
+        let sk_hex = "02d6ef6369a765d8c8d80b9df96637ac2bec0b85e8cb1da3e59aff65c1b9c72c";
+        let session = WasmTxSession::from_sk(sk_hex).expect("KAT sk");
+        assert_eq!(
+            session.get_pk_hex(),
+            "82496bd9c700a1c1252d27b5b8063bdeab149411436157dc3dfe1dd29c79faa3",
+            "KAT pk mismatch — derivation drifted from poker_l1"
+        );
+        let sig = session.sign(&hex::encode([0x42u8; 32])).expect("KAT sign");
+        assert_eq!(
+            sig,
+            "80e93d41175f69487f916da094a1cacb0d2b1dfc0c4c5caa386c7263ca78a09e007bfd2b92bf6112390243cc66f4b77fdfd71c03021a1d33c9ccae0543200c42",
+            "KAT mismatch — wasm signature space drifted from poker_l1"
+        );
+    }
+
     /// P1-2 会话委托：密钥恢复一致 + 签名确定性（与 poker_l1 stark_scheme
     /// 同公式——同 sk 同消息必得同签名，重放/对拍基准）。
     #[test]

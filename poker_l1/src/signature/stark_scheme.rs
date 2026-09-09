@@ -124,6 +124,24 @@ mod tests {
         TaggedPubkey::new(SignatureScheme::Stark, CURRENT_VERSION, raw).unwrap()
     }
 
+/// 跨 crate 已知答案向量（P2-2）：固定 sk 与消息的签名期望值。
+    /// **双写契约**：client-wasm `WasmTxSession` 测试携带同一向量——两侧
+    /// 域常量/签名实现漂移时，向量必有一侧失败（防静默分叉成两套不互通
+    /// 的签名空间）。sk = hash_to_scalar(b"zgame.tx-vector.kat.v1")。
+    #[test]
+    fn schnorr_known_answer_vector() {
+        let sk = poker_protocol::crypto::hash_to_scalar(b"zgame.tx-vector.kat.v1");
+        let msg = [0x42u8; 32];
+        let sig = sign(&sk, &msg);
+        assert_eq!(
+            hex::encode(sig),
+            "80e93d41175f69487f916da094a1cacb0d2b1dfc0c4c5caa386c7263ca78a09e007bfd2b92bf6112390243cc66f4b77fdfd71c03021a1d33c9ccae0543200c42",
+            "KAT mismatch — wasm/poker_l1 signature spaces have drifted"
+        );
+        let pk = poker_protocol::crypto::types::base_g() * sk;
+        verify_point(&pk, &msg, &sig).expect("KAT signature verifies");
+    }
+
     #[test]
     fn sign_verify_roundtrip() {
         let msg = [0x42u8; 32];

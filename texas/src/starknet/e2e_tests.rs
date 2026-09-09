@@ -1188,7 +1188,9 @@ mod runtime_authority_e2e {
         let game_deck: Vec<ZgCt> = game.deck_encrypted.clone();
         let vm_deck = super::super::mirror::conv::ciphertexts(&game_deck).expect("deck bridge");
 
-        // ---- 链运行时：开桌 + 签名入座 ----
+        // ---- 链运行时：开桌 + host 背书入座（P1-2 修复：签名通道不接受
+        //     join——未入座无验签锚；join 由服务端完成 vault 登记核验后
+        //     经 submit_unsigned 放行，此处直接模拟该路径）----
         let table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
             ObjectID::new([0x5A; 20], 77),
             "rt-e2e".to_string(),
@@ -1199,7 +1201,8 @@ mod runtime_authority_e2e {
         );
         let mut rt = TableRuntime::new(table, 377);
         let mut now: u64 = 1_778_000_000_000;
-        let mut nonce: u64 = 1;
+        // 按账户 nonce（P1-1）：两家各自从 1 计数——全局命名空间下必碰撞。
+        let mut nonces = [1u64, 1u64];
         let table_id = rt.table.id;
 
         rt.submit_unsigned(
@@ -1216,7 +1219,8 @@ mod runtime_authority_e2e {
         )
         .expect("create_table");
 
-        // 负路径 1：签名被篡改必须拒绝。
+        // 负路径 1：自洽的签名 join 必须被拒（P1-2 回归）——未入座钱包
+        // 没有验签锚，任何持钥者不得为任意钱包构造冒名入座。
         let join1_args = borsh::to_vec(&JoinTableArgs {
             player: w1.address,
             buy_in: 1000,
@@ -1224,7 +1228,6 @@ mod runtime_authority_e2e {
                 client1.pk,
             ))
             .expect("pk bridge"),
-            // 会话委托：入座登记本座会话交易公钥（生产路径经 vault 核验）。
             tx_pk: w1.session_pk.clone(),
             pk_ownership_proof: poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof(
                 &sk1,
@@ -1233,34 +1236,23 @@ mod runtime_authority_e2e {
             .expect("ownership proof"),
         })
         .expect("join args");
-        let mut bad = submission(&w1, now, selectors::join_table(), join1_args.clone(), nonce);
-        bad.signature = vec![0u8; 64];
-        bad.signature[63] ^= 0x01;
-        assert!(
-            rt.submit_signed(bad).is_err(),
-            "tampered signature must be rejected"
-        );
-
-        // 负路径 2：跨会话钥顶替——w2 的会话钥签名冒充 w1 提交必须在入队
-        // 前被拒（此时 w1 尚未入座，验签锚不存在；即便入座后锚也只认 w1
-        // 登记的会话钥——身份绑定在座位登记，不在公开派生）。
-        let mut forged = submission(&w1, now, selectors::join_table(), join1_args.clone(), nonce);
-        let forged_hash = tx_message_hash(
-            377,
+        let signed_join = sign_submission(
+            &w1,
             &table_id,
-            &w1.address,
-            &forged.selector,
-            &forged.args,
-            forged.nonce,
+            &submission(&w1, now, selectors::join_table(), join1_args.clone(), nonces[0]),
         );
-        forged.signature = w2.sign(&forged_hash);
+        let join_err = rt
+            .submit_signed(signed_join)
+            .expect_err("signed join must be rejected — joins are host-endorsed");
         assert!(
-            rt.submit_signed(forged).is_err(),
-            "cross-wallet substitution must be rejected"
+            format!("{join_err}").contains("no registered session tx public key"),
+            "join rejection reason, got: {join_err}"
         );
         assert!(rt.pending().is_empty(), "auth failure must not enqueue");
 
-        // 正路径：两名玩家签名入座。
+        // 正路径：host 背书入座（vault 核验后的放行路径，P1-2(a)）。
+        rt.submit_unsigned(w1.identity(), now, &selectors::join_table(), &join1_args)
+            .expect("join p1 (host-endorsed after vault verification)");
         let join2_args = borsh::to_vec(&JoinTableArgs {
             player: w2.address,
             buy_in: 1000,
@@ -1276,40 +1268,52 @@ mod runtime_authority_e2e {
             .expect("ownership proof"),
         })
         .expect("join args");
-        rt.submit_signed(sign_submission(&w1, &table_id, &submission(&w1, now, selectors::join_table(), join1_args, nonce)))
-            .expect("join p1 signed");
-        nonce += 1;
-        rt.submit_signed(sign_submission(&w2, &table_id, &submission(&w2, now, selectors::join_table(), join2_args, nonce)))
-            .expect("join p2 signed");
-        nonce += 1;
+        rt.submit_unsigned(w2.identity(), now, &selectors::join_table(), &join2_args)
+            .expect("join p2 (host-endorsed)");
 
-        // 负路径 3：同签名交易重放必须拒绝（applied-nonce 集合）。
-        // p1 的 join 已成功应用——重放同一签名材料（nonce 未变）必须在
-        // 重放检查处失败，而不是业务检查（pk 已注册）。
-        let replay = submission(&w1, now, selectors::join_table(), {
-            borsh::to_vec(&JoinTableArgs {
-                player: w1.address,
-                buy_in: 1000,
-                pk: super::super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(
-                    client1.pk,
-                ))
-                .expect("pk bridge"),
-                tx_pk: w1.session_pk.clone(),
-                pk_ownership_proof: poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof(
-                    &sk1,
-                    &<DefaultCurve as Curve>::Scalar::random(&mut OsRng),
-                )
-                .expect("ownership proof"),
-            })
-            .expect("join args")
-        }, nonce - 1);
-        // 用 p1 钱包对相同 nonce 重新签名（签名有效），但 nonce 已烧号。
-        let replay = sign_submission(&w1, &table_id, &replay);
-        let err = rt.submit_signed(replay).expect_err("replay must be rejected");
-        assert!(
-            format!("{err}").contains("replay"),
-            "replay must fail at the nonce guard, got: {err}"
+        // 负路径 2：签名被篡改必须拒绝（已入座 w1，锚存在，纯粹验签失败）。
+        let tamper_msg = tx_message_hash(
+            377,
+            &table_id,
+            &w1.address,
+            &[0xAA; 32],
+            &[0xBB; 4],
+            nonces[0],
         );
+        let mut bad = submission(&w1, now, [0xAA; 32], vec![0xBB; 4], nonces[0]);
+        bad.signature = vec![0u8; 64];
+        bad.signature[63] ^= 0x01;
+        let _ = tamper_msg;
+        assert!(
+            rt.submit_signed(bad).is_err(),
+            "tampered signature must be rejected"
+        );
+        assert!(rt.pending().is_empty(), "auth failure must not enqueue");
+
+        // 负路径 3：跨会话钥顶替——w2 的会话钥签名冒充 w1（锚只认 w1
+        // 座位登记的会话钥——身份绑定在座位登记，不在公开派生）。
+        let forged_hash = tx_message_hash(
+            377,
+            &table_id,
+            &w1.address,
+            &[0xAA; 32],
+            &[0xBB; 4],
+            nonces[0],
+        );
+        let forged_sig = w2.sign(&forged_hash);
+        let forged = Submission {
+            wallet: w1.wallet.clone(),
+            block_timestamp: now,
+            selector: [0xAA; 32],
+            args: vec![0xBB; 4],
+            signature: forged_sig,
+            nonce: nonces[0],
+        };
+        assert!(
+            rt.submit_signed(forged).is_err(),
+            "cross-session substitution must be rejected"
+        );
+        assert!(rt.pending().is_empty(), "auth failure must not enqueue");
 
         // ---- deck 注入 bootstrap（方案A：洗牌链在客户端完成）----
         {
@@ -1344,6 +1348,9 @@ mod runtime_authority_e2e {
         let clients = [&client1, &client2];
         let wallets = [&w1, &w2];
         let mut early_turn_submitted = false;
+        // 最近一笔已提交的签名交易（结尾做重放负路径；bet/reveal 两种
+        // 都会立即应用或入队——重放检查在 nonce 水位前置，两种都覆盖）。
+        let mut last_applied_signed: Option<Submission> = None;
         let mut steps = 0;
         loop {
             steps += 1;
@@ -1388,10 +1395,10 @@ mod runtime_authority_e2e {
                     rt.submit_signed(sign_submission(
                         wallets[seat],
                         &table_id,
-                        &submission(wallets[seat], now, selectors::submit_player_reveal_tokens(), args, nonce),
+                        &submission(wallets[seat], now, selectors::submit_player_reveal_tokens(), args, nonces[seat]),
                     ))
                     .expect("early turn reveal must be held, not rejected");
-                    nonce += 1;
+                    nonces[seat] += 1;
                 }
                 assert_eq!(rt.pending().len(), 2, "early turn reveals must sit in the queue");
                 early_turn_submitted = true;
@@ -1443,13 +1450,14 @@ mod runtime_authority_e2e {
                     proofs,
                 })
                 .expect("reveal args");
-                rt.submit_signed(sign_submission(
+                let signed = sign_submission(
                     wallets[seat as usize],
                     &table_id,
-                    &submission(wallets[seat as usize], now, selectors::submit_player_reveal_tokens(), args, nonce),
-                ))
-                .expect("reveal submit");
-                nonce += 1;
+                    &submission(wallets[seat as usize], now, selectors::submit_player_reveal_tokens(), args, nonces[seat as usize]),
+                );
+                rt.submit_signed(signed.clone()).expect("reveal submit");
+                last_applied_signed = Some(signed);
+                nonces[seat as usize] += 1;
                 continue;
             }
             if let Some(actor) = rt.table.current_turn_option() {
@@ -1458,13 +1466,14 @@ mod runtime_authority_e2e {
                     < rt.table.seats[other as usize].total_bet();
                 let selector = if facing_bet { selectors::call() } else { selectors::check() };
                 let args = borsh::to_vec(&SeatIndexArgs { seat_index: actor }).expect("bet args");
-                rt.submit_signed(sign_submission(
+                let signed = sign_submission(
                     wallets[actor as usize],
                     &table_id,
-                    &submission(wallets[actor as usize], now, selector, args, nonce),
-                ))
-                .expect("bet submit");
-                nonce += 1;
+                    &submission(wallets[actor as usize], now, selector, args, nonces[actor as usize]),
+                );
+                rt.submit_signed(signed.clone()).expect("bet submit");
+                last_applied_signed = Some(signed);
+                nonces[actor as usize] += 1;
                 continue;
             }
             if rt.table.community_cards.to_vec().len() == 5 {
@@ -1480,6 +1489,18 @@ mod runtime_authority_e2e {
         assert_eq!(rt.table.community_cards.to_vec().len(), 5, "board reaches river");
         assert!(early_turn_submitted, "out-of-order case must have been exercised");
         rt.finish().expect("pending queue must be fully digested (fail-closed)");
+
+        // 负路径 4：已应用签名交易的重放必须被按账户 nonce 水位拒绝
+        //（StaleTxNonce——含 "replay"，队列据此死信不重试）。
+        let replay = last_applied_signed.expect("at least one signed submission was made");
+        let replay_err = rt
+            .submit_signed(replay)
+            .expect_err("replay of an applied tx must be rejected");
+        assert!(
+            format!("{replay_err}").contains("replay"),
+            "replay must fail at the per-account nonce guard, got: {replay_err}"
+        );
+
         assert!(
             rt.tasks().len() >= 8,
             "reveal/bet tasks must be collected for the proof layer, got {}",

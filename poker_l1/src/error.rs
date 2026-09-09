@@ -66,6 +66,11 @@ pub enum PokerL1Error {
     /// account nonce 不匹配。
     #[error("nonce too low: tx={tx}, account={account}")]
     NonceTooLow { tx: u64, account: u64 },
+    /// 按账户 nonce 水位的陈旧/重放交易（TableRuntime 会话委托防重放）：
+    /// nonce 不高于该账户已应用水位。专用变体供入口队列做确定性死信
+    /// 分类（不进重试）。
+    #[error("tx nonce {nonce} already applied for this account (replay/stale rejected)")]
+    StaleTxNonce { nonce: u64 },
     /// account nonce 跳号（高于当前 +1）。
     #[error("nonce too high: tx={tx}, account={account}")]
     NonceTooHigh { tx: u64, account: u64 },
@@ -762,6 +767,7 @@ impl PokerL1Error {
             | Self::WrongChainId { .. }
             | Self::NonceTooLow { .. }
             | Self::NonceTooHigh { .. }
+            | Self::StaleTxNonce { .. }
             | Self::GameTurnNonceMismatch { .. }
             | Self::InvalidFallbackFlag
             | Self::InsufficientBalance { .. }

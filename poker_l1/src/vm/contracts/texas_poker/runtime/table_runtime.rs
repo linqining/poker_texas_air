@@ -22,9 +22,14 @@
 //! 知道钱包地址不再能推导出任何可用凭据——确定性身份的公开冒名面根除。
 //! 未入座/未登记钥的签名提交 fail-closed 拒绝（不入队）。
 //!
-//! 重放策略不变：applied-nonce 集合——成功应用的 nonce 烧号，同签名重放
-//! 被拒；业务失败的交易不烧号（可修正后重试）。nonce 绑定进签名消息
-//! （见 `dispatch::tx_message_hash`）。
+//! 重放策略：**按账户 nonce 水位**（Ethereum 式）——`nonce > last` 接受，
+//! `nonce <= last` 判重放/陈旧拒绝（[`crate::error::PokerL1Error::StaleTxNonce`]，
+//! 入口队列据此死信不重试）。nonce 绑定进签名消息（见
+//! `dispatch::tx_message_hash`），跨槽挪用签名的交易验证不过。
+//!
+//! join 路径：签名提交**不接受** join_table（未入座无锚，P1-2 修复）——
+//! join 由 host 完成 vault 登记核验（`set_session_tx_pk[_for]` 对拍）后经
+//! `submit_unsigned` 背书提交；签名通道只服务已入座玩家命令。
 //!
 //! 服务器管理路径（`submit_unsigned`）仍由 host 背书 caller 身份。
 //!
@@ -39,7 +44,7 @@
 //! 本门面是常驻权威入口——Phase 2b 完成后 mirror 退役。
 
 use super::caller_id;
-use super::dispatch::{JoinTableArgs, dispatch, selectors, tx_message_hash};
+use super::dispatch::{dispatch, tx_message_hash};
 use super::events::TexasPokerEvent;
 use super::pending::PendingQueue;
 use super::prove_task::{L1DispatchOutput, L1ProveTask};
@@ -116,7 +121,12 @@ pub struct TableRuntime {
     chain_id: ChainId,
     block_height: u64,
     pending: PendingQueue<Submission>,
-    applied_nonces: std::collections::HashSet<u64>,
+    /// 按账户的已应用 nonce 水位（wallet 派生地址 → last nonce）。
+    /// P1-1 修复（2026-09-10）：nonce 命名空间**按账户**——全局命名空间
+    /// 下两个玩家各自从 1 计数必然碰撞（误判重放 + 恶意消耗区间 DoS）。
+    /// Ethereum 式语义：`nonce > last` 接受（允许跳号），`nonce <= last`
+    /// 判重放拒绝。水位制同时消灭无界集合内存增长。
+    account_nonces: std::collections::HashMap<Address, u64>,
     tasks: Vec<L1ProveTask>,
     events: Vec<TexasPokerEvent>,
 }
@@ -128,7 +138,7 @@ impl TableRuntime {
             chain_id,
             block_height: 0,
             pending: PendingQueue::new(64),
-            applied_nonces: std::collections::HashSet::new(),
+            account_nonces: std::collections::HashMap::new(),
             tasks: Vec::new(),
             events: Vec::new(),
         }
@@ -166,18 +176,18 @@ impl TableRuntime {
         Ok(())
     }
 
-    /// 签名提交（玩家命令）：完整性校验（Stark Schnorr，钱包确定性身份）
-    /// + applied-nonce 防重放 + 乱序容忍（暂不可应用的命令连信封入队
-    /// 等待，不算失败；队列满则原样返回错误）。
+    /// 签名提交（玩家命令）：完整性校验（座位登记的会话公钥）+ 按账户
+    /// nonce 水位防重放 + 乱序容忍（暂不可应用的命令连信封入队等待，
+    /// 不算失败；队列满则原样返回错误）。
     ///
     /// 认证（签名/重放/钱包格式）在入队**之前**前置校验：失败立即返回
     /// 错误、绝不入队——只有业务/相位类错误（典型：窗口未开）才延迟。
     pub fn submit_signed(&mut self, sub: Submission) -> PokerL1Result<()> {
-        if self.applied_nonces.contains(&sub.nonce) {
-            return Err(PokerL1Error::Serialization(format!(
-                "tx nonce {} already applied (replay rejected)",
-                sub.nonce
-            )));
+        let address = caller_id::wallet_to_address(&sub.wallet)?;
+        if let Some(last) = self.account_nonces.get(&address) {
+            if sub.nonce <= *last {
+                return Err(PokerL1Error::StaleTxNonce { nonce: sub.nonce });
+            }
         }
         verify_submission(
             self.chain_id,
@@ -193,7 +203,7 @@ impl TableRuntime {
             chain_id,
             block_height,
             pending,
-            applied_nonces,
+            account_nonces,
             tasks,
             events,
         } = self;
@@ -202,7 +212,7 @@ impl TableRuntime {
                 table,
                 chain_id,
                 block_height,
-                applied_nonces,
+                account_nonces,
                 tasks,
                 events,
                 envelope,
@@ -222,7 +232,7 @@ impl TableRuntime {
             chain_id,
             block_height,
             pending,
-            applied_nonces,
+            account_nonces,
             tasks,
             events,
         } = self;
@@ -231,7 +241,7 @@ impl TableRuntime {
                 table,
                 chain_id,
                 block_height,
-                applied_nonces,
+                account_nonces,
                 tasks,
                 events,
                 envelope,
@@ -275,32 +285,19 @@ fn verify_submission(
     signature: &[u8],
 ) -> PokerL1Result<()> {
     let address = caller_id::wallet_to_address(wallet)?;
-    // 验签锚：座位登记的会话公钥。未入座钱包唯一的例外是 join_table
-    // 本身——鸡生蛋问题的解：join 命令的锚取 **args 内声明的 tx_pk**
-    // （生产路径该 args 由服务端经 vault `set_session_tx_pk[_for]` 核验
-    // 后才放行到本门面），且声明的 player 必须与钱包派生地址一致；
-    // 入座后所有命令一律按座位登记钥验证。
-    let tx_pk = match table.registered_tx_pk_of(&address) {
-        Some(pk) => pk.clone(),
-        None => {
-            if *selector != selectors::join_table() {
-                return Err(PokerL1Error::Serialization(format!(
-                    "no registered session tx public key for wallet {wallet} at this table"
-                )));
-            }
-            let join: JoinTableArgs = borsh::from_slice(args).map_err(|e| {
-                PokerL1Error::Serialization(format!("join_table args decode: {e}"))
-            })?;
-            if join.player != address {
-                return Err(PokerL1Error::Serialization(
-                    "join_table declared player does not match the submitting wallet".into(),
-                ));
-            }
-            join.tx_pk
-        }
-    };
+    // 验签锚：座位登记的会话公钥——**无例外**（P1-2 修复 2026-09-10：
+    // 移除 join_table 自登记例外）。未入座钱包没有任何可验签的锚，
+    // 一律拒绝——否则任何持钥者可为任意钱包构造自洽的冒名 join。
+    // join 的会话钥与链上 vault 登记的一致性由 **host 在放行前核验**
+    //（`verify_session_tx_pk`，vault `active_session_tx_pk` view 对拍），
+    // 随后经 host 背书的 `submit_unsigned` 提交（join 即管理路径）。
+    let tx_pk = table.registered_tx_pk_of(&address).ok_or_else(|| {
+        PokerL1Error::Serialization(format!(
+            "no registered session tx public key for wallet {wallet} at this table"
+        ))
+    })?;
     let msg_hash = tx_message_hash(chain_id, &table.id, &address, selector, args, nonce);
-    crate::signature::verify_signature(&tx_pk, signature, &msg_hash)
+    crate::signature::verify_signature(tx_pk, signature, &msg_hash)
 }
 
 /// 单条提交的全量重验与应用（认证 → dispatch → 产出收集）。
@@ -311,18 +308,19 @@ fn apply_submission(
     table: &mut TexasPokerTable,
     chain_id: &ChainId,
     block_height: &mut u64,
-    applied_nonces: &mut std::collections::HashSet<u64>,
+    account_nonces: &mut std::collections::HashMap<Address, u64>,
     tasks: &mut Vec<L1ProveTask>,
     events: &mut Vec<TexasPokerEvent>,
     sub: &Submission,
     selector: &[u8; 32],
     args: &[u8],
 ) -> PokerL1Result<()> {
-    if applied_nonces.contains(&sub.nonce) {
-        return Err(PokerL1Error::Serialization(format!(
-            "tx nonce {} already applied (replay rejected)",
-            sub.nonce
-        )));
+    let address = caller_id::wallet_to_address(&sub.wallet)?;
+    if let Some(last) = account_nonces.get(&address) {
+        if sub.nonce <= *last {
+            // 陈旧/重放：确定性失败，入口队列据此死信（不重试）。
+            return Err(PokerL1Error::StaleTxNonce { nonce: sub.nonce });
+        }
     }
     verify_submission(*chain_id, table, &sub.wallet, selector, args, sub.nonce, &sub.signature)?;
 
@@ -336,10 +334,12 @@ fn apply_submission(
         block_timestamp: sub.block_timestamp,
     };
     // 签名已在上方 verify_submission 按**座位登记的会话公钥**全量验证；
-    // 不走 dispatch_signed 二次验签——它的锚是 context.caller_pubkey
-    // （寻址派生公钥，非会话钥），会话钥签名在那里必然失败。
+    // 不做二次验签（派生公钥不是锚，会话钥签名在那种锚下必然失败）。
     let result = dispatch(&ctx, table, selector, args)?;
-    applied_nonces.insert(sub.nonce);
+    account_nonces
+        .entry(address)
+        .and_modify(|last| *last = (*last).max(sub.nonce))
+        .or_insert(sub.nonce);
     collect_into(&result.return_value, tasks, events)?;
     Ok(())
 }
@@ -525,5 +525,125 @@ mod tests {
             "cross-session substitution must be rejected"
         );
         assert_eq!(rt.pending().len(), 1, "queue unchanged on auth failure");
+
+        // P1-2 回归：自洽的签名 join 也必须被拒（未入座无锚，无例外）——
+        // 否则任何持钥者可为任意钱包构造冒名入座。用**未入座**的第三方
+        // 钱包 + 其自持会话钥签名（全部自洽）验证。
+        const W3: &str = "0x00000000000000000000000000000000000000000000000000000000dead03";
+        let w3_sk =
+            poker_protocol::crypto::types::hash_to_scalar(b"test-session-secret-w3");
+        let w3_pk_raw = (poker_protocol::crypto::types::base_g() * w3_sk)
+            .compress()
+            .as_ref()
+            .to_vec();
+        let w3_pk = crate::signature::TaggedPubkey::new(
+            crate::signature::SignatureScheme::Stark,
+            crate::signature::CURRENT_VERSION,
+            w3_pk_raw,
+        )
+        .unwrap();
+        let w3_join_args = borsh::to_vec(
+            &JoinTableArgs::with_key(
+                caller_id::wallet_to_address(W3).unwrap(),
+                1_000,
+                poker_protocol::crypto::types::Scalar::from_u64(9),
+                poker_protocol::crypto::types::Scalar::from_u64(9_009),
+            )
+            .unwrap()
+            .with_tx_pk(w3_pk),
+        )
+        .unwrap();
+        let w3_msg = tx_message_hash(
+            377,
+            &rt.table.id,
+            &caller_id::wallet_to_address(W3).unwrap(),
+            &selectors::join_table(),
+            &w3_join_args,
+            1,
+        );
+        let w3_sig = stark_scheme::sign(&w3_sk, &w3_msg).to_vec();
+        let sub_join = Submission {
+            wallet: W3.to_string(),
+            block_timestamp: 5,
+            selector: selectors::join_table(),
+            args: w3_join_args,
+            signature: w3_sig,
+            nonce: 1,
+        };
+        let join_err = rt
+            .submit_signed(sub_join)
+            .expect_err("signed join_table must be rejected — joins are host-endorsed");
+        assert!(
+            join_err.to_string().contains("no registered session tx public key"),
+            "join rejection reason, got: {join_err}"
+        );
+
+        // P1-1 回归：按账户 nonce 命名空间。两家各用 nonce=1 的
+        // leave_table（WAITING 态可离座，真实应用、烧号）——全局命名空间
+        // 下第二家必被误判"重放"拒绝，按账户水位必须双双通过。
+        let w2_session_sk =
+            poker_protocol::crypto::types::hash_to_scalar(b"test-session-secret-w2");
+        let w2_pk_raw = (poker_protocol::crypto::types::base_g() * w2_session_sk)
+            .compress()
+            .as_ref()
+            .to_vec();
+        let w2_pk = crate::signature::TaggedPubkey::new(
+            crate::signature::SignatureScheme::Stark,
+            crate::signature::CURRENT_VERSION,
+            w2_pk_raw,
+        )
+        .unwrap();
+        let w2_join = JoinTableArgs::with_key(
+            caller_id::wallet_to_address(OTHER).unwrap(),
+            1_000,
+            poker_protocol::crypto::types::Scalar::from_u64(7),
+            poker_protocol::crypto::types::Scalar::from_u64(7_007),
+        )
+        .unwrap()
+        .with_tx_pk(w2_pk);
+        rt.submit_unsigned(
+            CallerIdentity::from_wallet(OTHER).unwrap(),
+            6,
+            &selectors::join_table(),
+            &borsh::to_vec(&w2_join).unwrap(),
+        )
+        .expect("wallet 2 joins (seat 1)");
+
+        // 签名一条可真实应用的命令（leave_table，座位 1）。
+        let mut signed_apply = |wallet: &str, sk, seat: u8, nonce: u64| -> PokerL1Result<()> {
+            let args = borsh::to_vec(&crate::vm::contracts::texas_poker::dispatch::LeaveTableArgs {
+                seat_index: seat,
+            })
+            .unwrap();
+            let msg = tx_message_hash(
+                377,
+                &rt.table.id,
+                &caller_id::wallet_to_address(wallet).unwrap(),
+                &selectors::leave_table(),
+                &args,
+                nonce,
+            );
+            let sig = stark_scheme::sign(&sk, &msg).to_vec();
+            rt.submit_signed(Submission {
+                wallet: wallet.to_string(),
+                block_timestamp: 7,
+                selector: selectors::leave_table(),
+                args,
+                signature: sig,
+                nonce,
+            })
+        };
+        signed_apply(OTHER, w2_session_sk, 1, 1)
+            .expect("wallet 2 applies nonce=1 (per-account watermark)");
+        signed_apply(WALLET, session_sk, 0, 1)
+            .expect("wallet 1 applies the SAME nonce=1 — no cross-wallet collision");
+
+        // 陈旧 nonce（<= 水位）判重放：StaleTxNonce（队列将死信不重试）。
+        let stale_err = signed_apply(OTHER, w2_session_sk, 1, 1)
+            .expect_err("stale nonce must be rejected");
+        assert!(
+            matches!(stale_err, crate::error::PokerL1Error::StaleTxNonce { nonce: 1 }),
+            "stale nonce error variant, got: {stale_err}"
+        );
     }
 }

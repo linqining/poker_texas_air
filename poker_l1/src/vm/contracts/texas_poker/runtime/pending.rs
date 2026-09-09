@@ -33,9 +33,14 @@ pub struct PendingEntry<E> {
 /// 重验并应用**：
 /// - `Ok(())`：命令已应用（出队）；
 /// - `Err(_)`：当前仍不可应用（典型：相位未开）→ 继续暂存，不算失败。
+/// 非死信失败的重试上限：达到后死信（合法相位延迟远少于此值；
+/// 畸形载荷/永不可应用命令的滞留不再无限重试与白付验签）。
+pub const MAX_HOLDS: usize = 64;
+
 #[derive(Debug, Default)]
 pub struct PendingQueue<E> {
     entries: Vec<PendingEntry<E>>,
+    dead: Vec<PendingEntry<E>>,
     max_entries: usize,
     held_total: usize,
     flushed_total: usize,
@@ -45,10 +50,16 @@ impl<E: Clone> PendingQueue<E> {
     pub fn new(max_entries: usize) -> Self {
         Self {
             entries: Vec::new(),
+            dead: Vec::new(),
             max_entries,
             held_total: 0,
             flushed_total: 0,
         }
+    }
+
+    /// 死信清单（完整信封保留，供调用方告警/审计——不是静默丢弃）。
+    pub fn dead(&self) -> &[PendingEntry<E>] {
+        &self.dead
     }
 
     pub fn len(&self) -> usize {
@@ -96,7 +107,8 @@ impl<E: Clone> PendingQueue<E> {
     }
 
     /// 冲刷：按入队序全量重验重试，直到一轮内无进展（消化一条可能解锁
-    /// 下一条）。返回本轮消化的条数。
+    /// 下一条）。确定性失败（`StaleTxNonce`）立即死信；其余失败 hold 满
+    /// [`MAX_HOLDS`] 次后死信。返回本轮消化的条数。
     pub fn flush(
         &mut self,
         apply: &mut dyn FnMut(&E, &[u8; 32], &[u8]) -> PokerL1Result<()>,
@@ -108,14 +120,27 @@ impl<E: Clone> PendingQueue<E> {
             let mut i = 0;
             while i < self.entries.len() {
                 let entry = &self.entries[i];
-                if apply(&entry.envelope, &entry.selector, &entry.args).is_ok() {
-                    self.entries.remove(i);
-                    self.flushed_total += 1;
-                    flushed += 1;
-                    progressed = true;
-                } else {
-                    self.entries[i].hold_count += 1;
-                    i += 1;
+                match apply(&entry.envelope, &entry.selector, &entry.args) {
+                    Ok(()) => {
+                        self.entries.remove(i);
+                        self.flushed_total += 1;
+                        flushed += 1;
+                        progressed = true;
+                    }
+                    Err(e) if matches!(e, crate::error::PokerL1Error::StaleTxNonce { .. }) => {
+                        // 陈旧 nonce 是确定性失败：重试永不过，立即死信。
+                        let entry = self.entries.remove(i);
+                        self.dead.push(entry);
+                    }
+                    Err(_) => {
+                        self.entries[i].hold_count += 1;
+                        if self.entries[i].hold_count >= MAX_HOLDS {
+                            let entry = self.entries.remove(i);
+                            self.dead.push(entry);
+                        } else {
+                            i += 1;
+                        }
+                    }
                 }
             }
         }
@@ -147,5 +172,71 @@ impl<E: Clone> PendingQueue<E> {
             "pending queue has {} unmatched command(s) at hand end — fail-closed: {detail}",
             self.entries.len()
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 永远失败的 apply（模拟相位永不开/畸形载荷）。
+    fn always_err() -> PokerL1Error {
+        PokerL1Error::Serialization("phase not open".into())
+    }
+
+    #[test]
+    fn stale_nonce_dead_letters_immediately() {
+        let mut q: PendingQueue<u8> = PendingQueue::new(8);
+        q.submit(1, &[0; 32], &[], &mut |_, _, _| Err(PokerL1Error::StaleTxNonce { nonce: 7 }))
+            .expect("submit defers business errors");
+        assert_eq!(q.len(), 1);
+        let flushed = q.flush(&mut |_, _, _| Err(PokerL1Error::StaleTxNonce { nonce: 7 }));
+        assert_eq!(flushed, 0);
+        assert!(q.is_empty(), "stale entry dead-lettered, not held");
+        assert_eq!(q.dead().len(), 1, "dead list keeps the full entry");
+        // 死信不影响收尾：fail-closed 门只看活条目。
+        q.deny_unmatched().expect("no live entries — finish clean");
+    }
+
+    #[test]
+    fn hold_limit_dead_letters_after_max_holds() {
+        let mut q: PendingQueue<u8> = PendingQueue::new(8);
+        q.submit(1, &[0; 32], &[], &mut |_, _, _| Err(always_err()))
+            .expect("deferred");
+        // 每次 flush 无进展即止（一轮一个 hold）；到上限的死信在第
+        // MAX_HOLDS 次冲刷发生。
+        for _ in 0..MAX_HOLDS {
+            q.flush(&mut |_, _, _| Err(always_err()));
+        }
+        assert!(
+            q.is_empty(),
+            "permanently-failing entry dead-lettered after MAX_HOLDS"
+        );
+        assert_eq!(q.dead().len(), 1);
+        assert_eq!(q.dead()[0].hold_count, MAX_HOLDS);
+    }
+
+    #[test]
+    fn retryable_entry_survives_until_unlocked() {
+        let mut q: PendingQueue<u8> = PendingQueue::new(8);
+        let mut gate = false;
+        q.submit(1, &[0; 32], &[], &mut |_, _, _| {
+            if gate {
+                Ok(())
+            } else {
+                Err(always_err())
+            }
+        })
+        .expect("deferred");
+        // 数轮冲刷：仍持有（hold 数增长但未到上限）。
+        for _ in 0..3 {
+            q.flush(&mut |_, _, _| Err(always_err()));
+        }
+        assert_eq!(q.len(), 1, "retryable entry still held");
+        // 窗口打开后消化。
+        gate = true;
+        let flushed = q.flush(&mut |_, _, _| Ok(()));
+        assert_eq!(flushed, 1);
+        assert!(q.is_empty() && q.dead().is_empty());
     }
 }

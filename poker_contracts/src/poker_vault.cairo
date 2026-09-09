@@ -10,6 +10,14 @@
 /// - `withdraw()` is permissionless but only up to the caller's chip balance.
 /// - Pausing halts new deposits and withdrawals (settlement application is
 ///   also gated in this deployment for simplicity).
+/// - Session tx-pk storage visibility (P1-2, 2026-09-10): `session_tx_pk` /
+///   expiry are PUBLIC storage — the privacy buy-in path (anonymizer +
+///   `set_session_tx_pk_for`) hides the PAYER, not the chip-holder's state
+///   deltas (`chip_balances` / `session_last_activity` are already public).
+///   The exposed binding is "chip-holder address ↔ session key ↔ validity
+///   window", i.e. a playing window on an already-public address; it never
+///   links to the funding wallet. Do not treat it as a privacy defect —
+///   changing it would require a shielded registry.
 use openzeppelin::access::ownable::OwnableComponent;
 use openzeppelin::security::pausable::PausableComponent;
 use openzeppelin::token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTrait};
