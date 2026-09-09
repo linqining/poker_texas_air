@@ -2923,6 +2923,7 @@ fn digest<T: BorshSerialize>(domain: &[u8], value: &T) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::well_formed_tx_pk_fixture;
     use super::*;
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::constants::ROUND_FLOP;
@@ -3240,6 +3241,7 @@ mod tests {
             [1; 20],
             100,
             ECPoint(generator * scalar_from_u64(1)),
+            well_formed_tx_pk_fixture(),
             SeatStatus::Active,
         )
         .expect("active timed-out fixture seat");
@@ -3247,6 +3249,7 @@ mod tests {
             [2; 20],
             200,
             ECPoint(generator * scalar_from_u64(2)),
+            well_formed_tx_pk_fixture(),
             SeatStatus::Active,
         )
         .expect("active retained fixture seat");
@@ -3300,6 +3303,7 @@ mod tests {
             [1; 20],
             100,
             ECPoint(generator * scalar_from_u64(1)),
+            well_formed_tx_pk_fixture(),
             SeatStatus::Active,
         )
         .expect("active timed-out reveal fixture seat");
@@ -3307,6 +3311,7 @@ mod tests {
             [2; 20],
             200,
             ECPoint(generator * scalar_from_u64(2)),
+            well_formed_tx_pk_fixture(),
             SeatStatus::Active,
         )
         .expect("active retained reveal fixture seat");

@@ -512,13 +512,7 @@ impl JoinTableArgs {
             player,
             buy_in,
             pk: ECPoint(pk),
-            tx_pk: crate::signature::TaggedPubkey {
-                tag: crate::signature::encode_tag(
-                    crate::signature::SignatureScheme::Stark,
-                    crate::signature::CURRENT_VERSION,
-                ),
-                raw: vec![0u8; 32],
-            },
+            tx_pk: super::types::unregistered_tx_pk(),
             pk_ownership_proof: super::utils::create_pk_ownership_proof(&secret_key, &nonce)?,
         })
     }
@@ -767,50 +761,6 @@ pub fn tx_message_hash(
         .finalize_variable(&mut out)
         .expect("32-byte blake2b output");
     out
-}
-
-/// 一条已签名交易（`dispatch_signed` 消费）。
-#[derive(Debug, Clone, Copy)]
-pub struct SignedTx<'a> {
-    pub selector: &'a [u8; 32],
-    pub args: &'a [u8],
-    /// 钱包签名：Stark Schnorr = 64B（R‖s，[`super::caller_id::sign`]），
-    /// ed25519 = 64B（R||S）/ secp256k1 = 65B（r||s||v）——按
-    /// `context.caller_pubkey` 的 tag 路由验证。
-    pub signature: &'a [u8],
-    /// 发送方 nonce（进签名消息；重放策略由 runtime 门面管理）。
-    pub nonce: u64,
-}
-
-/// 签名完整性分发：先验证 `context.caller_pubkey` 对 (chain, table,
-/// caller, selector, args, nonce) 的签名，通过后执行普通 dispatch。
-///
-/// **信任模型（P1-2 修复，2026-09-09）**：本函数验证的是签名与公钥的
-/// 匹配及消息完整性；调用方（[`super::table_runtime`]）的调用方身份由
-/// 钱包地址确定性派生（[`super::caller_id`]）——派生公开可计算，签名
-/// 是完整性层而非钱包持有证明（资金授权在 Starknet vault / #18 动作
-/// 签名层）。直接调用方必须自行保证 `context.caller` 与
-/// `context.caller_pubkey` 的对应关系（派生或登记），不得盲信任意
-/// host 注入的 (address, pubkey) 对。
-///
-/// 注意：本函数只做完整性校验，不做重放策略——nonce 去重由
-/// [`super::table_runtime`] 的 applied-nonce 集合管理；直接调用方须
-/// 自行实现等价策略。
-pub fn dispatch_signed(
-    context: &DispatchContext,
-    table: &mut TexasPokerTable,
-    tx: SignedTx,
-) -> PokerL1Result<DispatchResult> {
-    let msg_hash = tx_message_hash(
-        context.chain_id,
-        &table.id,
-        &context.caller,
-        tx.selector,
-        tx.args,
-        tx.nonce,
-    );
-    crate::signature::verify_signature(&context.caller_pubkey, tx.signature, &msg_hash)?;
-    dispatch(context, table, tx.selector, tx.args)
 }
 
 /// Execute the canonical VM transition and return its exact native execution trace.

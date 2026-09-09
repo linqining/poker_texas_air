@@ -172,11 +172,10 @@ mod action_sig_parity {
     /// verify_hand——真客户端签名路径与 host 验证路径的等价性。
     #[test]
     fn protocol_signed_action_verifies_in_spike() {
-        use poker_protocol_core::curve::{Curve, CurvePoint, CurveScalar};
+        use poker_protocol_core::curve::{Curve, CurveScalar};
         use poker_protocol_core::stark_curve::action_sig_challenge;
         type SC = poker_protocol_core::StarkCurve;
 
-        use starknet_types_core::felt::Felt as CoreFelt;
         let sk = <SC as Curve>::Scalar::from_u64(424242);
         let pk = <SC as Curve>::base_g() * sk;
         let w = <SC as Curve>::Scalar::from_u64(999);
@@ -185,10 +184,6 @@ mod action_sig_parity {
         let c_core = action_sig_challenge(7, 42, 1, "call", 50, rx, ry).expect("encode");
         let s = w + c_core * sk;
 
-        // spike 侧：hex 往返（texas 材料 transmisión 同款）
-        let hex32 = |f: starknet_crypto::FieldElement| -> String {
-            format!("0x{}", f.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>())
-        };
         let (pkx, pky) = pk.to_affine_parts().expect("affine pk");
         let payload = vec![
             Felt::ZERO, Felt::ZERO, Felt::ZERO, Felt::ZERO, Felt::ZERO,
@@ -226,6 +221,7 @@ mod action_sig_parity {
 
     #[test]
     fn action_sig_challenge_matches_protocol_core() {
+        use starknet_types_core::felt::Felt as CoreFelt;
         let g = Point::generator();
         let r = g.mul(Felt::from(777u64));
         let (rx, ry) = r.to_affine().expect("non-identity R");
@@ -238,7 +234,6 @@ mod action_sig_parity {
         let raw = action_sig_challenge_raw(
             table_id, hand_id, seq, ascii_felt(action), amount, r,
         );
-        use starknet_types_core::felt::Felt as CoreFelt;
         let core = poker_protocol_core::stark_curve::action_sig_challenge(
             table_id as u32,
             hand_id as u32,

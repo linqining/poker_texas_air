@@ -329,7 +329,6 @@ impl Table {
         if !self.reveal_token_state.pending_players.iter().any(|p| p == player_pk) {
             return Err(Self::ERR_ALREADY_SUBMITTED.to_string());
         }
-        let tokens_clone = tokens.clone();
         // reveal 域权威路径（Phase 2b 第二刀）：先经实时 VM 镜像做 canonical
         // 重排 + 证明验证 + 窗口推进——VM 拒绝 = 动作非法，直接拒绝客户端。
         // 无实时镜像的手（不可证明）走下方本地规则兜底。

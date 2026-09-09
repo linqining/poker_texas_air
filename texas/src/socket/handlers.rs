@@ -1557,7 +1557,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             let mut fold_tables = Vec::new();
             let mut affected = Vec::new();
             let mut should_cleanup = false;
-            let mut sitting_out_tables = Vec::new();
+            let sitting_out_tables = Vec::new();
 
             for (table_id, table) in gs.tables.iter_mut() {
                 if wallet_address.as_ref().map_or(true, |wallet_address| table.find_player_by_wallet(wallet_address).is_none()) {

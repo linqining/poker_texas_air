@@ -5,6 +5,8 @@
 #[derive(Debug, Clone, Copy)]
 pub enum CryptoEventType {
     Shuffle,
+    /// 预留（remask 证明尚未接线广播）。
+    #[allow(dead_code)]
     Remask,
     RevealToken,
     Leave,

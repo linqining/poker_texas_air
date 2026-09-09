@@ -675,8 +675,7 @@ mod recursion_e2e {
     use crate::pokergame::actions::ActionSig;
     use crate::starknet::recursion_prover;
     use hand_verify_native::recurse::{
-        build_action_batch_payload, fold_accumulator, prove_payload_layer, write_prod_params,
-        RecurseTask, GENESIS_ACC,
+        build_action_batch_payload, fold_accumulator, RecurseTask, GENESIS_ACC,
     };
     use hand_verify_native::handbatch::{payload_digest, verify_hand};
     use poker_protocol::z_poker::protocol::sign_game_action;
@@ -787,6 +786,7 @@ mod recursion_e2e {
             submit_real_shuffle(&mut table, player);
             shuffled += 1;
         }
+        assert_eq!(shuffled, 2, "every player shuffles exactly once");
         table.advance_shuffle();
         assert!(table.reveal_token_state.phase == RevealPhase::HandReveal);
         drive_reveal_phase(&mut table, &players);
@@ -825,7 +825,7 @@ mod recursion_e2e {
     /// 派彩前快照（record_final_bets）必须保留终局投入。
     #[test]
     fn showdown_settle_keeps_pre_payout_total_bets() {
-        let mut table = run_signed_full_hand(9131);
+        let table = run_signed_full_hand(9131);
         // 摊牌派彩已完成（win_hand 已清零赢家的 seat.total_bet）……
         let any_seat_bet_left = table
             .seats()

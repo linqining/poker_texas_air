@@ -1050,7 +1050,7 @@ mod runtime_authority_e2e {
 
     impl RtWallet {
         fn new(seed_byte: u8) -> Self {
-            use poker_protocol::crypto::curve::{CurvePoint, CurveScalar};
+            use poker_protocol::crypto::curve::CurvePoint;
             let wallet = format!("0x{:064x}", (seed_byte as u64) * 0x0100_0000_0000_0001);
             let address = caller_id::wallet_to_address(&wallet).expect("test wallet parses");
             // 跨 crate 对拍：poker_l1 权威公式与 texas addr_from_starknet 同源。

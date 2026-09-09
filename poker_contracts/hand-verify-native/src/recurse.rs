@@ -392,14 +392,11 @@ fn felt_from_hex(hex_str: &str) -> Result<Felt, String> {
     Felt::from_bytes_be(&buf).map_err(|e| format!("felt out of range: {e:?}"))
 }
 
-fn felt_hex_pub(f: Felt) -> String {
-    format!("0x{}", f.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>())
-}
-
 /// 组装 action-sig 批次 payload（v3 header 6 词 + 每语句 10 词）。
 /// host 直验（fail-closed）：任一语句 off-curve / 签名不闭合 → Err。
+/// `_hand_binding`：v3 header 预留位（当前 payload 不绑定 hand_binding）。
 pub fn build_action_batch_payload(
-    hand_binding: Felt,
+    _hand_binding: Felt,
     table_id: u32,
     hand_id: u32,
     statements: &[ActionSigStatement],

@@ -413,6 +413,7 @@ fn validate_reconstruct_terminal(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::well_formed_tx_pk_fixture;
     use super::*;
     use crate::canonical_reveal_opening::{
         CanonicalRevealAssignmentOpening, MAX_CANONICAL_REVEAL_ASSIGNMENTS,
@@ -667,6 +668,7 @@ mod tests {
                 [seat + 1; 20],
                 100,
                 ECPoint(generator * scalar_from_u64(u64::from(seat + 1))),
+                well_formed_tx_pk_fixture(),
                 SeatStatus::Active,
             )
             .unwrap();
@@ -729,6 +731,7 @@ mod tests {
                 [seat + 1; 20],
                 100,
                 ECPoint(generator * scalar_from_u64(u64::from(seat + 1))),
+                well_formed_tx_pk_fixture(),
                 SeatStatus::Active,
             )
             .unwrap();
@@ -787,6 +790,7 @@ mod tests {
                 [seat + 1; 20],
                 100,
                 ECPoint(generator * scalar_from_u64(u64::from(seat + 1))),
+                well_formed_tx_pk_fixture(),
                 SeatStatus::Active,
             )
             .unwrap();
@@ -867,6 +871,7 @@ mod tests {
                 [seat + 1; 20],
                 100,
                 ECPoint(generator * scalar_from_u64(u64::from(seat + 1))),
+                well_formed_tx_pk_fixture(),
                 SeatStatus::Active,
             )
             .unwrap();

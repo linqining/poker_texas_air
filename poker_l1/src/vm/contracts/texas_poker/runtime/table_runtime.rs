@@ -104,7 +104,7 @@ pub struct Submission {
     pub block_timestamp: u64,
     pub selector: [u8; 32],
     pub args: Vec<u8>,
-    /// Stark Schnorr 签名（64B = R‖s，见 [`caller_id::sign`]）。
+    /// Stark Schnorr 签名（64B = R‖s，方案见 [`crate::signature::stark_scheme`]）。
     pub signature: Vec<u8>,
     /// 发送方 nonce：进签名消息 + applied 集合防重放。
     pub nonce: u64,
@@ -442,7 +442,9 @@ mod tests {
             &[2u8; 8],
             1,
         );
-        let derived_sig = caller_id::sign(WALLET, &msg).to_vec();
+        // 用（已废弃授权职能的）确定性身份钥签名——证明派生钥不再是锚。
+        let derived_sig =
+            stark_scheme::sign(&caller_id::identity_sk(WALLET), &msg).to_vec();
         let sub_unregistered = Submission {
             wallet: WALLET.to_string(),
             block_timestamp: 1,

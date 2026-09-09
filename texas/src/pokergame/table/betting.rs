@@ -1,8 +1,6 @@
 use super::*;
 use crate::pokergame::betting::BettingRound;
 
-use super::*;
-
 impl Table {
     /// 揭牌仪式（翻前底牌/公共牌/摊牌 reveal）期间拒绝下注动作：此时
     /// betting_round 是上一街的陈旧轮，validate_* 会用陈旧 current_bet

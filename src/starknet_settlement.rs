@@ -659,6 +659,7 @@ fn felt_to_bytes16(felt: FieldElement) -> TexasAirResult<[u8; 16]> {
 mod tests {
     use super::*;
     use crate::state_root::StateRoot;
+    use crate::test_support::well_formed_tx_pk_fixture;
     use crate::verified_chain::{VerificationReceipt, VerifiedChain};
 
     /// 测试用动作日志哈希样例（#18 Phase B 吸收链尾词；值本身不重要，
@@ -708,6 +709,7 @@ mod tests {
                     player,
                     stack: 1000,
                     pk: ECPoint(g1_gen()),
+                    tx_pk: well_formed_tx_pk_fixture(),
                     pending_addon: 0,
                     time_bank_ms: 30_000,
                 },

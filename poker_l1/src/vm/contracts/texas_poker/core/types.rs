@@ -218,12 +218,17 @@ pub fn unregistered_tx_pk() -> crate::signature::TaggedPubkey {
     }
 }
 
-/// 会话交易公钥是否为**已登记**（Stark scheme、32B、非恒等元压缩点）。
+/// 会话交易公钥结构合法性：Stark scheme + 32B 压缩点（不校验恒等元）。
 #[must_use]
-pub fn is_registered_tx_pk(pk: &crate::signature::TaggedPubkey) -> bool {
+pub fn is_well_formed_tx_pk(pk: &crate::signature::TaggedPubkey) -> bool {
     matches!(pk.scheme(), Ok(crate::signature::SignatureScheme::Stark))
         && pk.raw.len() == crate::signature::SignatureScheme::Stark.raw_pubkey_len()
-        && pk.raw.iter().any(|&b| b != 0)
+}
+
+/// 会话交易公钥是否为**已登记**（结构合法且非恒等元/全零哨兵）。
+#[must_use]
+pub fn is_registered_tx_pk(pk: &crate::signature::TaggedPubkey) -> bool {
+    is_well_formed_tx_pk(pk) && pk.raw.iter().any(|&b| b != 0)
 }
 
 /// Mutually exclusive status of a player participating in the current hand.
@@ -320,9 +325,7 @@ impl Seat {
         // 结构校验（Stark scheme + 32B 压缩点）；"已登记"（非恒等元）与否
         // 不在 core 强制——策略归 runtime：TableRuntime 的签名路径对未
         // 登记座位 fail-closed（mirror 注入路径不需要 tx 签名，允许哨兵）。
-        if !matches!(tx_pk.scheme(), Ok(crate::signature::SignatureScheme::Stark))
-            || tx_pk.raw.len() != crate::signature::SignatureScheme::Stark.raw_pubkey_len()
-        {
+        if !is_well_formed_tx_pk(&tx_pk) {
             return Err(PokerL1Error::Serialization(
                 "Texas join tx_pk must be a Stark-scheme 32-byte compressed point".into(),
             ));

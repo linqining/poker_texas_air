@@ -16,7 +16,6 @@ use poker_protocol::crypto::types::{EcPoint, Scalar, base_g, hash_to_scalar};
 
 use crate::Address;
 use crate::error::{PokerL1Error, PokerL1Result};
-use crate::signature::stark_scheme;
 use crate::signature::tagged_pubkey::{SignatureScheme, TaggedPubkey};
 
 /// 钱包 felt hex → VM 20 字节地址。
@@ -55,19 +54,23 @@ pub fn wallet_to_address(felt_hex: &str) -> PokerL1Result<Address> {
 /// 身份私钥：`hash_to_scalar(wallet.as_bytes())`。
 ///
 /// 与 `ClientPlayer::new_with_wallet_address`（client.rs）逐字节同源——
-/// 客户端、服务端、链运行时对同一钱包派生出同一密钥。
+/// 客户端、服务端、链运行时对同一钱包派生出同一密钥。**已不用于任何
+/// 验签锚**（授权在座位登记的会话公钥）；保留给测试的负路径（证明
+/// 派生签名不再能通过认证）与工具用途。
 #[must_use]
 pub fn identity_sk(felt_hex: &str) -> Scalar {
     hash_to_scalar(felt_hex.as_bytes())
 }
 
-/// 身份公钥：`base_g() * identity_sk(wallet)`。
-#[must_use]
-pub fn identity_pk(felt_hex: &str) -> EcPoint {
+/// 身份公钥：`base_g() * identity_sk(wallet)`（模块内派生用）。
+fn identity_pk(felt_hex: &str) -> EcPoint {
     base_g() * identity_sk(felt_hex)
 }
 
 /// 身份公钥的 tagged 编码（Stark scheme，raw = 32B 压缩点）。
+///
+/// 仅用于 unsigned 管理路径的 `DispatchContext.caller_pubkey` 填充；
+/// 签名交易的验证锚是座位登记的会话公钥（`OccupiedSeat.tx_pk`）。
 #[must_use]
 pub fn identity_tagged_pk(felt_hex: &str) -> TaggedPubkey {
     let raw = identity_pk(felt_hex).compress().as_ref().to_vec();
@@ -77,18 +80,6 @@ pub fn identity_tagged_pk(felt_hex: &str) -> TaggedPubkey {
         raw,
     )
     .expect("compressed stark point is 32 bytes")
-}
-
-/// 以钱包的确定性身份签名（Stark Schnorr，确定性 nonce）。
-/// 消息哈希构造见 [`super::dispatch::tx_message_hash`]。
-#[must_use]
-pub fn sign(felt_hex: &str, msg_hash: &[u8; 32]) -> [u8; stark_scheme::SIGNATURE_LEN] {
-    stark_scheme::sign(&identity_sk(felt_hex), msg_hash)
-}
-
-/// 用钱包的确定性身份公钥验签（等价于 `verify_signature` 的 Stark 路由）。
-pub fn verify(felt_hex: &str, msg_hash: &[u8; 32], sig: &[u8]) -> PokerL1Result<()> {
-    stark_scheme::verify_point(&identity_pk(felt_hex), msg_hash, sig)
 }
 
 #[cfg(test)]
@@ -146,20 +137,5 @@ mod tests {
             wallet_to_address(WALLET_A.strip_prefix("0x").unwrap()).unwrap(),
             wallet_to_address(WALLET_A).unwrap()
         );
-    }
-
-    #[test]
-    fn sign_verify_roundtrip_and_cross_wallet_rejected() {
-        let msg = [0x42u8; 32];
-        let sig = sign(WALLET_A, &msg);
-        assert_eq!(sig.len(), stark_scheme::SIGNATURE_LEN);
-        verify(WALLET_A, &msg, &sig).expect("own signature verifies");
-        // WALLET_B 的签名不能通过 WALLET_A 的公钥验证（身份绑定）。
-        let sig_b = sign(WALLET_B, &msg);
-        assert!(verify(WALLET_A, &msg, &sig_b).is_err());
-        // 篡改消息后验不过
-        let mut other = msg;
-        other[31] ^= 1;
-        assert!(verify(WALLET_A, &other, &sig).is_err());
     }
 }
