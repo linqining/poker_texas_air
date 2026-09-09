@@ -289,6 +289,62 @@ pub async fn vault_session_active(wallet: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// P1-2 会话委托：查钱包在 vault 上当前**有效**登记的会话交易公钥
+/// （`active_session_tx_pk`；未登记/已过期 = None）。
+///
+/// join 接受点用它核验"客户端声明的会话钥 == 链上登记钥"——登记在
+/// 买入时完成（非私密路径玩家 multicall `set_session_tx_pk`；STRK20
+/// 私密路径 anonymizer 同笔私交易 `set_session_tx_pk_for`）。view 调用
+/// 零链上足迹（重连不产生任何交易）。
+pub async fn vault_active_session_tx_pk(wallet: &str) -> Option<[u8; 32]> {
+    let chain = super::chain()?;
+    let vault = vault_address().ok()?;
+    let player = parse_felt(wallet)?;
+    let felts = chain
+        .call_contract(vault, selector("active_session_tx_pk"), vec![player])
+        .await
+        .ok()?;
+    let pk = felts.first()?;
+    let bytes = pk.to_bytes_be();
+    if bytes.iter().all(|&b| b == 0) {
+        return None; // 未登记
+    }
+    Some(bytes)
+}
+
+/// P1-2 会话委托核验（join 接受点）：客户端声明的会话交易公钥（32B 压缩
+/// 点 hex）与链上 vault 登记逐字节一致 → `Some(bytes)`（随 join 缓冲进入
+/// 座位状态，成为该座 VM 层交易签名验证锚）；未声明 / 格式错 / 链上未
+/// 登记 / 不一致 → `None`（该参与者签名路径未激活——过渡期仅告警，
+/// TableRuntime 接线后对 None fail-closed）。
+pub async fn verify_session_tx_pk(wallet: &str, declared_hex: Option<&str>) -> Option<Vec<u8>> {
+    let declared = declared_hex?.trim();
+    if declared.is_empty() {
+        return None;
+    }
+    let body = declared.strip_prefix("0x").unwrap_or(declared);
+    let bytes = match hex::decode(body) {
+        Ok(b) if b.len() == 32 => b,
+        _ => {
+            tracing::warn!("[session-tx-pk] {wallet} 声明的会话公钥格式非法（期望 32B hex）");
+            return None;
+        }
+    };
+    match vault_active_session_tx_pk(wallet).await {
+        Some(onchain) if onchain.as_slice() == bytes.as_slice() => Some(bytes),
+        Some(_) => {
+            tracing::warn!(
+                "[session-tx-pk] {wallet} 声明的会话公钥与链上 vault 登记不一致 — 未登记（按旧客户端处理）"
+            );
+            None
+        }
+        None => {
+            tracing::debug!("[session-tx-pk] {wallet} 链上未登记会话公钥（旧客户端/未买入登记）");
+            None
+        }
+    }
+}
+
 /// operator 账户 nonce 竞态判定（结算 bundle / vault 调用共用）：
 /// 相邻两手结算或结算与释放并发时，后一笔按旧 nonce 构建会被内存池
 /// 拒绝——可退避重试（重发会按链上最新 nonce 重建）。注意执行期错误

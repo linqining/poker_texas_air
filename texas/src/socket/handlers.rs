@@ -927,11 +927,22 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             let pk_proof_bytes = payload.pk_proof.to_proof()
                 .map(|p| crate::relayer::proof_bytes::serialize_pk_ownership_proof(&p))
                 .unwrap_or_default();
+            // P1-2 会话委托核验：客户端声明的会话交易公钥必须与链上 vault
+            // 登记（买入同笔 multicall `set_session_tx_pk[_for]`）完全一致，
+            // 核验通过的钥随 join 缓冲进入座位状态（VM 签名验证锚）。
+            // 不一致/未登记 → None（该参与者签名路径未激活，仅告警——
+            // 过渡期旧客户端；runtime 接线后升级为硬拒）。
+            let verified_tx_pk = crate::starknet::lock::verify_session_tx_pk(
+                &player.wallet_address.0,
+                payload.session_tx_pk.as_deref(),
+            )
+            .await;
             crate::starknet::prove_log::record_join(
                 payload.table_id,
                 &player.wallet_address.0,
                 &payload.pk_hex.0,
                 pk_proof_bytes,
+                verified_tx_pk,
             );
         }
 

@@ -3,12 +3,14 @@
 //! spec SEC-M9：tag 字节编码 `(scheme_id: 4 bits || version_id: 4 bits)`
 //! - `0x00` = secp256k1 v1（compressed 33B pubkey）
 //! - `0x01` = ed25519 v1（32B pubkey）
+//! - `0x02` = Stark Schnorr v1（32B 压缩点；2026-09-09 P1-2 引入）
 //! - `0x10`-`0xF0` 高位段预留（BLS12-381 / 后量子等）
 //! - 新 tag 引入须治理提案 + 90% quorum
 //!
 //! tagged pubkey = 1B tag || raw pubkey bytes
 //! - secp256k1: 1 + 33 = 34 字节
 //! - ed25519: 1 + 32 = 33 字节
+//! - stark: 1 + 32 = 33 字节（32B 压缩点）
 //!
 //! IMPL-SEC-1：tag 字节解析须常数时间（防 timing 侧信道泄露 scheme 信息）。
 
@@ -34,6 +36,10 @@ pub enum SignatureScheme {
     Secp256k1,
     /// ed25519（tag scheme_id = 1）
     Ed25519,
+    /// Stark 曲线 Schnorr（tag scheme_id = 2，2026-09-09 P1-2 引入）：
+    /// raw pubkey = 32B 压缩点、签名 64B（R‖s）。配套调用方身份为公开
+    /// 可派生的确定性身份（`runtime::caller_id`）——完整性层，非认证层。
+    Stark,
 }
 
 impl SignatureScheme {
@@ -42,6 +48,7 @@ impl SignatureScheme {
         match self {
             Self::Secp256k1 => 33, // compressed
             Self::Ed25519 => 32,
+            Self::Stark => 32, // compressed stark point（x + y 奇偶位）
         }
     }
 
@@ -50,6 +57,7 @@ impl SignatureScheme {
         match self {
             Self::Secp256k1 => 65, // r(32) || s(32) || v(1)
             Self::Ed25519 => 64,   // R(32) || S(32)
+            Self::Stark => 64,     // R_compressed(32) || s(32)
         }
     }
 
@@ -58,6 +66,7 @@ impl SignatureScheme {
         match id {
             0 => Some(Self::Secp256k1),
             1 => Some(Self::Ed25519),
+            2 => Some(Self::Stark),
             _ => None,
         }
     }
@@ -67,6 +76,7 @@ impl SignatureScheme {
         match self {
             Self::Secp256k1 => 0,
             Self::Ed25519 => 1,
+            Self::Stark => 2,
         }
     }
 }
@@ -201,15 +211,15 @@ mod tests {
 
     #[test]
     fn parse_tag_unknown_scheme_returns_error() {
-        // scheme_id = 2 (未定义)
+        // scheme_id = 3 (undefined)
         assert!(matches!(
-            TaggedPubkey::parse_tag(0x21),
-            Err(PokerL1Error::UnknownScheme { tag: 0x21 })
+            TaggedPubkey::parse_tag(0x31).unwrap_err(),
+            PokerL1Error::UnknownScheme { tag: 0x31 }
         ));
-        // scheme_id = 15 (预留)
+        // scheme_id = 15 (reserved)
         assert!(matches!(
-            TaggedPubkey::parse_tag(0xF1),
-            Err(PokerL1Error::UnknownScheme { tag: 0xF1 })
+            TaggedPubkey::parse_tag(0xF1).unwrap_err(),
+            PokerL1Error::UnknownScheme { tag: 0xF1 }
         ));
     }
 
@@ -236,6 +246,19 @@ mod tests {
     }
 
     #[test]
+    fn tagged_pubkey_roundtrip_stark() {
+        let raw = vec![0x07; 32]; // dummy compressed stark point
+        let tp = TaggedPubkey::new(SignatureScheme::Stark, 1, raw).unwrap();
+        assert_eq!(tp.tag, 0x21);
+        let bytes = tp.to_bytes();
+        assert_eq!(bytes.len(), 33);
+        let recovered = TaggedPubkey::from_bytes(&bytes).unwrap();
+        assert_eq!(tp, recovered);
+        assert_eq!(tp.scheme().unwrap(), SignatureScheme::Stark);
+        assert_eq!(tp.scheme().unwrap().signature_len(), 64);
+    }
+
+    #[test]
     fn tagged_pubkey_rejects_wrong_length() {
         // secp256k1 期望 33B，给 32B
         let err = TaggedPubkey::new(SignatureScheme::Secp256k1, 1, vec![0; 32]).unwrap_err();
@@ -243,6 +266,10 @@ mod tests {
 
         // ed25519 期望 32B，给 33B
         let err = TaggedPubkey::new(SignatureScheme::Ed25519, 1, vec![0; 33]).unwrap_err();
+        assert!(matches!(err, PokerL1Error::InvalidPubkeyLength { .. }));
+
+        // stark 期望 32B，给 31B
+        let err = TaggedPubkey::new(SignatureScheme::Stark, 1, vec![0; 31]).unwrap_err();
         assert!(matches!(err, PokerL1Error::InvalidPubkeyLength { .. }));
     }
 

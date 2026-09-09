@@ -39,6 +39,10 @@ pub struct HandStartData {
 pub struct HandParticipant {
     /// 游戏座位号（动作日志条目按它映射到本结构的 pk）。
     pub seat: u32,
+    /// 会话交易公钥（P1-2 会话委托，join 接受点经 vault 登记核验后的
+    /// 32B Stark 压缩点；None = 未登记——VM join 落未登记哨兵，签名路径
+    /// fail-closed，mirror 注入不受影响）。
+    pub tx_pk: Option<poker_l1::signature::TaggedPubkey>,
     /// 钱包 felt（hex，全精度——结算记账户头）。
     pub wallet: String,
     /// 玩家 pk hex（游戏层座位标识）。
@@ -90,17 +94,34 @@ impl HandProofLog {
 /// 仅是 socket 层与下一次 HandStart 之间的交接缓冲，不是状态账本
 /// （上一手未入局的残留会被 HandStart 的"参与者过滤"自然淘汰）。
 static JOIN_BUFFER: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<(u32, String), (String, Vec<u8>)>>,
+    std::sync::Mutex<
+        std::collections::HashMap<(u32, String), (String, Vec<u8>, Option<Vec<u8>>)>,
+    >,
 > = std::sync::OnceLock::new();
 
-fn join_buffer() -> &'static std::sync::Mutex<std::collections::HashMap<(u32, String), (String, Vec<u8>)>> {
+fn join_buffer() -> &'static std::sync::Mutex<
+    std::collections::HashMap<(u32, String), (String, Vec<u8>, Option<Vec<u8>>)>,
+> {
     JOIN_BUFFER.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 /// SIT_DOWN / join 成功后记录 pk 所有权证明（下一手 HandStart 消费）。
-pub fn record_join(table_id: u32, wallet: &str, pk_hex: &str, proof_bytes: Vec<u8>) {
+/// `tx_pk`：**已核验**的会话交易公钥（32B 压缩点；None = 未登记/未声明，
+/// 该参与者的 VM 层签名路径未激活——mirror 注入不受影响，runtime 签名
+/// 路径 fail-closed）。核验在 join 接受点完成（vault
+/// `active_session_tx_pk` view 对拍），本函数只存结论。
+pub fn record_join(
+    table_id: u32,
+    wallet: &str,
+    pk_hex: &str,
+    proof_bytes: Vec<u8>,
+    tx_pk: Option<Vec<u8>>,
+) {
     if let Ok(mut g) = join_buffer().lock() {
-        g.insert((table_id, wallet.to_string()), (pk_hex.to_string(), proof_bytes));
+        g.insert(
+            (table_id, wallet.to_string()),
+            (pk_hex.to_string(), proof_bytes, tx_pk),
+        );
     }
 }
 
@@ -147,7 +168,7 @@ pub fn record_hand_start(table: &mut Table) {
         if seat.sitting_out || seat.is_waiting {
             continue;
         }
-        let Some((pk_hex, proof)) = joins.as_ref().and_then(|j| {
+        let Some((pk_hex, proof, tx_pk_bytes)) = joins.as_ref().and_then(|j| {
             j.get(&(table_id, player.wallet_address.0.clone())).cloned()
         }) else {
             tracing::warn!(
@@ -166,8 +187,17 @@ pub fn record_hand_start(table: &mut Table) {
                 break;
             }
         };
+        let tx_pk = tx_pk_bytes.and_then(|bytes| {
+            poker_l1::signature::TaggedPubkey::new(
+                poker_l1::signature::SignatureScheme::Stark,
+                poker_l1::signature::CURRENT_VERSION,
+                bytes,
+            )
+            .ok()
+        });
         plan.push((seat_id, HandParticipant {
             seat: seat_id,
+            tx_pk,
             wallet: player.wallet_address.0.clone(),
             pk_hex,
             pk,

@@ -122,16 +122,14 @@ async fn settle_hand_from_log(
 
     // 终局比对 + 派奖推进：实时镜像即结算唯一 VM 来源。比对不干净 =
     // 镜像与游戏层分歧，其派生绝不上链。
+    //
+    // 结算门 = report.issues（对账分歧：board / rake / 逐钱包 deltas /
+    // total_bet / 零和）。**不含** bet_fail（2026-09-10 变更）：VM 是接受
+    // 点本身——VM 拒绝的动作游戏层同样拒绝，不构成状态分歧；把客户端
+    // 噪音（抢跑/轮次竞态/畸形加注）当分歧会交给恶意玩家一枚"单条非法
+    // 下注即令该手不可结算"的 griefing 武器。bet_fail 降级为观测指标。
     let (report, mirror) = live.finish(&input);
-    if report.issues.is_empty() && report.metrics.bet_fail == 0 {
-        tracing::info!(
-            "[live-mirror] table {table_id} hand {hand_id} parity OK: cmds={} reveal_ok={} bets={} folds={}",
-            report.metrics.commands,
-            report.metrics.reveal_ok,
-            report.metrics.bet_ok,
-            report.metrics.force_folds,
-        );
-    } else {
+    if !report.issues.is_empty() {
         refuse_settlement(
             table_id,
             hand_id,
@@ -139,6 +137,22 @@ async fn settle_hand_from_log(
         );
         return;
     }
+    if report.metrics.bet_fail > 0 {
+        tracing::warn!(
+            "[live-mirror] table {table_id} hand {hand_id}: {} bet(s) rejected by VM \
+             during hand (client noise/illegal actions) — settlement proceeds, \
+             gate is cross-check issues only",
+            report.metrics.bet_fail,
+        );
+    }
+    tracing::info!(
+        "[live-mirror] table {table_id} hand {hand_id} parity OK: cmds={} reveal_ok={} bets={} bet_fail={} folds={}",
+        report.metrics.commands,
+        report.metrics.reveal_ok,
+        report.metrics.bet_ok,
+        report.metrics.bet_fail,
+        report.metrics.force_folds,
+    );
     if !mirror.has_provable_activity() {
         refuse_settlement(table_id, hand_id, "live mirror has no prove tasks");
         return;
@@ -714,7 +728,8 @@ pub fn mirror_buffer_join_raw(
     pk_hex: &str,
     proof: Vec<u8>,
 ) {
-    super::prove_log::record_join(table_id, wallet, pk_hex, proof);
+    // bot 进程内路径未声明会话钥（未走 vault 登记）——None = 未登记。
+    super::prove_log::record_join(table_id, wallet, pk_hex, proof, None);
 }
 
 #[cfg(test)]

@@ -169,6 +169,13 @@ pub(crate) struct SitDownV2Payload {
     /// 玩家 Starknet 钱包地址（买入校验与结算参与者地址来源）。缺省回退 token 中的用户地址。
     #[serde(default)]
     pub wallet_address: Option<String>,
+    /// P1-2 会话委托：客户端声明的会话交易公钥（Stark Schnorr 32B 压缩点
+    /// hex，64 字符）。服务端经 vault `active_session_tx_pk` view 对拍核验
+    /// 后随 join 缓冲登记——它是该座位 VM 层交易签名的验证锚。买入时与
+    /// deposit 同一笔 multicall 完成链上登记（私密路径由 anonymizer 在
+    /// 同笔私交易 `set_session_tx_pk_for` 完成）。
+    #[serde(default)]
+    pub session_tx_pk: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -730,11 +737,15 @@ impl SocketState {
         let player_bankroll = player.bankroll;
 
                 // #20 Phase 2：缓冲 join 证明（下一手 HandStart 消费）。
+                // 会话交易公钥经 SIT_DOWN_V2 接受点核验后随 join 缓冲
+                // 传递（见 socket/handlers.rs）；本路径（重连/机器人等
+                // 次级 join）不携带——None = 未登记。
                 crate::starknet::prove_log::record_join(
                     table_id,
                     &player_wallet_address,
                     pk_hex.clone().0.as_str(),
                     mirror_pk_proof,
+                    None,
                 );
 
 

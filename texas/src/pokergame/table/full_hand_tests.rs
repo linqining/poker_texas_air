@@ -47,6 +47,8 @@ fn seat_players(table: &mut Table, n: u64) -> Vec<Player> {
             &format!("0x{:064x}", idx),
             &pk_hex,
             crate::relayer::proof_bytes::serialize_pk_ownership_proof(&proof),
+            // 会话交易公钥走 vault 登记核验路径，测试直连缓冲不携带（None）。
+            None,
         );
         table
             .mental_poker_game
@@ -1051,10 +1053,39 @@ mod shadow_e2e {
         assert!(report.issues.is_empty(), "shadow parity issues: {report:?}");
     }
 
+    /// 回归（2026-09-10）：被 VM 拒绝的下注（bet_fail > 0）不再阻断结算——
+    /// 结算门只看对账分歧（issues）。恶意玩家单条非法/抢跑下注不能令
+    /// 该手不可结算。
+    #[test]
+    fn rejected_bet_does_not_block_settlement() {
+        let table_id = 424244;
+        let table = drive_showdown_hand_opt(table_id, true);
+
+        let report = crate::starknet::shadow::take_last_report_for_test(table_id)
+            .expect("shadow must have finished with the hand");
+        assert_eq!(report.metrics.bet_fail, 1, "exactly one rejected bet: {report:?}");
+        assert!(report.issues.is_empty(), "rejected bet is client noise, not divergence: {report:?}");
+
+        // 结算输入照常产出、快照对账通过（旧门 bet_fail>0 会在此前拒掉这手）。
+        let input = crate::starknet::prove_log::take_settle_input(&table)
+            .expect("hand must have settle input");
+        let mirror = crate::starknet::shadow::take_last_mirror_for_test(table_id)
+            .expect("live hand mirror");
+        crate::starknet::hooks::cross_check_snapshot(&mirror, &input)
+            .expect("snapshot parity holds despite rejected bet");
+    }
+
     /// 驱动一手完整摊牌（真实加密 + reveal 补记 + 下注），走到
     /// finish_showdown（on_hand_complete 已触发）。供影子对账与生产
     /// 结算对账两个 e2e 复用。
     fn drive_showdown_hand(table_id: u32) -> Table {
+        drive_showdown_hand_opt(table_id, false)
+    }
+
+    /// `inject_rejected_bet = true`：首次轮到行动者前，让**非行动者**
+    /// 抢跑一次 call——VM 必须拒绝（bet_fail +1），且该拒绝不得影响
+    /// 后续结算（回归：bet_fail 不再是结算门，2026-09-10）。
+    fn drive_showdown_hand_opt(table_id: u32, inject_rejected_bet: bool) -> Table {
         let mut table = Table::new(table_id, "parity-e2e".to_string(), 10000, 9, String::new());
         let players = seat_players_hex_wallets(&mut table, 2);
         table.mental_poker_game.encrypt_deck();
@@ -1079,6 +1110,7 @@ mod shadow_e2e {
         assert!(!table.shuffle_state.is_active());
 
         let mut steps = 0;
+        let mut injected = false;
         loop {
             steps += 1;
             assert!(steps < 400, "game did not terminate");
@@ -1094,6 +1126,18 @@ mod shadow_e2e {
                 break;
             }
             if table.turn().is_some() {
+                if inject_rejected_bet && !injected {
+                    injected = true;
+                    let turn_pk = {
+                        let seat = table.local_seats.get(&table.turn().expect("turn")).expect("turn seat");
+                        seat.player.as_ref().expect("seat occupied").pk_hex.clone()
+                    };
+                    let bystander = players.iter().find(|p| p.pk_hex != turn_pk).expect("bystander");
+                    assert!(
+                        table.handle_call(&bystander.pk_hex).is_none(),
+                        "out-of-turn call must be rejected by VM"
+                    );
+                }
                 act_and_advance(&mut table, &players);
                 continue;
             }

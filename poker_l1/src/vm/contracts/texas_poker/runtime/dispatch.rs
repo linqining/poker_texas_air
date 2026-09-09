@@ -23,9 +23,9 @@
 //! dispatch 层目前仅记录日志（tracing::debug!）并丢弃，后续 Precompile
 //! 实现可在 Phase 3.3 / Phase 4 中扩展 DispatchResult 携带 events 字段。
 
+use super::utils::{BlsScalar, G1Projective};
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
-use super::utils::{BlsScalar, G1Projective};
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
@@ -37,9 +37,9 @@ use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use super::constants::{FOLD_REASON_FORCE_ADMIN, KICK_REASON_ADMIN};
 use super::events::TexasPokerEvent;
 use super::state_machine::{self, AdvanceDeadlineExecution, NormalizationReport};
-use super::types::TexasPokerTable;
 #[cfg(test)]
 use super::types::SeatStatus;
+use super::types::TexasPokerTable;
 use crate::Address;
 use crate::ChainId;
 use crate::error::{PokerL1Error, PokerL1Result};
@@ -491,6 +491,10 @@ pub struct JoinTableArgs {
     pub buy_in: u64,
     /// 玩家 ElGamal 公钥（G1 点，使用 ECPoint newtype 以支持 Borsh）。
     pub pk: ECPoint,
+    /// 会话交易公钥（P1-2 会话委托）：Stark Schnorr 32B 压缩点（tagged）。
+    /// 与链上 vault 登记（`set_session_tx_pk[_for]`）的一致性由游戏服务端
+    /// 在 join 接受点核验；入座后成为本座 VM 层交易签名的验证锚。
+    pub tx_pk: crate::signature::TaggedPubkey,
     /// 80-byte Schnorr proof that the caller knows the scalar behind `pk`.
     pub pk_ownership_proof: Vec<u8>,
 }
@@ -508,8 +512,23 @@ impl JoinTableArgs {
             player,
             buy_in,
             pk: ECPoint(pk),
+            tx_pk: crate::signature::TaggedPubkey {
+                tag: crate::signature::encode_tag(
+                    crate::signature::SignatureScheme::Stark,
+                    crate::signature::CURRENT_VERSION,
+                ),
+                raw: vec![0u8; 32],
+            },
             pk_ownership_proof: super::utils::create_pk_ownership_proof(&secret_key, &nonce)?,
         })
+    }
+
+    /// 显式携带会话交易公钥（生产 join 路径——`with_key` 的 tx_pk 是未登记
+    /// 哨兵，真实 join 必须由服务端核验后填充本方法设置的真钥）。
+    #[must_use]
+    pub fn with_tx_pk(mut self, tx_pk: crate::signature::TaggedPubkey) -> Self {
+        self.tx_pk = tx_pk;
+        self
     }
 }
 
@@ -616,6 +635,7 @@ pub struct RebuyArgs {
 struct CanonicalJoinTableArgs {
     buy_in: u64,
     pk: ECPoint,
+    tx_pk: crate::signature::TaggedPubkey,
     pk_ownership_proof: Vec<u8>,
 }
 
@@ -754,19 +774,28 @@ pub fn tx_message_hash(
 pub struct SignedTx<'a> {
     pub selector: &'a [u8; 32],
     pub args: &'a [u8],
-    /// 钱包签名：ed25519 = 64B（R||S）/ secp256k1 = 65B（r||s||v），
-    /// 按 `context.caller_pubkey` 的 tag 路由验证。
+    /// 钱包签名：Stark Schnorr = 64B（R‖s，[`super::caller_id::sign`]），
+    /// ed25519 = 64B（R||S）/ secp256k1 = 65B（r||s||v）——按
+    /// `context.caller_pubkey` 的 tag 路由验证。
     pub signature: &'a [u8],
     /// 发送方 nonce（进签名消息；重放策略由 runtime 门面管理）。
     pub nonce: u64,
 }
 
-/// 签名认证分发：先验证 `context.caller_pubkey` 对 (chain, table, caller,
-/// selector, args, nonce) 的签名（caller 身份不再盲信 host 上下文），通过后
-/// 执行普通 dispatch。
+/// 签名完整性分发：先验证 `context.caller_pubkey` 对 (chain, table,
+/// caller, selector, args, nonce) 的签名，通过后执行普通 dispatch。
 ///
-/// 注意：本函数只做认证，不做重放策略——nonce 去重由 [`super::table_runtime`]
-/// 的 applied-nonce 集合管理；直接调用方须自行实现等价策略。
+/// **信任模型（P1-2 修复，2026-09-09）**：本函数验证的是签名与公钥的
+/// 匹配及消息完整性；调用方（[`super::table_runtime`]）的调用方身份由
+/// 钱包地址确定性派生（[`super::caller_id`]）——派生公开可计算，签名
+/// 是完整性层而非钱包持有证明（资金授权在 Starknet vault / #18 动作
+/// 签名层）。直接调用方必须自行保证 `context.caller` 与
+/// `context.caller_pubkey` 的对应关系（派生或登记），不得盲信任意
+/// host 注入的 (address, pubkey) 对。
+///
+/// 注意：本函数只做完整性校验，不做重放策略——nonce 去重由
+/// [`super::table_runtime`] 的 applied-nonce 集合管理；直接调用方须
+/// 自行实现等价策略。
 pub fn dispatch_signed(
     context: &DispatchContext,
     table: &mut TexasPokerTable,
@@ -1335,6 +1364,7 @@ pub fn canonical_command_parts(selector: &[u8; 32], args: &[u8]) -> PokerL1Resul
             borsh::to_vec(&CanonicalJoinTableArgs {
                 buy_in: input.buy_in,
                 pk: input.pk,
+                tx_pk: input.tx_pk,
                 pk_ownership_proof: input.pk_ownership_proof,
             })
             .map_err(|error| {
@@ -1480,6 +1510,7 @@ pub fn replay_dispatch_args(
                 player,
                 buy_in,
                 pk: canonical.pk,
+                tx_pk: canonical.tx_pk,
                 pk_ownership_proof: canonical.pk_ownership_proof,
             })
         }
@@ -1776,6 +1807,7 @@ fn dispatch_join_table(
         input.player,
         input.buy_in,
         *input.pk,
+        input.tx_pk,
         &input.pk_ownership_proof,
         events,
     )
@@ -1893,8 +1925,7 @@ fn dispatch_submit_player_reveal_tokens(
         "submit_player_reveal_tokens",
     )?;
     // ECPoint → G1Projective（state_machine 接口使用裸 G1Projective）
-    let reveal_tokens: Vec<G1Projective> =
-        input.reveal_tokens.into_iter().map(|t| *t).collect();
+    let reveal_tokens: Vec<G1Projective> = input.reveal_tokens.into_iter().map(|t| *t).collect();
     state_machine::apply_submit_player_reveal_tokens(
         table,
         seat_index,
@@ -2091,6 +2122,19 @@ mod tests {
             super::super::utils::scalar_from_u64(secret + 10_000),
         )
         .unwrap()
+        .with_tx_pk(registered_tx_pk_fixture())
+    }
+
+    /// 测试用"已登记"会话交易公钥（base_g 压缩点，非恒等元）。
+    fn registered_tx_pk_fixture() -> crate::signature::TaggedPubkey {
+        use poker_protocol::crypto::curve::CurvePoint;
+        crate::signature::TaggedPubkey {
+            tag: crate::signature::encode_tag(
+                crate::signature::SignatureScheme::Stark,
+                crate::signature::CURRENT_VERSION,
+            ),
+            raw: poker_protocol::crypto::types::base_g().compress().as_ref().to_vec(),
+        }
     }
 
     fn decode_output(result: &DispatchResult) -> super::super::prove_task::L1DispatchOutput {
@@ -2322,6 +2366,7 @@ mod tests {
             player,
             buy_in: 1_000,
             pk: ECPoint(g1_identity()),
+            tx_pk: registered_tx_pk_fixture(),
             pk_ownership_proof: vec![0; 80],
         };
         let identity_error = dispatch(
@@ -3239,10 +3284,10 @@ mod tests {
         // 零标量复用 utils::scalar_zero()（封装了 ff::Field trait 的 ZERO 常量）。
         let zero = super::super::utils::scalar_zero();
         DLEqProof::from_parts(
-            vec![],                   // per_card_commitments
+            vec![],        // per_card_commitments
             g1_identity(), // commitment_pk（C::Point）
-            zero,                     // response（C::Scalar = BlsScalar）
-            zero,                     // nonce（C::Scalar = BlsScalar）
+            zero,          // response（C::Scalar = BlsScalar）
+            zero,          // nonce（C::Scalar = BlsScalar）
         )
     }
 

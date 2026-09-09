@@ -766,6 +766,99 @@ pub fn sign_action(
         .map(|v| serde_wasm_bindgen::to_value(&v).unwrap_or(JsValue::NULL))
 }
 
+
+// =============================================================================
+// P1-2 会话委托：VM 层交易签名的会话密钥（2026-09-10）
+//
+// 与 ElGamal 会话密钥（WasmClientPlayer）平行的第二把会话钥：它是玩家在
+// VM/链运行时（TableRuntime）交易签名的**授权锚**——买入时经 vault
+// `set_session_tx_pk`（非私密路径玩家 multicall / 私密路径 anonymizer 同笔
+// 私交易 `set_session_tx_pk_for`）登记到链上，join 时随 payload 声明、
+// 服务端 view 对拍核验。重连只需 localStorage 恢复（get_sk_hex/from_sk），
+// 零钱包交互。
+//
+// 签名格式与 poker_l1 `signature::stark_scheme` 完全一致（Stark Schnorr，
+// 确定性 nonce）：sig = R_compressed(32B) ‖ s(32B)。以下两个域分隔常量
+// 必须与 poker_l1/src/signature/stark_scheme.rs 保持逐字节同步。
+// =============================================================================
+
+const TX_SCHNORR_CHALLENGE_DOMAIN: &[u8] = b"zchain.schnorr.v1";
+const TX_SCHNORR_NONCE_DOMAIN: &[u8] = b"zchain.schnorr.nonce.v1";
+
+/// VM 交易会话密钥（随机新鲜钥，与钱包地址零派生关系）。
+#[wasm_bindgen]
+pub struct WasmTxSession {
+    sk: Scalar,
+    pk: EcPoint,
+}
+
+#[wasm_bindgen]
+impl WasmTxSession {
+    /// 生成随机会话密钥（进入牌桌前调用一次；sk 存 localStorage）。
+    #[wasm_bindgen(constructor)]
+    pub fn generate() -> WasmTxSession {
+        let sk = Scalar::random(&mut OsRng);
+        let pk = base_g() * &sk;
+        WasmTxSession { sk, pk }
+    }
+
+    /// 从 localStorage 的 sk hex 恢复（重连路径——零钱包交互）。
+    pub fn from_sk(sk_hex: &str) -> Result<WasmTxSession, JsValue> {
+        let sk = hex_to_scalar(sk_hex).map_err(|e| JsValue::from_str(&e))?;
+        let pk = base_g() * &sk;
+        Ok(WasmTxSession { sk, pk })
+    }
+
+    /// 会话公钥（32B 压缩点 hex）——join payload 的 `sessionTxPk` 字段与
+    /// 链上登记 felt 使用同一编码。
+    pub fn get_pk_hex(&self) -> String {
+        hex::encode(self.pk.compress().as_ref())
+    }
+
+    /// 会话私钥 hex（localStorage 持久化）。
+    pub fn get_sk_hex(&self) -> String {
+        scalar_to_hex(&self.sk)
+    }
+
+    /// Stark Schnorr 签名（msg_hash = 32B hex；返回 64B 签名的 hex）——
+    /// 消息哈希公式见 poker_l1 `dispatch::tx_message_hash`（客户端须用
+    /// 同一公式构造待签哈希）。
+    pub fn sign(&self, msg_hash_hex: &str) -> Result<String, JsValue> {
+        let hash_bytes = hex::decode(msg_hash_hex.trim_start_matches("0x"))
+            .map_err(|e| JsValue::from_str(&format!("Invalid msg hash hex: {e}")))?;
+        if hash_bytes.len() != 32 {
+            return Err(JsValue::from_str("msg hash must be 32 bytes"));
+        }
+        let mut msg = [0u8; 32];
+        msg.copy_from_slice(&hash_bytes);
+
+        // 与 stark_scheme::sign 同构：确定性 nonce + 域分离挑战。
+        let mut nonce_input = Vec::with_capacity(TX_SCHNORR_NONCE_DOMAIN.len() + 64);
+        nonce_input.extend_from_slice(TX_SCHNORR_NONCE_DOMAIN);
+        nonce_input.extend_from_slice(&self.sk.as_bytes());
+        nonce_input.extend_from_slice(&msg);
+        let r = poker_protocol::crypto::hash_to_scalar(&nonce_input);
+        let big_r = base_g() * &r;
+        let e = schnorr_challenge(&big_r, &self.pk, &msg);
+        let s = r + e * self.sk;
+
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(big_r.compress().as_ref());
+        sig[32..].copy_from_slice(&s.to_bytes_be());
+        Ok(hex::encode(sig))
+    }
+}
+
+/// Schnorr 挑战标量（与 stark_scheme::schnorr_challenge 同构）。
+fn schnorr_challenge(big_r: &EcPoint, pk: &EcPoint, msg_hash: &[u8; 32]) -> Scalar {
+    let mut buf = Vec::with_capacity(TX_SCHNORR_CHALLENGE_DOMAIN.len() + 96);
+    buf.extend_from_slice(TX_SCHNORR_CHALLENGE_DOMAIN);
+    buf.extend_from_slice(big_r.compress().as_ref());
+    buf.extend_from_slice(pk.compress().as_ref());
+    buf.extend_from_slice(msg_hash);
+    poker_protocol::crypto::hash_to_scalar(&buf)
+}
+
 #[cfg(test)]
 mod curve_hex_tests {
     use super::*;
@@ -810,6 +903,26 @@ mod curve_hex_tests {
             ),
             "sign→verify roundtrip through hex must hold (domain: table_id, hand_id, seq, action, amount)"
         );
+    }
+
+    /// P1-2 会话委托：密钥恢复一致 + 签名确定性（与 poker_l1 stark_scheme
+    /// 同公式——同 sk 同消息必得同签名，重放/对拍基准）。
+    #[test]
+    fn tx_session_restore_and_deterministic_sign() {
+        let session = WasmTxSession::generate();
+        let sk_hex = session.get_sk_hex();
+        let pk_hex = session.get_pk_hex();
+        let restored = WasmTxSession::from_sk(&sk_hex).expect("restore");
+        assert_eq!(restored.get_pk_hex(), pk_hex, "restore derives same pk");
+
+        let msg = [0x42u8; 32];
+        let sig1 = session.sign(&hex::encode(msg)).expect("sign");
+        let sig2 = restored.sign(&hex::encode(msg)).expect("sign");
+        assert_eq!(sig1, sig2, "deterministic nonce: same sk+msg => same sig");
+        assert_eq!(sig1.len(), 128, "64-byte signature hex");
+        // 不同消息不同签名
+        let other = session.sign(&hex::encode([0x43u8; 32])).expect("sign");
+        assert_ne!(sig1, other);
     }
 }
 

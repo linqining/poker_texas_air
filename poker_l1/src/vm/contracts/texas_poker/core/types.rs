@@ -191,10 +191,39 @@ pub struct OccupiedSeat {
     pub stack: u64,
     /// Mental Poker public key.
     pub pk: ECPoint,
+    /// 会话交易公钥（P1-2 修复，2026-09-10）：该座位 VM 层交易签名的
+    /// 验证锚——Stark Schnorr 32B 压缩点（tagged）。join 时经链上 vault
+    /// 登记（`set_session_tx_pk`，买入同笔 multicall）核验后写入；
+    /// 后续 `TableRuntime` 签名交易按此钥验证，替代可公开推导的确定性
+    /// 身份。全零压缩点 = 未登记（仅 fixture/旧路径；签名路径拒绝）。
+    pub tx_pk: crate::signature::TaggedPubkey,
     /// Addon held until the next-hand reset boundary.
     pub pending_addon: u64,
     /// Remaining time-bank allowance in milliseconds.
     pub time_bank_ms: u32,
+}
+
+/// 未登记的会话交易公钥（Stark scheme tag + 全零 32B 压缩点 = 恒等元）。
+///
+/// fixture 与不关心交易签名的构造路径使用；`TableRuntime::submit_signed`
+/// 遇到未登记座位显式拒绝（fail-closed）。
+#[must_use]
+pub fn unregistered_tx_pk() -> crate::signature::TaggedPubkey {
+    crate::signature::TaggedPubkey {
+        tag: crate::signature::encode_tag(
+            crate::signature::SignatureScheme::Stark,
+            crate::signature::CURRENT_VERSION,
+        ),
+        raw: vec![0u8; 32],
+    }
+}
+
+/// 会话交易公钥是否为**已登记**（Stark scheme、32B、非恒等元压缩点）。
+#[must_use]
+pub fn is_registered_tx_pk(pk: &crate::signature::TaggedPubkey) -> bool {
+    matches!(pk.scheme(), Ok(crate::signature::SignatureScheme::Stark))
+        && pk.raw.len() == crate::signature::SignatureScheme::Stark.raw_pubkey_len()
+        && pk.raw.iter().any(|&b| b != 0)
 }
 
 /// Mutually exclusive status of a player participating in the current hand.
@@ -270,6 +299,7 @@ impl Seat {
         player: Address,
         stack: u64,
         pk: ECPoint,
+        tx_pk: crate::signature::TaggedPubkey,
         status: SeatStatus,
     ) -> PokerL1Result<Self> {
         if player == EMPTY_PLAYER {
@@ -287,10 +317,21 @@ impl Seat {
                 "Texas newly occupied seat cannot use an identity public key".into(),
             ));
         }
+        // 结构校验（Stark scheme + 32B 压缩点）；"已登记"（非恒等元）与否
+        // 不在 core 强制——策略归 runtime：TableRuntime 的签名路径对未
+        // 登记座位 fail-closed（mirror 注入路径不需要 tx 签名，允许哨兵）。
+        if !matches!(tx_pk.scheme(), Ok(crate::signature::SignatureScheme::Stark))
+            || tx_pk.raw.len() != crate::signature::SignatureScheme::Stark.raw_pubkey_len()
+        {
+            return Err(PokerL1Error::Serialization(
+                "Texas join tx_pk must be a Stark-scheme 32-byte compressed point".into(),
+            ));
+        }
         let occupied = OccupiedSeat {
             player,
             stack,
             pk,
+            tx_pk,
             pending_addon: 0,
             time_bank_ms: super::constants::DEFAULT_TIME_BANK_MS,
         };
@@ -550,6 +591,18 @@ impl Seat {
         }
     }
 
+    /// 已登记的会话交易公钥（VM 层交易签名验证锚）；未登记/空座位返回 None。
+    #[must_use]
+    pub fn registered_tx_pk(&self) -> Option<&crate::signature::TaggedPubkey> {
+        match self {
+            Self::Waiting { occupied }
+            | Self::Playing {
+                playing: PlayingSeat { occupied, .. },
+            } => is_registered_tx_pk(&occupied.tx_pk).then_some(&occupied.tx_pk),
+            Self::Vacant { .. } | Self::DepartedThisHand { .. } => None,
+        }
+    }
+
     /// Hole cards when participating in the current hand.
     #[must_use]
     pub const fn hand(&self) -> Option<&HoleCards> {
@@ -707,6 +760,7 @@ impl Seat {
                     player,
                     stack,
                     pk,
+                    tx_pk: unregistered_tx_pk(),
                     pending_addon,
                     time_bank_ms,
                 },
@@ -732,6 +786,7 @@ impl Seat {
                             player,
                             stack: 0,
                             pk: ECPoint(g1_generator()),
+                            tx_pk: unregistered_tx_pk(),
                             pending_addon: 0,
                             time_bank_ms,
                         },
@@ -2825,6 +2880,18 @@ impl TexasPokerTable {
             .map(|i| i as u8)
     }
 
+    /// 按玩家地址查已登记的会话交易公钥（签名验证锚）。
+    ///
+    /// 未入座或座位未登记（fixture/哨兵）返回 None——`TableRuntime` 的
+    /// 签名路径对此 fail-closed 拒绝。
+    #[must_use]
+    pub fn registered_tx_pk_of(&self, player: &Address) -> Option<&crate::signature::TaggedPubkey> {
+        self.seats
+            .iter()
+            .find(|s| &s.player() == player)
+            .and_then(|s| s.registered_tx_pk())
+    }
+
     /// 查找第一个空座位。
     #[must_use]
     pub fn find_empty_seat(&self) -> Option<u8> {
@@ -3171,6 +3238,18 @@ impl TexasPokerTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 测试用"已登记"会话交易公钥（base_g 压缩点，非恒等元）。
+    fn registered_tx_pk_fixture() -> crate::signature::TaggedPubkey {
+        use poker_protocol::crypto::curve::CurvePoint;
+        crate::signature::TaggedPubkey {
+            tag: crate::signature::encode_tag(
+                crate::signature::SignatureScheme::Stark,
+                crate::signature::CURRENT_VERSION,
+            ),
+            raw: g1_generator().compress().as_ref().to_vec(),
+        }
+    }
 
     fn dummy_table_id() -> ObjectID {
         ObjectID::new([0xFF; 20], 0)
@@ -3536,7 +3615,14 @@ mod tests {
     fn seat_variant_mutations_preserve_tagged_payload_invariants() {
         let player = [0xAB; 20];
         let pk = ECPoint(g1_generator());
-        let mut seat = Seat::occupied(player, 1_000, pk, SeatStatus::Active).unwrap();
+        let mut seat = Seat::occupied(
+            player,
+            1_000,
+            pk,
+            registered_tx_pk_fixture(),
+            SeatStatus::Active,
+        )
+        .unwrap();
         assert!(seat.validate_canonical().is_ok());
 
         seat.fixture_set_bet(100);
@@ -3707,6 +3793,7 @@ mod tests {
             [0xCD; 20],
             5_000,
             ECPoint(g1_generator()),
+            registered_tx_pk_fixture(),
             SeatStatus::Active,
         )
         .unwrap();

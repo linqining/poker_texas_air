@@ -4204,15 +4204,20 @@ pub fn apply_create_table(
 }
 
 /// `join_table` 语义：WAITING 校验 → pk 三重校验（非恒等元 / 所有权证明 /
-/// 未注册）→ buy_in 下限与 chip_pool 上限 → 占首个空座（Waiting，等大盲）→
-/// 资金入池 → deck contributor 登记 → PlayerJoined 事件。
+/// 未注册）→ 会话交易公钥登记校验 → buy_in 下限与 chip_pool 上限 → 占首个
+/// 空座（Waiting，等大盲）→ 资金入池 → deck contributor 登记 → PlayerJoined
+/// 事件。
 ///
-/// `caller == player` 的认证检查在 runtime dispatch 层。
+/// `caller == player` 的认证检查在 runtime dispatch 层；`tx_pk` 与链上 vault
+/// 登记（`set_session_tx_pk[_for]`）的一致性由游戏服务端在 join 接受点核验
+/// （VM 无法查询链上账户状态）——入座后它就是本座 VM 层交易签名的唯一
+/// 验证锚（P1-2 会话委托，2026-09-10）。
 pub fn apply_join_table(
     table: &mut TexasPokerTable,
     player: Address,
     buy_in: u64,
     pk: G1Projective,
+    tx_pk: crate::signature::TaggedPubkey,
     pk_ownership_proof: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
@@ -4257,7 +4262,7 @@ pub fn apply_join_table(
     table.set_seat_acted_this_round(seat_idx, false);
     table.set_seat_wants_leave(seat_idx, false);
     table.seats[seat_idx as usize] =
-        Seat::occupied(player, buy_in, ECPoint(pk), SeatStatus::Waiting)?;
+        Seat::occupied(player, buy_in, ECPoint(pk), tx_pk, SeatStatus::Waiting)?;
     // waiting-for-BB：先入座等待，盲注位（大盲）到达时才参与发牌
 
     // P0 修复：与 apply_join_shuffle 保持一致的资金记账——buy_in 必须进入

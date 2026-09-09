@@ -141,6 +141,7 @@ impl TableMirror {
         player: poker_l1::Address,
         buy_in_chips: u64,
         pk: PtxECPoint,
+        tx_pk: Option<poker_l1::signature::TaggedPubkey>,
         pk_ownership_proof: Vec<u8>,
     ) -> Result<(), String> {
         use poker_l1::vm::contracts::texas_poker::dispatch::JoinTableArgs;
@@ -148,6 +149,11 @@ impl TableMirror {
             player,
             buy_in: buy_in_chips,
             pk,
+            // P1-2 会话委托：核验过的会话交易公钥（None = 未登记哨兵，
+            // 签名路径 fail-closed；mirror 注入路径不需要 tx 签名）。
+            tx_pk: tx_pk.unwrap_or_else(
+                poker_l1::vm::contracts::texas_poker::types::unregistered_tx_pk,
+            ),
             pk_ownership_proof,
         })
         .map_err(|e| format!("encode join args: {e}"))?;
@@ -164,7 +170,7 @@ impl TableMirror {
     pub fn begin_reveal_hand(
         &mut self,
         deck: Vec<PtxElGamalCiphertext>,
-        plan: &[(poker_l1::Address, u64, PtxECPoint, Vec<u8>)],
+        plan: &[(poker_l1::Address, u64, PtxECPoint, Option<poker_l1::signature::TaggedPubkey>, Vec<u8>)],
         button_rank: u8,
         hand_id: u32,
     ) -> Result<(), String> {
@@ -179,8 +185,8 @@ impl TableMirror {
 
         // join：按升序座位计划重放（VM find_empty_seat 顺序填座 →
         // mirror 座位 rank == 游戏座位 rank）。
-        for (player, buy_in, pk, proof) in plan {
-            self.join(*player, *buy_in, pk.clone(), proof.clone())
+        for (player, buy_in, pk, tx_pk, proof) in plan {
+            self.join(*player, *buy_in, pk.clone(), tx_pk.clone(), proof.clone())
                 .map_err(|e| format!("begin_reveal join: {e}"))?;
         }
         if self.table.seats.iter().all(|s| seat_player_addr(s).is_none()) {
@@ -529,11 +535,23 @@ pub(crate) fn mirror_bootstrap(
         bb,
         [0xC0; 20],
     );
-    let mut plan: Vec<(poker_l1::Address, u64, PtxECPoint, Vec<u8>)> = Vec::new();
+    let mut plan: Vec<(
+        poker_l1::Address,
+        u64,
+        PtxECPoint,
+        Option<poker_l1::signature::TaggedPubkey>,
+        Vec<u8>,
+    )> = Vec::new();
     for p in &start.participants {
         let addr = TableMirror::addr_from_starknet(&p.wallet)
             .ok_or_else(|| format!("bad wallet felt: {}", p.wallet))?;
-        plan.push((addr, p.stack, p.pk.clone(), p.pk_ownership_proof.clone()));
+        plan.push((
+            addr,
+            p.stack,
+            p.pk.clone(),
+            p.tx_pk.clone(),
+            p.pk_ownership_proof.clone(),
+        ));
     }
     mirror
         .begin_reveal_hand(start.deck.clone(), &plan, start.button_rank, hand_id)

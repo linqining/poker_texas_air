@@ -88,6 +88,10 @@ pub struct Metrics {
     pub commands: usize,
     pub reveal_ok: usize,
     pub bet_ok: usize,
+    /// VM 拒绝的下注动作数（**观测指标，不是结算门**，2026-09-10 变更）：
+    /// VM 是接受点本身，被拒动作游戏层同样拒绝，不构成状态分歧。hooks
+    /// 的结算门只看 `FinishReport.issues`（对账分歧）；本计数仅 warn 日志，
+    /// 用于监控客户端噪音（抢跑/轮次竞态/畸形加注）的规模。
     pub bet_fail: usize,
     pub force_folds: usize,
     pub unknown_player: usize,

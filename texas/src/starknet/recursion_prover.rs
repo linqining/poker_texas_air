@@ -166,6 +166,7 @@ mod sig_materials_tests {
 
         let participants = vec![crate::starknet::prove_log::HandParticipant {
             seat: 3,
+            tx_pk: None,
             wallet: "0xabc".into(),
             pk_hex: pk_hex.clone(),
             pk: crate::starknet::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(player.pk)).unwrap(),

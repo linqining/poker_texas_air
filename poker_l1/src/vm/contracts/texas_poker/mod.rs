@@ -81,13 +81,16 @@ pub const TEXAS_POKER_GOVERNANCE_OBJECT_TYPE: &str = "TexasPokerGovernancePolicy
 /// sentinel `0x0f`. Version 29 replaces the variable-length reveal ledger with a fixed
 /// `(seat, hole_slot)` owner-readable partial-ciphertext ledger.
 /// Incompatible older layouts are deliberately unsupported.
-pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 29;
+/// Version 30 adds the per-seat registered session tx public key
+/// (`OccupiedSeat.tx_pk`，P1-2 会话委托：座位级签名验证锚).
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 30;
 
 /// ObjectDb-only hot-state schema.
 ///
-/// Runtime/proof snapshots use resolved schema v29. The v30 ObjectDb encoding combines immutable
-/// context commitments with the same physical tagged-seat and typed-reveal representation.
-pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 30;
+/// Runtime/proof snapshots use resolved schema v30. The v31 ObjectDb encoding combines immutable
+/// context commitments with the same physical tagged-seat and typed-reveal representation,
+/// adding the per-seat session tx public key (`OccupiedSeat.tx_pk`).
+pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 31;
 
 // Phase 3.3: TexasPokerPrecompile impl（待 state_machine/dispatch 完成后补）
 // pub struct TexasPokerPrecompile { ... }

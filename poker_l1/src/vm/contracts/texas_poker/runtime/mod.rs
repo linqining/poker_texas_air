@@ -8,6 +8,7 @@
 //! 依赖方向：runtime → core（单向）。核心状态机（`super::core`）不得反向
 //! 引用本目录任何模块（由 `poker_l1/tests/arch_core_purity.rs` 强制）。
 
+pub mod caller_id;
 pub mod dispatch;
 pub mod pending;
 pub mod prove_task;

@@ -138,8 +138,8 @@ fn play_full_hand_artifacts(
     let proof2 = create_pk_ownership_proof(&sk2, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng))
         .expect("proof p2");
     let plan = vec![
-        (p1, 1000u64, zpk1, proof1),
-        (p2, 1000u64, zpk2, proof2),
+        (p1, 1000u64, zpk1, None, proof1),
+        (p2, 1000u64, zpk2, None, proof2),
     ];
     let mut mirror = TableMirror::new(1, "e2e", creator, 4, 10, 20, creator);
     mirror
@@ -351,7 +351,10 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
     let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
     let proof1 = create_pk_ownership_proof(&sk1, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng)).unwrap();
     let proof2 = create_pk_ownership_proof(&sk2, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng)).unwrap();
-    let plan = vec![(p1, 1000u64, zpk1, proof1), (p2, 1000u64, zpk2, proof2)];
+    let plan = vec![
+        (p1, 1000u64, zpk1, None, proof1),
+        (p2, 1000u64, zpk2, None, proof2),
+    ];
     let mut mirror = TableMirror::new(1, "e2e-prefix", creator, 4, 10, 20, creator);
     mirror
         .begin_reveal_hand(super::mirror::conv::ciphertexts(&game_deck).unwrap(), &plan, 0, 1)
@@ -1018,8 +1021,7 @@ fn dual_placeholder() -> String {
 
 mod runtime_authority_e2e {
     use super::*;
-    use ed25519_dalek::SigningKey;
-    use poker_l1::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
+    use poker_l1::vm::contracts::texas_poker::runtime::caller_id;
     use poker_l1::vm::contracts::texas_poker::runtime::dispatch::{selectors, tx_message_hash};
     use poker_l1::vm::contracts::texas_poker::runtime::table_runtime::{
         CallerIdentity, Submission, TableRuntime,
@@ -1035,38 +1037,50 @@ mod runtime_authority_e2e {
     use poker_l1::object_model::ObjectID;
     use poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript as RtFsT;
 
-    /// 测试玩家钱包：ed25519 签名密钥（交易认证）+ 确定性地址。
+    /// 测试玩家钱包：Starknet felt hex（寻址）+ **随机会话密钥**
+    /// （授权锚——P1-2 会话委托：地址派生只用于寻址，交易签名按座位
+    /// 登记的会话公钥验证）。会话钥在 join 时随 JoinTableArgs 登记，
+    /// 对应生产路径中 vault `set_session_tx_pk[_for]` 核验后的放行。
     struct RtWallet {
-        signing: SigningKey,
-        pubkey: TaggedPubkey,
+        wallet: String,
         address: [u8; 20],
+        session_sk: poker_protocol::crypto::types::Scalar,
+        session_pk: poker_l1::signature::TaggedPubkey,
     }
 
     impl RtWallet {
         fn new(seed_byte: u8) -> Self {
-            let mut seed = [0u8; 32];
-            seed[0] = seed_byte;
-            seed[31] = seed_byte.wrapping_mul(7).max(1);
-            let signing = SigningKey::from_bytes(&seed);
-            let vk = signing.verifying_key();
-            let pubkey = TaggedPubkey::new(
-                SignatureScheme::Ed25519,
-                CURRENT_VERSION,
-                vk.to_bytes().to_vec(),
+            use poker_protocol::crypto::curve::{CurvePoint, CurveScalar};
+            let wallet = format!("0x{:064x}", (seed_byte as u64) * 0x0100_0000_0000_0001);
+            let address = caller_id::wallet_to_address(&wallet).expect("test wallet parses");
+            // 跨 crate 对拍：poker_l1 权威公式与 texas addr_from_starknet 同源。
+            debug_assert_eq!(
+                super::super::mirror::TableMirror::addr_from_starknet(&wallet),
+                Some(address)
+            );
+            // 随机会话密钥（与钱包地址零派生关系——授权与寻址分离）。
+            let session_sk = poker_protocol::crypto::types::hash_to_scalar(&[
+                seed_byte, 0x5E, 0x55, 0x10, 0xCE
+            ]);
+            let raw = (poker_protocol::crypto::types::base_g() * session_sk)
+                .compress()
+                .as_ref()
+                .to_vec();
+            let session_pk = poker_l1::signature::TaggedPubkey::new(
+                poker_l1::signature::SignatureScheme::Stark,
+                poker_l1::signature::CURRENT_VERSION,
+                raw,
             )
-            .expect("tagged pubkey");
-            let mut address = [0u8; 20];
-            address.copy_from_slice(&vk.to_bytes()[..20]);
-            Self { signing, pubkey, address }
+            .expect("session pk tagged");
+            Self { wallet, address, session_sk, session_pk }
         }
 
         fn identity(&self) -> CallerIdentity {
-            CallerIdentity { address: self.address, pubkey: self.pubkey.clone() }
+            CallerIdentity::from_wallet(&self.wallet).expect("test wallet parses")
         }
 
         fn sign(&self, msg_hash: &[u8; 32]) -> Vec<u8> {
-            use ed25519_dalek::Signer;
-            self.signing.sign(msg_hash).to_bytes().to_vec()
+            poker_l1::signature::stark_scheme::sign(&self.session_sk, msg_hash).to_vec()
         }
     }
 
@@ -1078,7 +1092,7 @@ mod runtime_authority_e2e {
         nonce: u64,
     ) -> Submission {
         Submission {
-            caller: wallet.identity(),
+            wallet: wallet.wallet.clone(),
             block_timestamp,
             selector,
             args,
@@ -1210,6 +1224,8 @@ mod runtime_authority_e2e {
                 client1.pk,
             ))
             .expect("pk bridge"),
+            // 会话委托：入座登记本座会话交易公钥（生产路径经 vault 核验）。
+            tx_pk: w1.session_pk.clone(),
             pk_ownership_proof: poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof(
                 &sk1,
                 &<DefaultCurve as Curve>::Scalar::random(&mut OsRng),
@@ -1225,6 +1241,25 @@ mod runtime_authority_e2e {
             "tampered signature must be rejected"
         );
 
+        // 负路径 2：跨会话钥顶替——w2 的会话钥签名冒充 w1 提交必须在入队
+        // 前被拒（此时 w1 尚未入座，验签锚不存在；即便入座后锚也只认 w1
+        // 登记的会话钥——身份绑定在座位登记，不在公开派生）。
+        let mut forged = submission(&w1, now, selectors::join_table(), join1_args.clone(), nonce);
+        let forged_hash = tx_message_hash(
+            377,
+            &table_id,
+            &w1.address,
+            &forged.selector,
+            &forged.args,
+            forged.nonce,
+        );
+        forged.signature = w2.sign(&forged_hash);
+        assert!(
+            rt.submit_signed(forged).is_err(),
+            "cross-wallet substitution must be rejected"
+        );
+        assert!(rt.pending().is_empty(), "auth failure must not enqueue");
+
         // 正路径：两名玩家签名入座。
         let join2_args = borsh::to_vec(&JoinTableArgs {
             player: w2.address,
@@ -1233,6 +1268,7 @@ mod runtime_authority_e2e {
                 client2.pk,
             ))
             .expect("pk bridge"),
+            tx_pk: w2.session_pk.clone(),
             pk_ownership_proof: poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof(
                 &sk2,
                 &<DefaultCurve as Curve>::Scalar::random(&mut OsRng),
@@ -1247,7 +1283,7 @@ mod runtime_authority_e2e {
             .expect("join p2 signed");
         nonce += 1;
 
-        // 负路径 2：同签名交易重放必须拒绝（applied-nonce 集合）。
+        // 负路径 3：同签名交易重放必须拒绝（applied-nonce 集合）。
         // p1 的 join 已成功应用——重放同一签名材料（nonce 未变）必须在
         // 重放检查处失败，而不是业务检查（pk 已注册）。
         let replay = submission(&w1, now, selectors::join_table(), {
@@ -1258,6 +1294,7 @@ mod runtime_authority_e2e {
                     client1.pk,
                 ))
                 .expect("pk bridge"),
+                tx_pk: w1.session_pk.clone(),
                 pk_ownership_proof: poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof(
                     &sk1,
                     &<DefaultCurve as Curve>::Scalar::random(&mut OsRng),
