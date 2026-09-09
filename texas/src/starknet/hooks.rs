@@ -2,7 +2,7 @@
 //!
 //! 单一状态表示（2026-09-09）：手牌只有一份 VM 状态——`shadow.rs` 的实时
 //! 镜像在每个接受点同步 dispatch；[`on_hand_complete`] 把它移交给
-//! [`settle_hand_from_log`]，经终局比对（与游戏层事实逐分对账）后直接取用
+//! [`settle_from_live_mirror`]，经终局比对（与游戏层事实逐分对账）后直接取用
 //! ProveTask 链与 pre-payout 快照构建 register_aggregate/settle_hand 上链，
 //! 失败由 game_loop tick 有界重试。历史"结算时日志重放出第二份 VM 状态"
 //! 的 build_from_log 已删除。
@@ -14,41 +14,40 @@
 use std::sync::OnceLock;
 use super::mirror::{seat_player_addr, TableMirror};
 
-/// 把 vault 的 settlement 绑定切到指定结算合约（operator 必须是 vault owner）。
-/// settle 成功上链的 (table, mirror_hand) 集合：失败可重试（game_loop tick
+/// settle 成功上链的 (table, hand_id) 集合：失败可重试（game_loop tick
 /// 驱动），成功后幂等跳过。
 static SETTLE_OK: OnceLock<std::sync::Mutex<std::collections::HashSet<(u32, u32)>>> =
     OnceLock::new();
 
-fn settle_ok_once(table_id: u32, mirror_hand: u32) -> bool {
+fn settle_ok_once(table_id: u32, hand_id: u32) -> bool {
     let set = SETTLE_OK.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-    set.lock().map(|mut g| g.insert((table_id, mirror_hand))).unwrap_or(false)
+    set.lock().map(|mut g| g.insert((table_id, hand_id))).unwrap_or(false)
 }
 
-pub(crate) fn settle_ok_already(table_id: u32, mirror_hand: u32) -> bool {
+pub(crate) fn settle_ok_already(table_id: u32, hand_id: u32) -> bool {
     let set = SETTLE_OK.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-    set.lock().map(|g| g.contains(&(table_id, mirror_hand))).unwrap_or(false)
+    set.lock().map(|g| g.contains(&(table_id, hand_id))).unwrap_or(false)
 }
 
 /// 失败重试上限（防镜像状态与游戏永久分歧时的无限重试）。
 static SETTLE_ATTEMPTS: OnceLock<std::sync::Mutex<std::collections::HashMap<(u32, u32), u32>>> =
     OnceLock::new();
 
-fn settle_attempts_bumped_max(table_id: u32, mirror_hand: u32) -> bool {
+fn settle_attempts_bumped_max(table_id: u32, hand_id: u32) -> bool {
     let m = SETTLE_ATTEMPTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut g = match m.lock() { Ok(g) => g, Err(_) => return true };
-    let k = (table_id, mirror_hand);
+    let k = (table_id, hand_id);
     let n = g.entry(k).or_insert(0);
     *n += 1;
     *n > 5
 }
 
-/// 待投递结算：按桌保留**构建时快照**（HandSettlement + mirror 克隆）。
-/// 链上提交失败（nonce 竞争/RPC 抖动）时由 game_loop tick 用同一快照重投，
-/// 绝不读取已被新手替换的 mirror 活状态（避免跨手状态污染）。
+/// 待投递结算：按桌保留**构建时快照**（HandSettlement 的 calldata/重映射
+/// 均已固化在 settlement 内）。链上提交失败（nonce 竞争/RPC 抖动）时由
+/// game_loop tick 用同一快照重投，绝不读取已被新手替换的活状态
+/// （避免跨手状态污染）。
 struct PendingSettle {
     settlement: super::submit::HandSettlement,
-    mirror: TableMirror,
     attempts: u32,
 }
 
@@ -96,7 +95,7 @@ pub fn on_hand_complete(table: &mut Table) {
         return;
     };
     handle.spawn(async move {
-        settle_hand_from_log(input, live).await;
+        settle_from_live_mirror(input, live).await;
     });
 }
 
@@ -104,7 +103,7 @@ pub fn on_hand_complete(table: &mut Table) {
 ///
 /// 手牌只有一份 VM 状态表示（实时镜像）；比对不干净或镜像缺失 =
 /// fail-closed 拒绝该手结算（与游戏层事实分歧的状态绝不上链）。
-async fn settle_hand_from_log(
+async fn settle_from_live_mirror(
     input: super::prove_log::HandSettleInput,
     live: super::shadow::ShadowHand,
 ) {
@@ -146,8 +145,9 @@ async fn settle_hand_from_log(
         );
     }
     tracing::info!(
-        "[live-mirror] table {table_id} hand {hand_id} parity OK: cmds={} reveal_ok={} bets={} bet_fail={} folds={}",
-        report.metrics.commands,
+        "[live-mirror] table {} hand {} parity OK: reveal_ok={} bets={} bet_fail={} folds={}",
+        report.table_id,
+        report.hand_id,
         report.metrics.reveal_ok,
         report.metrics.bet_ok,
         report.metrics.bet_fail,
@@ -277,7 +277,7 @@ async fn settle_hand_from_log(
 
     PENDING_SETTLE
         .lock()
-        .map(|mut g| g.insert(table_id, PendingSettle { settlement, mirror, attempts: 0 }))
+        .map(|mut g| g.insert(table_id, PendingSettle { settlement, attempts: 0 }))
         .ok();
     run_settle_attempt(table_id).await;
 }
@@ -719,17 +719,6 @@ pub fn register_treasury_wallet(wallet: &str) {
     if let Ok(mut set) = TREASURY_WALLETS.lock() {
         set.insert(wallet.to_string());
     }
-}
-
-/// 直接记录 join（bot 进程内路径：wallet + pk hex + 80 字节证明）。
-pub fn mirror_buffer_join_raw(
-    table_id: u32,
-    wallet: &str,
-    pk_hex: &str,
-    proof: Vec<u8>,
-) {
-    // bot 进程内路径未声明会话钥（未走 vault 登记）——None = 未登记。
-    super::prove_log::record_join(table_id, wallet, pk_hex, proof, None);
 }
 
 #[cfg(test)]

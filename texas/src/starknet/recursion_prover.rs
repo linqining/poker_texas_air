@@ -12,6 +12,8 @@
 
 use serde::Serialize;
 
+use super::chain::hex_encode;
+
 /// 一条待证明的动作签名语句（每参与者首条已签名动作）。
 #[derive(Debug, Clone)]
 pub struct ActionSigMaterial {
@@ -55,7 +57,7 @@ pub fn action_sig_materials(
         let bytes = crate::starknet::recursion_prover::decode_hex(hex_str)?;
         let point = P::from_compressed(&bytes)?;
         let (x, y) = point.to_affine_parts()?;
-        Some((hex_encode_32(&x.to_bytes_be()), hex_encode_32(&y.to_bytes_be())))
+        Some((hex_encode(&x.to_bytes_be()), hex_encode(&y.to_bytes_be())))
     };
 
     let mut out: Vec<ActionSigMaterial> = Vec::new();
@@ -78,7 +80,7 @@ pub fn action_sig_materials(
             pk_y_hex,
             r_x_hex,
             r_y_hex,
-            s_hex: hex_encode_32(&s_scalar.as_bytes()),
+            s_hex: hex_encode(&s_scalar.as_bytes()),
             seq: entry.seq,
             action: entry.action.clone(),
             amount: entry.amount,
@@ -97,10 +99,6 @@ pub fn decode_hex(hex_str: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&t[i..i + 2], 16).ok())
         .collect()
-}
-
-fn hex_encode_32(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// 出证一层递归信封（阻塞调用，调用方须放 spawn_blocking）。
@@ -139,7 +137,7 @@ pub fn prove_batch_blocking(
     Ok(ProveOutput {
         hand_id,
         table_id,
-        acc: hex_encode_32(&acc.to_bytes_be()),
+        acc: hex_encode(&acc.to_bytes_be()),
         out_dir: out_dir.display().to_string(),
         steps: outcome.steps,
         ec_ops: outcome.ec_ops,

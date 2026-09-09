@@ -183,11 +183,16 @@ pub fn settle_hand(
     //     见 hooks::hand_wallet_map），并按同一映射重算 settlement digest——
     //     合约 settle_hand 会用 calldata 的 players 重算 Poseidon 承诺并与
     //     register_aggregate 写入的 root 精确比对。
+    //     截断公式（felt 低 20 字节）唯一权威在 poker_l1
+    //     caller_id::wallet_to_address（与 mirror addr_from_starknet 同源，
+    //     e2e 对拍断言）；这里 felt → hex 后交由权威实现截断。
     let remap_player = |p: Ff| -> Ff {
         let p_felt = ff_to_felt(p);
-        let truncated: [u8; 20] = p_felt.to_bytes_be()[12..32]
-            .try_into()
-            .expect("32-byte felt tail is 20 bytes");
+        let truncated: [u8; 20] =
+            poker_l1::vm::contracts::texas_poker::runtime::caller_id::wallet_to_address(
+                &format!("{p_felt:#x}"),
+            )
+            .expect("canonical felt hex always truncates to 20 bytes");
         wallet_map
             .iter()
             .find(|(addr, _)| *addr == truncated)

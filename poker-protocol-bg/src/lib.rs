@@ -1,8 +1,9 @@
 //! Bayer--Groth shuffle backend.
 //!
 //! The implementation depends only on the curve/transcript interfaces from
-//! `poker-protocol-core`. It can therefore be instantiated by BLS12-381 today,
-//! BLS12-377 in a precompile host, or another compatible backend later.
+//! `poker-protocol-core`. It is currently instantiated on the Stark curve
+//! (Plan D 后协议唯一曲线)；the generic backend keeps other compatible
+//! backends a recompile away.
 
 mod proof;
 

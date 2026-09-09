@@ -26,7 +26,6 @@ use std::collections::HashMap;
 /// 方案A deck 注入的 canonical-match 前提。
 /// Plan D：STARK 曲线世界的明文牌 = DefaultCurve::hash_to_curve
 /// （poseidon try-and-increment，与本仓库主协议一致）。
-#[cfg(feature = "stark-curve")]
 pub fn new_plain_text() -> Vec<Plaintext> {
     (0..N_CARDS)
         .map(|i| {

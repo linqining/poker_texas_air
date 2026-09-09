@@ -180,8 +180,9 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
         return false;
     }
 
-    // #20 Phase 2：无常驻 mirror（VM 派奖推进在结算构建内完成）。
-    // tick 只负责：游戏手已结束（hand_over）而链上结算未成功时，有界重试上链。
+    // #20 Phase 2：VM 派奖推进在实时镜像（shadow.rs）收尾时完成，tick 不
+    // 持有第二份 VM 状态。tick 只负责：游戏手已结束（hand_over）而链上结算
+    // 未成功时，有界重试上链。
     // 严禁在此恢复 fill/autoplay/replay 等事后追赶补丁（见计划文档禁止事项）。
     {
         let hand_over = {

@@ -11,7 +11,6 @@
 
 use super::*;
 use crate::pokergame::player::{GamePkHex, GamePlayer, WalletAddress};
-use poker_protocol::crypto::Scalar;
 use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::z_poker::protocol::ShuffleRound;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
@@ -21,14 +20,6 @@ use rand_core::OsRng;
 struct Player {
     pk_hex: GamePkHex,
     client: ClientPlayer,
-}
-
-/// 满手向量生成状态：捕获流程中每个真实 reveal token（含提交者与密文）。
-struct CapturedReveal {
-    pk: EcPoint,
-    sk: Scalar,
-    ct: ElGamalCiphertext,
-    token: EcPoint,
 }
 
 fn seat_players(table: &mut Table, n: u64) -> Vec<Player> {
@@ -99,6 +90,7 @@ fn submit_real_shuffle(table: &mut Table, player: &Player) {
 
 /// 推进当前 reveal 阶段：每个 pending 玩家对其 assignment 的全部卡出
 /// 真实 token（RevealTokenProof），提交后阶段完成时触发 on_reveal_complete。
+/// `captured` 累计真实 token 数（hand-batch 向量的 reveal 方程计数）。
 fn drive_reveal_phase(table: &mut Table, players: &[Player]) -> RevealPhase {
     drive_reveal_phase_capture(table, players, &mut None)
 }
@@ -106,7 +98,7 @@ fn drive_reveal_phase(table: &mut Table, players: &[Player]) -> RevealPhase {
 fn drive_reveal_phase_capture(
     table: &mut Table,
     players: &[Player],
-    capture: &mut Option<&mut Vec<CapturedReveal>>,
+    captured: &mut Option<&mut usize>,
 ) -> RevealPhase {
     assert!(
         table.reveal_token_state.is_active(),
@@ -134,13 +126,8 @@ fn drive_reveal_phase_capture(
         let mut tokens = Vec::new();
         for ct in cards {
             let token = ct.gen_reveal_token(&player.client.sk);
-            if let Some(cap) = capture.as_deref_mut() {
-                cap.push(CapturedReveal {
-                    pk: player.client.pk,
-                    sk: player.client.sk,
-                    ct: ct.clone(),
-                    token,
-                });
+            if let Some(cap) = captured.as_deref_mut() {
+                *cap += 1;
             }
             let proof = RevealTokenProof::prove(
                 &player.client.sk,
@@ -378,8 +365,8 @@ mod full_hand_vector_gen {
         }
         table.advance_shuffle();
 
-        // 捕获全部 reveal token
-        let mut captured: Vec<CapturedReveal> = Vec::new();
+        // 捕获全部 reveal token 计数
+        let mut captured: usize = 0;
         drive_reveal_phase_capture(&mut table, &players, &mut Some(&mut captured));
         let mut steps = 0;
         loop {
@@ -416,7 +403,7 @@ mod full_hand_vector_gen {
         let mut words: Vec<[u8; 32]> = vec![
             u256_word_pub(n),
             u256_word_pub(0), // n_shuffle（BG 桶待链上 CK/MSM）
-            u256_word_pub(captured.len() as u64),
+            u256_word_pub(captured as u64),
             u256_word_pub(1), // n_leave
             u256_word_pub(0), // n_recon（Hand-batch v2.8 五词头）
         ];
@@ -439,7 +426,7 @@ mod full_hand_vector_gen {
         // 只由方程数量与点运算决定（曲线局部），故按真实计数在 StarkCurve
         // 上以同构语句铸造：ct_j 在聚合公钥下加密、token = sk_j·c1_j、
         // 两联方程与 reveal_token_proof 同形（挑战换 dapv 式）。
-        let n_reveals = captured.len();
+        let n_reveals = captured;
         for j in 0..n_reveals {
             let sk_j: SSC = <SSC as CurveScalar>::random(&mut OsRng);
             let pk_j: SPT = g_stark * sk_j;
@@ -557,13 +544,13 @@ mod full_hand_vector_gen {
         let parsed = parse_batch_terms(&hand_binding, &words).expect("parse full-hand batch");
         assert_eq!(
             parsed.len(),
-            (n as usize) + captured.len() + 1,
+            (n as usize) + captured + 1,
             "equation count: n_own + n_reveal + 1 leave"
         );
         assert!(host_fold_check(&hand_binding, &parsed), "full-hand batch must fold to identity");
 
         // 打印 Cairo 向量
-        println!("// {label}: captured {} reveals, {} words", captured.len(), words.len());
+        println!("// {label}: captured {} reveals, {} words", captured, words.len());
         println!("// {label}: payload:");
         println!("        array![");
         for w in &words {

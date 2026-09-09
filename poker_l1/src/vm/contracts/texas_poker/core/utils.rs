@@ -27,7 +27,9 @@ use poker_protocol::crypto::types::{DefaultCurve, ElGamalCiphertext};
 
 // Plan D（2026-09-05）：曲线类型统一收敛到 `DefaultCurve`（= StarkCurve）。
 // 保留历史别名 `G1Projective`/`BlsScalar` 以最小化移植面——实际为 Stark 点/标量。
+/// 历史别名：曲线点（现为 Stark 曲线 `DefaultCurve` 的点类型）。
 pub type G1Projective = <DefaultCurve as Curve>::Point;
+/// 历史别名：域标量（现为 Stark 曲线 `DefaultCurve` 的标量类型，非 BLS）。
 pub type BlsScalar = <DefaultCurve as Curve>::Scalar;
 use poker_protocol::zk_shuffle::transcript_ext::{
     CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
@@ -64,28 +66,10 @@ pub fn new_shuffle_transcript() -> FiatShamirTranscript {
     FiatShamirTranscript::new(b"zk_shuffle_proof_v2")
 }
 
-/// 创建重掩码证明的 Transcript。
-#[must_use]
-pub fn new_remask_transcript() -> MerlinTranscript {
-    MerlinTranscript::new(b"zk_remask_proof_v1")
-}
-
 /// 创建离场证明的 Transcript。
 #[must_use]
 pub fn new_leave_transcript() -> MerlinTranscript {
     MerlinTranscript::new(b"zk_leave_proof_v1")
-}
-
-/// Create the legacy reconstruction transcript.
-///
-/// Production `submit_reconstruct_deck` uses
-/// [`new_reconstruct_v3_transcript`]. This constructor remains available for
-/// decoding and auditing historical V2 artifacts.
-#[must_use]
-pub fn new_reconstruct_transcript() -> FiatShamirTranscript {
-    FiatShamirTranscript::new(
-        poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_PROOF_LABEL,
-    )
 }
 
 /// Create the Fiat--Shamir transcript used by reconstruction V3.
@@ -269,32 +253,6 @@ pub fn scalar_from_u64(x: u64) -> BlsScalar {
     <BlsScalar as CurveScalar>::from_u64(x)
 }
 
-/// 标量加法。
-pub fn scalar_add(a: &BlsScalar, b: &BlsScalar) -> BlsScalar {
-    a + b
-}
-
-/// 标量减法。
-pub fn scalar_sub(a: &BlsScalar, b: &BlsScalar) -> BlsScalar {
-    a - b
-}
-
-/// 标量乘法。
-pub fn scalar_mul(a: &BlsScalar, b: &BlsScalar) -> BlsScalar {
-    a * b
-}
-
-/// 标量取负。
-pub fn scalar_neg(a: &BlsScalar) -> BlsScalar {
-    -a
-}
-
-/// 标量求逆（若为零返回零）。
-pub fn scalar_inv(a: &BlsScalar) -> BlsScalar {
-    // core StarkScalar::invert 对零值返回零（非 CtOption）。
-    CurveScalar::invert(a)
-}
-
 // ========== 哈希到标量 / Hash-to-curve ==========
 
 /// 将任意数据哈希为曲线标量。
@@ -321,33 +279,6 @@ pub fn generate_plaintext_cards() -> Vec<G1Projective> {
             hash_to_g1(label.as_bytes())
         })
         .collect()
-}
-
-/// 派生独立基点 H：`hash_to_g1("texas_poker_independent_base_H")`。
-pub fn base_h() -> G1Projective {
-    hash_to_g1(b"texas_poker_independent_base_H")
-}
-
-/// 从密文 c1*sk 与 c2*sk 派生标量（m6 长度前缀防歧义编码）。
-pub fn derive_scalar_from_card_and_sk(c1_sk: &[u8], c2_sk: &[u8]) -> PokerL1Result<BlsScalar> {
-    let mut data = Vec::with_capacity(8 + c1_sk.len() + c2_sk.len());
-    data.extend_from_slice(&(c1_sk.len() as u32).to_le_bytes());
-    data.extend_from_slice(c1_sk);
-    data.extend_from_slice(&(c2_sk.len() as u32).to_le_bytes());
-    data.extend_from_slice(c2_sk);
-    hash_to_scalar(&data)
-}
-
-/// 从密文 (c1, c2) 与公钥 pk 派生标量（m6 长度前缀防歧义编码）。
-pub fn derive_scalar_from_card_and_pk(c1: &[u8], c2: &[u8], pk: &[u8]) -> PokerL1Result<BlsScalar> {
-    let mut data = Vec::with_capacity(12 + c1.len() + c2.len() + pk.len());
-    data.extend_from_slice(&(c1.len() as u32).to_le_bytes());
-    data.extend_from_slice(c1);
-    data.extend_from_slice(&(c2.len() as u32).to_le_bytes());
-    data.extend_from_slice(c2);
-    data.extend_from_slice(&(pk.len() as u32).to_le_bytes());
-    data.extend_from_slice(pk);
-    hash_to_scalar(&data)
 }
 
 // ========== G1 辅助 ==========
@@ -385,22 +316,6 @@ pub fn g1_add(a: &G1Projective, b: &G1Projective) -> G1Projective {
 /// G1 点减法。
 pub fn g1_sub(a: &G1Projective, b: &G1Projective) -> G1Projective {
     a - b
-}
-
-/// 多标量乘法（MSM）：`Σ scalars[i] * points[i]`。
-pub fn g1_msm(scalars: &[BlsScalar], points: &[G1Projective]) -> PokerL1Result<G1Projective> {
-    if scalars.len() != points.len() {
-        return Err(PokerL1Error::Serialization(format!(
-            "g1_msm length mismatch: scalars={} points={}",
-            scalars.len(),
-            points.len()
-        )));
-    }
-    let mut result = G1Projective::identity();
-    for (s, p) in scalars.iter().zip(points.iter()) {
-        result += p * s;
-    }
-    Ok(result)
 }
 
 /// DLEq 验证：检查 `s * g == commitment + c * pk`。
@@ -476,37 +391,6 @@ pub fn add_pk_to_c2(ct: &ElGamalCiphertext, player_pk: &G1Projective) -> ElGamal
         c1: ct.c1,
         c2: g1_add(&ct.c2, player_pk),
     }
-}
-
-/// 批量加密：对每张明文用对应的随机数加密。
-pub fn encrypt_batch(
-    plaintexts: &[G1Projective],
-    pk: &G1Projective,
-    randoms: &[BlsScalar],
-) -> Vec<ElGamalCiphertext> {
-    plaintexts
-        .iter()
-        .zip(randoms.iter())
-        .map(|(m, r)| encrypt(m, pk, r))
-        .collect()
-}
-
-/// 批量 remask：每张密文都用同一个 sk remask。
-pub fn remask_batch(
-    ciphertexts: &[ElGamalCiphertext],
-    sk: &BlsScalar,
-) -> PokerL1Result<Vec<ElGamalCiphertext>> {
-    ciphertexts.iter().map(|ct| remask(ct, sk)).collect()
-}
-
-/// 提取所有 c1 点。
-pub fn extract_c1s(ciphertexts: &[ElGamalCiphertext]) -> Vec<G1Projective> {
-    ciphertexts.iter().map(|ct| ct.c1).collect()
-}
-
-/// 提取所有 c2 点。
-pub fn extract_c2s(ciphertexts: &[ElGamalCiphertext]) -> Vec<G1Projective> {
-    ciphertexts.iter().map(|ct| ct.c2).collect()
 }
 
 // ========== PK 所有权证明（80 字节 Schnorr，自定义格式保留） ==========
@@ -647,18 +531,6 @@ mod tests {
         for (a, b) in cards1.iter().zip(cards2.iter()) {
             assert!(g1_equal(a, b));
         }
-    }
-
-    #[test]
-    fn test_g1_msm() {
-        let points = vec![g1_generator(), hash_to_g1(b"point2")];
-        let scalars = vec![scalar_from_u64(2), scalar_from_u64(3)];
-        let msm = g1_msm(&scalars, &points).unwrap();
-        let manual = g1_add(
-            &g1_mul(&scalars[0], &points[0]),
-            &g1_mul(&scalars[1], &points[1]),
-        );
-        assert!(g1_equal(&msm, &manual));
     }
 
     #[test]

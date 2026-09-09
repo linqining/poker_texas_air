@@ -18,12 +18,14 @@ use std::time::{Duration, Instant};
 use bincode::Options;
 use poker_l1::object_model::ObjectID;
 use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
-use poker_texas_air::airs::lifecycle::create_table::{CreateTableAir, CreateTableInput};
+use poker_texas_air::airs::lifecycle::create_table::{
+    CreateTableAir, CreateTableInput, CreateTableRow,
+};
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prover::prove_method;
 use poker_texas_air::public_inputs::TexasPublicInputs;
+use poker_texas_air::state_root::{compute_state_root, state_root_to_air_limbs};
 use poker_texas_air::trace_gen::MethodTrace;
-use poker_texas_air::trace_gen::create_table_trace::gen_create_table_trace;
 use poker_texas_air::verifier::verify_method_against;
 
 const WARM_SAMPLES: usize = 9;
@@ -147,30 +149,50 @@ fn fixture(log_size: u32) -> Result<Fixture, String> {
         20,
     );
     post_table.call_seq = 1;
-    let generated = gen_create_table_trace(
-        CreateTableInput {
-            name: "stwo-log-size-benchmark".into(),
-            max_players: 6,
-            small_blind: 10,
-            big_blind: 20,
-        },
-        &pre_table,
-        &post_table,
+
+    // Build the active statement row directly from the canonical row ABI,
+    // exactly as the orchestrator's create_table path does.
+    let input = CreateTableInput {
+        name: "stwo-log-size-benchmark".into(),
+        max_players: 6,
+        small_blind: 10,
+        big_blind: 20,
+    };
+    let pre_root = compute_state_root(&pre_table)
+        .map_err(|error| format!("pre state root failed: {error}"))?;
+    let post_root = compute_state_root(&post_table)
+        .map_err(|error| format!("post state root failed: {error}"))?;
+    let pre_limbs = state_root_to_air_limbs(pre_root);
+    let post_limbs = state_root_to_air_limbs(post_root);
+    let pre_version = u64::from(pre_table.call_seq);
+    let post_version = u64::from(post_table.call_seq);
+
+    let row = CreateTableRow::active(
+        &input,
+        pre_limbs,
+        post_limbs,
         42,
         0,
         1,
+        pre_version,
+        post_version,
     )
-    .map_err(|error| format!("fixture trace generation failed: {error}"))?;
-    let row = generated
-        .trace
-        .first_row()
-        .map_err(|error| format!("fixture row extraction failed: {error}"))?;
+    .to_vec();
     let mut trace = MethodTrace::new(log_size, CreateTableAir::num_columns());
     trace
         .write_active_with_padding(&row, &row)
         .map_err(|error| format!("trace construction failed: {error}"))?;
-    let mut air = generated.air;
-    air.log_size = log_size;
+    let air = CreateTableAir::new(
+        log_size,
+        input,
+        pre_limbs,
+        post_limbs,
+        42,
+        0,
+        1,
+        pre_version,
+        post_version,
+    );
     let mut public_inputs =
         TexasPublicInputs::from_tables(&pre_table, &post_table, MethodKind::CreateTable, 42, 0, 1)
             .map_err(|error| format!("public-input construction failed: {error}"))?;

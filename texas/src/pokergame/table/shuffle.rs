@@ -382,8 +382,9 @@ impl Table {
                 self.transition_to(RoundState::PreFlop);
                 self.start_preflop_reveal_phase();
                 // #20 Phase 2：deck 已终局（全部客户端洗牌已验证），此刻采集
-                // HandStart 快照（参与者/盲注前 stack/button/deck）——结算时
-                // 一次性重放为 ProveTask 链，无常驻镜像。
+                // HandStart 快照（参与者/盲注前 stack/button/deck）——实时镜像
+                // （shadow.rs）据此 bootstrap 本手唯一 VM 状态；prove_log 本身
+                // 只作结算对账基准，不再重放。
                 crate::starknet::prove_log::record_hand_start(self);
             } else {
                 // Reconstruct 完成 → 清空 reconstruct_state + reveal_token_state

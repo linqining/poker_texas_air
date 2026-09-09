@@ -2,123 +2,19 @@
 //!
 //! ## API
 //!
-//! - [`verify_create_table`] — 验证 `create_table` 方法的 L1 proof
 //! - [`verify_method`] — 泛型 verify，支持任意 method AIR（阶段 2-4）
 
 use stwo::core::channel::Poseidon252Channel;
 use stwo::core::pcs::CommitmentSchemeVerifier;
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleChannel;
 use stwo::core::verifier::{VerificationError, verify};
-use stwo_constraint_framework::{FrameworkComponent, FrameworkEval, TraceLocationAllocator};
+use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::airs::TexasAir;
 use crate::airs::bound::BoundAir;
-use crate::airs::lifecycle::create_table::{CreateTableAir, cols};
 use crate::error::{TexasAirError, TexasAirResult};
-use crate::prover::{CreateTableProof, MethodProof};
+use crate::prover::MethodProof;
 use crate::public_inputs::TexasPublicInputs;
-
-/// 验证 `create_table` 方法的 L1 proof。
-///
-/// 调用方必须独立重建 `expected_air` 与完整 trusted row。本函数不认证任务来自
-/// 共识区块，也不替代 Orchestrator 的完整 VM dispatch replay。
-///
-/// # 参数
-/// - `proof`: 由 [`crate::prover::prove_create_table`] 生成的 proof
-///
-/// # 返回
-/// - `Ok(())` — 验证通过
-/// - `Err(TexasAirError)` — 验证失败（proof 伪造、约束不满足等）
-///
-/// # Errors
-///
-/// - `TexasAirError::ConstraintUnsatisfied` — AIR 约束不满足
-/// - `TexasAirError::StwoProverError` — Stwo verifier 内部错误
-pub fn verify_create_table_against(
-    proof: CreateTableProof,
-    expected_air: CreateTableAir,
-    expected_public_inputs: &TexasPublicInputs,
-) -> TexasAirResult<()> {
-    verify_create_table_inner(proof, expected_air, expected_public_inputs, true)
-}
-
-fn verify_create_table_inner(
-    proof: CreateTableProof,
-    expected_air: CreateTableAir,
-    expected_public_inputs: &TexasPublicInputs,
-    validate_canonical_state: bool,
-) -> TexasAirResult<()> {
-    let config = crate::prover_context::protocol_pcs_config();
-    expected_public_inputs.verify_roots(&proof.root_binding)?;
-    expected_public_inputs.verify_air_statement(&expected_air.statement())?;
-    if validate_canonical_state {
-        expected_air.validate_public_inputs(expected_public_inputs)?;
-    }
-    let log_size = expected_air.log_size();
-    if proof.log_size != log_size {
-        return Err(TexasAirError::SpecViolation(format!(
-            "proof/AIR log-size mismatch: proof={}, AIR={}",
-            proof.log_size, log_size
-        )));
-    }
-    let expected_trace_row =
-        expected_public_inputs.require_expected_trace_row(cols::NUM_COLUMNS)?;
-    let stark_proof = &proof.stark_proof;
-
-    // 1. Channel + CommitmentSchemeVerifier
-    let mut channel = Poseidon252Channel::default();
-    // Only verifier-supplied public inputs define the statement/transcript.
-    expected_public_inputs.mix_into(&mut channel);
-    let mut commitment_scheme = CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
-
-    // 2. 从 proof 读取 preprocessed commitment（tree 0，0 列）
-    //    prover 提交了空 preprocessed trace，所以 column_log_sizes 为空
-    let preprocessed_commitment = *stark_proof.commitments.get(0).ok_or_else(|| {
-        TexasAirError::StwoProverError(format!(
-            "proof.commitments 长度不足：期望 ≥1，实际 {}",
-            stark_proof.commitments.len()
-        ))
-    })?;
-    commitment_scheme.commit(preprocessed_commitment, &[], &mut channel);
-
-    // 3. 从 proof 读取 trace commitment（tree 1，cols::NUM_COLUMNS 列）
-    let trace_commitment = *stark_proof.commitments.get(1).ok_or_else(|| {
-        TexasAirError::StwoProverError(format!(
-            "proof.commitments 长度不足：期望 ≥2，实际 {}",
-            stark_proof.commitments.len()
-        ))
-    })?;
-    let trace_log_sizes = vec![log_size; cols::NUM_COLUMNS];
-    commitment_scheme.commit(trace_commitment, &trace_log_sizes, &mut channel);
-
-    // 4. Build from the independently reconstructed AIR, never proof.air.
-    let mut allocator = TraceLocationAllocator::default();
-    let component = FrameworkComponent::new(
-        &mut allocator,
-        BoundAir::new(expected_air, expected_trace_row),
-        stwo::core::fields::qm31::SecureField::from(0u32),
-    );
-
-    // 5. 验证（verify 内部处理 composition poly commitment = proof.commitments.last()）
-    verify(
-        &[&component],
-        &mut channel,
-        &mut commitment_scheme,
-        proof.stark_proof,
-    )
-    .map_err(|e: VerificationError| TexasAirError::ConstraintUnsatisfied(e.to_string()))?;
-
-    Ok(())
-}
-
-/// Test-only compatibility entry point. It deliberately trusts proof-carried
-/// metadata and is omitted from production builds.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn verify_create_table(proof: CreateTableProof) -> TexasAirResult<()> {
-    let expected_air = proof.air.clone();
-    let expected_public_inputs = proof.public_inputs.clone();
-    verify_create_table_inner(proof, expected_air, &expected_public_inputs, false)
-}
 
 /// 泛型 method verify — 验证任意 method AIR 的 L1 proof。
 ///

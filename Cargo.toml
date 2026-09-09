@@ -65,8 +65,6 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# 保留 Aggregator PoC 配置；生产 prove/verify 默认拒绝 descriptor-only 聚合
-aggregator = []
 # 测试辅助：暴露不可信负向测试工具；lib.rs 禁止其进入 release 构建
 test-helpers = []
 

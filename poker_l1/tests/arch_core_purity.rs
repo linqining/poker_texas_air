@@ -86,12 +86,14 @@ fn core_is_pure_no_clock_io_async() {
                 );
             }
             let trimmed = line.trim_start();
-            if trimmed.starts_with("use rand") && !line.starts_with(char::is_whitespace) {
-                panic!(
-                    "core purity violation at {}:{}: 顶层 `use rand` — 随机数只允许在 #[cfg(test)] 模块内（缩进）使用\n  line: {line}",
-                    file.display(),
-                    idx + 1,
-                );
+            for pat in FORBIDDEN_TOPLEVEL_USES {
+                if trimmed.starts_with(pat) && !line.starts_with(char::is_whitespace) {
+                    panic!(
+                        "core purity violation at {}:{}: 顶层 `{pat}` — 随机数只允许在 #[cfg(test)] 模块内（缩进）使用\n  line: {line}",
+                        file.display(),
+                        idx + 1,
+                    );
+                }
             }
         }
     }

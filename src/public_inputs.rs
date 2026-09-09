@@ -292,38 +292,11 @@ impl TexasPublicInputs {
     ///
     /// image 为测试专用的 24 个 `FieldElement::ONE`，root 为其真实 Poseidon 哈希（自洽）。
     /// 用于不需要真实 table 的 AIR 机制测试（仅验证 prove/verify 流程，不验证 state 绑定语义）。
+    #[cfg(test)]
     #[must_use]
     pub fn synthetic_placeholder(kind: MethodKind) -> Self {
         let image = vec![FieldElement::ONE; 24];
         Self::with_consistent_roots(image.clone(), image, kind, 0, 0, 0)
-    }
-
-    /// 构造自洽占位 PI 并指定元数据（机制测试用，使 PI 与 AIR struct 的
-    /// table_id/hand_id/call_seq/version 一致，通过 `verify_air_statement`）。
-    #[must_use]
-    pub fn synthetic_for_test(
-        kind: MethodKind,
-        table_id: u64,
-        hand_id: u32,
-        call_seq: u32,
-    ) -> Self {
-        let image = vec![FieldElement::ONE; 24];
-        Self::with_consistent_roots(image.clone(), image, kind, table_id, hand_id, call_seq)
-    }
-
-    /// 返回 synthetic_placeholder 对应的 AIR 端 state_root limb（pre/post）。
-    ///
-    /// 机制测试需让 AIR struct 与 trace 的 state_root 列 == PI 的 root 经
-    /// `state_root_to_air_limbs` 转换后的值，否则 `verify_air_statement` 失败。
-    /// 此 helper 暴露这些 limb，供测试填入 AIR/trace。
-    #[must_use]
-    pub fn synthetic_air_roots(kind: MethodKind) -> ([M31; 4], [M31; 4]) {
-        use crate::state_root::state_root_to_air_limbs;
-        let pi = Self::synthetic_placeholder(kind);
-        (
-            state_root_to_air_limbs(pi.pre_state_root),
-            state_root_to_air_limbs(pi.post_state_root),
-        )
     }
 
     /// 把公开输入 mix 进 Fiat-Shamir channel（prover 与 verifier 共用，顺序固定）。

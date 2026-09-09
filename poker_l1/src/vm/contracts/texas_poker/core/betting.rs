@@ -126,14 +126,12 @@ impl BettingRound {
 /// 下注错误类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BettingError {
+    /// 加注金额非法（未超过当前注 / 低于 seat_bet / 非 all-in 低于最小加注增量）。
     #[error("invalid raise amount")]
     InvalidRaiseAmount,
+    /// 筹码不足以完成该加注（needed > stack）。
     #[error("cannot raise: insufficient stack")]
     CannotRaise,
-    #[error("not player's turn")]
-    NotPlayerTurn,
-    #[error("player folded or all-in")]
-    PlayerInactive,
 }
 
 #[cfg(test)]

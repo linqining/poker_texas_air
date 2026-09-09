@@ -1,13 +1,27 @@
-//! Starknet 接入层：链配置、RPC 客户端、钱包认证、STRK20 买入、牌局镜像证明与结算上链。
+//! Starknet 接入层：链配置、RPC 客户端、钱包认证、STRK20 买入、实时 VM 镜像、
+//! 证明生成与结算上链。
 //!
-//! 模块结构：
-//! - [`config`]：环境变量配置（RPC、操作员账户、合约地址）
-//! - [`chain`]：全局 `StarknetChain` 单例（provider + 操作员账户）
-//! - [`auth`]：Starknet 钱包签名验证（isValidSignature 视图调用）
-//! - [`chips`]：STRK20 余额 / vault 筹码余额 / 买入交易回执校验
-//! - [`paymaster`]：Plan C paymaster 中继（paymaster_* JSON-RPC 透传 + API key 服务端注入）
-//! - [`mirror`]：牌局镜像 —— 把 WS 牌局操作同步 dispatch 到 poker_l1 VM 收集 ProveTask
-//! - [`submit`]：一手结束后 prove → outer aggregate → Cairo calldata → 上链提交
+//! 模块地图（按职责）：
+//! - 实时镜像与对账事实
+//!   - [`shadow`]：实时 VM 镜像（**权威入口**）——每个接受点同步 dispatch
+//!     的单一 VM 状态，结算直接取用其 ProveTask 链与 pre-payout 快照
+//!   - [`mirror`]：VM 机械层——`TableMirror` dispatch 包装、开局引导、
+//!     zgame ↔ ptx 类型的 borsh 桥
+//!   - [`prove_log`]：手牌对账事实记录（HandStart 快照、终局投入、派奖）
+//! - 结算编排与提交
+//!   - [`hooks`]：结算编排（游戏层结束钩子 → 证明 → 提交 → 锁账续钟）
+//!   - [`lock`]：vault 会话钥核验（P1-2 会话委托）与在局筹码锁定/释放
+//!   - [`submit`]：legacy 结算（register_aggregate / settle_hand calldata + 提交）
+//!   - [`dual_settle`]：DAPV 双证明结算路径
+//!   - [`recursion_prover`] / [`settlement_prover`]：证明生成
+//!     （SNIP-36 递归信封 / settlement 电路）
+//! - 基础设施
+//!   - [`config`]：环境变量配置（RPC、操作员账户、合约地址）
+//!   - [`chain`]：全局 `StarknetChain` 单例（provider + 操作员账户）及
+//!     felt 解析 / selector / hex 公共辅助
+//!   - [`auth`]：Starknet 钱包签名验证（isValidSignature 视图调用）
+//!   - [`chips`]：vault 筹码余额 / 买入交易回执校验
+//!   - [`paymaster`]：Plan C paymaster 中继（paymaster_* JSON-RPC 透传）
 
 pub mod auth;
 pub mod chain;

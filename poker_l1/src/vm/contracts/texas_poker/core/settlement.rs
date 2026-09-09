@@ -1338,4 +1338,25 @@ mod tests {
         assert!((tampered.winner_mask >> donee) & 1 == 0);
         assert!(tampered.validate(seat_count).is_err());
     }
+
+    // ========== compute_rake 边界（自 state_machine.rs 迁入） ==========
+
+    #[test]
+    fn compute_rake_uses_full_width_multiplication() {
+        let mut table = table();
+        table.rake_mode = RAKE_MODE_PERCENTAGE;
+        table.rake_bps = u16::MAX;
+        table.rake_cap = u64::MAX;
+
+        let rake = compute_rake(&table, u64::MAX).unwrap();
+        assert_eq!(rake, u64::MAX);
+    }
+
+    #[test]
+    fn compute_rake_none_mode_is_zero() {
+        let mut table = table();
+        table.rake_mode = RAKE_MODE_NONE;
+
+        assert_eq!(compute_rake(&table, 1_000).unwrap(), 0);
+    }
 }

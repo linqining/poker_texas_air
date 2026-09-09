@@ -1,9 +1,9 @@
 //! Tagged Pubkey 编码（SEC-M9 修复 — tag 版本化机制）
 //!
 //! spec SEC-M9：tag 字节编码 `(scheme_id: 4 bits || version_id: 4 bits)`
-//! - `0x00` = secp256k1 v1（compressed 33B pubkey）
-//! - `0x01` = ed25519 v1（32B pubkey）
-//! - `0x02` = Stark Schnorr v1（32B 压缩点；2026-09-09 P1-2 引入）
+//! - `0x01` = secp256k1 v1（compressed 33B pubkey）
+//! - `0x11` = ed25519 v1（32B pubkey）
+//! - `0x21` = Stark Schnorr v1（32B 压缩点；2026-09-09 P1-2 引入）
 //! - `0x10`-`0xF0` 高位段预留（BLS12-381 / 后量子等）
 //! - 新 tag 引入须治理提案 + 90% quorum
 //!

@@ -33,15 +33,12 @@
 //!
 //! 服务器管理路径（`submit_unsigned`）仍由 host 背书 caller 身份。
 //!
-//! 重放策略：applied-nonce 集合——成功应用的 nonce 烧号，同签名重放被拒；
-//! 业务失败的交易不烧号（可修正后重试）。nonce 绑定进签名消息（见
-//! `dispatch::tx_message_hash`），跨槽挪用签名的交易验证不过。
-//!
 //! 队列冲刷是**全量重验**：暂存条目连同完整签名材料保存，每次重试都重新
-//! 走签名验证 + 重放集检查 + 业务语义——不信任任何已入队状态。
+//! 走签名验证 + nonce 水位检查 + 业务语义——不信任任何已入队状态。
 //!
-//! 与 texas 侧 `TableMirror` 的关系：mirror 是结算时一次性重放器（即弃），
-//! 本门面是常驻权威入口——Phase 2b 完成后 mirror 退役。
+//! 与 texas 侧 `TableMirror` 的关系：texas 经本门面在每个接受点同步
+//! dispatch（实时 VM 镜像 = 手牌唯一 VM 状态表示），结算直接取用其
+//! ProveTask 链与 pre-payout 快照。
 
 use super::caller_id;
 use super::dispatch::{dispatch, tx_message_hash};
@@ -107,16 +104,19 @@ pub struct Submission {
     pub wallet: String,
     /// 本笔交易的共识时钟（毫秒）——由调用方注入。
     pub block_timestamp: u64,
+    /// 命令 selector（32 字节方法选择子，`dispatch::selectors` 的产出）。
     pub selector: [u8; 32],
+    /// 命令参数（对应 selector 的 `*Args` 的 borsh 编码）。
     pub args: Vec<u8>,
     /// Stark Schnorr 签名（64B = R‖s，方案见 [`crate::signature::stark_scheme`]）。
     pub signature: Vec<u8>,
-    /// 发送方 nonce：进签名消息 + applied 集合防重放。
+    /// 发送方 nonce：绑定进签名消息，应用成功后抬升账户水位（防重放）。
     pub nonce: u64,
 }
 
 /// 链运行时门面：一张表的权威交易入口。
 pub struct TableRuntime {
+    /// VM 权威表状态（dispatch 的唯一可变对象）。
     pub table: TexasPokerTable,
     chain_id: ChainId,
     block_height: u64,
@@ -132,6 +132,7 @@ pub struct TableRuntime {
 }
 
 impl TableRuntime {
+    /// 建门面：`chain_id` 进签名消息域（防跨链签名挪用），队列容量 64。
     pub fn new(table: TexasPokerTable, chain_id: ChainId) -> Self {
         Self {
             table,
@@ -144,18 +145,22 @@ impl TableRuntime {
         }
     }
 
+    /// 入口队列（乱序容忍暂存 + 死信清单）。
     pub fn pending(&self) -> &PendingQueue<Submission> {
         &self.pending
     }
 
+    /// 已收集的证明任务（交证明层消费）。
     pub fn tasks(&self) -> &[L1ProveTask] {
         &self.tasks
     }
 
+    /// 已收集的表事件（广播/审计消费）。
     pub fn events(&self) -> &[TexasPokerEvent] {
         &self.events
     }
 
+    /// 当前块高（每次 dispatch 自增；驱动 VM 内的超时/相位逻辑）。
     pub fn block_height(&self) -> u64 {
         self.block_height
     }

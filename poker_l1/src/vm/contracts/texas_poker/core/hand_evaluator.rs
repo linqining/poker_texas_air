@@ -15,15 +15,25 @@ use super::card::Card;
 
 // ===== 牌型常量 =====
 
+/// 高牌（无任何成牌，按最大点数比较）。
 pub const HIGH_CARD: u8 = 0;
+/// 一对。
 pub const ONE_PAIR: u8 = 1;
+/// 两对。
 pub const TWO_PAIR: u8 = 2;
+/// 三条。
 pub const THREE_OF_A_KIND: u8 = 3;
+/// 顺子（五张连续点数）。
 pub const STRAIGHT: u8 = 4;
+/// 同花（五张同花色）。
 pub const FLUSH: u8 = 5;
+/// 葫芦（三条 + 一对）。
 pub const FULL_HOUSE: u8 = 6;
+/// 四条。
 pub const FOUR_OF_A_KIND: u8 = 7;
+/// 同花顺。
 pub const STRAIGHT_FLUSH: u8 = 8;
+/// 皇家同花顺（A 高同花顺）。
 pub const ROYAL_FLUSH: u8 = 9;
 
 /// 手牌评估结果。
@@ -43,7 +53,9 @@ pub const ROYAL_FLUSH: u8 = 9;
     BorshDeserialize,
 )]
 pub struct HandRank {
+    /// 牌型类别（0-9，见上方 `HIGH_CARD`..`ROYAL_FLUSH` 常量）。
     pub category: u8,
+    /// 决胜点数（定长 5、降序，不足位补 0；同一 category 下按位比较）。
     pub kickers: [u8; 5],
 }
 
@@ -606,5 +618,209 @@ mod tests {
         ];
         let rank = evaluate_best(&rainbow);
         assert_eq!(rank.category, HIGH_CARD);
+    }
+
+    // ===== 6 张牌路径（C(6,5)=6 组合枚举；此前只有 7 张与 <5 张覆盖）=====
+
+    #[test]
+    fn test_six_card_best_five_drops_sixth() {
+        // 两对 + 三张散牌：最佳 5 张 = 两对 + 最大 kicker（丢掉最小散牌）。
+        let six = vec![
+            card(SPADES, KING),
+            card(HEARTS, KING),
+            card(DIAMONDS, EIGHT),
+            card(CLUBS, EIGHT),
+            card(SPADES, ACE),
+            card(HEARTS, THREE),
+        ];
+        let rank = evaluate_best(&six);
+        assert_eq!(rank.category, TWO_PAIR);
+        // kicker = A（丢掉 3）
+        assert_eq!(rank.kickers, [13, 8, 14, 0, 0]);
+    }
+
+    #[test]
+    fn test_six_card_upgrade_to_full_house() {
+        // 两对 + 第 6 张把小对升成葫芦：K-K-8-8 + 8 → 8 葫芦带 K。
+        let six = vec![
+            card(SPADES, KING),
+            card(HEARTS, KING),
+            card(DIAMONDS, EIGHT),
+            card(CLUBS, EIGHT),
+            card(SPADES, EIGHT),
+            card(HEARTS, TWO),
+        ];
+        let rank = evaluate_best(&six);
+        assert_eq!(rank.category, FULL_HOUSE);
+        assert_eq!(rank.kickers, [8, 13, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_six_card_pair_plus_flush_draw_not_flush() {
+        // 4 张同花 + 一对：6 张里任何 5 张都无法凑满 5 张同花 → 两对/一对。
+        let six = vec![
+            card(SPADES, ACE),
+            card(SPADES, KING),
+            card(SPADES, QUEEN),
+            card(SPADES, JACK),
+            card(HEARTS, NINE),
+            card(DIAMONDS, NINE),
+        ];
+        let rank = evaluate_best(&six);
+        assert_eq!(rank.category, ONE_PAIR);
+        assert_eq!(rank.kickers[0], 9);
+    }
+
+    // ===== 同牌型 kicker 决胜（AIR classify 镜像最易漂移的字段）=====
+
+    #[test]
+    fn test_same_category_kicker_duels() {
+        // 顺子高牌决胜：T-high 击败 9-high。
+        let ten_high = vec![
+            card(SPADES, TEN),
+            card(HEARTS, NINE),
+            card(DIAMONDS, EIGHT),
+            card(CLUBS, SEVEN),
+            card(SPADES, SIX),
+            card(HEARTS, TWO),
+            card(CLUBS, THREE),
+        ];
+        let nine_high = vec![
+            card(SPADES, NINE),
+            card(HEARTS, EIGHT),
+            card(DIAMONDS, SEVEN),
+            card(CLUBS, SIX),
+            card(SPADES, FIVE),
+            card(HEARTS, TWO),
+            card(CLUBS, THREE),
+        ];
+        assert!(evaluate_best(&ten_high) > evaluate_best(&nine_high));
+
+        // 同花逐位 kicker：A-K-9 击败 A-K-8（第 3 位分胜负）。
+        let flush_high = vec![
+            card(HEARTS, ACE),
+            card(HEARTS, KING),
+            card(HEARTS, NINE),
+            card(HEARTS, FIVE),
+            card(HEARTS, THREE),
+            card(CLUBS, QUEEN),
+            card(SPADES, JACK),
+        ];
+        let flush_low = vec![
+            card(DIAMONDS, ACE),
+            card(DIAMONDS, KING),
+            card(DIAMONDS, EIGHT),
+            card(DIAMONDS, FIVE),
+            card(DIAMONDS, THREE),
+            card(CLUBS, QUEEN),
+            card(SPADES, JACK),
+        ];
+        assert!(evaluate_best(&flush_high) > evaluate_best(&flush_low));
+
+        // 葫芦同三条不同对子：Q over K 击败 Q over J。
+        let fh_high_pair = vec![
+            card(SPADES, QUEEN),
+            card(HEARTS, QUEEN),
+            card(DIAMONDS, QUEEN),
+            card(CLUBS, KING),
+            card(SPADES, KING),
+            card(HEARTS, TWO),
+            card(CLUBS, THREE),
+        ];
+        let fh_low_pair = vec![
+            card(SPADES, QUEEN),
+            card(HEARTS, QUEEN),
+            card(DIAMONDS, QUEEN),
+            card(CLUBS, JACK),
+            card(SPADES, JACK),
+            card(HEARTS, TWO),
+            card(CLUBS, THREE),
+        ];
+        assert!(evaluate_best(&fh_high_pair) > evaluate_best(&fh_low_pair));
+
+        // 高牌逐位：A-K-J-9 击败 A-K-T-9（注意别凑出 A-2-3-4-5 轮子顺）。
+        let hc_high = vec![
+            card(SPADES, ACE),
+            card(HEARTS, KING),
+            card(DIAMONDS, JACK),
+            card(CLUBS, NINE),
+            card(SPADES, SEVEN),
+            card(HEARTS, TWO),
+            card(CLUBS, THREE),
+        ];
+        let hc_low = vec![
+            card(SPADES, ACE),
+            card(HEARTS, KING),
+            card(DIAMONDS, TEN),
+            card(CLUBS, NINE),
+            card(SPADES, SEVEN),
+            card(HEARTS, TWO),
+            card(CLUBS, THREE),
+        ];
+        assert!(evaluate_best(&hc_high) > evaluate_best(&hc_low));
+    }
+
+    #[test]
+    fn test_find_winners_single_player_and_kicker_sweep() {
+        // 单人：自己就是赢家。
+        let winners = find_winners(&[(
+            3u8,
+            vec![
+                card(SPADES, TWO),
+                card(HEARTS, SEVEN),
+                card(DIAMONDS, NINE),
+                card(CLUBS, JACK),
+                card(SPADES, KING),
+            ],
+        )]);
+        assert_eq!(winners, vec![3]);
+
+        // kicker 决胜横扫：T-high 顺子同时击败两个 9-high。
+        let table = vec![
+            (
+                0u8,
+                vec![
+                    card(SPADES, TEN),
+                    card(HEARTS, NINE),
+                    card(DIAMONDS, EIGHT),
+                    card(CLUBS, SEVEN),
+                    card(SPADES, SIX),
+                    card(HEARTS, TWO),
+                    card(CLUBS, THREE),
+                ],
+            ),
+            (
+                1u8,
+                vec![
+                    card(HEARTS, NINE),
+                    card(DIAMONDS, EIGHT),
+                    card(CLUBS, SEVEN),
+                    card(SPADES, SIX),
+                    card(HEARTS, FIVE),
+                    card(CLUBS, TWO),
+                    card(SPADES, THREE),
+                ],
+            ),
+            (
+                2u8,
+                vec![
+                    card(CLUBS, NINE),
+                    card(SPADES, EIGHT),
+                    card(HEARTS, SEVEN),
+                    card(DIAMONDS, SIX),
+                    card(CLUBS, FIVE),
+                    card(SPADES, TWO),
+                    card(HEARTS, THREE),
+                ],
+            ),
+        ];
+        assert_eq!(find_winners(&table), vec![0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "find_winners")]
+    fn test_find_winners_empty_panics() {
+        // 坏状态（无玩家）必须 panic 而不是返回空——锁定该契约。
+        let _ = find_winners(&[]);
     }
 }

@@ -856,7 +856,6 @@ async fn sepolia_settle_smoke() {
     let op_key = std::env::var("STARKNET_OPERATOR_PRIVATE_KEY").expect("STARKNET_OPERATOR_PRIVATE_KEY");
     let dual_addr = std::env::var("STARKNET_DUAL_SETTLEMENT_ADDRESS").expect("STARKNET_DUAL_SETTLEMENT_ADDRESS");
     let vault_addr = std::env::var("STARKNET_VAULT_ADDRESS").expect("STARKNET_VAULT_ADDRESS");
-    let strk_addr = std::env::var("STARKNET_STRK_ADDRESS").expect("STARKNET_STRK_ADDRESS");
     // settlement_enabled() 要求 legacy 字段非空（dapv 模式下不消费，仅门控）。
     let legacy_addr = std::env::var("STARKNET_SETTLEMENT_ADDRESS").unwrap_or_else(|_| dual_placeholder());
 
@@ -895,10 +894,8 @@ async fn sepolia_settle_smoke() {
     // 3. 初始化全局 chain（与 main.rs 同一入口；dapv/linear 模式）。
     let config = super::config::StarknetConfig {
         rpc_url: rpc.clone(),
-        chain_id: "SN_SEPOLIA".into(),
         operator_address: op_addr.clone(),
         operator_private_key: op_key.clone(),
-        strk_address: strk_addr.clone(),
         vault_address: vault_addr.clone(),
         settlement_address: legacy_addr,
         dual_settlement_address: dual_addr.clone(),
@@ -909,8 +906,6 @@ async fn sepolia_settle_smoke() {
         prover_work_dir: "/tmp/zgame-prover".into(),
         auth_strict: false,
         treasury_address: op_addr.clone(),
-        rake_bps: 500,
-        rake_cap: 1_000,
     };
     let chain = super::init(config);
     let operator = chain.operator().await.expect("operator account");
@@ -1102,7 +1097,7 @@ mod runtime_authority_e2e {
     }
 
     /// VM 当前 reveal 窗口中该座位待提交的密文（canonical 顺序）——
-    /// 移植 TableMirror::pending_reveal_ciphertexts（mirror 在 Phase 2b 退役）。
+    /// 与 TableMirror::pending_reveal_ciphertexts 同语义（直接在 VM 表上计算）。
     fn pending_ciphertexts(
         table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
         seat_index: u8,

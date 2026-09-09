@@ -55,9 +55,7 @@ use super::types::{
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
 // typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
-use super::utils::{
-    self, g1_equal, g1_generator, g1_is_identity, g1_sub, generate_plaintext_cards, hash_to_scalar,
-};
+use super::utils::{self, g1_equal, g1_generator, g1_is_identity, g1_sub, generate_plaintext_cards};
 #[cfg(test)]
 use super::utils::{g1_add, scalar_from_u64};
 use crate::error::{PokerL1Error, PokerL1Result};
@@ -147,7 +145,10 @@ pub struct AdvanceDeadlineExecution {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerAction {
     /// Fold the current player for the supplied canonical event reason.
-    Fold { reason: u8 },
+    Fold {
+        /// 弃牌原因（见 `FOLD_REASON_*` 常量：0=manual, 1=auto_timeout, 2=force_admin）。
+        reason: u8,
+    },
     /// Match the current bet; this is a check when no chips are owed and a
     /// call/all-in call otherwise.
     MatchBet,
@@ -192,16 +193,6 @@ pub fn is_betting_round(table: &TexasPokerTable) -> bool {
             table.round_state(),
             ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER
         )
-}
-
-/// 是否处于"游戏中"（非 WAITING 或任一协议 phase != NONE）。
-#[must_use]
-pub fn is_playing(table: &TexasPokerTable) -> bool {
-    table.round_state() != ROUND_WAITING
-        || table.shuffle_phase() != SHUFFLE_PHASE_NONE
-        || table.reveal_token_state().is_some()
-        || table.reconstruct_phase() != RECONSTRUCT_PHASE_NONE
-        || table.run_it_twice_state.is_active()
 }
 
 /// Reconcile the embedded TableVault against every canonical custody bucket.
@@ -258,12 +249,6 @@ pub fn reconcile_table_vault(table: &TexasPokerTable) -> PokerL1Result<u64> {
 #[must_use]
 pub fn is_player_turn(table: &TexasPokerTable, seat_index: u8) -> bool {
     table.current_turn() == seat_index
-}
-
-/// 是否在 seat mask 中。
-#[must_use]
-pub fn is_in_mask(mask: SeatMask, value: u8) -> bool {
-    seat_mask_contains(mask, value)
 }
 
 /// 是否已注册 pk（occupied 且 pk 匹配）。
@@ -1292,20 +1277,6 @@ fn partial_decrypt_c2(c2: &G1Projective, tokens: &[G1Projective]) -> G1Projectiv
     result
 }
 
-/// 根据 encrypted_card_index 反查明文 G1 点。
-#[allow(dead_code)] // 保留供 future RPC / 测试使用。
-fn plaintext_point_by_index(_table: &TexasPokerTable, idx: u8) -> PokerL1Result<G1Projective> {
-    let plaintext = generate_plaintext_cards();
-    if (idx as usize) >= plaintext.len() {
-        return Err(PokerL1Error::Serialization(format!(
-            "plaintext index {} out of range {}",
-            idx,
-            plaintext.len()
-        )));
-    }
-    Ok(plaintext[idx as usize])
-}
-
 // ========== Reconstruct 协议 ==========
 
 /// 启动 reconstruct 流程（玩家超时未提交 reveal token 时触发）。
@@ -1325,14 +1296,9 @@ fn start_reconstruct(
     // the hand phase into `Waiting`. Reading `table.round_state()` after the
     // take would pass `ROUND_WAITING` (0) to `enter_reconstructing`.
     let street = table.round_state();
-    // 生成 coefficient = hash_to_scalar("reconstruct_coefficient/" || table_id_bytes || timestamp_ascii)
-    let mut input = b"reconstruct_coefficient/".to_vec();
-    input.extend_from_slice(&table.id.to_bytes());
-    input.extend_from_slice(&utils::u64_to_ascii(now_ms));
-    // Bind the transcript derivation even though reconstruction V3 no longer persists the
-    // obsolete v1 coefficient. Failure is impossible for the current hash-to-field backend.
-    let _ = hash_to_scalar(&input).unwrap_or_else(|_| utils::scalar_one());
-
+    // 历史留档：reconstruct v1 曾在此派生 coefficient =
+    // hash_to_scalar("reconstruct_coefficient/" || table_id_bytes || timestamp_ascii)。
+    // reconstruction V3 不再持久化该系数，死计算已删除（其值从未被读取）。
     let suspended_reveal = table.take_reveal_payload()?;
     table.enter_reconstructing(
         street,
@@ -1465,7 +1431,7 @@ pub fn apply_submit_shuffle_v2(
             current_shuffler
         )));
     }
-    if is_in_mask(table.shuffle_state().completed_mask, seat_index) {
+    if seat_mask_contains(table.shuffle_state().completed_mask, seat_index) {
         return Err(PokerL1Error::Serialization(
             "already completed shuffle".into(),
         ));
@@ -1554,7 +1520,7 @@ pub fn apply_submit_player_reveal_tokens(
         .iter()
         .enumerate()
         .filter_map(|(index, assignment)| {
-            is_in_mask(assignment.pending_mask(), seat_index).then_some(index as u8)
+            seat_mask_contains(assignment.pending_mask(), seat_index).then_some(index as u8)
         })
         .collect::<Vec<_>>();
     if assignment_indices.len() != reveal_tokens.len() {
@@ -1588,7 +1554,7 @@ pub fn apply_submit_player_reveal_tokens(
                     "assignment {ai} already resolved"
                 )));
             }
-            if !is_in_mask(assignment.pending_mask(), seat_index) {
+            if !seat_mask_contains(assignment.pending_mask(), seat_index) {
                 return Err(PokerL1Error::Serialization(format!(
                     "seat {seat_index} not in pending for assignment {ai}"
                 )));
@@ -1999,7 +1965,7 @@ pub fn apply_submit_reconstruct_deck(
     if !table.seats[seat_index as usize].is_occupied() {
         return Err(PokerL1Error::Serialization("seat not occupied".into()));
     }
-    if !is_in_mask(table.reconstruct_state().pending_mask, seat_index) {
+    if !seat_mask_contains(table.reconstruct_state().pending_mask, seat_index) {
         return Err(PokerL1Error::Serialization(
             "seat not in reconstruct pending".into(),
         ));
@@ -2745,6 +2711,11 @@ fn normalize_until_blocked_in_place(
 }
 
 /// Consume the one canonical deadline currently exposed by the table.
+///
+/// 薄包装：仅返回 `AdvanceDeadlineOutcome`。生产 dispatch 层与 VM 执行走
+/// [`advance_deadline_with_report`]（需要确定性阶段报告选择 native relation）；
+/// 本包装保留给单元测试，以及 `src/airs/lifecycle/advance_deadline.rs` 的
+/// canonical replay（该路径只消费 outcome）。
 pub fn advance_deadline(
     table: &mut TexasPokerTable,
     now_ms: u64,
@@ -3284,20 +3255,6 @@ fn apply_settlement_plan(
         },
     );
     Ok(())
-}
-
-/// 计算 rake 金额（不修改状态），供 settle_hand 在分层后使用。
-fn compute_rake_amount(table: &TexasPokerTable, pot: u64) -> PokerL1Result<u64> {
-    if table.rake_mode == super::constants::RAKE_MODE_NONE {
-        return Ok(0);
-    }
-    let raw_rake = u128::from(pot)
-        .checked_mul(u128::from(table.rake_bps))
-        .ok_or_else(|| PokerL1Error::Serialization("rake multiplication overflow".into()))?
-        / 10_000;
-    Ok(raw_rake
-        .min(u128::from(table.rake_cap))
-        .min(u128::from(pot)) as u64)
 }
 
 /// 退还所有下注（异常路径）。
@@ -4065,36 +4022,6 @@ pub fn collect_ante(
     Ok(())
 }
 
-/// `collect_rake` — 在 `settle_hand` 中按 `rake_mode` 抽水。
-///
-/// 此函数由 `settle_hand` / `end_without_showdown` 内部调用。
-/// 抽水规则：
-/// - `RAKE_MODE_NONE`：不抽水
-/// - `RAKE_MODE_PERCENTAGE`：`rake = min(pot * rake_bps / 10000, rake_cap)`
-///
-/// 抽水后：
-/// - `table.pot -= rake`（从奖池中扣除）
-/// - `table.chip_pool -= rake`（资金已离开桌台，预编译将创建 Treasury Coin 输出）
-///
-/// 返回实际抽水金额（调用方用于 emit RakeCollected 事件）。
-pub fn collect_rake(table: &mut TexasPokerTable) -> PokerL1Result<u64> {
-    if table.rake_mode == super::constants::RAKE_MODE_NONE {
-        return Ok(0);
-    }
-    let pot = table.pot;
-    let rake = compute_rake_amount(table, pot)?;
-    let post_pot = table
-        .pot
-        .checked_sub(rake)
-        .ok_or_else(|| PokerL1Error::Serialization("collect_rake: pot -= rake underflow".into()))?;
-    let post_chip_pool = table.chip_pool.checked_sub(rake).ok_or_else(|| {
-        PokerL1Error::Serialization("collect_rake: rake exceeds TableVault".into())
-    })?;
-    table.pot = post_pot;
-    table.chip_pool = post_chip_pool;
-    Ok(rake)
-}
-
 /// Activate Run It Twice once no further contested betting is possible.
 fn maybe_trigger_run_it_twice(
     table: &mut TexasPokerTable,
@@ -4403,7 +4330,6 @@ mod tests {
         let table = make_table();
         assert!(can_join_state(&table));
         assert!(can_leave_state(&table));
-        assert!(!is_playing(&table));
     }
 
     #[test]
@@ -5856,65 +5782,8 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    // ========== Rake 测试 ==========
-
-    #[test]
-    fn test_collect_rake_percentage() {
-        let mut table = make_table();
-        table.rake_mode = RAKE_MODE_PERCENTAGE;
-        table.rake_bps = 500; // 5%
-        table.rake_cap = 100;
-        table.pot = 1000;
-        table.chip_pool = 1000;
-
-        let pot_before = table.pot;
-        let rake = collect_rake(&mut table).unwrap();
-        assert_eq!(rake, 50); // 1000 * 5% = 50
-        assert_eq!(table.pot, 950);
-        assert_eq!(table.chip_pool, 950);
-        assert_eq!(pot_before, 1000);
-    }
-
-    #[test]
-    fn test_collect_rake_capped() {
-        let mut table = make_table();
-        table.rake_mode = RAKE_MODE_PERCENTAGE;
-        table.rake_bps = 500; // 5%
-        table.rake_cap = 30;
-        table.pot = 1000;
-        table.chip_pool = 1000;
-
-        let rake = collect_rake(&mut table).unwrap();
-        // raw_rake = 50，但 cap = 30
-        assert_eq!(rake, 30);
-        assert_eq!(table.pot, 970);
-    }
-
-    #[test]
-    fn test_collect_rake_uses_full_width_multiplication() {
-        let mut table = make_table();
-        table.rake_mode = RAKE_MODE_PERCENTAGE;
-        table.rake_bps = u16::MAX;
-        table.rake_cap = u64::MAX;
-        table.pot = u64::MAX;
-        table.chip_pool = u64::MAX;
-
-        let rake = collect_rake(&mut table).unwrap();
-        assert_eq!(rake, u64::MAX);
-        assert_eq!(table.pot, 0);
-        assert_eq!(table.chip_pool, 0);
-    }
-
-    #[test]
-    fn test_collect_rake_none_mode() {
-        let mut table = make_table();
-        table.rake_mode = RAKE_MODE_NONE;
-        table.pot = 1000;
-
-        let rake = collect_rake(&mut table).unwrap();
-        assert_eq!(rake, 0);
-        assert_eq!(table.pot, 1000);
-    }
+    // Rake 金额计算的唯一权威实现是 `settlement::compute_rake`，
+    // 其公式、封顶与守恒行为由 settlement.rs / settlement_fixture.rs 的测试覆盖。
 
     // ========== Run It Twice 测试 ==========
 

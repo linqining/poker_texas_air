@@ -46,7 +46,7 @@ use poker_protocol_core::{
 };
 
 use crate::error::{TexasAirError, TexasAirResult};
-use crate::hash_prover::{ArchivedHashProof, Blake2bStatement, HashProofProvider};
+use crate::hash_prover::{ArchivedHashProof, HashStatement, HashProofProvider};
 use crate::ristretto_poseidon2_air::Poseidon2ChainSpec;
 use crate::ristretto_poseidon2_transcript::Poseidon2M31Transcript;
 /// Fixed 52-card deck size for the V2 Ristretto wire (was
@@ -183,7 +183,7 @@ pub struct RistrettoShuffleV2ChallengeWire {
 pub struct FlockShuffleTranscript {
     state: [u8; 32],
     pending: Vec<u8>,
-    statements: Vec<Blake2bStatement>,
+    statements: Vec<HashStatement>,
     challenges: Vec<RistrettoShuffleV2ChallengeWire>,
 }
 
@@ -196,7 +196,7 @@ impl FlockShuffleTranscript {
         preimage.extend_from_slice(&(protocol_name.len() as u32).to_le_bytes());
         preimage.extend_from_slice(protocol_name);
         let state = chain_digest(&preimage);
-        let statements = vec![Blake2bStatement::new(preimage, state)];
+        let statements = vec![HashStatement::new(preimage, state)];
         Self {
             state,
             pending: Vec::new(),
@@ -206,7 +206,7 @@ impl FlockShuffleTranscript {
     }
 
     /// The ordered chain statements produced so far (Flock-provable).
-    pub fn statements(&self) -> &[Blake2bStatement] {
+    pub fn statements(&self) -> &[HashStatement] {
         &self.statements
     }
 
@@ -238,7 +238,7 @@ impl FlockShuffleTranscript {
         message.extend_from_slice(&self.pending);
         self.state = chain_digest(&message);
         self.statements
-            .push(Blake2bStatement::new(message, self.state));
+            .push(HashStatement::new(message, self.state));
         self.pending.clear();
     }
 
@@ -986,7 +986,7 @@ pub struct RistrettoAirV2ShuffleInCircuitComponents {
     /// `x (powers), y (product), z (product), mexp, product`.
     pub challenges: Vec<RistrettoScalar>,
     /// The transcript chain statements the Flock STARKs cover.
-    pub transcript_statements: Vec<Blake2bStatement>,
+    pub transcript_statements: Vec<HashStatement>,
 }
 
 /// Extract the on-chain recursion component set for one V2 shuffle request.

@@ -1,10 +1,11 @@
 //! Shared protocol primitives and native curve backends.
 //!
-//! This crate owns the curve traits, the current Ristretto/BN254/secp256k1
-//! implementations plus the Plan D Stark-curve backend ([`stark_curve`]),
-//! generic ElGamal, transcript interfaces, and verification errors
-//! （BLS12-381/blst 后端已按 2026-09-05 决策移除，不考虑兼容）. It intentionally contains no game state machine, networking code,
-//! or chain SDK dependency.
+//! This crate owns the curve traits, the Plan D Stark-curve backend
+//! ([`stark_curve`]——2026-09-05 起协议唯一生产曲线), generic ElGamal,
+//! transcript interfaces, and verification errors. 历史 Ristretto/BN254/
+//! secp256k1 后端仍作为测试与基准的参照实现保留（BLS12-381/blst 已按
+//! 2026-09-05 决策移除，不考虑兼容）. It intentionally contains no game
+//! state machine, networking code, or chain SDK dependency.
 
 mod backend;
 pub mod curve;

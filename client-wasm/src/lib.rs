@@ -738,10 +738,10 @@ pub fn encrypt_plaintext(plaintext_hex: &str, pk_hex: &str) -> Result<JsValue, J
 
 
 /// #16 抗审查动作签名：以牌局身份 SK 对 (table_id, hand_id, seq, action,
-/// amount) 签名（Starknet-Poseidon 域分离同族：`zgame.action-sig.v2`，与
+/// amount) 签名（Starknet-Poseidon 域分离同族：`zgame.action-sig.v3`，与
 /// texas 服务端 `game_action.rs` 验签口径逐字节一致）。返回 `{ r_hex, s_hex }`
 /// ——客户端把 `(seq, r_hex, s_hex)` 附在动作消息上；服务端按座位 pk 验签。
-/// v2：hand_id 进签名域，签名升级为逐手归属凭证（endorsement 通道已删除）。
+/// v3：hand_id 进签名域，签名升级为逐手归属凭证（endorsement 通道已删除）。
 ///
 /// `sk_hex` 为 ClientPlayer 的 sk（32 字节大端 hex，localStorage `sk` 同源）；
 /// `hand_id` 为开局广播分配的本手 id。
@@ -864,7 +864,7 @@ mod curve_hex_tests {
     use super::*;
 
     /// 2026-09-07 回归：hex_to_ecpoint 曾按 BLS12-381 时代断言 48 字节，
-    /// Stark 压缩点 33 字节 → 浏览器洗牌全挂（2026-09-06 重建 pkg 首次
+    /// Stark 压缩点 32 字节 → 浏览器洗牌全挂（2026-09-06 重建 pkg 首次
     /// 把遗留代码编进产物后爆发）。roundtrip 必须闭环。
     #[test]
     fn ecpoint_hex_roundtrip() {

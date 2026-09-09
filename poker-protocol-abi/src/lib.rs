@@ -784,7 +784,21 @@ pub enum AbiError {
 
 impl std::fmt::Display for AbiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::UnexpectedEof => write!(f, "request truncated: unexpected end of input"),
+            Self::InvalidMagic => write!(f, "request magic mismatch"),
+            Self::UnsupportedVersion(v) => write!(f, "unsupported ABI version {v}"),
+            Self::UnsupportedCurve(c) => write!(f, "unsupported curve id {c}"),
+            Self::UnsupportedProofSystem(p) => write!(f, "unsupported proof system id {p}"),
+            Self::UnsupportedTranscript(t) => write!(f, "unsupported transcript id {t}"),
+            Self::InvalidFlags => write!(f, "invalid flags word"),
+            Self::InvalidDeckSize => write!(f, "deck size out of the allowed range"),
+            Self::ContextTooLarge => write!(f, "context field exceeds the allowed length"),
+            Self::InvalidPointSize => write!(f, "point section has invalid width"),
+            Self::InvalidProofSize => write!(f, "proof section has invalid width"),
+            Self::TrailingBytes => write!(f, "trailing bytes after the request"),
+            Self::VerifierUnavailable => write!(f, "no verifier registered for this request"),
+        }
     }
 }
 

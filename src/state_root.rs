@@ -26,7 +26,6 @@ use starknet_ff::FieldElement;
 use stwo::core::fields::m31::M31;
 
 use crate::error::{TexasAirError, TexasAirResult};
-use crate::merkle_tree::{MerkleTree, SeatLeaf};
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
@@ -143,18 +142,6 @@ pub fn u64_to_field(v: u64) -> FieldElement {
     FieldElement::from(v)
 }
 
-/// 把 u8 编码为 Starknet `FieldElement`。
-#[must_use]
-pub fn u8_to_field(v: u8) -> FieldElement {
-    FieldElement::from(u64::from(v))
-}
-
-/// 把 bool 编码为 Starknet `FieldElement`（0 或 1）。
-#[must_use]
-pub fn bool_to_field(b: bool) -> FieldElement {
-    FieldElement::from(u64::from(b))
-}
-
 /// Canonical, complete resolved `TexasPokerTable` transcript image.
 ///
 /// The old hand-maintained 24-field list omitted consensus fields whenever the
@@ -191,15 +178,6 @@ pub fn table_from_state_preimage(
         TexasAirError::SerializationError(format!("TexasPokerTable schema validation: {e}"))
     })?;
     Ok(table)
-}
-
-/// Canonical preimage of the exact ObjectDb hot-v30 table projection.
-pub fn hot_table_state_preimage(
-    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
-) -> TexasAirResult<Vec<FieldElement>> {
-    let bytes = poker_l1::vm::contracts::texas_poker::state_codec::encode_hot_table_state(table)
-        .map_err(|e| TexasAirError::StateRootError(format!("encode Texas hot table: {e}")))?;
-    canonical_bytes_preimage("zchain.texas_poker.hot_table.v30", &bytes)
 }
 
 /// Compute the ObjectDb-compatible hot-v30 state root.
@@ -258,31 +236,6 @@ pub fn hot_table_state_bytes(
 ) -> TexasAirResult<Vec<u8>> {
     poker_l1::vm::contracts::texas_poker::state_codec::encode_hot_table_state(table)
         .map_err(|e| TexasAirError::StateRootError(format!("encode Texas hot table: {e}")))
-}
-
-/// 计算 seats 的 Merkle root。
-///
-/// 把每个 `Seat` 编码为 `SeatLeaf`（Poseidon252 of seat fields），构造 Merkle 树，
-/// 返回 root。空列表返回 0。
-///
-/// # Errors
-///
-/// 当 seats 长度 > 16 时返回错误（max_players=9 时叶子数 ≤ 9，padding 到 16 即可）。
-pub fn compute_seats_root(
-    seats: &[poker_l1::vm::contracts::texas_poker::types::Seat],
-) -> TexasAirResult<FieldElement> {
-    if seats.is_empty() {
-        return Ok(FieldElement::ZERO);
-    }
-    if seats.len() > 16 {
-        return Err(TexasAirError::StateRootError(format!(
-            "seats.len() = {} > 16 (max padding)",
-            seats.len()
-        )));
-    }
-    let leaves: Vec<SeatLeaf> = seats.iter().map(SeatLeaf::from_seat).collect();
-    let tree = MerkleTree::from_leaves(&leaves);
-    Ok(tree.root())
 }
 
 // ===== 内部辅助函数 =====
@@ -433,19 +386,9 @@ fn decode_field_chunks(
 
 /// Interpret a canonical 32-byte big-endian integer as a field element.
 /// Out-of-field values are rejected; bytes are never masked or truncated.
+#[cfg(test)]
 fn bytes_to_field(bytes: &[u8; 32]) -> Option<FieldElement> {
     FieldElement::from_bytes_be(bytes).ok()
-}
-
-/// 把 Address（20 字节）编码为 Starknet FieldElement。
-///
-/// 20 字节 < 32 字节，不会溢出 Fr 模数，因此无需像 32 字节那样做 `& 0x07` 截断。
-/// 右对齐到 32 字节 BE buffer 后复用 [`bytes_to_field`]。
-#[must_use]
-pub fn address_to_field(addr: &poker_l1::Address) -> FieldElement {
-    let mut buf = [0u8; 32];
-    buf[12..].copy_from_slice(addr); // 右对齐（前 12 字节为 0）
-    bytes_to_field(&buf).unwrap_or(FieldElement::ZERO)
 }
 
 /// 把 Starknet `FieldElement` (~251 bit) 分解为 8 个 **大端** u32 字。
@@ -549,12 +492,8 @@ mod tests {
 
     #[test]
     fn test_field_encoding_basic() {
-        assert_eq!(u8_to_field(0), FieldElement::ZERO);
-        assert_eq!(u8_to_field(255), FieldElement::from(255u64));
         assert_eq!(u64_to_field(0), FieldElement::ZERO);
         assert_eq!(u64_to_field(u64::MAX), FieldElement::from(u64::MAX));
-        assert_eq!(bool_to_field(false), FieldElement::ZERO);
-        assert_eq!(bool_to_field(true), FieldElement::ONE);
     }
 
     #[test]

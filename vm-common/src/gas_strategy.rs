@@ -43,10 +43,10 @@ pub enum InsnCategory {
 /// 跨 VM gas 差异的形式化接口。Phase 4 为非侵入式形式化层：
 /// 仅定义接口与双实现，**不接入 executor**。
 ///
-/// # 实现者
+/// # 实现者（历史记录）
 ///
-/// - [`BpfGasStrategy`](../../poker_l1/vm/gas_strategy/struct.BpfGasStrategy.html)（poker_l1）
-/// - [`ZkvmGasStrategy`](../../poker_zkvm/syscalls/gas_strategy/struct.ZkvmGasStrategy.html)（poker_zkvm）
+/// - `BpfGasStrategy`（poker_l1，已随 rBPF 路线移除）
+/// - `ZkvmGasStrategy`（poker_zkvm——该 crate 已不存在）
 pub trait GasStrategy: Send + Sync {
     /// 指令级 gas（每条指令按类别）。
     fn instruction_gas(&self, category: InsnCategory) -> u64;

@@ -29,25 +29,6 @@ pub async fn table_event_consumer(
             TableEvent::TableUpdated { message } => {
                 broadcast::broadcast_to_table(&io, &state, table_id, message.as_deref()).await;
             }
-            TableEvent::CryptoEvent {
-                event_type,
-                player_pk,
-                card_index,
-                verified,
-                message,
-            } => {
-                state
-                    .broadcast_crypto_event(
-                        table_id,
-                        event_type,
-                        player_pk,
-                        card_index,
-                        verified,
-                        message,
-                        None,
-                    )
-                    .await;
-            }
             TableEvent::ShuffleNotice => {
                 state.send_shuffle_notice(table_id).await;
             }

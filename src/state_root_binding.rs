@@ -19,7 +19,7 @@
 //! the statements the proof actually covers.
 
 use crate::error::{TexasAirError, TexasAirResult};
-use crate::hash_prover::{ArchivedHashProof, Blake2bStatement, HashProofProvider};
+use crate::hash_prover::{ArchivedHashProof, HashStatement, HashProofProvider};
 use crate::state_root::{StateRoot, hot_table_state_bytes};
 
 /// One proven `(hot_bytes, root)` endpoint statement.
@@ -75,10 +75,10 @@ pub fn synthetic_image_message(image: &[starknet_ff::FieldElement]) -> Vec<u8> {
     message
 }
 
-fn provider_statements(endpoints: &[StateRootEndpointStatement; 2]) -> [Blake2bStatement; 2] {
+fn provider_statements(endpoints: &[StateRootEndpointStatement; 2]) -> [HashStatement; 2] {
     [
-        Blake2bStatement::new(endpoints[0].message.clone(), endpoints[0].root),
-        Blake2bStatement::new(endpoints[1].message.clone(), endpoints[1].root),
+        HashStatement::new(endpoints[0].message.clone(), endpoints[0].root),
+        HashStatement::new(endpoints[1].message.clone(), endpoints[1].root),
     ]
 }
 

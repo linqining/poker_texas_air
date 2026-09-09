@@ -12,11 +12,7 @@
 use starknet::accounts::Account;
 use starknet::core::types::{Call, Felt};
 
-use super::chain::parse_felt;
-
-fn selector(name: &str) -> Felt {
-    starknet::core::utils::starknet_keccak(name.as_bytes())
-}
+use super::chain::{parse_felt, selector};
 
 fn vault_address() -> Result<Felt, String> {
     let chain = super::chain().ok_or("starknet chain not initialized")?;
@@ -220,11 +216,7 @@ async fn release_player_lock(wallet: &str) {
         }
     };
     let locked_wei = match chain
-        .call_contract(
-            vault,
-            starknet::core::utils::starknet_keccak("locked_balance".as_bytes()),
-            vec![player],
-        )
+        .call_contract(vault, selector("locked_balance"), vec![player])
         .await
     {
         Ok(felts) => {
@@ -266,8 +258,9 @@ fn normalize_wallet(w: &str) -> String {
     w.trim().trim_start_matches("wallet:").to_lowercase()
 }
 
+/// 钱包 felt → `0x` 前缀全 64 位 hex（hooks / dual_settle 的结算参与者键）。
 pub(crate) fn wallet_of_felt(p: &starknet_ff::FieldElement) -> String {
-    format!("0x{}", p.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>())
+    format!("0x{}", super::chain::hex_encode(&p.to_bytes_be()))
 }
 
 /// 玩家是否有活跃在局 session（view；结算编排用它过滤续钟调用，

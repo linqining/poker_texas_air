@@ -14,25 +14,42 @@ use std::ops::Deref;
 
 // ===== Card 花色常量（table.move 编码）=====
 
+/// 黑桃（table.move 编码 0）。
 pub const SPADES: u8 = 0;
+/// 红心（table.move 编码 1）。
 pub const HEARTS: u8 = 1;
+/// 方块（table.move 编码 2）。
 pub const DIAMONDS: u8 = 2;
+/// 梅花（table.move 编码 3）。
 pub const CLUBS: u8 = 3;
 
 // ===== Card 点数常量 =====
 
+/// 点数 2。
 pub const TWO: u8 = 2;
+/// 点数 3。
 pub const THREE: u8 = 3;
+/// 点数 4。
 pub const FOUR: u8 = 4;
+/// 点数 5。
 pub const FIVE: u8 = 5;
+/// 点数 6。
 pub const SIX: u8 = 6;
+/// 点数 7。
 pub const SEVEN: u8 = 7;
+/// 点数 8。
 pub const EIGHT: u8 = 8;
+/// 点数 9。
 pub const NINE: u8 = 9;
+/// 点数 10。
 pub const TEN: u8 = 10;
+/// 点数 J（11）。
 pub const JACK: u8 = 11;
+/// 点数 Q（12）。
 pub const QUEEN: u8 = 12;
+/// 点数 K（13）。
 pub const KING: u8 = 13;
+/// 点数 A（14，最大）。
 pub const ACE: u8 = 14;
 
 /// Canonical card identifier (`0..=51`).
@@ -180,7 +197,9 @@ impl std::fmt::Display for Card {
     BorshDeserialize,
 )]
 pub struct PlayingCard {
+    /// 点数（2-14，A=14）。
     pub rank: u8,
+    /// 花色（0=Club, 1=Diamond, 2=Heart, 3=Spade）。
     pub suit: u8,
 }
 
@@ -493,5 +512,92 @@ mod tests {
         );
         // PlayingCard Spade(3) → Card SPADES(0)
         assert_eq!(PlayingCard::new(JACK, 3).to_card(), Card::new(SPADES, JACK));
+    }
+
+    // ===== 定容容器（持久化 canonical 表示的第一道防线）=====
+
+    #[test]
+    fn test_hole_cards_capacity_and_validity() {
+        let mut hole = HoleCards::empty();
+        assert!(hole.is_empty());
+        assert!(hole.try_push(Card::from_index(0)).is_ok());
+        assert!(hole.try_push(Card::from_index(51)).is_ok());
+        assert_eq!(hole.len(), 2);
+        // 第三张必须拒绝。
+        let err = hole.try_push(Card::from_index(7)).unwrap_err();
+        assert_eq!(err, "hole cards exceed capacity 2");
+        // 非法 id 必须拒绝（既不写入也不改变长度）。
+        assert!(hole.try_push(Card::PADDING).is_err());
+        assert_eq!(hole.len(), 2);
+        assert!(hole.validate_canonical().is_ok());
+        // clear 恢复 canonical padding。
+        hole.clear();
+        assert!(hole.is_empty());
+        assert!(hole.validate_canonical().is_ok());
+    }
+
+    #[test]
+    fn test_hole_cards_try_from_vec_overflow() {
+        let three = vec![Card::from_index(0), Card::from_index(1), Card::from_index(2)];
+        assert_eq!(
+            HoleCards::try_from(three).unwrap_err(),
+            "hole cards exceed capacity 2"
+        );
+        // From<[Card;2]> 与 Vec 相等性（事件/结算边界互转）。
+        let pair = [Card::from_index(4), Card::from_index(9)];
+        let hole = HoleCards::from(pair);
+        assert!(hole == pair.to_vec());
+    }
+
+    #[test]
+    fn test_hole_cards_borsh_rejects_dirty_padding() {
+        use borsh::BorshDeserialize;
+        // 坏持久化字节：len=1 但空位不是 PADDING → validate_canonical 拒绝。
+        let dirty = HoleCards::try_from_slice(&[1, 5, 99]).expect("decode");
+        assert_eq!(
+            dirty.validate_canonical().unwrap_err(),
+            "hole cards contain non-canonical padding"
+        );
+        // 活牌位是非法 id → 拒绝。
+        let invalid = HoleCards::try_from_slice(&[2, 5, 99]).expect("decode");
+        assert_eq!(
+            invalid.validate_canonical().unwrap_err(),
+            "hole cards contain an invalid card id"
+        );
+        // 合法编码：2 张活牌（定容 [Card;2] 序列化为 len + 2 字节，无尾巴）。
+        let ok = HoleCards::try_from_slice(&[2, 0, 51]).expect("decode");
+        assert!(ok.validate_canonical().is_ok());
+    }
+
+    #[test]
+    fn test_board_cards_capacity_and_validity() {
+        let mut board = BoardCards::empty();
+        for i in 0..5 {
+            assert!(board.try_push(Card::from_index(i)).is_ok());
+        }
+        assert_eq!(
+            board.try_push(Card::from_index(9)).unwrap_err(),
+            "board cards exceed capacity 5"
+        );
+        assert!(board.try_push(Card::PADDING).is_err());
+        assert_eq!(board.len(), 5);
+        assert!(board.validate_canonical().is_ok());
+        assert_eq!(board.to_vec().len(), 5);
+        board.clear();
+        assert!(board.is_empty() && board.validate_canonical().is_ok());
+    }
+
+    #[test]
+    fn test_board_cards_borsh_rejects_dirty_padding() {
+        use borsh::BorshDeserialize;
+        // len=3、空位含非 PADDING 字节 → 拒绝（BoardCards = len + [Card;5]，共 6 字节）。
+        let dirty = BoardCards::try_from_slice(&[3, 0, 1, 2, 7, 7]).expect("decode");
+        assert_eq!(
+            dirty.validate_canonical().unwrap_err(),
+            "board contains non-canonical padding"
+        );
+        let ok = BoardCards::try_from_slice(&[3, 0, 1, 2, 0xFF, 0xFF]).expect("decode");
+        assert!(ok.validate_canonical().is_ok());
+        assert_eq!(ok.len(), 3);
     }
 }

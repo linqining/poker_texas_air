@@ -8,8 +8,9 @@ license = "BUSL-1.1"
 default = ["stark-curve"]
 # Plan D: STARK-curve protocol world (Cairo-native EC_OP settlement).
 # BLS12-381/blst legacy world removed 2026-09-05（不考虑兼容）。
+# 2026-09-10：Stark 是唯一世界——依赖不再 optional、模块不再 cfg 门控，
+# feature 仅保留名称以兼容旧引用。
 stark-curve = [
-    "dep:poker-protocol-core",
     "poker-protocol-core/stark-backend",
     "poker-protocol-core/borsh",
     "poker-protocol-proofs/borsh",
@@ -21,7 +22,7 @@ ristretto-air = []
 borsh = ["dep:borsh"]
 
 [dependencies]
-poker-protocol-core = { path = "../poker-protocol-core", optional = true }
+poker-protocol-core = { path = "../poker-protocol-core" }
 poker-protocol-proofs = { path = "../poker-protocol-proofs" }
 poker-protocol-abi = { path = "../poker-protocol-abi" }
 rand_core = "0.6.4"

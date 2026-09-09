@@ -23,6 +23,7 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch};
 use poker_l1::vm::contracts::texas_poker::dispatch::{
     RaiseArgs, SeatIndexArgs, SubmitRevealTokensArgs,
 };
+use poker_l1::vm::contracts::texas_poker::runtime::caller_id::wallet_to_address;
 use poker_l1::vm::contracts::texas_poker::types::{CipherDeck, SeatMask, ShuffleState, TexasPokerTable};
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 // 别名：源仓库里 ptx_protocol 是 poker_protocol 的重命名依赖；迁入工作区后
@@ -109,12 +110,12 @@ impl TableMirror {
             },
             chain_id: 377,
             block_height: self.block_height,
-            block_timestamp: now_ms(),
+            block_timestamp: crate::relayer::util::now_ms(),
         }
     }
 
-    /// dispatch 一个动作并收集产出的 ProveTask。
-    pub fn apply(
+    /// dispatch 一个动作并收集产出的 ProveTask（仅本模块的应用原语调用）。
+    fn apply(
         &mut self,
         caller: poker_l1::Address,
         selector: &[u8; 32],
@@ -132,11 +133,11 @@ impl TableMirror {
         Ok(())
     }
 
-    /// 玩家入座（对应 SIT_DOWN_V2 的 join 步骤）。
+    /// 玩家入座（对应 SIT_DOWN_V2 的 join 步骤；仅 `begin_reveal_hand` 重放调用）。
     ///
     /// `player` 为玩家 Starknet 地址（20 字节），`pk` 为其 mental-poker ElGamal 公钥
     /// （与前端 pkHex 同源），`pk_ownership_proof` 为 80 字节 Schnorr 证明。
-    pub fn join(
+    fn join(
         &mut self,
         player: poker_l1::Address,
         buy_in_chips: u64,
@@ -235,7 +236,7 @@ impl TableMirror {
                     pending_mask: 0,
                     completed_mask: 0,
                 },
-                now_ms(),
+                crate::relayer::util::now_ms(),
             )
             .map_err(|e| format!("mirror enter_initial_shuffling failed: {e}"))?;
         // 规范化推进：武装 deadline + 驱动 ShuffleComplete → DealHole，
@@ -243,7 +244,7 @@ impl TableMirror {
         let mut events = Vec::new();
         poker_l1::vm::contracts::texas_poker::state_machine::normalize_until_blocked(
             &mut self.table,
-            now_ms(),
+            crate::relayer::util::now_ms(),
             &mut events,
         )
         .map_err(|e| format!("mirror normalize after deck injection: {e}"))?;
@@ -295,8 +296,8 @@ impl TableMirror {
         Ok(out)
     }
 
-    /// 玩家洗牌提交（对应 WS `SHUFFLE_SUBMIT`）。
-    /// 玩家揭牌令牌提交。
+    /// 玩家揭牌令牌提交（tokens/proofs 须已按 VM canonical 顺序重排，
+    /// 见 [`Self::apply_recorded_reveal`]）。
     pub fn submit_reveal_tokens(
         &mut self,
         seat_index: u8,
@@ -313,27 +314,30 @@ impl TableMirror {
         self.apply(caller, &texas_dispatch::selectors::submit_player_reveal_tokens(), args)
     }
 
-    /// 牌组重构提交（失败牌补救路径；镜像尽力跟随）。
-    pub fn fold(&mut self, seat_index: u8) -> Result<(), String> {
+    /// 弃牌（仅 [`Self::apply_recorded_bet`] 调用）。
+    pub(crate) fn fold(&mut self, seat_index: u8) -> Result<(), String> {
         let caller = self.seat_player(seat_index)?;
         let args = borsh::to_vec(&SeatIndexArgs { seat_index }).map_err(|e| e.to_string())?;
         self.apply(caller, &texas_dispatch::selectors::fold(), args)
     }
 
-    pub fn check(&mut self, seat_index: u8) -> Result<(), String> {
+    /// 过牌（[`Self::apply_recorded_bet`] 与 e2e 对拍测试调用）。
+    pub(crate) fn check(&mut self, seat_index: u8) -> Result<(), String> {
         let caller = self.seat_player(seat_index)?;
         let args = borsh::to_vec(&SeatIndexArgs { seat_index }).map_err(|e| e.to_string())?;
         self.apply(caller, &texas_dispatch::selectors::check(), args)
     }
 
-    pub fn call(&mut self, seat_index: u8) -> Result<(), String> {
+    /// 跟注（[`Self::apply_recorded_bet`] 与 e2e 对拍测试调用）。
+    pub(crate) fn call(&mut self, seat_index: u8) -> Result<(), String> {
         let caller = self.seat_player(seat_index)?;
         let args = borsh::to_vec(&SeatIndexArgs { seat_index }).map_err(|e| e.to_string())?;
         self.apply(caller, &texas_dispatch::selectors::call(), args)
     }
 
     /// 加注。`total_bet` 是加注后本轮总下注额（与 WS RAISE 语义一致）。
-    pub fn raise(&mut self, seat_index: u8, total_bet: u64) -> Result<(), String> {
+    /// 仅 [`Self::apply_recorded_bet`] 调用。
+    pub(crate) fn raise(&mut self, seat_index: u8, total_bet: u64) -> Result<(), String> {
         let caller = self.seat_player(seat_index)?;
         let args = borsh::to_vec(&RaiseArgs {
             seat_index,
@@ -389,11 +393,17 @@ impl TableMirror {
         !self.tasks.is_empty()
     }
 
-    /// 从 Starknet felt 地址派生 poker_l1 地址（32 字节大端取低 20 字节）。
-    pub fn addr_from_starknet(felt_hex: &str) -> Option<poker_l1::Address> {
-        let felt = super::chain::parse_felt(felt_hex)?;
-        let bytes = felt.to_bytes_be();
-        Some(bytes[12..32].try_into().expect("20 bytes"))
+    /// 从 Starknet felt 地址派生 poker_l1 地址。
+    ///
+    /// 截断公式（felt 低 20 字节）的**唯一权威**在
+    /// `poker_l1::...::runtime::caller_id::wallet_to_address`（e2e 有对拍
+    /// 断言）。本封装仅补 texas 侧的输入面：钱包端会以上送十进制 felt 串
+    /// （bigint.toString()），`wallet_to_address` 只吃 hex——先经
+    /// [`chain::parse_felt`] 解出 felt 再 hex 化喂给权威实现，两条输入
+    /// 路径最终落在同一公式上。
+    pub fn addr_from_starknet(felt_str: &str) -> Option<poker_l1::Address> {
+        let felt = super::chain::parse_felt(felt_str)?;
+        wallet_to_address(&format!("{felt:#x}")).ok()
     }
 
     /// 应用一条记录的 reveal 令牌命令（移植原 `mirror_sync_reveal` 锁内逻辑：
@@ -599,11 +609,4 @@ pub mod conv {
         let bytes = borsh::to_vec(proof).map_err(|e| e.to_string())?;
         borsh::from_slice(&bytes).map_err(|e| format!("reveal token proof borsh bridge: {e}"))
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }

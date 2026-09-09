@@ -97,7 +97,7 @@ pub fn rake_opening_of(rules: &TableRules) -> CanonicalRakeOpening {
 pub fn prove_canonical_rules_hash(
     rules: &TableRules,
 ) -> TexasAirResult<ArchivedCanonicalRulesHashProof> {
-    let statements = vec![crate::hash_prover::Blake2bStatement::new(
+    let statements = vec![crate::hash_prover::HashStatement::new(
         canonical_rules_preimage(rules)?,
         canonical_rules_commitment(rules)?,
     )];
@@ -204,15 +204,15 @@ pub fn prove_canonical_hand_openings(
     post_image: &crate::texas_canonical::CanonicalStateImage,
 ) -> TexasAirResult<ArchivedCanonicalHandOpeningsProof> {
     let statements = vec![
-        crate::hash_prover::Blake2bStatement::new(
+        crate::hash_prover::HashStatement::new(
             canonical_rules_preimage(rules)?,
             canonical_rules_commitment(rules)?,
         ),
-        crate::hash_prover::Blake2bStatement::new(
+        crate::hash_prover::HashStatement::new(
             crate::canonical_state_hash::canonical_state_image_preimage(pre_image)?,
             pre_image.commitment(),
         ),
-        crate::hash_prover::Blake2bStatement::new(
+        crate::hash_prover::HashStatement::new(
             crate::canonical_state_hash::canonical_state_image_preimage(post_image)?,
             post_image.commitment(),
         ),
@@ -281,18 +281,18 @@ fn hand_bundle_statements(
     post_image: &crate::texas_canonical::CanonicalStateImage,
     smt_pre: Option<&crate::blake2b_smt_witness::Blake2bSmtFixedValuePathWitness>,
     smt_post: Option<&crate::blake2b_smt_witness::Blake2bSmtFixedValuePathWitness>,
-) -> TexasAirResult<Vec<crate::hash_prover::Blake2bStatement>> {
-    use crate::hash_prover::Blake2bStatement;
+) -> TexasAirResult<Vec<crate::hash_prover::HashStatement>> {
+    use crate::hash_prover::HashStatement;
     let mut statements = vec![
-        Blake2bStatement::new(
+        HashStatement::new(
             canonical_rules_preimage(rules)?,
             canonical_rules_commitment(rules)?,
         ),
-        Blake2bStatement::new(
+        HashStatement::new(
             crate::canonical_state_hash::canonical_state_image_preimage(pre_image)?,
             pre_image.commitment(),
         ),
-        Blake2bStatement::new(
+        HashStatement::new(
             crate::canonical_state_hash::canonical_state_image_preimage(post_image)?,
             post_image.commitment(),
         ),
@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn hand_bundle_rejects_statement_splices() {
         use crate::blake3_flock::FlockProvider;
-        use crate::hash_prover::Blake2bStatement;
+        use crate::hash_prover::HashStatement;
         use crate::texas_canonical::{
             CANONICAL_ABI_VERSION, CanonicalPhase, CanonicalSeat, CanonicalStateImage,
             MAX_CANONICAL_SEATS, NO_CANONICAL_SEAT,
@@ -503,7 +503,7 @@ mod tests {
         assert!(
             verify_canonical_hand_bundle(&provider, &bundle, &wrong_rules, &pre, &post).is_err()
         );
-        let _ = Blake2bStatement::new(Vec::new(), [0; 32]);
+        let _ = HashStatement::new(Vec::new(), [0; 32]);
     }
 
     #[test]

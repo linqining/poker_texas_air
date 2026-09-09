@@ -28,7 +28,6 @@ use stwo::prover::poly::circle::CircleEvaluation;
 use crate::airs::common::ZERO;
 use crate::error::{TexasAirError, TexasAirResult};
 
-pub mod create_table_trace;
 pub mod generic_trace;
 
 /// 业务方法的 trace 数据结构。

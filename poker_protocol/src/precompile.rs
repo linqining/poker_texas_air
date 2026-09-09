@@ -333,7 +333,15 @@ impl From<AbiError> for NativePrecompileError {
 
 impl std::fmt::Display for NativePrecompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::Abi(e) => write!(f, "proof ABI rejected request: {e}"),
+            Self::UnsupportedCurve => write!(f, "curve is not supported by this verifier"),
+            Self::UnsupportedProofSystem => write!(f, "proof system is not supported"),
+            Self::LegacyProofDisabled => write!(f, "legacy proof route is disabled"),
+            Self::InvalidPointEncoding => write!(f, "point encoding has invalid width"),
+            Self::InvalidProofEncoding => write!(f, "proof encoding has invalid width"),
+            Self::VerificationFailed => write!(f, "native verification failed"),
+        }
     }
 }
 

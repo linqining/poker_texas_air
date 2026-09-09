@@ -2,9 +2,8 @@
 //!
 //! ## API
 //!
-//! - [`prove_create_table`] — 生成 `create_table` 方法的 L1 Stwo proof
 //! - [`prove_method`] — 泛型 prove，支持任意 method AIR（阶段 2-4）
-//! - [`aggregate_proofs`] — 保护性聚合入口；可信递归闭环完成前默认拒绝
+//! - `aggregate_proofs` — 保护性聚合入口；可信递归闭环完成前默认拒绝
 
 use stwo::core::channel::Poseidon252Channel;
 use stwo::core::proof::StarkProof;
@@ -18,27 +17,9 @@ use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::airs::TexasAir;
 use crate::airs::bound::BoundAir;
-use crate::airs::lifecycle::create_table::CreateTableAir;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::public_inputs::TexasPublicInputs;
 use crate::trace_gen::MethodTrace;
-use crate::trace_gen::create_table_trace::CreateTableTrace;
-
-/// `create_table` 方法的 L1 proof 类型。
-#[derive(Debug, Clone)]
-pub struct CreateTableProof {
-    /// Stwo 内部 proof。
-    pub stark_proof: StarkProof<Poseidon252MerkleHasher>,
-    /// AIR 公开输入（用于 verify）。
-    pub air: CreateTableAir,
-    /// trace log_size。
-    pub log_size: u32,
-    /// Flock-proven `root = BLAKE3(hot bytes)` binding for both endpoints.
-    pub root_binding: crate::state_root_binding::ArchivedStateRootBindingProof,
-    /// Prover-declared public inputs (diagnostic/test transport only).
-    /// Production verification must supply an independent expected value.
-    pub public_inputs: TexasPublicInputs,
-}
 
 /// 泛型 method proof（适用于任意 method AIR）。
 ///
@@ -58,88 +39,6 @@ pub struct MethodProof<A: TexasAir> {
     /// Prover-declared public inputs (diagnostic/test transport only).
     /// Production verification must supply an independent expected value.
     pub public_inputs: TexasPublicInputs,
-}
-
-/// 生成 `create_table` 方法的 L1 proof。
-///
-/// # 参数
-/// - `trace`: 由 [`gen_create_table_trace`] 生成的 trace
-///
-/// # 返回
-/// `CreateTableProof`，可由 [`verify_create_table`] 验证。
-///
-/// # Errors
-///
-/// - `TexasAirError::StwoProverError` — Stwo prover 内部错误（如约束不满足）
-pub fn prove_create_table(
-    trace: &CreateTableTrace,
-    public_inputs: TexasPublicInputs,
-) -> TexasAirResult<CreateTableProof> {
-    let log_size = trace.trace.log_size;
-    let public_inputs = prepare_public_inputs_for_trace(
-        public_inputs,
-        &trace.trace,
-        CreateTableAir::num_columns(),
-    )?;
-    let root_binding =
-        crate::state_root_binding::prove_state_root_binding_for_inputs(&public_inputs)?;
-    public_inputs.verify_roots(&root_binding)?;
-    public_inputs.verify_air_statement(&trace.air.statement())?;
-    let expected_trace_row =
-        public_inputs.require_expected_trace_row(CreateTableAir::num_columns())?;
-
-    // 1. PCS 配置 + twiddles 预计算
-    let config = crate::prover_context::protocol_pcs_config();
-    let blowup_log = config.fri_config.log_blowup_factor;
-    let twiddles = crate::prover_context::simd_twiddles(log_size + blowup_log);
-
-    // 2. Channel + CommitmentSchemeProver
-    let mut channel = Poseidon252Channel::default();
-    // soundness 关键：在任何 commit/draw 之前，把完整公开输入 mix 进 Fiat-Shamir channel，
-    // 把证明绑定到 state_root（preimage + 重算 root）。详见 TexasPublicInputs。
-    public_inputs.mix_into(&mut channel);
-    let mut commitment_scheme =
-        CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::with_memory_pool(
-            config,
-            &twiddles,
-            crate::prover_context::simd_base_column_pool(),
-        );
-
-    // 3. 提交空 preprocessed trace（tree 0）
-    {
-        let mut tree_builder = commitment_scheme.tree_builder();
-        tree_builder.extend_evals(vec![]);
-        tree_builder.commit(&mut channel);
-    }
-
-    // 4. 提交 original trace（tree 1）
-    {
-        let columns = trace.trace.to_evaluations();
-        let mut tree_builder = commitment_scheme.tree_builder();
-        tree_builder.extend_evals(columns);
-        tree_builder.commit(&mut channel);
-    }
-
-    // 5. 构建 AIR component
-    let air = BoundAir::new(trace.air.clone(), expected_trace_row);
-    let mut allocator = TraceLocationAllocator::default();
-    let component = FrameworkComponent::new(
-        &mut allocator,
-        air,
-        stwo::core::fields::qm31::SecureField::from(0u32),
-    );
-
-    // 6. 生成证明
-    let stark_proof = prove(&[&component], &mut channel, commitment_scheme)
-        .map_err(|e: ProvingError| TexasAirError::StwoProverError(e.to_string()))?;
-
-    Ok(CreateTableProof {
-        stark_proof,
-        air: trace.air.clone(),
-        log_size,
-        root_binding,
-        public_inputs,
-    })
 }
 
 /// 泛型 method prove — 生成任意 method AIR 的 L1 proof。

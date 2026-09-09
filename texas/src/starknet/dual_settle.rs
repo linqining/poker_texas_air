@@ -129,6 +129,10 @@ fn scalar_be(s: &Sc) -> [u8; 32] {
 /// Hand-batch 一次结算的全部工件。
 pub struct DualSettlement {
     pub hand_binding: Ff,
+    /// G（外部聚合）+ 状态根的 Poseidon 承诺——已逐字嵌入
+    /// register_calldata（合约 register_hand 第 3 参）；字段本体仅测试
+    /// 对拍断言读（生产走 calldata），保留为对拍锚。
+    #[allow(dead_code)]
     pub g_attestation: Ff,
     pub hand_id: u32,
     /// 本手动作日志哈希（#18 Phase B）——v2 电路第 37 入参 / 公开段尾词。
@@ -162,12 +166,19 @@ pub struct ProvedSettlement {
     pub register_calldata: Vec<Felt>,
     /// `verify_and_settle_dapv_proved` calldata：
     /// [hand_binding, 32, hand_id_bytes…, hand_id, action_log, n, players…, n,
-    /// deltas…, commitment, batch_len]——无 p_batch。
+    /// deltas…, commitment, batch_len]——无 p_batch。proved 路径预留
+    ///（当前 prover 存根必失败回退 linear，提交期才填充；生产未读）。
+    #[allow(dead_code)]
     pub settle_calldata: Vec<Felt>,
 }
 
 /// 递给外部 prover 的 workload（也是 JSON 导出文件的 schema）。
+///
+/// 当前 HTTP prover 客户端是必然报错的存根（proved 模式自动回退 linear），
+/// 本结构是 prover 工具落地时的 wire schema 占位——字段在存根路径下只写
+/// 不读，属有意预留。
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ProverWorkload {
     pub hand_binding: Ff,
     pub hand_id: u32,
@@ -1459,6 +1470,10 @@ pub fn linear_residual(terms: &LinearTerms) -> Pt {
 }
 
 /// BG 方程组 + 派生挑战 + 两条标量校验的公开中间量。
+/// （挑战中间量 ck/x/y/z/e/q 的字段在验证主路径不读——它们已折进
+/// equations 的系数；但 Cairo 金向量导出（tests 的 transcript replay）
+/// 逐个读取，保留为导出 schema。）
+#[allow(dead_code)]
 pub struct BgShuffleEquations {
     pub ck: BgCommitmentKey,
     /// transcript 派生挑战：x（powers）、y、z、e（mexp）、q（product）。
@@ -1995,6 +2010,8 @@ mod stark_vector_gen {
 #[cfg(test)]
 mod bg_fold_tests {
     use super::*;
+    // 测试向量行的 hex 编码统一走 chain::hex_encode（小写、无前缀）。
+    use crate::starknet::chain::hex_encode as hex_line;
     use poker_protocol_core::PoseidonFeltTranscript;
     use poker_protocol::zk_shuffle::bayer_groth::{
     BayerGrothShuffleProof, MultiExponentiationArgument, ProductArgument,
@@ -2241,10 +2258,6 @@ mod bg_fold_tests {
             eqs.equations.iter().all(|e| linear_residual(e).is_identity()),
             "pinned vector residuals"
         );
-    }
-
-    fn hex_line(w: &[u8; 32]) -> String {
-        hex::encode(w)
     }
 
     fn point_words(p: &Pt) -> [[u8; 32]; 2] {

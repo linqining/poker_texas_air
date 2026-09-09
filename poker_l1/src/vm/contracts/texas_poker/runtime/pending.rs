@@ -7,7 +7,7 @@
 //!
 //! 队列泛型于信封 `E`：暂存的不只是 (selector, args)，还有调用方提供的
 //! 完整提交材料（签名、caller、时钟等，见 `TableRuntime` 的 `Submission`）。
-//! 冲刷时**全量重验**（签名 + 重放集 + 业务语义）——不信任任何已入队状态。
+//! 冲刷时**全量重验**（签名 + nonce 水位 + 业务语义）——不信任任何已入队状态。
 //!
 //! 与历史实现的本质区别是收尾语义：历史上未消化的 reveal 只告警放行
 //! （mirror.rs 的静默丢弃类缺陷）；这里 [`PendingQueue::deny_unmatched`]
@@ -20,11 +20,17 @@ use crate::error::{PokerL1Error, PokerL1Result};
 pub struct PendingEntry<E> {
     /// 提交信封（签名材料 / caller / 时钟——冲刷时全量重验）。
     pub envelope: E,
+    /// 命令 selector（32 字节方法选择子，与 dispatch 层同一编码）。
     pub selector: [u8; 32],
+    /// 命令参数（borsh 编码；冲刷时连同信封重新校验）。
     pub args: Vec<u8>,
     /// 被重试过但仍未消化的次数。
     pub hold_count: usize,
 }
+
+/// 非死信失败的重试上限：达到后死信（合法相位延迟远少于此值；
+/// 畸形载荷/永不可应用命令的滞留不再无限重试与白付验签）。
+pub const MAX_HOLDS: usize = 64;
 
 /// 入口命令队列。
 ///
@@ -33,10 +39,6 @@ pub struct PendingEntry<E> {
 /// 重验并应用**：
 /// - `Ok(())`：命令已应用（出队）；
 /// - `Err(_)`：当前仍不可应用（典型：相位未开）→ 继续暂存，不算失败。
-/// 非死信失败的重试上限：达到后死信（合法相位延迟远少于此值；
-/// 畸形载荷/永不可应用命令的滞留不再无限重试与白付验签）。
-pub const MAX_HOLDS: usize = 64;
-
 #[derive(Debug, Default)]
 pub struct PendingQueue<E> {
     entries: Vec<PendingEntry<E>>,
@@ -47,6 +49,7 @@ pub struct PendingQueue<E> {
 }
 
 impl<E: Clone> PendingQueue<E> {
+    /// 建队列；`max_entries` 为暂存容量上限（满时背压直通调用方）。
     pub fn new(max_entries: usize) -> Self {
         Self {
             entries: Vec::new(),
@@ -62,18 +65,22 @@ impl<E: Clone> PendingQueue<E> {
         &self.dead
     }
 
+    /// 当前暂存条数（不含死信）。
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// 暂存是否为空。
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// 累计入队总数（观测指标）。
     pub fn held_total(&self) -> usize {
         self.held_total
     }
 
+    /// 累计冲刷成功总数（观测指标）。
     pub fn flushed_total(&self) -> usize {
         self.flushed_total
     }
@@ -233,9 +240,16 @@ mod tests {
             q.flush(&mut |_, _, _| Err(always_err()));
         }
         assert_eq!(q.len(), 1, "retryable entry still held");
-        // 窗口打开后消化。
+        // 窗口打开后消化（复用同一 gate 条件闭包，证明暂存条目按原始
+        // 语义可被消化，而非换个无条件 Ok 的闭包）。
         gate = true;
-        let flushed = q.flush(&mut |_, _, _| Ok(()));
+        let flushed = q.flush(&mut |_, _, _| {
+            if gate {
+                Ok(())
+            } else {
+                Err(always_err())
+            }
+        });
         assert_eq!(flushed, 1);
         assert!(q.is_empty() && q.dead().is_empty());
     }

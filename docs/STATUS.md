@@ -5,16 +5,17 @@
 > （Ristretto 迁移、L1 链机制、无交易重放信任模型）已移至
 > [`docs/archive/`](archive/)——Plan D（2026-09-05）后协议唯一曲线为
 > Stark 曲线，poker_l1 收缩为合约库，常驻 mirror 已删除（结算 =
-> prove_log 记录 + settle 时一次性重建）。
+> 单一状态架构：实时 VM 镜像 + settle 时直接取用，prove_log 仅作对账基准）。
 
 ## Workspace model
 
 This workspace is the extracted `poker_texas_air` project: a Starknet
 off-chain stwo proving stack. There is no L1 chain, no transaction replay,
-and no resident mirror. The proof pipeline is: game layer records accepted
-inputs (`texas/src/starknet/prove_log.rs`) → one-shot rebuild
-(`mirror::build_from_log`) → ProveTask chain → canonical AIR / outer
-aggregate → on-chain settlement (`poker_contracts`). Settlement digests bind
+and no resident mirror. The proof pipeline is: a per-hand live VM mirror
+(`texas/src/starknet/shadow.rs`, dispatched synchronously at every game
+acceptance point) → ProveTask chain → canonical AIR / outer aggregate →
+on-chain settlement (`poker_contracts`), cross-checked against game-layer
+facts recorded in `texas/src/starknet/prove_log.rs`. Settlement digests bind
 the hand's action log (`action_log_digest` tail word, #18 Phase B).
 
 ## Canonical AIR — composed relations (current)

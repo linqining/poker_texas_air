@@ -10,8 +10,7 @@
 //! 3. 下注操作：PlayerFolded / PlayerChecked / PlayerCalled / PlayerRaised / PlayerAllIn
 //! 4. 洗牌协议：ShuffleVerified / ShuffleTurn / ShuffleComplete / ShuffleTimeout
 //! 5. 揭示协议：RevealPhase / RevealTokenSubmitted / RevealPhaseComplete / RevealTimeout /
-//!    CardIsIdentity / IdentityRedeal / RedealRequested / CommunityCardRevealed /
-//!    ShowdownHoleCardsRevealed
+//!    CommunityCardRevealed / ShowdownHoleCardsRevealed
 //! 6. 重构协议：ReconstructInitiated / ReconstructDeckSubmitted / ReconstructComplete /
 //!    ReconstructTimeout
 //! 7. 玩家管理：PlayerKicked / PlayerRefund
@@ -24,9 +23,15 @@ use crate::Address;
 use crate::object_model::ObjectID;
 
 // ========== 退款类型常量 ==========
-pub const REFUND_TYPE_STACK_ONLY: u8 = 0;
-pub const REFUND_TYPE_STACK_AND_BET: u8 = 1;
-pub const REFUND_TYPE_BET_ONLY: u8 = 2;
+//
+// 退款/重置/弃牌原因常量的唯一定义在 `core/constants.rs`（Move 对齐视角）。
+// 此处 re-export 维持 `events::X` 历史导入路径（state_machine / src/airs 消费者仍在用）。
+
+pub use super::constants::{
+    FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN, FOLD_REASON_MANUAL, REFUND_TYPE_BET_ONLY,
+    REFUND_TYPE_STACK_ONLY, RESET_REASON_LAST_PLAYER_STANDING, RESET_REASON_RECONSTRUCT_FAIL,
+    RESET_REASON_STATE_INCONSISTENT, RESET_REASON_TIMEOUT,
+};
 
 /// Canonical source of a player removal.
 #[derive(
@@ -43,28 +48,25 @@ pub enum KickCause {
     ReconstructTimeout = 2,
 }
 
-// ========== 重置原因常量 ==========
-pub const RESET_REASON_TIMEOUT: u8 = 0;
-pub const RESET_REASON_KICK: u8 = 1;
-pub const RESET_REASON_RECONSTRUCT_FAIL: u8 = 2;
-pub const RESET_REASON_LAST_PLAYER_STANDING: u8 = 3;
-pub const RESET_REASON_STATE_INCONSISTENT: u8 = 4;
-
-// ========== 弃牌原因常量 ==========
-pub const FOLD_REASON_MANUAL: u8 = 0;
-pub const FOLD_REASON_AUTO_TIMEOUT: u8 = 1;
-pub const FOLD_REASON_FORCE_ADMIN: u8 = 2;
-
 // ========== 牌组重建原因常量 ==========
+
+/// 洗牌超时后降级重建明文牌组。
 pub const DECK_REBUILT_REASON_SHUFFLE_TIMEOUT: u8 = 0;
+/// 重构协议完成后重建规范牌组。
 pub const DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE: u8 = 1;
 
 // ========== 触发动作常量（PlayerAllIn）==========
+
+/// all-in 由跟注触发（筹码不足以完整跟注，剩余全部推入）。
 pub const TRIGGER_ACTION_CALL_ALL_IN: u8 = 0;
+/// all-in 由加注触发（主动把剩余筹码全部推入）。
 pub const TRIGGER_ACTION_RAISE_ALL_IN: u8 = 1;
 
 // ========== pot_type 常量（WinnerAwarded）==========
+
+/// 主池。
 pub const POT_TYPE_MAIN: u8 = 0;
+/// 边池。
 pub const POT_TYPE_SIDE: u8 = 1;
 
 /// Texas Poker 事件枚举（所有变体 copy + drop，Borsh 友好）。
@@ -74,21 +76,35 @@ pub const POT_TYPE_SIDE: u8 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum TexasPokerEvent {
     // ========== 1. 牌桌生命周期 ==========
+    /// 牌桌创建成功（`create_table` 完成时发出，本组事件中的第一个）。
     TableCreated {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 牌桌展示名称。
         name: String,
     },
+    /// 玩家入座（`join_table` 成功时发出；买入从 chip_pool 锁定到座位 stack）。
     PlayerJoined {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 分配到的座位索引（0 起）。
         seat_index: u8,
+        /// 玩家地址。
         player: Address,
+        /// 本次买入金额（chip）。
         buy_in: u64,
+        /// 是否标记为等待位（等待下一手才开始参与，不进入本局）。
         is_waiting: bool,
+        /// 入座后桌上活跃座位数（occupied 且非 waiting）。
         active_count_after: u64,
     },
+    /// 玩家离开牌桌（`leave_table` 生效、座位清空并退款后发出）。
     PlayerLeft {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 被清空的座位索引。
         seat_index: u8,
+        /// 离场玩家地址。
         player: Address,
     },
     /// 玩家显式设置「本手结束后离场」意图。
@@ -97,313 +113,494 @@ pub enum TexasPokerEvent {
     /// 实际离场（退款 + 座位清空）在下一手 `reset_for_next_hand` 时触发，
     /// 届时另发 `PlayerRefund` + `PlayerLeft`。
     LeaveRequested {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 发起预约的座位索引。
         seat_index: u8,
+        /// 发起预约的玩家地址。
         player: Address,
         /// 显式目标值（true=已预约下局离场，false=取消预约）。
         want_leave: bool,
     },
 
     // ========== 2. 手牌生命周期 ==========
+    /// 一手开始（`start_hand` 完成洗牌准备、确定按钮位与盲注后发出）。
     HandStarted {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 本手按钮位（庄家）座位索引。
         button: u8,
+        /// 小盲金额（chip）。
         small_blind: u64,
+        /// 大盲金额（chip）。
         big_blind: u64,
+        /// 参与本手的座位索引列表（按座位序）。
         participants: Vec<u8>,
     },
+    /// 盲注（含 ante）投注完成、即将进入 preflop 下注轮时发出。
     BlindsPosted {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 小盲座位索引。
         sb_seat: u8,
+        /// 大盲座位索引。
         bb_seat: u8,
+        /// 小盲实投金额（chip，受 stack 限制可能小于名义值）。
         sb_amount: u64,
+        /// 大盲实投金额（chip）。
         bb_amount: u64,
+        /// preflop 首个行动座位（UTG）。
         first_to_act: u8,
     },
+    /// 一条街的下注轮开始（发完公共牌 / preflop 盲注后就绪时发出）。
     BettingRoundStarted {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 当前街道（见 constants 模块的 `ROUND_*` 常量）。
         round_state: u8,
+        /// 本轮起始最高下注（chip；preflop=大盲，postflop=0）。
         current_bet: u64,
+        /// 本轮最小加注增量（chip，初始 = 大盲）。
         min_raise: u64,
+        /// 本轮首个行动座位。
         first_to_act: u8,
+        /// 本轮开始前底池金额（chip，不含本轮尚未收集的下注）。
         pot_before: u64,
     },
+    /// 街道推进（本轮下注收齐、即将揭示下一张公共牌时发出）。
     RoundAdvanced {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 推进前街道。
         from_round: u8,
+        /// 推进后街道。
         to_round: u8,
+        /// 推进时底池金额（chip）。
         pot: u64,
+        /// 推进后已揭示的公共牌张数。
         community_cards_count: u64,
     },
+    /// 本轮下注收集进底池（`collect_bets` 在街道切换前发出）。
     PotCollected {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 收集发生的街道。
         round_state: u8,
+        /// 收集后底池金额（chip）。
         pot_after: u64,
+        /// 本轮有下注被收集的座位索引列表。
         collected_from_seats: Vec<u8>,
     },
+    /// 结算时向单一赢家/平分者 award（settle 按池层逐个发出）。
     WinnerAwarded {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 获奖座位索引。
         seat_index: u8,
+        /// 获奖玩家地址。
         player: Address,
+        /// 获奖金额（chip）。
         amount: u64,
         /// 0=main_pot, 1=side_pot
         pot_type: u8,
         /// 最佳牌型（None=无摊牌直接获胜）
         hand_rank: Option<u8>,
     },
+    /// 一手结算完成（settle 汇总发出，随后进入摊牌展示或直接重置）。
     HandSettled {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 本手最终底池（chip，已含全部收集）。
         pot: u64,
+        /// 获奖座位索引列表（含平分者）。
         winners: Vec<u8>,
     },
+    /// 无摊牌结束（其余玩家全部弃牌，唯一剩余玩家直接赢得底池）。
     HandEndedWithoutShowdown {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 获胜座位索引。
         winner_seat: u8,
+        /// 获胜玩家地址。
         winner_player: Address,
+        /// 获胜金额（chip，即本手底池）。
         pot: u64,
     },
+    /// 本手被重置（异常路径：超时/踢人/重构失败等，见 RESET_REASON_* 常量）。
     HandReset {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 重置原因（见 `RESET_REASON_*` 常量）。
         reason: u8,
+        /// 重置发生时的街道。
         round_state: u8,
     },
 
     // ========== 3. 下注操作 ==========
+    /// 玩家弃牌（主动或超时/管理员触发）。
     PlayerFolded {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 弃牌座位索引。
         seat_index: u8,
         /// 0=manual, 1=auto_timeout, 2=force_admin
         reason: u8,
+        /// 弃牌发生时的街道。
         round_state: u8,
     },
+    /// 玩家过牌（无需补齐下注时）。
     PlayerChecked {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 过牌座位索引。
         seat_index: u8,
+        /// 过牌发生时的街道。
         round_state: u8,
     },
+    /// 玩家跟注（补齐到当前最高下注；all-in 时金额可能不足）。
     PlayerCalled {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 跟注座位索引。
         seat_index: u8,
+        /// 实际补入的跟注金额（chip，all-in 时 < chips_to_call）。
         call_delta: u64,
+        /// 跟注发生时的街道。
         round_state: u8,
     },
+    /// 玩家加注（把本轮下注抬高到新总额）。
     PlayerRaised {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 加注座位索引。
         seat_index: u8,
+        /// 相对原最高下注的增量（chip）。
         raise_delta: u64,
+        /// 加注后该座位本轮累计下注（chip）。
         total_bet: u64,
+        /// 加注发生时的街道。
         round_state: u8,
     },
+    /// 玩家全下（筹码全部推入）。
     PlayerAllIn {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 全下座位索引。
         seat_index: u8,
         /// 0=call_all_in, 1=raise_all_in
         trigger_action: u8,
+        /// 全下推入的金额（chip）。
         amount: u64,
+        /// 全下发生时的街道。
         round_state: u8,
     },
 
     // ========== 4. 洗牌协议 ==========
+    /// 某玩家的洗牌贡献通过 ZK 验证（`submit_shuffle_v2` 成功后发出）。
     ShuffleVerified {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 提交洗牌的座位索引。
         seat_index: u8,
+        /// 提交洗牌的玩家地址。
         player: Address,
     },
+    /// 轮转到下一位洗牌者（前一位验证通过后由状态机发出）。
     ShuffleTurn {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 新轮到的洗牌座位索引。
         seat_index: u8,
+        /// 尚未完成洗牌的贡献者数量。
         pending_count: u64,
+        /// 已完成洗牌的贡献者数量。
         completed_count: u64,
     },
+    /// 全员洗牌完成（聚合密钥就绪、加密牌组可发牌时发出）。
     ShuffleComplete {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 完成时的洗牌阶段（见 `SHUFFLE_PHASE_*` 常量）。
         phase: u8,
+        /// 参与本手洗牌的玩家数。
         participant_count: u64,
+        /// 洗牌后加密牌组的张数。
         deck_size: u64,
     },
+    /// 洗牌超时（某贡献者在截止前未提交，触发降级或踢人）。
     ShuffleTimeout {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 超时的座位索引。
         seat_index: u8,
+        /// 超时发生的洗牌阶段。
         phase: u8,
+        /// 本轮洗牌开始时刻（Unix 毫秒）。
         started_at: u64,
+        /// 配置的超时阈值（毫秒）。
         timeout_ms: u64,
     },
 
     // ========== 5. 揭示协议 ==========
+    /// 揭示阶段切换（进入 flop/turn/river/showdown 或重发流程时发出）。
     RevealPhase {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 新进入的揭示阶段（见 `REVEAL_PHASE_*` 常量）。
         phase: u8,
     },
+    /// 某座位提交了一张牌的揭示令牌（部分解密贡献）。
     RevealTokenSubmitted {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 提交令牌的座位索引。
         seat_index: u8,
+        /// 目标牌在牌组中的索引。
         card_index: u8,
+        /// 提交时的揭示阶段。
         phase: u8,
     },
+    /// 一个揭示阶段完成（该阶段所有令牌集齐、牌面可解密时发出）。
     RevealPhaseComplete {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 完成的揭示阶段。
         phase: u8,
     },
+    /// 揭示超时（有座位未在截止前提交令牌）。
     RevealTimeout {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 超时的揭示阶段。
         phase: u8,
+        /// 未按时提交令牌的座位索引列表。
         pending_players: Vec<u8>,
     },
-    CardIsIdentity {
-        table_id: ObjectID,
-        card_index: u8,
-        assignment_index: u8,
-        phase: u8,
-    },
-    IdentityRedeal {
-        table_id: ObjectID,
-        identity_card_indices: Vec<u8>,
-        redeal_count: u64,
-        phase: u8,
-    },
-    RedealRequested {
-        table_id: ObjectID,
-        seat_index: u8,
-        card_indices: Vec<u8>,
-    },
+    /// 公共牌揭示（flop/turn/river 阶段牌面解密完成时发出）。
     CommunityCardRevealed {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 揭示发生的阶段（flop/turn/river）。
         phase: u8,
+        /// 本次揭示的牌索引列表（按发牌顺序）。
         card_indices: Vec<u8>,
+        /// 对应牌的点数列表（2-14，与 card_indices 同序）。
         card_ranks: Vec<u8>,
+        /// 对应牌的花色列表（table.move 编码 0-3，与 card_indices 同序）。
         card_suits: Vec<u8>,
     },
+    /// 摊牌时某玩家亮出手牌（showdown 解密完成时逐座位发出）。
     ShowdownHoleCardsRevealed {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 亮牌座位索引。
         seat_index: u8,
+        /// 亮牌玩家地址。
         player: Address,
+        /// 手牌的牌索引列表（2 张）。
         card_indices: Vec<u8>,
+        /// 手牌点数列表（2-14，与 card_indices 同序）。
         card_ranks: Vec<u8>,
+        /// 手牌花色列表（0-3，与 card_indices 同序）。
         card_suits: Vec<u8>,
     },
 
     // ========== 6. 重构协议 ==========
+    /// 牌组重构启动（玩家离场致密钥份额缺失时，转由剩余玩家重构牌组明文）。
     ReconstructInitiated {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 需提交重构份额的座位索引列表。
         expected_players: Vec<u8>,
+        /// 重构启动时的街道。
         round_state: u8,
     },
+    /// 某座位提交了重构份额（`submit_reconstruct_deck` 验证通过后发出）。
     ReconstructDeckSubmitted {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 提交份额的座位索引。
         seat_index: u8,
     },
+    /// 重构完成（所有份额集齐、牌组明文恢复，随后重建规范牌组）。
     ReconstructComplete {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
     },
+    /// 重构超时（有座位未在截止前提交份额）。
     ReconstructTimeout {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 未按时提交份额的座位索引列表。
         pending_players: Vec<u8>,
     },
 
     // ========== 7. 玩家管理 ==========
+    /// 玩家被踢出（超时/管理员/重构超时，随后附退款与离场事件）。
     PlayerKicked {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 被踢座位索引。
         seat_index: u8,
+        /// 被踢玩家地址。
         player: Address,
+        /// 踢出原因（见 [`KickCause`]）。
         reason: KickCause,
     },
+    /// 向离场/被踢玩家退款（座位资产退回 chip_pool 时发出）。
     PlayerRefund {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 退款座位索引。
         seat_index: u8,
+        /// 退款玩家地址。
         player: Address,
+        /// 退款金额（chip）。
         amount: u64,
+        /// 退款类型（见 `REFUND_TYPE_*` 常量）。
         refund_type: u8,
     },
 
     // ========== 8. 配置与牌组重建 ==========
+    /// 超时配置更新（`set_timeout_config` 生效后发出，全量回显新值）。
     TimeoutConfigUpdated {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 行动超时阈值（毫秒）。
         betting_timeout_ms: u64,
+        /// 洗牌超时阈值（毫秒）。
         shuffle_timeout_ms: u64,
+        /// 揭示超时阈值（毫秒）。
         reveal_timeout_ms: u64,
+        /// 重构超时阈值（毫秒）。
         reconstruct_timeout_ms: u64,
+        /// 摊牌展示时长（毫秒）。
         showdown_display_ms: u64,
     },
+    /// 牌组重建（超时降级或重构完成后以明文规范牌组替换原牌组）。
     DeckRebuilt {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 重建原因（见 `DECK_REBUILT_REASON_*` 常量）。
         reason: u8,
+        /// 重建后牌组张数。
         deck_size: u64,
     },
+    /// 行动权变更（advance_turn 每次切换当前行动座位时发出）。
     CurrentTurnChanged {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 变更前行动座位（None=轮空/无行动者）。
         old_turn: Option<u8>,
+        /// 变更后行动座位（None=本手行动阶段结束）。
         new_turn: Option<u8>,
+        /// 变更发生时的街道。
         round_state: u8,
     },
 
     // ========== 9. Addon / Rebuy ==========
     /// 玩家发起 addon（下一手生效）。
     AddonRequested {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 发起 addon 的座位索引。
         seat_index: u8,
+        /// 发起 addon 的玩家地址。
         player: Address,
+        /// 请求加购的金额（chip）。
         amount: u64,
+        /// 请求后该座位累计的待生效 addon 总额（chip）。
         pending_after: u64,
     },
     /// addon 在 `reset_for_next_hand` 合并到 stack 时触发。
     AddonCredited {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 收到 addon 的座位索引。
         seat_index: u8,
+        /// 收到 addon 的玩家地址。
         player: Address,
+        /// 本次入账金额（chip）。
         amount: u64,
+        /// 入账后座位 stack 余额（chip）。
         stack_after: u64,
     },
     /// 玩家 rebuy（立即生效，仅 MTT 早期/特殊规则）。
     RebuyProcessed {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// rebuy 的座位索引。
         seat_index: u8,
+        /// rebuy 的玩家地址。
         player: Address,
+        /// 本次 rebuy 金额（chip）。
         amount: u64,
+        /// 入账后座位 stack 余额（chip）。
         stack_after: u64,
     },
 
     // ========== 10. Bet 动作 ==========
     /// 玩家主动下注（postflop 第一个下注者）。
     PlayerBet {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 下注座位索引。
         seat_index: u8,
+        /// 下注金额（chip）。
         amount: u64,
+        /// 下注发生时的街道。
         round_state: u8,
     },
 
     // ========== 11. Time Bank ==========
     /// 玩家 Time Bank 被消耗（超时续命）。
     TimeBankConsumed {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 消耗 Time Bank 的座位索引。
         seat_index: u8,
+        /// 本次消耗量（毫秒）。
         consumed_ms: u64,
+        /// 消耗后剩余额度（毫秒）。
         remaining_ms: u64,
     },
 
     // ========== 12. Ante ==========
     /// Ante 被投注（start_hand 时）。
     AntePosted {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 投 ante 的座位索引。
         seat_index: u8,
+        /// ante 金额（chip）。
         amount: u64,
+        /// ante 模式（见 `ANTE_MODE_*` 常量）。
         ante_mode: u8,
     },
 
     // ========== 13. Rake ==========
     /// Rake 被抽水（settle 时）。
     RakeCollected {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 抽水前底池（chip）。
         pot_before: u64,
+        /// 抽走的 rake 金额（chip，归 treasury）。
         rake_amount: u64,
+        /// 抽水后底池（chip）。
         pot_after: u64,
+        /// rake 模式（见 `RAKE_MODE_*` 常量）。
         rake_mode: u8,
     },
 
     // ========== 14. Run It Twice ==========
     /// Run It Twice 被触发（all-in 后）。
     RunItTwiceTriggered {
+        /// 牌桌对象 ID。
         table_id: ObjectID,
+        /// 第一副牌局的后续公共牌张数。
         board1_cards: u8, // 牌数
+        /// 第二副牌局的后续公共牌张数。
         board2_cards: u8,
     },
 
@@ -552,9 +749,9 @@ mod tests {
 
     #[test]
     fn test_constants_match_move() {
-        // 验证常量值与 Move 端一致
+        // 验证常量值与 Move 端一致（REFUND_TYPE_STACK_AND_BET / RESET_REASON_KICK
+        // 无任何构造点，已随重复定义一并删除）
         assert_eq!(REFUND_TYPE_STACK_ONLY, 0);
-        assert_eq!(REFUND_TYPE_STACK_AND_BET, 1);
         assert_eq!(REFUND_TYPE_BET_ONLY, 2);
 
         assert_eq!(KickCause::Timeout as u8, 0);
@@ -562,7 +759,6 @@ mod tests {
         assert_eq!(KickCause::ReconstructTimeout as u8, 2);
 
         assert_eq!(RESET_REASON_TIMEOUT, 0);
-        assert_eq!(RESET_REASON_KICK, 1);
         assert_eq!(RESET_REASON_RECONSTRUCT_FAIL, 2);
         assert_eq!(RESET_REASON_LAST_PLAYER_STANDING, 3);
         assert_eq!(RESET_REASON_STATE_INCONSISTENT, 4);
@@ -738,23 +934,6 @@ mod tests {
                 phase: 0,
                 pending_players: vec![],
             },
-            TexasPokerEvent::CardIsIdentity {
-                table_id,
-                card_index: 0,
-                assignment_index: 0,
-                phase: 0,
-            },
-            TexasPokerEvent::IdentityRedeal {
-                table_id,
-                identity_card_indices: vec![],
-                redeal_count: 0,
-                phase: 0,
-            },
-            TexasPokerEvent::RedealRequested {
-                table_id,
-                seat_index: 0,
-                card_indices: vec![],
-            },
             TexasPokerEvent::CommunityCardRevealed {
                 table_id,
                 phase: 0,
@@ -882,7 +1061,8 @@ mod tests {
             let _recovered: TexasPokerEvent =
                 borsh::from_slice(&bytes).expect("Borsh deserialize 失败");
         }
-        // 验证样本数量（49 个变体）
-        assert_eq!(samples.len(), 49, "事件变体数应为 49");
+        // 验证样本数量（46 个变体；CardIsIdentity/IdentityRedeal/RedealRequested
+        // 三个从未发出的 redeal 协议事件已删除）
+        assert_eq!(samples.len(), 46, "事件变体数应为 46");
     }
 }

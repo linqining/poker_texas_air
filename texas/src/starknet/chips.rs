@@ -13,16 +13,10 @@
 //! dev 模式（未配置 RPC）跳过校验直接放行，保持离线可玩。
 
 use starknet::core::types::Felt;
-use starknet::core::utils::starknet_keccak;
 
-use super::chain::parse_felt;
+use super::chain::{parse_felt, selector};
 use super::config::WEI_PER_CHIP;
 
-fn selector(name: &str) -> Felt {
-    starknet_keccak(name.as_bytes())
-}
-
-/// 查询 STRK20 余额（wei）。未配置 token 地址或调用失败返回 None。
 /// 查询 PokerVault 中玩家的筹码余额（wei）。未配置 vault 返回 None。
 pub async fn vault_chip_balance_wei(address: &str) -> Option<u128> {
     let chain = super::chain()?;

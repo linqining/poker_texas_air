@@ -344,21 +344,6 @@ pub async fn player_action(
         }
     };
 
-    // A2 修复：验证请求中的 pk_hex 属于已认证用户
-    // User.address 存储的是用户绑定的 pk_hex（钱包登录时为 pk_hex，注册时为生成的 pk_hex）
-    // let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
-    // let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
-    // if user_pk != req_pk {
-    //     tracing::warn!(
-    //         "[player_action] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
-    //         claims.user.id,
-    //         user_pk,
-    //         req_pk
-    //     );
-    //     return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
-    // }
-
-
     let sender = match state.socket_state.get_action_sender(table_id).await {
         Some(s) => {
             tracing::debug!("[player_action] got action sender for table_id={}", table_id);
@@ -437,18 +422,6 @@ pub async fn submit_reveal_token(
             return err_resp(StatusCode::UNAUTHORIZED, "User not found");
         }
     };
-    //todo find game pk
-    // let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
-    // let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
-    // if user_pk != req_pk {
-    //     tracing::warn!(
-    //         "[submit_reveal_token] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
-    //         claims.user.id,
-    //         user_pk,
-    //         req_pk
-    //     );
-    //     return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
-    // }
 
     let player_pk = match hex_to_ecpoint(&body.pk_hex) {
         Ok(pt) => pt,
@@ -464,26 +437,7 @@ pub async fn submit_reveal_token(
         return err_resp(StatusCode::BAD_REQUEST, "No reveal tokens provided");
     }
 
-    let tokens: Result<Vec<_>, String> = body.reveal_tokens.iter()
-        .enumerate()
-        .map(|(idx, item)| {
-            let encrypted_card = item.encrypted_card.to_ciphertext()
-                .map_err(|e| format!("Token[{}]: Invalid encrypted_card: {}", idx, e))?;
-            let reveal_token = hex_to_ecpoint(&item.reveal_token_hex)
-                .map_err(|e| format!("Token[{}]: Invalid reveal_token_hex: {}", idx, e))?;
-            let proof = item.reveal_token_proof.to_proof()
-                .map_err(|e| format!("Token[{}]: Invalid reveal_token_proof: {}", idx, e))?;
-
-            Ok(poker_protocol::z_poker::protocol::RevealToken {
-                user_public_key: player_pk,
-                encrypted_card,
-                proof,
-                reveal_token,
-            })
-        })
-        .collect();
-
-    let tokens = match tokens {
+    let tokens = match crate::socket::handlers::parse_reveal_tokens(player_pk, &body.reveal_tokens) {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("[submit_reveal_token] token parse error: {}", e);
@@ -576,7 +530,8 @@ pub async fn submit_reveal_token(
 #[derive(Deserialize, Debug)]
 struct WalletLoginRequest {
     address: String,
-    message: String,
+    // 前端还会随请求发原始 message 明文；验签只认 SNIP-12 消息哈希
+    //（message_hash），明文服务端不消费，未知字段 serde 默认忽略。
     /// Starknet 路径：签名 felts（hex 字符串数组）。
     #[serde(default)]
     signature: serde_json::Value,

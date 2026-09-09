@@ -23,7 +23,9 @@ use crate::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
 
 /// A locked showdown scene: the table snapshot plus its boards.
 pub struct SettlementScene {
+    /// 结算瞬间的牌桌快照（座位、下注、底池、规则与公共牌）。
     pub table: TexasPokerTable,
+    /// 本场景的运行牌面（单 board 或 run-it-twice 双 board）。
     pub boards: SettlementBoards,
 }
 

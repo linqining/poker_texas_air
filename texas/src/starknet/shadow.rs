@@ -85,7 +85,6 @@ pub struct ShadowHand {
 
 #[derive(Default, Debug, Clone)]
 pub struct Metrics {
-    pub commands: usize,
     pub reveal_ok: usize,
     pub bet_ok: usize,
     /// VM 拒绝的下注动作数（**观测指标，不是结算门**，2026-09-10 变更）：
@@ -94,7 +93,6 @@ pub struct Metrics {
     /// 用于监控客户端噪音（抢跑/轮次竞态/畸形加注）的规模。
     pub bet_fail: usize,
     pub force_folds: usize,
-    pub unknown_player: usize,
 }
 
 /// 终局比对报告（finish 时产出；测试经 take_last_report_for_test 读取）。
@@ -145,7 +143,6 @@ pub struct RevealView {
 #[derive(Debug, Clone, Default)]
 pub struct BettingViewSeat {
     pub pk_hex: String,
-    pub in_hand: bool,
     pub folded: bool,
     pub bet: u64,
     pub total_bet: u64,
@@ -245,8 +242,11 @@ impl ShadowHand {
 
     /// 手牌结束：派奖推进 → 派生结算计划 → 与游戏层事实对账。
     ///
-    /// 返回 (比对报告, 镜像)。镜像只有在报告干净（零分歧、零 bet 失败）
-    /// 时才可作为结算来源——调用方（hooks）负责拒绝脏镜像。
+    /// 返回 (比对报告, 镜像)。镜像只有在报告**零分歧**（`issues` 为空）
+    /// 时才可作为结算来源——调用方（hooks）按 issues 拒绝脏镜像。
+    /// `metrics.bet_fail` 是**观测指标**（客户端噪音/非法动作计数），不是
+    /// 结算门（2026-09-10：VM 拒绝的动作游戏层同样拒绝，不构成状态分歧；
+    /// 把它当门会把"单条非法下注"变成拒结算的 griefing 武器）。
     pub fn finish(mut self, input: &HandSettleInput) -> (FinishReport, TableMirror) {
         let mut issues: Vec<String> = Vec::new();
 
@@ -426,7 +426,6 @@ impl ShadowHand {
                         .find(|(idx, _)| *idx == i as u8)
                         .map(|(_, pk)| pk.to_string())
                         .unwrap_or_default(),
-                    in_hand: s.is_occupied() && !s.is_waiting() && !s.has_left_hand(),
                     folded: s.is_folded(),
                     bet: s.bet(),
                     total_bet: s.total_bet(),
@@ -467,6 +466,15 @@ pub(crate) fn bootstrap(
     table_id: u32,
     start: &super::prove_log::HandStartData,
 ) -> Option<ShadowHand> {
+    if !enabled() {
+        // 紧急停用开关：本手不挂载实时镜像，动作走游戏层本地兜底
+        // （*_local / 本地轮转），该手不可证明、不上链（结算 fail-closed）。
+        tracing::warn!(
+            "[live-mirror] table {table_id} hand {}: disabled by TEXAS_SHADOW_PROVER=0 — hand unprovable",
+            start.hand_id
+        );
+        return None;
+    }
     match ShadowHand::start(table_id, start) {
         Ok(sh) => Some(sh),
         Err(e) => {

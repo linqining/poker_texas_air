@@ -143,10 +143,10 @@ pub(crate) struct TableMessagePayload {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// 已废弃的 v1 入座消息：只用于识别并提示改用 SIT_DOWN_V2。
 pub(crate) struct SitDownPayload {
     pub table_id: u32,
     pub seat_id: u32,
-    pub amount: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -245,10 +245,6 @@ pub(crate) struct ReconstructSubmitPayload {
     pub pk_hex: GamePkHex,
     pub output_cards: Vec<ElGamalCiphertextJson>,
     pub swap_cards: Vec<ElGamalCiphertextJson>,
-    /// Task 4: 用户可读牌（每个 swap_out 对应一张），on-chain 模式下需要传给 Move 合约
-    /// 旧客户端不发送该字段，缺省按空处理。
-    #[serde(default)]
-    pub user_readable_cards: Vec<ElGamalCiphertextJson>,
     pub proof: ReconstructProofJson,
 }
 
@@ -272,14 +268,6 @@ pub(crate) struct CommunityRevealResultPayload {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReconstructInitiatePayload {
     pub table_id: u32,
-    pub target_socket_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ReconstructVotePayload {
-    pub table_id: u32,
-    pub vote: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -394,9 +382,6 @@ pub(crate) struct GameState {
     pub disconnect_cancellers: HashMap<String, tokio::sync::watch::Sender<bool>>,
 }
 
-impl GameState {
-}
-
 pub struct SocketState {
     pub db: Database,
     pub state: RwLock<GameState>,
@@ -446,13 +431,6 @@ impl SocketState {
             processed.clear();
         }
         processed.insert(key, ());
-    }
-
-    /// 已弃用：原从 relayer 缓存同步 deck 的逻辑。
-    /// 移除 RelayerState 后，`sync_table_state`（relayer/mod.rs）已直接将
-    /// `summary.crypto` 同步到 `table.summary.crypto`，本函数无需再做事。
-    pub async fn sync_deck_from_relayer_cache(&self, _table_id: u32) {
-        // no-op: table.summary.crypto 已由 sync_table_state 同步
     }
 
     /// 为所有已注册的 table 创建事件 channel 并 spawn consumer 任务。
@@ -570,12 +548,6 @@ impl SocketState {
             Some(io) => io,
             None => return,
         };
-
-        // 非阻塞地从 relayer 已同步好的 TableSummaryV2 缓存中同步 deck_encrypted。
-        // 客户端会用此 deck 生成 remask proof，如果 deck 过期会导致上链验证失败。
-        // 这里只读 relayer 内存缓存（已被链上事件同步），不做阻塞式 RPC 调用，
-        // 避免阻塞 SHUFFLE_NOTICE 推送。
-        self.sync_deck_from_relayer_cache(table_id).await;
 
         let shuffle_notice_data = {
             let gs = self.state.read().await;
@@ -725,7 +697,7 @@ impl SocketState {
         seat_id: u32,
         amount: u64,
     ) -> Result<(bool, JoinResult), JoinError> {
-        let mirror_pk_proof = pk_proof_json.to_proof()
+        let pk_proof_bytes = pk_proof_json.to_proof()
             .map(|p| crate::relayer::proof_bytes::serialize_pk_ownership_proof(&p))
             .unwrap_or_default();
         let socket_id = player.socket_id.clone();
@@ -744,7 +716,7 @@ impl SocketState {
                     table_id,
                     &player_wallet_address,
                     pk_hex.clone().0.as_str(),
-                    mirror_pk_proof,
+                    pk_proof_bytes,
                     None,
                 );
 

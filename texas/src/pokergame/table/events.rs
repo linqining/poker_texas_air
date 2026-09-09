@@ -29,18 +29,14 @@ impl CryptoEventType {
 ///
 /// 通过 `Table::emit_event` 发送到 mpsc channel，由 `socket::table_event_consumer`
 /// 消费并执行实际的 `io.emit` 广播。
+///
+/// crypto_event（shuffle/reveal 等 ZK 面板事件）不走本通道：由 socket 层
+/// 在处理对应提交消息时直接调 `broadcast_crypto_event`（单一入口，
+/// 避免进程内/WS 双路径广播漂移）。
 #[derive(Debug, Clone)]
 pub enum TableEvent {
     /// 广播 TABLE_UPDATED 给该桌所有玩家（含 per-player 视图定制，隐藏对手手牌）。
     TableUpdated { message: Option<String> },
-    /// 广播 crypto_event 消息（shuffle/reveal/reconstruct 等协议阶段事件）。
-    CryptoEvent {
-        event_type: CryptoEventType,
-        player_pk: String,
-        card_index: Option<u32>,
-        verified: bool,
-        message: Option<String>,
-    },
     /// 发送 SHUFFLE_NOTICE 给下一个洗牌玩家。
     ShuffleNotice,
     /// 发送 REVEAL_NOTICE 给活跃玩家。

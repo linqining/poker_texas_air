@@ -680,27 +680,6 @@ fn validate_state_image_bytes(
     validate_state_image_bytes_inner(proof, true)
 }
 
-/// Validate the typed endpoint ABI and public scope without recomputing the
-/// Blake2b image commitment in the host.  The state-image opening composition
-/// supplies that missing relation through its dedicated lookup-backed hash
-/// AIR; this path is therefore the verifier-side boundary for host-zero
-/// composition.
-pub(crate) fn validate_state_image_bytes_without_commitment(
-    proof: &ArchivedCanonicalTaggedProof,
-) -> TexasAirResult<(CanonicalStateImage, CanonicalStateImage)> {
-    validate_state_image_bytes_inner(proof, false)
-}
-
-/// Decode the canonical endpoint bytes carried by an archived proof for a
-/// proof-composition module.  The returned images have already been checked
-/// against the archive's public scope and canonical Borsh ABI; no VM replay
-/// or native hash result is consulted.
-pub(crate) fn validate_canonical_state_image_scope_for_opening(
-    proof: &ArchivedCanonicalTaggedProof,
-) -> TexasAirResult<(CanonicalStateImage, CanonicalStateImage)> {
-    validate_state_image_bytes(proof)
-}
-
 fn u32_limbs(value: u32) -> [M31; 2] {
     [M31::from(value & 0xffff), M31::from(value >> 16)]
 }
@@ -8666,7 +8645,7 @@ pub fn prove_canonical_tagged_batch(
 /// L1 state-object opening.
 ///
 /// This function only commits the key/epoch into the canonical STARK's
-/// Fiat--Shamir scope.  [`crate::canonical_state_opening`] proves and checks
+/// Fiat--Shamir scope.  A separate hash/opening STARK proves and checks
 /// the matching Blake2b sparse-Merkle openings; keeping the two STARKs
 /// separate avoids an in-AIR STARK verifier on the latency-sensitive route.
 pub fn prove_canonical_tagged_batch_for_state_opening(
@@ -8835,28 +8814,6 @@ fn verify_canonical_stark(archive: &ArchivedCanonicalTaggedProof) -> TexasAirRes
     );
     verify(&[&component], &mut channel, &mut scheme, proof)
         .map_err(|e: VerificationError| TexasAirError::ConstraintUnsatisfied(e.to_string()))
-}
-
-/// Verify a canonical proof while leaving image-commitment authentication to
-/// the composed state-image hash AIR.  This is intentionally not a standalone
-/// verifier: callers must immediately verify the matching hash/opening proof.
-pub(crate) fn verify_canonical_tagged_proof_for_state_opening(
-    archive: &ArchivedCanonicalTaggedProof,
-) -> TexasAirResult<()> {
-    if archive.num_columns != NUM_COLUMNS as u32
-        || archive.transition_count == 0
-        || archive.transition_count as usize > (1usize << archive.log_size)
-        || archive.log_size > 10
-        || archive.first_transition_kind as usize >= KIND_COUNT
-        || archive.last_transition_kind as usize >= KIND_COUNT
-    {
-        return Err(TexasAirError::SpecViolation(
-            "canonical proof shape is invalid".into(),
-        ));
-    }
-    validate_reveal_timeout_cascade_archive_shape(archive)?;
-    let _ = validate_state_image_bytes_without_commitment(archive)?;
-    verify_canonical_stark(archive)
 }
 
 fn validate_reveal_timeout_cascade_archive_shape(

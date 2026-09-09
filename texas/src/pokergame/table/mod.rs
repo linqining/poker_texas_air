@@ -177,19 +177,6 @@ pub struct Table {
     pub chain_table_id: Option<String>,
     #[serde(skip)]
     pub event_tx: Option<tokio::sync::mpsc::Sender<crate::pokergame::table::events::TableEvent>>,
-    /// 标记事件处理器是否已自行调用 `sync_table_state`。
-    /// 由 4 个生命周期/shuffle/reveal 处理器在 self-sync 后置 true，
-    /// `apply_event_to_socket` 末尾的统一 end-sync 检查此标志：
-    /// 若为 true 则跳过 end-sync 并重置为 false，避免双重 sync。
-    /// 仅在事件处理流程内有效，每次 end-sync 检查后都会被重置。
-    #[serde(skip)]
-    pub already_synced: bool,
-    /// Phase 2.3: 上次成功同步链上状态的时间戳。
-    /// 由 `sync_table_state` 和 `sync_deck_from_chain` 在写锁块末尾设置。
-    /// 用于 `verify_*_with_retry` 判断内存 crypto 数据新鲜度（阈值 2000ms），
-    /// 以及 tick 循环跳过冗余 fetch（阈值 3000ms）。
-    #[serde(skip)]
-    pub last_synced_at: Option<std::time::Instant>,
     /// #16/#17：座位 → 已接受的最大动作 seq（跨手单调，抗审查承诺向量）。
     #[serde(skip)]
     pub accepted_seq: HashMap<u32, u64>,
@@ -202,8 +189,9 @@ pub struct Table {
     pub hand_log_start: usize,
     /// 本手 id（开局时分配；动作签名域 v2 与结算记账同源）。
     pub current_hand_id: u32,
-    /// #20 Phase 2：本手证明输入日志（HandStart 快照 + 已接受命令）。
-    /// 结算时一次性重放为 ProveTask 链（取代常驻 mirror 第二本账）。
+    /// 本手证明事实（单一状态架构）：HandStart 快照 + 游戏层对账基准
+    /// （终局投入/逐笔派奖）；结算取用实时 VM 镜像（live_mirror），
+    /// 本结构是对账与动作签名材料的来源。
     /// `record_hand_start`（deck 终局时）整体重置。
     #[serde(skip)]
     pub hand_proof_log: crate::starknet::prove_log::HandProofLog,
@@ -516,8 +504,6 @@ impl Table {
             pk_to_seat: HashMap::new(),
             chain_table_id: Some(chain_table_id),
             event_tx: None,
-            already_synced: false,
-            last_synced_at: None,
             accepted_seq: HashMap::new(),
             action_log: Vec::new(),
             hand_proof_log: crate::starknet::prove_log::HandProofLog::default(),

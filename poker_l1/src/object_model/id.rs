@@ -5,7 +5,7 @@
 //! - 同一 creator 的 creation_nonce 单调递增不复用
 //! - 不同 creator address 不碰撞（address 由 tagged_pubkey 派生，不同曲线不碰撞）
 //!
-//! ObjectStore 创建时校验 ObjectID 不存在，冲突返回 `ObjectIDCollision`。
+//! （历史：ObjectStore 创建时校验 ObjectID 不存在；ObjectStore 已随死代码清理移除。）
 
 use crate::Address;
 use blake2::Blake2bVar;

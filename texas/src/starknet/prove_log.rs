@@ -2,7 +2,7 @@
 //!
 //! 职责只剩两件：
 //! 1. **HandStart 快照**（deck 终局时刻的参与者/公钥/所有权证明/deck）——
-//!    实时 VM 镜像（`shadow::hand_start`）的开局引导输入，以及结算时
+//!    实时 VM 镜像（`shadow::bootstrap`）的开局引导输入，以及结算时
 //!    钱包重映射与 snip36 动作签名材料的参与者来源；
 //! 2. **游戏层对账事实**（终局投入快照、逐笔派奖、台费）——结算时
 //!    `cross_check_snapshot` / `cross_check_deltas` 的比对基准。

@@ -8,7 +8,7 @@
 //!
 //! 保留范围 = 证明与结算路径的实际闭包：
 //! - [`error`]：PokerL1Error / PokerL1Result
-//! - [`object_model`]：ObjectID / Object / Ownership / ObjectStore / Sparse Merkle Tree
+//! - [`object_model`]：ObjectID / Object / Ownership / Sparse Merkle Tree
 //! - [`signature`]：tagged pubkey / secp256k1 / ed25519
 //! - [`vm::contracts`]：`DispatchContext` / `DispatchResult` + [`vm::contracts::texas_poker`]
 //!   合约库（TexasPokerTable 状态机 / mental-poker 验证 / 确定性结算计划）——

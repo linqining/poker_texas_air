@@ -42,11 +42,11 @@ pub fn prove_canonical_state_image_hashes(
     post: &CanonicalStateImage,
 ) -> TexasAirResult<ArchivedCanonicalStateImageHashProof> {
     let statements = vec![
-        crate::hash_prover::Blake2bStatement::new(
+        crate::hash_prover::HashStatement::new(
             canonical_state_image_preimage(pre)?,
             pre.commitment(),
         ),
-        crate::hash_prover::Blake2bStatement::new(
+        crate::hash_prover::HashStatement::new(
             canonical_state_image_preimage(post)?,
             post.commitment(),
         ),
@@ -151,11 +151,11 @@ mod tests {
         let preimage = canonical_state_image_preimage(&image).unwrap();
         let hashes = crate::blake3_flock::ArchivedFlockHashesProof {
             statements: vec![
-                crate::hash_prover::Blake2bStatement {
+                crate::hash_prover::HashStatement {
                     message: preimage.clone(),
                     digest: image.commitment(),
                 },
-                crate::hash_prover::Blake2bStatement {
+                crate::hash_prover::HashStatement {
                     message: preimage,
                     digest: image.commitment(),
                 },

@@ -38,23 +38,33 @@ async fn get_available_chips(state: &Arc<SocketState>, user: &crate::models::Use
 
 
 
-/// 遗留 on-chain 钩子：Sui 上链模式已随 Sui 链路移除（Starknet-only）。
+/// 把前端上送的 reveal token JSON 批量解析为协议层 `RevealToken`。
 ///
-/// 返回 `false` 表示未处理，调用方应执行本地处理（本地模式 + Starknet 结算）。
-async fn try_on_chain_action(
-    _socket: &SocketRef,
-    _state: &Arc<SocketState>,
-    _table_id: u32,
-    _action: &str,
-    _amount: Option<u64>,
-) -> bool {
-    // Sui on-chain 模式已移除（Starknet-only）：始终走本地处理。
-    false
+/// WS `REVEAL_SUBMIT` 与 HTTP `submit_reveal_token`（handlers.rs）共用；
+/// 错误文案带 `Token[idx]` 前缀，两条路径逐字一致。
+pub(crate) fn parse_reveal_tokens(
+    player_pk: EcPoint,
+    items: &[SubmitRevealTokenJson],
+) -> Result<Vec<poker_protocol::z_poker::protocol::RevealToken>, String> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let encrypted_card = item.encrypted_card.to_ciphertext()
+                .map_err(|e| format!("Token[{}]: Invalid encrypted_card: {}", idx, e))?;
+            let reveal_token = poker_protocol::z_poker::convert::hex_to_ecpoint(&item.reveal_token_hex)
+                .map_err(|e| format!("Token[{}]: Invalid reveal_token_hex: {}", idx, e))?;
+            let proof = item.reveal_token_proof.to_proof()
+                .map_err(|e| format!("Token[{}]: Invalid reveal_token_proof: {}", idx, e))?;
+            Ok(poker_protocol::z_poker::protocol::RevealToken {
+                user_public_key: player_pk,
+                encrypted_card,
+                proof,
+                reveal_token,
+            })
+        })
+        .collect()
 }
-
-
-
-
 
 /// A3 修复：验证 socket 发送者拥有所声称的 pk_hex。
 ///
@@ -779,47 +789,39 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         // #16：兼容两种载荷（裸 tableId / 带 seq+sig 的对象）
         let simple = parse_payload!(actions::FOLD, payload_raw, SimpleActionPayload);
         let table_id = simple.table_id;
-        if !try_on_chain_action(&s, &state, table_id, "fold", None).await {
-            send_simple_action_signed(&s, &state, table_id, "fold", simple.seq, simple.sig).await;
-        }
+        send_simple_action_signed(&s, &state, table_id, "fold", simple.seq, simple.sig).await;
     });
 
     socket.on(actions::CHECK, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, State(state): State<Arc<SocketState>>| {
         let simple = parse_payload!(actions::CHECK, payload_raw, SimpleActionPayload);
         let table_id = simple.table_id;
-        if !try_on_chain_action(&s, &state, table_id, "check", None).await {
-            send_simple_action_signed(&s, &state, table_id, "check", simple.seq, simple.sig).await;
-        }
+        send_simple_action_signed(&s, &state, table_id, "check", simple.seq, simple.sig).await;
     });
 
     socket.on(actions::CALL, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, State(state): State<Arc<SocketState>>| {
         let simple = parse_payload!(actions::CALL, payload_raw, SimpleActionPayload);
         let table_id = simple.table_id;
-        if !try_on_chain_action(&s, &state, table_id, "call", None).await {
-            send_simple_action_signed(&s, &state, table_id, "call", simple.seq, simple.sig).await;
-        }
+        send_simple_action_signed(&s, &state, table_id, "call", simple.seq, simple.sig).await;
     });
 
     socket.on(actions::RAISE, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), _io: SocketIo, State(state): State<Arc<SocketState>>| {
         let payload = parse_payload!(actions::RAISE, payload_raw, RaisePayload);
-        if !try_on_chain_action(&s, &state, payload.table_id, "raise", Some(payload.amount)).await {
-            let socket_id = s.id.to_string();
-            let pk_hex = {
-                let gs = state.state.read().await;
-                gs.players.get(&socket_id)
-                    .and_then(|p| gs.tables.get(&payload.table_id).and_then(|t| t.get_pk_hex_by_wallet_address(&p.wallet_address.0)))
-            };
-            if let (Some(pk_hex), Some(sender)) = (pk_hex, state.get_action_sender(payload.table_id).await) {
-                let req = ActionRequest { pk_hex, action: "raise".to_string(), amount: Some(payload.amount), seq: payload.seq, sig: payload.sig.map(|s| crate::pokergame::actions::ActionSig { r_hex: s.r_hex, s_hex: s.s_hex }) };
-                if let Err(reason) = crate::socket::send_action_with_timeout(&sender, req).await {
-                    let _ = s.emit("error", &serde_json::json!({
-                        "code": "GAME_LOOP_UNRESPONSIVE",
-                        "msg": "桌面无响应，请稍后重试",
-                        "detail": reason,
-                        "action": "raise",
-                        "table_id": payload.table_id
-                    }));
-                }
+        let socket_id = s.id.to_string();
+        let pk_hex = {
+            let gs = state.state.read().await;
+            gs.players.get(&socket_id)
+                .and_then(|p| gs.tables.get(&payload.table_id).and_then(|t| t.get_pk_hex_by_wallet_address(&p.wallet_address.0)))
+        };
+        if let (Some(pk_hex), Some(sender)) = (pk_hex, state.get_action_sender(payload.table_id).await) {
+            let req = ActionRequest { pk_hex, action: "raise".to_string(), amount: Some(payload.amount), seq: payload.seq, sig: payload.sig.map(|s| crate::pokergame::actions::ActionSig { r_hex: s.r_hex, s_hex: s.s_hex }) };
+            if let Err(reason) = crate::socket::send_action_with_timeout(&sender, req).await {
+                let _ = s.emit("error", &serde_json::json!({
+                    "code": "GAME_LOOP_UNRESPONSIVE",
+                    "msg": "桌面无响应，请稍后重试",
+                    "detail": reason,
+                    "action": "raise",
+                    "table_id": payload.table_id
+                }));
             }
         }
     });
@@ -1148,18 +1150,6 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             return;
         }
 
-        // Starknet 镜像：同步洗牌到 poker_l1（失败仅告警，不影响牌局）
-        {
-            let out: Result<Vec<poker_protocol::crypto::ElGamalCiphertext>, String> =
-                payload.output_cards.iter().map(|c| c.to_ciphertext()).collect();
-            if let (Ok(_out), Some(Ok(_proof))) = (out, payload.shuffle_proof.as_ref().map(|p| p.to_proof())) {
-                let gs = state.state.read().await;
-                if let Some(_table) = gs.tables.get(&payload.table_id) {
-                    // 方案A：SHUFFLE_SUBMIT 不再转发 mirror（deck 终局注入）。
-                }
-            }
-        }
-
         let player = {
             let gs = state.state.read().await;
             gs.players.get(&socket_id).cloned()
@@ -1326,9 +1316,6 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 return;
             }
 
-            // 获取 reveal phase（与 HTTP submit_reveal_token 一致），在 mark_reveal_complete 之前读取
-            let _reveal_phase = state.get_reveal_phase_for_table(payload.table_id).await.unwrap_or_default();
-
             // 本地模式：复用 HTTP submit_reveal_token 逻辑
             let player_pk = match poker_protocol::z_poker::convert::hex_to_ecpoint(&pk_hex.0) {
                 Ok(pt) => pt,
@@ -1346,25 +1333,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 return;
             }
 
-            let tokens: Result<Vec<_>, String> = reveal_tokens.iter()
-                .enumerate()
-                .map(|(idx, item)| {
-                    let encrypted_card = item.encrypted_card.to_ciphertext()
-                        .map_err(|e| format!("Token[{}]: Invalid encrypted_card: {}", idx, e))?;
-                    let reveal_token = poker_protocol::z_poker::convert::hex_to_ecpoint(&item.reveal_token_hex)
-                        .map_err(|e| format!("Token[{}]: Invalid reveal_token_hex: {}", idx, e))?;
-                    let proof = item.reveal_token_proof.to_proof()
-                        .map_err(|e| format!("Token[{}]: Invalid reveal_token_proof: {}", idx, e))?;
-                    Ok(poker_protocol::z_poker::protocol::RevealToken {
-                        user_public_key: player_pk,
-                        encrypted_card,
-                        proof,
-                        reveal_token,
-                    })
-                })
-                .collect();
-
-            let tokens = match tokens {
+            let tokens = match parse_reveal_tokens(player_pk, reveal_tokens) {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!("[REVEAL_SUBMIT] token parse error: {}", e);
@@ -1399,13 +1368,6 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 return;
             }
 
-            // Starknet 镜像：同步 reveal tokens 到 poker_l1（失败仅告警）
-            {
-                let gs = state.state.read().await;
-                if let Some(_table) = gs.tables.get(&payload.table_id) {
-                }
-            }
-
             // ZK 可视化：reveal_token 证明验证成功
             state.broadcast_crypto_event(
                 payload.table_id,
@@ -1436,8 +1398,6 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
 
         // 旧路径：reveal_tokens 为 None，保持原有行为（仅标记完成）
-        // 获取 reveal phase（与 HTTP submit_reveal_token 一致），在 mark_reveal_complete 之前读取
-        let _reveal_phase = state.get_reveal_phase_for_table(payload.table_id).await.unwrap_or_default();
         let pk_hex_str = {
             let gs = state.state.read().await;
             gs.tables.get(&payload.table_id)

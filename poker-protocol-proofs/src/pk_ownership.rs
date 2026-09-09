@@ -100,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn bls12381_ownership_proof() {
+    fn stark_ownership_proof() {
         roundtrip::<StarkCurve>();
     }
 

@@ -39,7 +39,9 @@ use super::betting::BettingRound;
 use super::card::{BoardCards, Card, HoleCards};
 // 复用 constants.rs 中与 Move 端逐字节一致的 phase 常量（避免本地重复定义导致语义分叉）
 use super::constants::{
-    ANTE_MODE_BBA, ANTE_MODE_NONE, ANTE_MODE_NORMAL, RAKE_MODE_NONE, RAKE_MODE_PERCENTAGE,
+    ANTE_MODE_BBA, ANTE_MODE_NONE, ANTE_MODE_NORMAL, DEFAULT_BETTING_TIMEOUT_MS,
+    DEFAULT_RECONSTRUCT_TIMEOUT_MS, DEFAULT_REVEAL_TIMEOUT_MS, DEFAULT_SHUFFLE_TIMEOUT_MS,
+    DEFAULT_SHOWDOWN_DISPLAY_MS, RAKE_MODE_NONE, RAKE_MODE_PERCENTAGE,
     RECONSTRUCT_PHASE_COLLECTING, RECONSTRUCT_PHASE_NONE, REVEAL_PHASE_FLOP, REVEAL_PHASE_NONE,
     REVEAL_PHASE_PREFLOP, REVEAL_PHASE_RIVER, REVEAL_PHASE_SHOWDOWN, REVEAL_PHASE_TURN,
     RIT_MODE_DISABLED, RIT_MODE_TWICE, ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER, ROUND_SHOWDOWN,
@@ -1295,12 +1297,13 @@ pub struct TimeoutConfig {
 
 impl Default for TimeoutConfig {
     fn default() -> Self {
+        // 默认值唯一权威在 core/constants.rs 的 DEFAULT_*_TIMEOUT_MS 常量组。
         Self {
-            shuffle_timeout_ms: 10_000,
-            reveal_timeout_ms: 10_000,
-            betting_timeout_ms: 30_000,
-            reconstruct_timeout_ms: 10_000,
-            showdown_display_ms: 3_000,
+            shuffle_timeout_ms: DEFAULT_SHUFFLE_TIMEOUT_MS,
+            reveal_timeout_ms: DEFAULT_REVEAL_TIMEOUT_MS,
+            betting_timeout_ms: DEFAULT_BETTING_TIMEOUT_MS,
+            reconstruct_timeout_ms: DEFAULT_RECONSTRUCT_TIMEOUT_MS,
+            showdown_display_ms: DEFAULT_SHOWDOWN_DISPLAY_MS,
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Canonical persisted-state codec for Texas Poker tables.
 //!
 //! Production deliberately supports only the current resolved snapshot (v30，座位新增
-//! 会话交易公钥 `OccupiedSeat.tx_pk`) and the ObjectDb hot-table layout (v30-hot).
+//! 会话交易公钥 `OccupiedSeat.tx_pk`) and the ObjectDb hot-table layout (v31-hot).
 //! Historical schemas are not consensus inputs and fail closed instead of
 //! carrying an ever-growing migration surface in the execution path.
 
@@ -10,15 +10,12 @@ use std::io::{self, Read, Write};
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
-use poker_protocol::crypto::types::ECPoint;
 
 use super::card::BoardCards;
 use super::types::{
     DeckState, HandPhase, RunItTwiceState, Seat, SeatMask, TableContextBinding,
-    TableContextBindings, TableContextOpenings, TableRules, TexasPokerTable, seat_mask_contains,
-    seat_mask_is_canonical,
+    TableContextBindings, TableContextOpenings, TableRules, TexasPokerTable,
 };
-use super::utils::{g1_add, g1_is_identity};
 use super::{
     TEXAS_POKER_GOVERNANCE_OBJECT_TYPE, TEXAS_POKER_HOT_STATE_SCHEMA_VERSION,
     TEXAS_POKER_METADATA_OBJECT_TYPE, TEXAS_POKER_RULES_OBJECT_TYPE, TEXAS_POKER_TABLE_OBJECT_TYPE,
@@ -103,48 +100,6 @@ fn persisted_deck(table: &TexasPokerTable) -> PersistedDeckStateV30 {
     }
 }
 
-fn aggregate_pk_for_mask(
-    seats: &[Seat],
-    max_players: u8,
-    mask: SeatMask,
-) -> PokerL1Result<Option<ECPoint>> {
-    if !seat_mask_is_canonical(mask, max_players) || seats.len() != usize::from(max_players) {
-        return Err(PokerL1Error::Serialization(
-            "Texas contributor mask/seat layout is not canonical".into(),
-        ));
-    }
-    let mut aggregate: Option<ECPoint> = None;
-    for seat_index in 0..max_players {
-        if !seat_mask_contains(mask, seat_index) {
-            continue;
-        }
-        let seat = &seats[usize::from(seat_index)];
-        let pk = seat.pk().ok_or_else(|| {
-            PokerL1Error::Serialization(format!(
-                "Texas contributor seat {seat_index} has no live key"
-            ))
-        })?;
-        if !seat.is_occupied() || g1_is_identity(&pk.0) {
-            return Err(PokerL1Error::Serialization(format!(
-                "Texas contributor seat {seat_index} is not a live non-identity key"
-            )));
-        }
-        aggregate = Some(match aggregate {
-            None => *pk,
-            Some(current) => ECPoint(g1_add(&current.0, &pk.0)),
-        });
-    }
-    if aggregate
-        .as_ref()
-        .is_some_and(|point| g1_is_identity(&point.0))
-    {
-        return Err(PokerL1Error::Serialization(
-            "Texas contributor aggregate cannot be identity".into(),
-        ));
-    }
-    Ok(aggregate)
-}
-
 fn restore_table(
     id: ObjectID,
     rules: TableRules,
@@ -164,7 +119,9 @@ fn restore_table(
     call_seq: u32,
 ) -> PokerL1Result<TexasPokerTable> {
     let seats = restore_seats(seats)?;
-    let _ = aggregate_pk_for_mask(&seats, rules.max_players, deck_state.contributor_mask)?;
+    // 贡献者聚合公钥校验统一走 `TexasPokerTable::validate_state_schema`
+    // （内部经 `derived_aggregated_pk` → `aggregated_pk_for_contributor_mask`），
+    // 本文件不再保留平行的本地实现。
     let table = TexasPokerTable {
         id,
         name,
@@ -430,28 +387,24 @@ pub fn table_storage_objects(table: &TexasPokerTable) -> PokerL1Result<[Object; 
             Ownership::Shared,
             TEXAS_POKER_TABLE_OBJECT_TYPE,
             encode_hot_table_state(table)?,
-            None,
         ),
         Object::new(
             table_metadata_object_id(table.id),
             Ownership::Immutable,
             TEXAS_POKER_METADATA_OBJECT_TYPE,
             borsh::to_vec(&openings.metadata)?,
-            None,
         ),
         Object::new(
             table_rules_object_id(table.id),
             Ownership::Immutable,
             TEXAS_POKER_RULES_OBJECT_TYPE,
             borsh::to_vec(&openings.rules)?,
-            None,
         ),
         Object::new(
             table_governance_object_id(table.id),
             Ownership::Immutable,
             TEXAS_POKER_GOVERNANCE_OBJECT_TYPE,
             borsh::to_vec(&openings.governance)?,
-            None,
         ),
     ])
 }

@@ -95,3 +95,18 @@ pub fn parse_felt(s: &str) -> Option<Felt> {
     Felt::from_hex(s).ok().or_else(|| Felt::from_dec_str(s).ok())
 }
 
+/// 合约入口名 → selector（`starknet_keccak`）。lock / chips 等 vault 调用共用。
+pub fn selector(name: &str) -> Felt {
+    starknet::core::utils::starknet_keccak(name.as_bytes())
+}
+
+/// 字节序列 → 小写 hex（无 `0x` 前缀、不去前导零）。
+///
+/// starknet 层各处本地 hex 辅助（lock::wallet_of_felt 的 32 字节钱包、
+/// recursion_prover 的仿射坐标/标量、dual_settle 测试向量行）统一于此；
+/// 需要 `0x` 前缀的调用方自行拼接。注意 `pokergame::actions::hex_encode_starknet`
+/// 有去前导零语义（`0x0` 归一），与本函数不同，保持独立。
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+

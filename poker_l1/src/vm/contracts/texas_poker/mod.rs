@@ -71,8 +71,7 @@ pub const TEXAS_POKER_GOVERNANCE_OBJECT_TYPE: &str = "TexasPokerGovernancePolicy
 /// table-local command version. Version 18 removes `addon_pool`, which is uniquely derived from
 /// the checked sum of every occupied seat's `pending_addon`. Version 19 removes
 /// `ante_collected`; the start-hand transition derives it from checked per-seat debits and the pot
-/// delta. Versions 2 through 18 are decoded through explicit fail-closed migrations in
-/// [`state_codec`]. Version 23 physically groups immutable/low-frequency poker parameters into
+/// delta. Version 23 physically groups immutable/low-frequency poker parameters into
 /// one canonical `TableRules` value, preparing it to move behind a rules hash without keeping
 /// duplicate flat fields in the hot table state. Version 25 makes the tagged `Seat` enum the
 /// physical runtime and resolved-snapshot representation; version 27 replaces the redundant

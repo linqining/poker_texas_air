@@ -217,6 +217,9 @@ pub fn action_log_digest_hex(log: &[ActionLogEntry]) -> String {
     hex_encode_starknet(action_log_digest_felt(log))
 }
 
+/// felt → 去前导零的 `0x` 短 hex（零值归一为 `0x0`，与 starknet `{:#x}`
+/// 展示形态一致）。注意与 `crate::starknet::chain::hex_encode`（定长、
+/// 不去零、无前缀）语义不同，故保持独立。
 fn hex_encode_starknet(f: starknet::core::types::Felt) -> String {
     let bytes = f.to_bytes_be();
     let s = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();

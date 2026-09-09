@@ -6,8 +6,9 @@
 > body where they conflict: curve world = Stark curve only; production P layer
 > = `dual::hand_batch_stark` (EC_OP, Poseidon challenges/ρ, 32-byte points);
 > settlement digest = `poseidon([hand_id] ++ Σ(player, sign, |delta|) ++
-> [action_log_digest])`; the resident mirror is removed (prove_log + one-shot
-> rebuild); legacy `PokerSettlement` is fallback only. The body is the Chinese
+> [action_log_digest])`; the resident mirror is removed — a per-hand live VM
+> mirror is the single state, consumed directly at settle (prove_log is the
+> cross-check baseline only); legacy `PokerSettlement` is fallback only. The body is the Chinese
 > working spec with the full derivation history.
 
 状态：设计稿 v2.9（2026-09-05 修订）。本文档取代 admission-AIR（Path A
@@ -24,8 +25,10 @@
   尾词为本手动作日志哈希（#18 Phase B，2026-09-05 接线：settlement_private
   电路第 37 入参、公开段 15 felt、合约 register_hand 第 4 参承诺、
   SETTLEMENT_SEGMENT_LEN=15）。
-- **§5.2 "canonical 状态镜像"**：常驻 mirror 已删除，改为游戏层 prove_log
-  记录 + settle 时一次性重建（`mirror::build_from_log`）。
+- **§5.2 "canonical 状态镜像"**：常驻 mirror 已删除；现为单一状态架构——
+  实时 VM 镜像（`texas/src/starknet/shadow.rs`）在每个接受点同步 dispatch，
+  结算直接取用其 ProveTask 链与 pre-payout 快照；游戏层 prove_log 仅作
+  对账基准（`mirror::build_from_log` 重放路径已删除）。
 - **§7.1 合约签名以代码为准**：`register_hand(hand_binding, settlement_digest,
   g_attestation, action_log_digest, exp_reveal, exp_leave, exp_recon)`；
   生产入口 `verify_and_settle_dapv_stark(hand_binding, hand_id_bytes, hand_id,

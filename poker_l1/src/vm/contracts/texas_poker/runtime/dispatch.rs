@@ -19,9 +19,10 @@
 //!
 //! # Events 处理
 //!
-//! state_machine 函数会通过 `events: &mut Vec<TexasPokerEvent>` 收集事件。
-//! dispatch 层目前仅记录日志（tracing::debug!）并丢弃，后续 Precompile
-//! 实现可在 Phase 3.3 / Phase 4 中扩展 DispatchResult 携带 events 字段。
+//! state_machine 函数通过 `events: &mut Vec<TexasPokerEvent>` 收集事件；
+//! dispatch 层把它们 borsh 进 `DispatchResult.return_value`
+//! （`build_dispatch_output`），由 host 侧（`TableRuntime::collect_into`）
+//! 解码消费——事件不落日志即丢弃，出栈即结构化。
 
 use super::utils::{BlsScalar, G1Projective};
 use blake2::Blake2bVar;
@@ -36,7 +37,7 @@ use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 
 use super::constants::{FOLD_REASON_FORCE_ADMIN, KICK_REASON_ADMIN};
 use super::events::TexasPokerEvent;
-use super::state_machine::{self, AdvanceDeadlineExecution, NormalizationReport};
+use super::state_machine;
 #[cfg(test)]
 use super::types::SeatStatus;
 use super::types::TexasPokerTable;
@@ -48,19 +49,6 @@ use crate::vm::contracts::dispatch::{DispatchContext, DispatchResult};
 
 /// 方法选择器长度（32 字节 = blake2b_256 输出）。
 pub const METHOD_SELECTOR_LEN: usize = 32;
-
-/// Host-side canonical trace retained for native relation selection.
-///
-/// This is not a proof ABI and contains no relation selector. The command is
-/// already fixed by the dispatch entrypoint; the trace only records semantic
-/// facts produced by the authoritative VM execution.
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct CanonicalExecutionTrace {
-    /// Typed deadline execution, present only for `advance_deadline`.
-    pub advance_deadline: Option<AdvanceDeadlineExecution>,
-    /// Deterministic normalization performed by the common dispatch suffix.
-    pub suffix_normalization: NormalizationReport,
-}
 
 /// 计算方法选择器：`blake2b_256(method_name)[0..32]`。
 ///
@@ -221,11 +209,6 @@ pub mod selectors {
         ]
     }
 
-    /// Alias for the active consensus selector registry.
-    #[must_use]
-    pub fn active() -> Vec<[u8; 32]> {
-        all()
-    }
 }
 
 /// Stable canonical command tag shared by source dispatch and heterogeneous method batches.
@@ -679,36 +662,6 @@ struct CanonicalAmountArgs {
     amount: u64,
 }
 
-/// Decode the native ZCN amount required by a funded Texas Poker method.
-///
-/// This is the canonical selector-to-funding mapping shared by consensus execution and
-/// frictionless wallet builders. Non-funding methods return `Ok(None)`.
-pub fn required_funding(method_selector: &[u8; 32], args: &[u8]) -> PokerL1Result<Option<u64>> {
-    let amount = if method_selector == &selectors::join_table() {
-        borsh::from_slice::<JoinTableArgs>(args)
-            .map_err(|error| {
-                PokerL1Error::Serialization(format!("join_table funding args: {error}"))
-            })?
-            .buy_in
-    } else if method_selector == &selectors::addon() {
-        borsh::from_slice::<AddonArgs>(args)
-            .map_err(|error| PokerL1Error::Serialization(format!("addon funding args: {error}")))?
-            .amount
-    } else if method_selector == &selectors::rebuy() {
-        borsh::from_slice::<RebuyArgs>(args)
-            .map_err(|error| PokerL1Error::Serialization(format!("rebuy funding args: {error}")))?
-            .amount
-    } else {
-        return Ok(None);
-    };
-    if amount == 0 {
-        return Err(PokerL1Error::Other(
-            "funded Texas call amount must be greater than zero".into(),
-        ));
-    }
-    Ok(Some(amount))
-}
-
 // ========== Dispatch 路由入口 ==========
 
 /// Dispatch 路由入口。
@@ -730,50 +683,6 @@ pub fn dispatch(
     selector: &[u8; 32],
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    dispatch_with_execution_trace(context, table, selector, args).map(|(result, _)| result)
-}
-
-/// 签名交易消息域（P0-2 缺口修复：caller 签名绑定接线）。
-pub const TX_SIGNING_DOMAIN: &[u8] = b"zchain.tx.v1";
-
-/// 构造签名交易消息哈希：绑定链 ID、表对象、caller、方法与载荷、nonce。
-///
-/// nonce 绑定进签名消息 = 每条签名只能用于特定序列槽（配合 runtime 层的
-/// applied-nonce 集合实现防重放）。客户端与 runtime 必须使用同一公式。
-pub fn tx_message_hash(
-    chain_id: ChainId,
-    table_id: &ObjectID,
-    caller: &Address,
-    selector: &[u8; 32],
-    args: &[u8],
-    nonce: u64,
-) -> [u8; 32] {
-    let mut hasher = Blake2bVar::new(32).expect("blake2b-256 initialized");
-    Update::update(&mut hasher, TX_SIGNING_DOMAIN);
-    Update::update(&mut hasher, &chain_id.to_be_bytes());
-    Update::update(&mut hasher, table_id.to_bytes().as_slice());
-    Update::update(&mut hasher, caller.as_slice());
-    Update::update(&mut hasher, selector);
-    Update::update(&mut hasher, args);
-    Update::update(&mut hasher, &nonce.to_be_bytes());
-    let mut out = [0u8; 32];
-    hasher
-        .finalize_variable(&mut out)
-        .expect("32-byte blake2b output");
-    out
-}
-
-/// Execute the canonical VM transition and return its exact native execution trace.
-///
-/// The serialized `DispatchOutput` remains unchanged for legacy proof/archive
-/// compatibility. New native proving code consumes this out-of-band typed
-/// trace and must not infer an outcome from the post-state alone.
-pub fn dispatch_with_execution_trace(
-    context: &DispatchContext,
-    table: &mut TexasPokerTable,
-    selector: &[u8; 32],
-    args: &[u8],
-) -> PokerL1Result<(DispatchResult, CanonicalExecutionTrace)> {
     // Post-commit Prover：执行前捕获 pre_table 快照（用于构造证明任务）。
     // clone 成本可接受（TexasPokerTable ~KB 级，且 prove_task 是异步消费的离线数据）。
     let pre_table = table.clone();
@@ -782,7 +691,6 @@ pub fn dispatch_with_execution_trace(
         CanonicalCommand::from_selector(selector).ok_or(PokerL1Error::UnknownContractMethod {
             selector: *selector,
         })?;
-    let mut advance_deadline_execution = None;
     let result = match command {
         CanonicalCommand::CreateTable => dispatch_create_table(context, table, args, &mut events),
         CanonicalCommand::JoinTable => dispatch_join_table(context, table, args, &mut events),
@@ -790,7 +698,6 @@ pub fn dispatch_with_execution_trace(
         CanonicalCommand::StartHand => dispatch_start_hand(context, table, args, &mut events),
         CanonicalCommand::AdvanceDeadline => {
             dispatch_advance_deadline(context, table, args, &mut events)
-                .map(|execution| advance_deadline_execution = Some(execution))
         }
         CanonicalCommand::ForceFold => dispatch_force_fold(context, table, args, &mut events),
         CanonicalCommand::KickPlayer => dispatch_kick_player(context, table, args, &mut events),
@@ -821,14 +728,7 @@ pub fn dispatch_with_execution_trace(
         *table = pre_table.clone();
         return Err(error);
     }
-    let suffix_normalization =
-        match state_machine::normalize_until_blocked(table, context.block_timestamp, &mut events) {
-            Ok(report) => report,
-            Err(error) => {
-                *table = pre_table.clone();
-                return Err(error);
-            }
-        };
+    state_machine::normalize_until_blocked(table, context.block_timestamp, &mut events)?;
 
     // Action transitions intentionally disarm the previous actor's deadline while
     // changing the turn.  The persisted tagged-union phase must never cross the
@@ -874,17 +774,41 @@ pub fn dispatch_with_execution_trace(
     // Orchestrator 从链层取回后反序列化生成 proof。
     let return_value = build_dispatch_output(context, &events, selector, args, pre_table, table)?;
 
-    Ok((
-        DispatchResult {
-            created_objects: vec![],
-            modified_objects: vec![table.id],
-            return_value,
-        },
-        CanonicalExecutionTrace {
-            advance_deadline: advance_deadline_execution,
-            suffix_normalization,
-        },
-    ))
+    Ok(DispatchResult {
+        created_objects: vec![],
+        modified_objects: vec![table.id],
+        return_value,
+    })
+}
+
+/// 签名交易消息域（P0-2 缺口修复：caller 签名绑定接线）。
+pub const TX_SIGNING_DOMAIN: &[u8] = b"zchain.tx.v1";
+
+/// 构造签名交易消息哈希：绑定链 ID、表对象、caller、方法与载荷、nonce。
+///
+/// nonce 绑定进签名消息 = 每条签名只能用于特定序列槽（配合 runtime 层的
+/// applied-nonce 集合实现防重放）。客户端与 runtime 必须使用同一公式。
+pub fn tx_message_hash(
+    chain_id: ChainId,
+    table_id: &ObjectID,
+    caller: &Address,
+    selector: &[u8; 32],
+    args: &[u8],
+    nonce: u64,
+) -> [u8; 32] {
+    let mut hasher = Blake2bVar::new(32).expect("blake2b-256 initialized");
+    Update::update(&mut hasher, TX_SIGNING_DOMAIN);
+    Update::update(&mut hasher, &chain_id.to_be_bytes());
+    Update::update(&mut hasher, table_id.to_bytes().as_slice());
+    Update::update(&mut hasher, caller.as_slice());
+    Update::update(&mut hasher, selector);
+    Update::update(&mut hasher, args);
+    Update::update(&mut hasher, &nonce.to_be_bytes());
+    let mut out = [0u8; 32];
+    hasher
+        .finalize_variable(&mut out)
+        .expect("32-byte blake2b output");
+    out
 }
 
 /// 构造 `L1DispatchOutput` 并序列化为 return_value 字节。
@@ -1801,14 +1725,14 @@ fn dispatch_advance_deadline(
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
-) -> PokerL1Result<AdvanceDeadlineExecution> {
+) -> PokerL1Result<()> {
     if !args.is_empty() {
         return Err(PokerL1Error::Serialization(
             "advance_deadline does not accept arguments".into(),
         ));
     }
     // 时间只来自已认证的共识上下文；payload 不再保留第二份时间事实。
-    state_machine::advance_deadline_with_report(table, context.block_timestamp, events)
+    state_machine::advance_deadline(table, context.block_timestamp, events).map(|_| ())
 }
 
 /// `force_fold` — 管理员强制 fold。
@@ -1972,7 +1896,8 @@ fn dispatch_bet(
 /// 在下一手 `reset_for_next_hand` 第一阶段合并到 `stack`。
 ///
 /// 资金来源由 Texas Poker precompile 统一校验：executor 传入 NativeCoin
-/// UTXO，precompile 按 [`required_funding`] 消费 amount、生成确定性 change，
+/// UTXO，precompile 按 selector→amount 规则（join_table/addon/rebuy 解码 borsh
+/// 载荷取 buy_in/amount）消费 amount、生成确定性 change，
 /// 并校验 `chip_pool` 的 TableVault 转移与实际到账一致。
 fn dispatch_addon(
     context: &DispatchContext,
@@ -2030,6 +1955,33 @@ mod tests {
     use crate::object_model::ObjectID;
     use crate::signature::TaggedPubkey;
     use crate::vm::contracts::texas_poker::utils::{g1_generator, g1_identity};
+
+    /// `tx_message_hash` 已知答案向量（KAT）：签名域是 poker_l1 ↔
+    /// client-wasm（WasmTxSession）↔ texas e2e 的三方契约，任何一处
+    /// 改动（域分隔串/字段顺序/宽度）都必须同时改三端——本向量把漂移
+    /// 变成编译期可见的测试失败。期望值由当前实现生成后钉死；
+    /// 若你有意更改签名域，请重新生成并同步 client-wasm/texas。
+    #[test]
+    fn tx_message_hash_known_answer_vector() {
+        let table_id = ObjectID::new([0x5A; 20], 77);
+        let hash = tx_message_hash(
+            377,
+            &table_id,
+            &[0xC0; 20],
+            &[0x42; 32],
+            &[0x11, 0x22, 0x33, 0x44],
+            9,
+        );
+        let pinned: [u8; 32] = [
+            0xdc, 0xb6, 0xda, 0x3b, 0x0f, 0x64, 0xd7, 0xc1, 0x06, 0x25, 0x7b, 0x6c, 0x52, 0xcf,
+            0x42, 0x1b, 0x43, 0xf3, 0x9f, 0xec, 0x0a, 0x4c, 0x42, 0x38, 0xc8, 0xa6, 0xb8, 0x76,
+            0xb3, 0xb1, 0x88, 0x26,
+        ];
+        assert_eq!(
+            hash, pinned,
+            "tx signature domain drifted — sync poker_l1/client-wasm/texas"
+        );
+    }
 
     fn make_table() -> TexasPokerTable {
         // creator 设为 [0xAA;20]，与 make_context().caller 一致，
@@ -2112,11 +2064,11 @@ mod tests {
     #[test]
     fn canonical_command_tags_cover_all_selectors() {
         let mut tags = std::collections::BTreeSet::new();
-        for selector in selectors::active() {
+        for selector in selectors::all() {
             let command = CanonicalCommand::from_selector(&selector).expect("known selector");
             tags.insert(command.method_tag());
         }
-        assert_eq!(selectors::active().len(), 19);
+        assert_eq!(selectors::all().len(), 19);
         assert_eq!(tags.len(), 19);
         for retired_tag in [5, 10, 15, 16] {
             assert!(CanonicalCommand::from_u8(retired_tag).is_none());
@@ -2176,7 +2128,6 @@ mod tests {
             assert_eq!(table, before);
             assert!(canonical_command_parts(&selector, &[]).is_err());
             assert!(build_method_input(&selector, &[]).is_err());
-            assert_eq!(required_funding(&selector, &[]).unwrap(), None);
         }
     }
 
@@ -3687,7 +3638,7 @@ mod tests {
         // reveal_token_state.assignments 中无 p1（下注轮本就为空）
         for a in table.reveal_assignments() {
             assert!(
-                !super::super::state_machine::is_in_mask(a.pending_mask(), 0),
+                !super::super::types::seat_mask_contains(a.pending_mask(), 0),
                 "p1 不应在任何 reveal pending_players 中"
             );
         }
