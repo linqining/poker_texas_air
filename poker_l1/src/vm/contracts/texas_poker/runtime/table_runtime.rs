@@ -17,8 +17,6 @@
 //! 与 texas 侧 `TableMirror` 的关系：mirror 是结算时一次性重放器（即弃），
 //! 本门面是常驻权威入口——Phase 2b 完成后 mirror 退役。
 
-use borsh::BorshDeserialize;
-
 use super::dispatch::{dispatch_signed, tx_message_hash, SignedTx};
 use super::events::TexasPokerEvent;
 use super::pending::PendingQueue;

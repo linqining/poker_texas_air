@@ -43,7 +43,8 @@ fn seat_players(table: &mut Table, n: u64) -> Vec<Player> {
         // 真实流程由 join_table 写入；测试直连写同一缓冲）。
         crate::starknet::prove_log::record_join(
             table.summary.id,
-            &format!("0xwallet{idx}"),
+            // 有效 felt 钱包：实时 VM 镜像的 addr_from_starknet 必须可解析
+            &format!("0x{:064x}", idx),
             &pk_hex,
             crate::relayer::proof_bytes::serialize_pk_ownership_proof(&proof),
         );
@@ -55,7 +56,7 @@ fn seat_players(table: &mut Table, n: u64) -> Vec<Player> {
             bankroll: 100000,
             pk_hex: GamePkHex::new(pk_hex.clone()),
             readable_hands: vec![],
-            wallet_address: WalletAddress(format!("0xwallet{idx}")),
+            wallet_address: WalletAddress(format!("0x{:064x}", idx)),
         };
         table.sit_player(player, idx as u32, 100000, false);
         if let Some(seat) = table.local_seats.get_mut(&(idx as u32)) {
@@ -193,21 +194,21 @@ fn act_and_advance(table: &mut Table, players: &[Player]) {
         table.handle_check(&player.pk_hex);
     }
 
-    // handle_turn_advance 的纯表镜像
+    // handle_turn_advance 的纯表镜像（权威模式：turn 轮转由 VM 视图同步
+    // 负责，街道仪式在 apply_betting_view 内触发）。
     if table.unfolded_players().len() <= 1 {
         table.end_without_showdown();
     } else if table.is_betting_round_complete() {
         table.advance_to_next_phase();
-    } else {
-        let last = table.turn().unwrap_or(1);
-        table.set_turn(table.next_unfolded_player(last, 1));
     }
 }
 
-fn run_full_hand(n: u64) {
+fn run_full_hand(table_id: u32, n: u64) {
     // limit=10000 -> min_bet=50 (limit/200)，盲注 50/100 实际入池；
     // 否则奖池恒 0、win_messages 不产生（determine 仅在奖池>0 时写消息）。
-    let mut table = Table::new(9, "full-flow".to_string(), 10000, 9, String::new());
+    // table_id 必须全局唯一：join 缓冲/实时镜像按桌键控，并行测试共用
+    // 同一 id 会互相串流（2026-09-09 两次复现）。
+    let mut table = Table::new(table_id, "full-flow".to_string(), 10000, 9, String::new());
     let players = seat_players(&mut table, n);
 
     // 在全量聚合公钥下重加密明文牌组（真实对局由 join 掩码层完成同样
@@ -332,12 +333,12 @@ fn run_full_hand(n: u64) {
 
 #[test]
 fn full_hand_2_players_everyone_shuffles_and_reveals() {
-    run_full_hand(2);
+    run_full_hand(9101, 2);
 }
 
 #[test]
 fn full_hand_9_players_everyone_shuffles_and_reveals() {
-    run_full_hand(9);
+    run_full_hand(9102, 9);
 }
 
 // ============================================================
@@ -358,13 +359,13 @@ mod full_hand_vector_gen {
     #[test]
     #[ignore = "vector generator: prints cairo literal"]
     fn print_full_hand_batch() {
-        print_full_hand_batch_n(2, "full_hand_n2");
-        print_full_hand_batch_n(9, "full_hand_n9");
+        print_full_hand_batch_n(9111, 2, "full_hand_n2");
+        print_full_hand_batch_n(9112, 9, "full_hand_n9");
     }
 
-    fn print_full_hand_batch_n(n: u64, label: &str) {
+    fn print_full_hand_batch_n(table_id: u32, n: u64, label: &str) {
         use poker_protocol::crypto::curve::{Curve, CurveScalar};
-        let mut table = Table::new(9, "full-flow".to_string(), 10000, 9, String::new());
+        let mut table = Table::new(table_id, "full-flow".to_string(), 10000, 9, String::new());
         let players = seat_players(&mut table, n);
         table.mental_poker_game.encrypt_deck();
         table.start_hand();
@@ -608,7 +609,7 @@ mod hand_start_baseline_tests {
     /// 开局（无论上一手留下什么牌组/洗牌状态）必须重建基线 + 全员 pending。
     #[test]
     fn hand_start_rebuilds_baseline_and_repends_everyone() {
-        let mut table = Table::new(9, "baseline".to_string(), 10000, 9, String::new());
+        let mut table = Table::new(9121, "baseline".to_string(), 10000, 9, String::new());
         let players = seat_players(&mut table, 2);
         // 上一手遗留：牌组带真实洗牌层、completed 非空
         table.start_preflop_shuffle();
@@ -642,7 +643,7 @@ mod hand_start_baseline_tests {
     /// 玩家的 agg —— 孤儿份额问题随基线重建消失。
     #[test]
     fn hand_start_orphan_layer_dissolves_into_baseline() {
-        let mut table = Table::new(9, "orphan".to_string(), 10000, 9, String::new());
+        let mut table = Table::new(9122, "orphan".to_string(), 10000, 9, String::new());
         let players = seat_players(&mut table, 2);
         table.start_preflop_shuffle();
         for p in &players {
@@ -822,7 +823,7 @@ mod recursion_e2e {
     /// 派彩前快照（record_final_bets）必须保留终局投入。
     #[test]
     fn showdown_settle_keeps_pre_payout_total_bets() {
-        let mut table = run_signed_full_hand(4243);
+        let mut table = run_signed_full_hand(9131);
         // 摊牌派彩已完成（win_hand 已清零赢家的 seat.total_bet）……
         let any_seat_bet_left = table
             .seats()
@@ -863,7 +864,7 @@ mod recursion_e2e {
         // table_id=9 + "0xwallet{idx}" 的 full_hand 测试并发跑时会互相覆盖
         // join 证明缓冲，record_hand_start 读到别桌 pk → participants 与
         // 签名 pk 错配（残差不闭合，2026-09-07 e2e 间歇失败根因）。
-        let table = run_signed_full_hand(4242);
+        let table = run_signed_full_hand(9132);
 
         // 材料提取：每参与者首条已签名动作 + 座位公钥。
         let start = table.hand_proof_log.start.as_ref().expect("hand started");
@@ -938,7 +939,7 @@ mod recursion_e2e {
     #[test]
     #[ignore = "runs prove-hand (~15s); needs proving-tool release binary"]
     fn recursion_e2e_signed_hand_full_prove() {
-        let table = run_signed_full_hand(4242);
+        let table = run_signed_full_hand(9132);
         let start = table.hand_proof_log.start.as_ref().expect("hand started");
         let hand_id = start.hand_id;
         let materials = recursion_prover::action_sig_materials(
@@ -977,49 +978,13 @@ mod recursion_e2e {
 mod shadow_e2e {
     use super::*;
 
-    /// 测试结束自动关闭影子开关（断言失败也不污染其他测试）。
-    struct ShadowOff;
-    impl Drop for ShadowOff {
-        fn drop(&mut self) {
-            crate::starknet::shadow::set_enabled_for_test(false);
-        }
-    }
-
-    /// 与 seat_players 相同，但钱包是可解析的 felt hex——影子表/结算重放
-    /// 的 addr_from_starknet 需要从钱包派生 VM 座位地址。
+    /// seat_players 已统一为有效 felt 钱包（权威模式全量覆盖）。
     fn seat_players_hex_wallets(table: &mut Table, n: u64) -> Vec<Player> {
-        let mut players = Vec::new();
-        for idx in 1..=n {
-            let client = ClientPlayer::new();
-            let proof = client.generate_pk_proof();
-            let pk_hex = poker_protocol::z_poker::convert::ecpoint_to_hex(&client.pk);
-            let wallet = format!("0x{:064x}", idx);
-            crate::starknet::prove_log::record_join(
-                table.summary.id,
-                &wallet,
-                &pk_hex,
-                crate::relayer::proof_bytes::serialize_pk_ownership_proof(&proof),
-            );
-            table.mental_poker_game.register_player(pk_hex.clone(), client.pk, proof);
-            let player = GamePlayer {
-                name: format!("p{idx}"),
-                bankroll: 100000,
-                pk_hex: GamePkHex::new(pk_hex.clone()),
-                readable_hands: vec![],
-                wallet_address: WalletAddress(wallet),
-            };
-            table.sit_player(player, idx as u32, 100000, false);
-            if let Some(seat) = table.local_seats.get_mut(&(idx as u32)) {
-                seat.folded = false;
-            }
-            players.push(Player { pk_hex: GamePkHex::new(pk_hex), client });
-        }
-        players
+        seat_players(table, n)
     }
 
     /// drive_reveal_phase + WS handler 同款 reveal 采集点（socket/mod.rs:861）：
-    /// 提交被接受后立即 record_reveal，否则命令日志缺 reveal，影子表/结算
-    /// 重放都无法跟随。
+    /// 提交被接受后立即接入实时 VM 镜像接受点（与 WS handler 同位）。
     fn drive_reveal_and_record(table: &mut Table, players: &[Player]) -> RevealPhase {
         assert!(
             table.reveal_token_state.is_active(),
@@ -1064,7 +1029,6 @@ mod shadow_e2e {
             table
                 .submit_player_reveal_tokens(&pk_hex, tokens.clone())
                 .unwrap_or_else(|e| panic!("{phase:?} token submit failed for {pk_hex}: {e}"));
-            crate::starknet::prove_log::record_reveal(table, &pk_hex.0, &tokens);
             table.mark_player_reveal_complete(&pk_hex);
         }
         assert!(
@@ -1076,16 +1040,12 @@ mod shadow_e2e {
 
     #[test]
     fn shadow_one_pass_matches_game_layer() {
-        crate::starknet::shadow::set_enabled_for_test(true);
-        let _off = ShadowOff;
-
         let table = drive_showdown_hand(424242);
 
         let report = crate::starknet::shadow::take_last_report_for_test(424242)
             .expect("shadow must have finished with the hand");
         assert_eq!(report.hand_id, table.current_hand_id, "shadow hand id");
         assert_eq!(report.metrics.bet_fail, 0, "one-pass bet failures: {report:?}");
-        assert_eq!(report.unmatched_reveals, 0, "unmatched reveals: {report:?}");
         assert!(report.metrics.reveal_ok > 0, "no reveals dispatched: {report:?}");
         assert!(report.metrics.bet_ok > 0, "no bets dispatched: {report:?}");
         assert!(report.issues.is_empty(), "shadow parity issues: {report:?}");
@@ -1143,10 +1103,10 @@ mod shadow_e2e {
         table
     }
 
-    /// Phase 0 生产结算路径全量对账 e2e：真实游戏手 → build_from_log 重放
-    /// → settle_hand（真实 stwo 证明 + calldata 组装）→
+    /// Phase 0 生产结算路径全量对账 e2e：真实游戏手 → 实时 VM 镜像终局
+    /// 比对 → settle_hand（真实 stwo 证明 + calldata 组装）→
     /// cross_check_snapshot + cross_check_deltas 全过——生产 fail-closed
-    /// 对账链路的端到端验收（此前只有单测覆盖）。
+    /// 对账链路的端到端验收（镜像即结算唯一 VM 来源，无第二份重放）。
     #[test]
     fn settlement_build_passes_full_parity_checks() {
         let table_id = 424243;
@@ -1154,21 +1114,25 @@ mod shadow_e2e {
 
         let input = crate::starknet::prove_log::take_settle_input(&table)
             .expect("hand must have settle input");
-        let start = input.log.start.clone().expect("hand start");
-        let mirror = crate::starknet::mirror::build_from_log(
-            table_id,
-            &start,
-            &input.log.commands,
-            start.hand_id,
-        )
-        .expect("settlement replay");
+        // 单一状态表示：结算直接取用实时镜像（无重放构建）。
+        // （on_hand_complete 已在 drive 中消费实时镜像并完成终局比对，
+        // 测试经 test-only stash 取回镜像与报告。）
+        let report = crate::starknet::shadow::take_last_report_for_test(table_id)
+            .expect("live mirror finish report");
+        assert!(
+            report.issues.is_empty() && report.metrics.bet_fail == 0,
+            "live mirror must match game layer: {report:?}"
+        );
+        let mirror = crate::starknet::shadow::take_last_mirror_for_test(table_id)
+            .expect("live hand mirror");
 
         // 对账 1（快照）：board / per-wallet total_bet。
         crate::starknet::hooks::cross_check_snapshot(&mirror, &input)
             .expect("snapshot parity");
 
         // 生产结算构建：分池 + 真实证明 + calldata（含 treasury 台费项）。
-        let wallet_map: Vec<(poker_l1::Address, starknet_ff::FieldElement)> = start
+        let wallet_map: Vec<(poker_l1::Address, starknet_ff::FieldElement)> = input
+            .start
             .participants
             .iter()
             .filter_map(|p| {

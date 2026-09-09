@@ -855,12 +855,8 @@ impl SocketState {
     ) -> Result<(), String> {
         let mut gs = self.state.write().await;
         if let Some(table) = gs.tables.get_mut(&table_id) {
-            let result = table.submit_player_reveal_tokens(pk_hex, tokens.clone());
-            if result.is_ok() {
-                // #20 Phase 2：记录已接受的 reveal 令牌（结算时一次性重放）。
-                crate::starknet::prove_log::record_reveal(table, &pk_hex.0, &tokens);
-            }
-            result
+            // reveal 喂食在 Table::submit_player_reveal_tokens 内统一完成。
+            table.submit_player_reveal_tokens(pk_hex, tokens.clone())
         } else {
             Err("Table not found".to_string())
         }

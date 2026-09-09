@@ -30,6 +30,12 @@ impl BettingRound {
         }
     }
 
+    /// 权威视图同步：VM 是下注规则的裁判，本地轮仅保留展示/派生语义。
+    pub fn sync_from_vm(&mut self, current_bet: u64, min_raise: u64) {
+        self.current_bet = current_bet;
+        self.min_raise = min_raise;
+    }
+
     pub fn current_bet(&self) -> u64 {
         self.current_bet
     }

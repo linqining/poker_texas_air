@@ -207,6 +207,10 @@ pub struct Table {
     /// `record_hand_start`（deck 终局时）整体重置。
     #[serde(skip)]
     pub hand_proof_log: crate::starknet::prove_log::HandProofLog,
+    /// 实时 VM 镜像（单一状态表示）：deck 终局时挂载，随桌存在，
+    /// 结算时 take。挂在 Table 上而非全局表——无跨桌串流。
+    #[serde(skip)]
+    pub live_mirror: Option<crate::starknet::shadow::ShadowHand>,
 }
 
 impl Table {
@@ -517,6 +521,7 @@ impl Table {
             accepted_seq: HashMap::new(),
             action_log: Vec::new(),
             hand_proof_log: crate::starknet::prove_log::HandProofLog::default(),
+            live_mirror: None,
             hand_log_start: 0,
             current_hand_id: 0,
         }

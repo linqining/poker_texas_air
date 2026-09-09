@@ -961,7 +961,12 @@ pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>,
                 table.advance_to_next_phase();
                 // advance_to_next_phase 启动 reveal phase，turn 由 on_reveal_complete 设置。
                 // 仅在 Showdown（无 reveal）时不需要设置 turn。
+            } else if table.live_mirror.is_some() {
+                // 权威模式（Phase 2b）：turn 轮转由 VM 视图同步负责
+                // （apply_betting_view），此处不再手动轮转。
+                table.set_betting_started_at(now_ms());
             } else {
+                // 本地兜底模式（不可证明手）：turn 轮转由本地驱动。
                 let last_turn = table.turn().unwrap_or(1);
                 table.set_turn(table.next_unfolded_player(last_turn, 1));
                 table.set_betting_started_at(now_ms());

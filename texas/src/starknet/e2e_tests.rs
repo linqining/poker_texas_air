@@ -583,7 +583,7 @@ async fn live_flow_assignments_match_mirror_targets() {
         .start
         .clone()
         .expect("hand start recorded at advance_shuffle");
-    let mirror = super::mirror::build_from_log(1, &start, &[], 1).expect("mirror build from log");
+    let mirror = super::mirror::mirror_bootstrap(1, &start, 1).expect("mirror bootstrap");
     for (pk_hex, _player) in &pks {
         let key = GamePkHex::new(pk_hex.clone());
         let wallet = table.players().get(&key).unwrap().0.clone();

@@ -1,11 +1,16 @@
-//! 手牌证明构建器（Phase 2，TODO #20）：把游戏层记录的手牌日志
-//! （`prove_log::HandProofLog`）**一次性**重放进 poker_l1 的 TexasPokerTable
-//! VM，产出该手的 ProveTask 链与 pre-payout 快照，供结算生成证明与 calldata。
+//! 实时 VM 镜像的机械层（`TableMirror` + 开局引导 + 类型桥接）。
 //!
-//! 权威状态只有游戏层一本账；本类型不再常驻、不再被接受点实时同步——
-//! `hooks::on_hand_complete` 在锁外用克隆的日志构建即弃。重放输入与游戏层
-//! 接受的输入逐字节相同，构建失败 = 记录异常，显式放弃该手上链（绝不带着
-//! 分歧状态结算）。
+//! 手牌只有一份 VM 状态表示：`shadow.rs` 的实时镜像在每个接受点同步
+//! dispatch（单一状态），结算时经其 `finish` 直接取用 ProveTask 链与
+//! pre-payout 快照。本模块不再持有"日志重放"路径——历史的
+//! `build_from_log`（结算时构建第二份 VM 状态）已随单一状态重构删除。
+//!
+//! 剩余职责：
+//! - [`TableMirror`]：dispatch 包装（认证上下文 + ProveTask 收集）与
+//!   已接受命令的应用原语（reveal 重排 / bet / force_fold）；
+//! - [`mirror_bootstrap`]：实时镜像的开局引导（join 重放 + deck 注入 +
+//!   DealHole 窗口），与 shadow.rs 共用；
+//! - [`conv`]：zgame poker_protocol → ptx 类型的桥接。
 //!
 //! 类型桥接：服务端现有代码把前端 JSON 解析为 zgame poker_protocol（0.2.0）类型；
 //! poker_l1 使用 poker_texas_air 内的 poker_protocol（0.1.0）类型。两份副本的
@@ -31,7 +36,7 @@ pub use ptx_protocol::crypto::DefaultCurve as PtxCurve;
 
 
 /// 单桌镜像。生命周期：建桌 → 每手 start → 操作 → 结算 → 下一手。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TableMirror {
     pub table: TexasPokerTable,
     /// 当前手牌收集的证明任务（每手结算后清空）。
@@ -507,37 +512,8 @@ impl TableMirror {
     }
 }
 
-/// 从记录的手牌日志构建本手证明工件（一次性；构建即弃，无常驻状态）。
-///
-/// `hand_id` 由调用方（hooks 的单调序列）分配，满足链上 register_aggregate
-/// 的 first_hand_id 严格递增校验。
-/// 重放构建入口：失败时把完整命令日志落盘（Debug 格式，含全部令牌），
-/// 供离线复现相位失步（目录可用 TEXAS_REPLAY_DUMP_DIR 覆盖）。
-pub fn build_from_log(
-    table_id: u32,
-    start: &super::prove_log::HandStartData,
-    commands: &[super::prove_log::HandCommand],
-    hand_id: u32,
-) -> Result<TableMirror, String> {
-    if let Err(e) = build_from_log_inner(table_id, start, commands, hand_id) {
-        let dir = std::env::var("TEXAS_REPLAY_DUMP_DIR")
-            .unwrap_or_else(|_| "/tmp/texas-replay-failures".to_string());
-        let _ = std::fs::create_dir_all(&dir);
-        let path = format!("{dir}/table{table_id}-hand{hand_id}-{}.txt", now_ms());
-        let body = format!(
-            "error: {e}\n\nstart: {start:#?}\n\ncommands ({}):\n{commands:#?}\n",
-            commands.len()
-        );
-        let _ = std::fs::write(&path, body);
-        tracing::warn!("[mirror-replay] failure forensics dumped to {path}");
-        Err(e)
-    } else {
-        build_from_log_inner(table_id, start, commands, hand_id)
-    }
-}
-
-/// 影子表（shadow.rs）与结算重放共用的开局引导：按 HandStart 快照构建
-/// 镜像、按升序座位 join、注入终局 deck、直接进入 DealHole reveal 窗口。
+/// 实时镜像（shadow.rs）的开局引导：按 HandStart 快照构建镜像、按升序
+/// 座位 join、注入终局 deck、直接进入 DealHole reveal 窗口。
 pub(crate) fn mirror_bootstrap(
     table_id: u32,
     start: &super::prove_log::HandStartData,
@@ -562,107 +538,6 @@ pub(crate) fn mirror_bootstrap(
     mirror
         .begin_reveal_hand(start.deck.clone(), &plan, start.button_rank, hand_id)
         .map_err(|e| format!("begin_reveal: {e}"))?;
-    Ok(mirror)
-}
-
-fn build_from_log_inner(
-    table_id: u32,
-    start: &super::prove_log::HandStartData,
-    commands: &[super::prove_log::HandCommand],
-    hand_id: u32,
-) -> Result<TableMirror, String> {
-    let mut mirror = mirror_bootstrap(table_id, start, hand_id)?;
-    let mut by_pk: std::collections::HashMap<&str, poker_l1::Address> = std::collections::HashMap::new();
-    let mut by_wallet: std::collections::HashMap<&str, poker_l1::Address> = std::collections::HashMap::new();
-    for p in &start.participants {
-        let addr = TableMirror::addr_from_starknet(&p.wallet)
-            .ok_or_else(|| format!("bad wallet felt: {}", p.wallet))?;
-        by_pk.insert(p.pk_hex.as_str(), addr);
-        by_wallet.insert(p.wallet.as_str(), addr);
-    }
-
-    // 游戏层接受异步乱序提交（reveal 令牌可晚于下注到达），而 VM 重放是
-    // 相位序敏感的。重放分两遍（2026-09-08 线上 4/7 手 "not in betting
-    // round" / "reveal phase is NONE" / pot 不匹配均源于乱序）：
-    //   1) 先按日志序应用全部 reveal——当前窗口内的立即生效并推进相位；
-    //      相位不匹配的进缓冲（属于尚未到达的窗口）；
-    //   2) 再按日志序重放 Bet/ForceFold，每条前后冲刷缓冲：下注完成推进
-    //      街道时，对应窗口打开，缓冲中的 board/showdown reveal 随之消化。
-    let mut deferred_reveals: Vec<(u8, &[poker_protocol::z_poker::protocol::RevealToken])> =
-        Vec::new();
-
-    for cmd in commands {
-        if let super::prove_log::HandCommand::RevealTokens { pk_hex, tokens } = cmd {
-            let Some(addr) = by_pk.get(pk_hex.as_str()) else {
-                return Err(format!("reveal from unknown pk {pk_hex}"));
-            };
-            let Some(seat) = mirror.seat_index_of(*addr) else {
-                return Err(format!("reveal from non-participant pk {pk_hex}"));
-            };
-            if let Err(e) = mirror.apply_recorded_reveal(seat, tokens) {
-                tracing::debug!(
-                    "[mirror-replay] reveal seat {seat} deferred (phase mismatch): {e}"
-                );
-                deferred_reveals.push((seat, tokens.as_slice()));
-            } else {
-                flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
-            }
-        }
-    }
-
-    for cmd in commands {
-        match cmd {
-            super::prove_log::HandCommand::Bet { pk_hex, action, total_bet } => {
-                let Some(addr) = by_pk.get(pk_hex.as_str()) else {
-                    return Err(format!("bet from unknown pk {pk_hex}"));
-                };
-                let Some(seat) = mirror.seat_index_of(*addr) else {
-                    return Err(format!("bet from non-participant pk {pk_hex}"));
-                };
-                // 先冲刷缓冲 reveal：可能正是补齐当前窗口、解锁下注相位的那条。
-                flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
-                mirror
-                    .apply_recorded_bet(seat, action, *total_bet)
-                    .map_err(|e| format!("bet replay ({action} seat {seat}): {e}"))?;
-                flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
-            }
-            super::prove_log::HandCommand::ForceFold { wallet } => {
-                let Some(addr) = by_wallet.get(wallet.as_str()) else {
-                    continue; // 非本手参与者（跨手残留命令）：跳过
-                };
-                if let Some(seat) = mirror.seat_index_of(*addr) {
-                    mirror.apply_recorded_force_fold(seat);
-                    flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
-                }
-            }
-            super::prove_log::HandCommand::RevealTokens { .. } => {} // 已在第一遍处理
-        }
-    }
-    // 收尾再冲刷一次；仍未消化的 reveal 属于真正无法重放的提交（如跨手
-    // 残留），告警放行——相位完整性由后续 pre-payout/证明检查兜底。
-    flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
-    if !deferred_reveals.is_empty() {
-        tracing::warn!(
-            "[mirror-replay] {} deferred reveal(s) never matched a VM window — dropped",
-            deferred_reveals.len()
-        );
-    }
-
-    // 摊牌展示期 → 派奖前快照 + 推进 VM 复位（与旧 game_loop tick 的
-    // mirror_advance_showdown_display 等价；fold-win 快照已在终局 fold 命令
-    // 中打好，此处 no-op）。
-    if matches!(
-        mirror.table.hand_phase,
-        poker_l1::vm::contracts::texas_poker::types::HandPhase::ShowdownDisplay { .. }
-    ) {
-        mirror.mark_pre_settlement();
-        mirror
-            .advance_deadline()
-            .map_err(|e| format!("payout advance: {e}"))?;
-    }
-    if !mirror.has_provable_activity() {
-        return Err("hand has no prove tasks".into());
-    }
     Ok(mirror)
 }
 
@@ -705,28 +580,6 @@ pub mod conv {
     ) -> Result<PtxRevealTokenProof<PtxCurve>, String> {
         let bytes = borsh::to_vec(proof).map_err(|e| e.to_string())?;
         borsh::from_slice(&bytes).map_err(|e| format!("reveal token proof borsh bridge: {e}"))
-    }
-}
-
-/// 冲刷缓冲的乱序 reveal：反复尝试直到一轮内无进展（应用一条 reveal
-/// 可能推进相位、解锁另一条）。
-fn flush_deferred_reveals(
-    mirror: &mut TableMirror,
-    deferred: &mut Vec<(u8, &[poker_protocol::z_poker::protocol::RevealToken])>,
-) {
-    let mut progressed = true;
-    while progressed {
-        progressed = false;
-        let mut i = 0;
-        while i < deferred.len() {
-            let (seat, tokens) = deferred[i];
-            if mirror.apply_recorded_reveal(seat, tokens).is_ok() {
-                deferred.remove(i);
-                progressed = true;
-            } else {
-                i += 1;
-            }
-        }
     }
 }
 

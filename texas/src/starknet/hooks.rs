@@ -1,14 +1,15 @@
 //! 服务器接线钩子：把牌局事件桥接到 Starknet 结算（#20 Phase 2）。
 //!
-//! 常驻 mirror（第二本账）已移除。游戏层在接受动作的同一条代码路径上把
-//! 已验证输入记录进 `prove_log::HandProofLog`；[`on_hand_complete`] 在锁外
-//! 用日志**一次性**重放出 ProveTask 链与 pre-payout 快照（`mirror::build_from_log`），
-//! 与游戏层终局事实强制对账后构建 register_aggregate/settle_hand 上链，
-//! 失败由 game_loop tick 有界重试。
+//! 单一状态表示（2026-09-09）：手牌只有一份 VM 状态——`shadow.rs` 的实时
+//! 镜像在每个接受点同步 dispatch；[`on_hand_complete`] 把它移交给
+//! [`settle_hand_from_log`]，经终局比对（与游戏层事实逐分对账）后直接取用
+//! ProveTask 链与 pre-payout 快照构建 register_aggregate/settle_hand 上链，
+//! 失败由 game_loop tick 有界重试。历史"结算时日志重放出第二份 VM 状态"
+//! 的 build_from_log 已删除。
 //!
-//! 禁止事项（防止回到老路）：不再引入常驻镜像/实时同步；不新增"事后追赶"
-//! 型补丁；不引入第二套密文派生（deck 必须同源）；不为绕过验证失败放宽
-//! VM 证明校验；对账不一致宁可不结算，绝不带分歧状态上链。
+//! 禁止事项（防止回到老路）：不再引入第二份手牌状态（重放/事后重建）；
+//! 不新增"事后追赶"型补丁；不引入第二套密文派生（deck 必须同源）；不为
+//! 绕过验证失败放宽 VM 证明校验；对账不一致宁可不结算，绝不带分歧状态上链。
 
 use std::sync::OnceLock;
 use super::mirror::{seat_player_addr, TableMirror};
@@ -64,7 +65,7 @@ fn is_already_settled_error(e: &str) -> bool {
         || e.contains("Digest already registered")
 }
 
-pub fn on_hand_complete(table: &Table) {
+pub fn on_hand_complete(table: &mut Table) {
     // 阶段 1（快速，锁内只克隆）：提取本手证明输入日志 + 游戏层终局事实。
     // 日志重放（验证 EC 证明）与证明生成都是重活，必须全部移出写锁。
     let table_id = table.summary.id;
@@ -77,44 +78,70 @@ pub fn on_hand_complete(table: &Table) {
     let Some(input) = super::prove_log::take_settle_input(table) else {
         return; // 本手未记录（未开局/缺 join 证明）——无可证明结算
     };
-    // 影子证明机终局比对（Phase 1 观察性：放在运行时检查之前，
-    // 无 tokio runtime 的测试环境也执行；开关关闭时为 no-op）。
-    super::shadow::finish(&input);
+    // 单一状态表示：取走本手的实时 VM 镜像交给结算流程。缺失 =
+    // bootstrap 失败 / 紧急停用 / 进程重启——该手不可证明，fail-closed。
+    let Some(live) = table.live_mirror.take() else {
+        refuse_settlement(
+            input.table_id,
+            input.start.hand_id,
+            "no live hand mirror — hand unprovable",
+        );
+        return;
+    };
     // 无 tokio runtime 的环境（游戏层单测直接调 settle_hand）跳过链上
-    // 结算——此前这里会 panic；生产恒有 runtime，不受影响。
+    // 结算——但终局比对照常执行（测试断言依赖报告）。
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        tracing::warn!("[starknet-settle] no tokio runtime — settle skipped (test context)");
+        let (report, _mirror) = live.finish(&input);
+        tracing::info!("[live-mirror] test-context finish: {report:?}");
         return;
     };
     handle.spawn(async move {
-        settle_hand_from_log(input).await;
+        settle_hand_from_log(input, live).await;
     });
 }
 
-/// 锁外结算：日志一次性重放 → 强制对账 → 证明 → 入队上链。
-async fn settle_hand_from_log(mut input: super::prove_log::HandSettleInput) {
+/// 锁外结算：实时 VM 镜像终局比对 → 强制对账 → 证明 → 入队上链。
+///
+/// 手牌只有一份 VM 状态表示（实时镜像）；比对不干净或镜像缺失 =
+/// fail-closed 拒绝该手结算（与游戏层事实分歧的状态绝不上链）。
+async fn settle_hand_from_log(
+    input: super::prove_log::HandSettleInput,
+    live: super::shadow::ShadowHand,
+) {
     let table_id = input.table_id;
-    let Some(start) = input.log.start.clone() else { return };
+    let start = input.start.clone();
     // hand_id 在开局时由 record_hand_start 分配（动作签名挑战域同源）。
     let hand_id = start.hand_id;
 
-    // 一次性构建（取代常驻 mirror）：按记录序重放已接受命令，产出
-    // ProveTask 链 + pre-payout 快照。重放输入与游戏层接受输入逐字节相同，
-    // 失败 = 记录/时序异常——显式放弃该手，绝不带着分歧状态结算。
-    let mirror = match super::mirror::build_from_log(table_id, &start, &input.log.commands, hand_id) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(
-                "[starknet-settle] table {table_id} hand {hand_id} build failed: {e} — hand not settled"
-            );
-            return;
-        }
-    };
     if settle_ok_already(table_id, hand_id) {
         return; // 本手已成功上链（幂等）
     }
     if settle_attempts_bumped_max(table_id, hand_id) {
         return; // 重试上限：记录与游戏层永久分歧
+    }
+
+    // 终局比对 + 派奖推进：实时镜像即结算唯一 VM 来源。比对不干净 =
+    // 镜像与游戏层分歧，其派生绝不上链。
+    let (report, mirror) = live.finish(&input);
+    if report.issues.is_empty() && report.metrics.bet_fail == 0 {
+        tracing::info!(
+            "[live-mirror] table {table_id} hand {hand_id} parity OK: cmds={} reveal_ok={} bets={} folds={}",
+            report.metrics.commands,
+            report.metrics.reveal_ok,
+            report.metrics.bet_ok,
+            report.metrics.force_folds,
+        );
+    } else {
+        refuse_settlement(
+            table_id,
+            hand_id,
+            &format!("live mirror DIVERGED from game layer: {report:?}"),
+        );
+        return;
+    }
+    if !mirror.has_provable_activity() {
+        refuse_settlement(table_id, hand_id, "live mirror has no prove tasks");
+        return;
     }
     // 强制对账（游戏层 = 唯一真相）：per-wallet total_bet 与公共牌数逐分一致。
     if let Err(e) = cross_check_snapshot(&mirror, &input) {
@@ -711,7 +738,13 @@ mod delta_parity_tests {
     ) -> HandSettleInput {
         HandSettleInput {
             table_id: 1,
-            log: Default::default(),
+            start: crate::starknet::prove_log::HandStartData {
+                hand_id: 1,
+                participants: Vec::new(),
+                button_rank: 0,
+                small_blind: 10,
+                deck: Vec::new(),
+            },
             rake_collected: rake,
             total_bets: total_bets
                 .into_iter()

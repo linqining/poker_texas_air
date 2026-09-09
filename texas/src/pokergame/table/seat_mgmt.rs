@@ -19,14 +19,14 @@ impl Table {
         // 对齐 Move：手牌进行中使用 kick_player_internal，保留 seat 供 side pot 计算
         if self.is_playing() {
             self.kick_player_internal(pk);
-            // #20 Phase 2：记录强制弃牌命令（结算时一次性重放）。
+            // 实时 VM 镜像接受点（单一状态表示）：强制弃牌同步 dispatch。
             if let Some(player) = self
                 .local_seats
                 .values()
                 .find_map(|s| s.player.as_ref().filter(|p| &p.pk_hex == pk))
             {
                 let wallet = player.wallet_address.0.clone();
-                crate::starknet::prove_log::record_force_fold(self, &wallet);
+                self.mirror_on_force_fold(&wallet);
             }
         } else {
             self.stand_player_by_pk(pk);
@@ -417,7 +417,7 @@ impl Table {
     /// end_without_showdown，无 fold 记录），结算走 showdown 计划但
     /// 公共牌不满 5 张 → build failed，客户端上手牌凭空消失
     /// （2026-09-08 hand 1788804569 线上）。局内筹码由 30s 下注超时
-    /// 正常 fold（有 record_bet 记录，可证明）；下一手开始时仍未重连
+    /// 正常 fold（实时镜像已 dispatch，可证明）；下一手开始时仍未重连
     /// 才由 start_preflop_shuffle 转 sitting_out。
     pub fn mark_player_disconnected_mid_hand(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
         let seat = self.find_player_by_pk(pk)?;
