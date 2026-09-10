@@ -27,16 +27,16 @@ for arg in "$@"; do
 done
 
 [[ -f "$ENV_FILE" ]] || {
-  echo "缺少配置文件 $ENV_FILE（参考仓库内 texas/.env.test 或 DEPLOYMENTS.md 自行填写）"
+  echo "缺少配置文件 ${ENV_FILE}（参考仓库内 texas/.env.test 或 DEPLOYMENTS.md 自行填写）"
   exit 1
 }
 
 log() { echo "[test] $*"; }
 
-log "构建服务器（cargo build -p texas --$PROFILE）…"
+log "构建服务器（cargo build -p texas --${PROFILE}）…"
 cargo build -p texas --"$PROFILE"
 
-log "启动 texas 服务器（$PROFILE，Sepolia）…"
+log "启动 texas 服务器（${PROFILE}，Sepolia）…"
 cd "$ROOT"
 set -a
 # shellcheck disable=SC1090
@@ -46,4 +46,4 @@ source "$ENV_FILE"
 export TEXAS_ENV=test
 export TEXAS_PROVER_MODE=remote
 set +a
-cargo run -p texas --"$PROFILE"
+cargo run -p texas --bin texas --"$PROFILE"

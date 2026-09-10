@@ -11,9 +11,11 @@ const config: Config = {
   contentfulSpaceId: import.meta.env.VITE_CONTENTFUL_SPACE_ID,
   contentfulAccessToken: import.meta.env.VITE_CONTENTFUL_ACCESS_TOKEN,
   googleAnalyticsTrackingId: import.meta.env.VITE_GOOGLE_ANALYTICS_TRACKING_ID,
+  // dev 前缀端口可由 VITE_SERVER_PORT 覆盖（scripts/dev.sh 生成
+  // client/.env.development.local 时注入）；缺省仍是本地 9001。
   socketURI: import.meta.env.PROD
     ? import.meta.env.VITE_SERVER_URI
-    : `http://${window.location.hostname}:9001/`,
+    : `http://${window.location.hostname}:${import.meta.env.VITE_SERVER_PORT ?? 9001}/`,
 };
 
 export default config;

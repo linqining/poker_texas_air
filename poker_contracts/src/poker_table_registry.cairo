@@ -22,6 +22,8 @@
 //! 存储形态：记录字段拆为平行 Map（TableRecord 仅作 view 返回聚合），
 //! 规避 struct-in-Map 在 cairo 2.11/2.19 间的 storage 语义差异。
 
+use starknet::ContractAddress;
+
 /// 未登记（storage 默认零值语义）。
 pub const STATUS_VACANT: u8 = 0;
 /// 开放中（可入座、可开局）。
@@ -61,12 +63,16 @@ pub trait IPokerTableRegistry<TContractState> {
 
 #[starknet::contract]
 pub mod PokerTableRegistry {
+    use core::num::traits::Zero;
     use starknet::{
         ContractAddress, get_caller_address, get_block_timestamp,
-        storage::{Map, StorageMapReadAccess, StorageMapWriteAccess},
+        storage::{
+            Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
+            StoragePointerWriteAccess,
+        },
     };
 
-    use super::{TableRecord, STATUS_CLOSED, STATUS_OPEN, STATUS_VACANT};
+    use super::{TableRecord, STATUS_CLOSED, STATUS_OPEN};
 
     #[storage]
     struct Storage {
@@ -178,6 +184,9 @@ pub mod PokerTableRegistry {
 mod tests {
     use starknet::{ContractAddress, get_contract_address};
     use snforge_std::{ContractClassTrait, DeclareResultTrait, declare};
+    use snforge_std::cheatcodes::execution_info::block_timestamp::{
+        start_cheat_block_timestamp_global,
+    };
     use snforge_std::cheatcodes::execution_info::caller_address::{
         start_cheat_caller_address, stop_cheat_caller_address,
     };
@@ -200,6 +209,9 @@ mod tests {
         ContractAddress,
         IPokerTableRegistryDispatcher,
     ) {
+        // snforge 默认块时间戳为 0，created_at/closed_at 的 "已设置" 断言
+        // 需要一个非零基准时间戳（宽限期相对语义不受具体值影响）。
+        start_cheat_block_timestamp_global(1000);
         let owner: ContractAddress = 0x09e7.try_into().unwrap();
         let registry = deploy_contract(
             "PokerTableRegistry",

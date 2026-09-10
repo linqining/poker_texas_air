@@ -37,10 +37,17 @@ const connectors = [
   injected({ id: 'ready' }),
 ];
 
-// Per-chain RPC endpoints (public Blast endpoints; override by editing here).
-const RPC_URLS: Record<string, string> = {
+// Per-chain RPC endpoints：配置链（VITE_STARKNET_CHAIN_ID）的端点来自
+// starknetConfig（VITE_STARKNET_RPC_URL[S]）——dev 模式指向本地 devnet
+// http://127.0.0.1:5051，未配置时回退公共端点（行为与硬编码时代一致）。
+// 非配置链保留公共端点（钱包在另一条链上时 dApp 读取仍可用）。
+const DEFAULT_RPC_URLS: Record<string, string> = {
   [sepolia.id.toString()]: 'https://starknet-sepolia-rpc.publicnode.com',
   [mainnet.id.toString()]: 'https://starknet-rpc.publicnode.com',
+};
+const RPC_URLS: Record<string, string> = {
+  ...DEFAULT_RPC_URLS,
+  [starknetConfig.chainId]: starknetConfig.rpcUrl,
 };
 
 const provider = jsonRpcProvider({

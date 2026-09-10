@@ -7,7 +7,8 @@
 # （TEXAS_PROVER_MODE=dev）启动 texas 服务器，连接本地开发网提交。
 #
 # 用法：
-#   scripts/dev.sh                  # 完整流程（构建 + 部署 + 启动）
+#   scripts/dev.sh                  # 完整流程（清理旧实例 + 构建 + 部署 + 服务器 + 前端）
+#   scripts/dev.sh --no-client      # 只起 devnet + 服务器（不拉前端）
 #   scripts/dev.sh --skip-build     # 跳过 scarb/cargo 构建（复用已有产物）
 #   scripts/dev.sh --skip-deploy    # 跳过部署（复用运行中的 devnet 与
 #                                   # texas/.env.dev.local 里的地址快照；
@@ -15,6 +16,10 @@
 #   scripts/dev.sh --keep-devnet    # 脚本退出时不关 devnet
 #   scripts/dev.sh --debug          # 服务器用 debug 构建（默认 release，
 #                                   # 递归证明在 debug 下极慢，仅排查用）
+#
+# 前端：默认一并拉起 vite（client/），并生成 client/.env.development.local
+# （gitignored）：RPC 指向本地 devnet 5051、合约地址快照、浏览器直签账户
+# （devnet seed-0 预充值账户 #1）。要插真实钱包联调时删掉该文件即可。
 #
 # 环境变量：DEVNET_URL / DEVNET_PORT 覆盖 devnet 地址；ENV_DEV 覆盖账户
 # 文件位置（默认仓库根目录 .env.dev）；SCARB_HOME 覆盖 scarb 工具链位置
@@ -31,18 +36,36 @@ PROFILE=release
 SKIP_BUILD=0
 SKIP_DEPLOY=0
 KEEP_DEVNET=0
+NO_CLIENT=0
 
 for arg in "$@"; do
   case "$arg" in
     --skip-build) SKIP_BUILD=1 ;;
     --skip-deploy) SKIP_DEPLOY=1 ;;
     --keep-devnet) KEEP_DEVNET=1 ;;
+    --no-client) NO_CLIENT=1 ;;
     --debug) PROFILE=debug ;;
     *) echo "未知参数: $arg"; exit 1 ;;
   esac
 done
 
 log() { echo "[dev] $*"; }
+
+# ---------- 0) 停掉旧实例（上次运行的 texas 服务器 / 前端 / devnet）----------
+# texas 的 cmdline 可能是绝对路径（手动启动）或相对路径（cargo run 生成），
+# 两种都覆盖；`target/*/texas` 名称唯一，误伤面可控。pkill 无匹配时返回
+# 非零，`|| true` 防止 set -e 中断。
+log "清理旧实例…"
+pkill -f "target/release/texas" 2>/dev/null || true
+pkill -f "target/debug/texas" 2>/dev/null || true
+pkill -f "cargo run -p texas" 2>/dev/null || true
+pkill -f "$ROOT/client" 2>/dev/null || true
+# --skip-deploy 复用运行中的 devnet（地址快照仍有效）；完整流程则连同
+# 旧 devnet 一起停（合约地址随新 devnet 重新部署生成）。
+if [[ "$SKIP_DEPLOY" != 1 ]]; then
+  pkill -f starknet-devnet 2>/dev/null || true
+fi
+sleep 1
 
 # ---------- 1) starknet devnet ----------
 DEVNET_PID=""
@@ -63,6 +86,8 @@ else
   log "devnet 已启动 (pid $DEVNET_PID, 日志 /tmp/starknet-devnet.log)"
 fi
 cleanup() {
+  [[ -n "${CLIENT_PID:-}" ]] && kill "$CLIENT_PID" 2>/dev/null
+  [[ -n "${SERVER_PID:-}" ]] && kill "$SERVER_PID" 2>/dev/null
   if [[ -n "$DEVNET_PID" ]] && [[ "$KEEP_DEVNET" != 1 ]]; then
     kill "$DEVNET_PID" 2>/dev/null || true
     log "devnet 已停止（--keep-devnet 可保留）"
@@ -71,7 +96,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ---------- 2) owner/operator 账户：根目录 .env.dev（ADDRESS/PRIVATE_KEY）----------
-[[ -f "$ENV_DEV" ]] || { echo "缺少账户文件 $ENV_DEV（需要 ADDRESS= / PRIVATE_KEY= 两行）"; exit 1; }
+[[ -f "$ENV_DEV" ]] || { echo "缺少账户文件 ${ENV_DEV}（需要 ADDRESS= / PRIVATE_KEY= 两行）"; exit 1; }
 OWNER=$(grep -E '^ADDRESS=' "$ENV_DEV" | head -1 | cut -d= -f2- | tr -d '[:space:]')
 OPKEY=$(grep -E '^PRIVATE_KEY=' "$ENV_DEV" | head -1 | cut -d= -f2- | tr -d '[:space:]')
 [[ -n "$OWNER" && -n "$OPKEY" ]] || {
@@ -83,7 +108,7 @@ if [[ "$SKIP_BUILD" != 1 ]]; then
   if [[ -x "$SCARB_HOME/bin/scarb" ]]; then
     export PATH="$SCARB_HOME/bin:$PATH"
   fi
-  command -v scarb >/dev/null 2>&1 || { echo "缺少 scarb（$SCARB_HOME）"; exit 1; }
+  command -v scarb >/dev/null 2>&1 || { echo "缺少 scarb（${SCARB_HOME}）"; exit 1; }
   log "构建 Cairo 合约（scarb build）…"
   (cd "$ROOT/poker_contracts" && scarb build)
   log "构建 snops + 服务器（cargo build -p texas）…"
@@ -165,7 +190,7 @@ cat > "$ENV_FILE" <<EOF
 # 由 scripts/dev.sh 生成（本地 devnet 部署快照）——devnet 重建后地址会变。
 # dev 模式：TEXAS_ENV=dev → TEXAS_PROVER_MODE 缺省即本地 prover；
 # 这里显式写出便于对照。proved 实验入口见文件尾部注释。
-PORT=9001
+PORT=${PORT:-9001}
 JWT_SECRET=devnet-secret-for-local-e2e
 TEXAS_ENV=dev
 TEXAS_PROVER_MODE=dev
@@ -200,11 +225,100 @@ BOT_LOOP_SECS=0
 EOF
 log "服务器环境已生成: $ENV_FILE"
 
-# ---------- 6) 启动服务器（前台；Ctrl-C 一并停 devnet）----------
-log "启动 texas 服务器（$PROFILE，连接 $DEVNET_URL）…"
+# ---------- 5b) 前端环境（client/.env.development.local，gitignored）----------
+CLIENT_ENV="$ROOT/client/.env.development.local"
+if [[ "$NO_CLIENT" != 1 ]]; then
+  # 浏览器直签账户：devnet seed-0 预充值账户 #1（devnet 预部署 OZ 账户、
+  # 自带 1000 STRK，免钱包插件配置）；API 不可用时回退 seed 0 确定性常量。
+  CLIENT_ACCT=$(curl -sf "$DEVNET_URL" -X POST -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"devnet_getPredeployedAccounts","params":{}}' 2>/dev/null \
+    | python3 -c '
+import json, sys
+try:
+    a = json.load(sys.stdin)["result"][1]
+    print(a["address"]); print(a["private_key"])
+except Exception:
+    sys.exit(1)
+' 2>/dev/null) || CLIENT_ACCT=""
+  if [[ -n "$CLIENT_ACCT" ]]; then
+    CADDR=$(echo "$CLIENT_ACCT" | sed -n '1p')
+    CPK=$(echo "$CLIENT_ACCT" | sed -n '2p')
+  else
+    CADDR=0x78662e7352d062084b0010068b99288486c2d8b914f6e2a55ce945f8792c8b1
+    CPK=0x0e1406455b7d66b1690803be066cbe5e
+  fi
+  cat > "$CLIENT_ENV" <<EOF
+# 由 scripts/dev.sh 生成——本地 devnet 联调配置（覆盖 client/.env.development）。
+# 注意：直签账户启用时会顶掉真实钱包登录；要插 Ready 钱包实机联调时，
+# 删除本文件（回退 Sepolia 配置）或注释掉下面两行 VITE_DEV_ACCOUNT_*。
+VITE_STARKNET_RPC_URL=$DEVNET_URL
+VITE_STARKNET_RPC_URLS=$DEVNET_URL
+VITE_STARKNET_CHAIN_ID=0x534e5f5345504f4c4941
+VITE_STRK_TOKEN_ADDRESS=$STRK
+VITE_POKER_VAULT_ADDRESS=$VAULT
+VITE_POKER_SETTLEMENT_ADDRESS=$SETTLE
+VITE_SERVER_PORT=${PORT:-9001}
+# pSTRK/swap/私密池已退役：本地 devnet 不部署 anonymizer，走公开买入路径
+VITE_POKER_VAULT_ANONYMIZER_ADDRESS=
+VITE_STRK20_POOL_ADDRESS=
+# 浏览器直签账户（devnet 预充值账户 #1）
+VITE_DEV_ACCOUNT_ADDRESS=$CADDR
+VITE_DEV_ACCOUNT_PRIVATE_KEY=$CPK
+EOF
+  log "前端环境已生成: ${CLIENT_ENV}（直签账户 ${CADDR}）"
+fi
+
+# ---------- 6) 启动（服务器 + 前端；Ctrl-C 一并停 devnet）----------
+PORT="${PORT:-9001}"
+# 端口兜底：步骤 0 之后仍占用目标端口的，视为漏网旧实例，直接停掉；
+# 停不掉（权限等）再报错让用户处理。
+if lsof -tiTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  log "端口 $PORT 仍被占用，停止占用进程…"
+  kill $(lsof -tiTCP:"$PORT" -sTCP:LISTEN) 2>/dev/null || true
+  sleep 1
+fi
+if lsof -tiTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "端口 $PORT 仍被占用且无法停止。手动处理后重试，或用 PORT=<其他端口> 运行。"
+  exit 1
+fi
+log "启动 texas 服务器（${PROFILE}，连接 ${DEVNET_URL}，端口 ${PORT}）…"
 cd "$ROOT"
 set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
-cargo run -p texas --"$PROFILE"
+
+if [[ "$NO_CLIENT" != 1 ]]; then
+  if [[ ! -d "$ROOT/client/node_modules" ]]; then
+    log "安装前端依赖（pnpm install）…"
+    (cd "$ROOT/client" && pnpm install)
+  fi
+  log "启动前端（vite，代理 → http://127.0.0.1:${PORT}）…"
+  (
+    cd "$ROOT/client" &&
+    GAME_SERVER_URL="http://127.0.0.1:${PORT}" exec ./node_modules/.bin/vite
+  ) >>/tmp/texas-client.log 2>&1 &
+  CLIENT_PID=$!
+fi
+
+cargo run -p texas --bin texas --"$PROFILE" >>/tmp/texas-server.log 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 180); do
+  curl -sf "http://127.0.0.1:${PORT}/" >/dev/null 2>&1 && break
+  kill -0 "$SERVER_PID" 2>/dev/null || {
+    echo "服务器启动失败，日志见 /tmp/texas-server.log"
+    tail -20 /tmp/texas-server.log
+    exit 1
+  }
+  sleep 1
+done
+curl -sf "http://127.0.0.1:${PORT}/" >/dev/null 2>&1 || {
+  echo "服务器启动超时（180s），日志见 /tmp/texas-server.log"
+  exit 1
+}
+log "游戏服务器就绪: http://127.0.0.1:${PORT}（日志 /tmp/texas-server.log）"
+if [[ -n "${CLIENT_PID:-}" ]]; then
+  log "前端就绪: http://localhost:5173（端口占用时 vite 自动顺延，日志 /tmp/texas-client.log）"
+fi
+log "全部已启动；Ctrl-C 一次性停止（前端 + 服务器 + devnet）"
+wait
