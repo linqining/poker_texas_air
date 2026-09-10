@@ -339,17 +339,36 @@ pub async fn verify_session_tx_pk(wallet: &str, declared_hex: Option<&str>) -> O
         }
     };
     match vault_active_session_tx_pk(wallet).await {
-        Some(onchain) if onchain.as_slice() == bytes.as_slice() => Some(bytes),
-        Some(onchain) => {
-            SESSION_TX_PK_MISMATCHES.fetch_add(1, Relaxed);
-            tracing::warn!(
-                target: "session_tx_pk_mismatch",
-                "[session-tx-pk] ATTACK SIGNAL: {wallet} 声明 {}.. 与链上登记 {}.. 不一致 — 拒绝登记，计数 {}",
-                &declared[..8.min(declared.len())],
-                hex::encode(&onchain[..4]),
-                SESSION_TX_PK_MISMATCHES.load(Relaxed)
-            );
-            None
+        Some(mut onchain) => {
+            // 编码说明：stark_curve compress() = x 坐标 + byte[0] 高位 0x80
+            // y 奇偶标志。标志位会让数值越出 felt252（见 poker_vault
+            // set_session_tx_pk 的 felt 入参），所以链上登记存的是 x-only，
+            // 而声明值（客户端 compress 全形式）带标志——对拍按 x-only
+            // 掩码比较；通过后返回**声明原值**作为座位 VM 签名锚
+            // （stark_scheme::verify 的 from_compressed 需要奇偶标志）。
+            onchain[0] &= 0x7f;
+            let mut declared_x = bytes.clone();
+            declared_x[0] &= 0x7f;
+            if onchain.as_slice() == declared_x.as_slice() {
+                // 成功路径刻意留痕：绑定是否生效此前只能靠链上 view 反查
+                // （2026-09-11 审核结论），info 级一行让日志可直接核实。
+                tracing::info!(
+                    target: "session_tx_pk",
+                    "[session-tx-pk] {wallet} session key verified & registered (pk=0x{}…) — join 携带 VM 签名锚",
+                    hex::encode(&bytes[..8])
+                );
+                Some(bytes)
+            } else {
+                SESSION_TX_PK_MISMATCHES.fetch_add(1, Relaxed);
+                tracing::warn!(
+                    target: "session_tx_pk_mismatch",
+                    "[session-tx-pk] ATTACK SIGNAL: {wallet} 声明 {}.. 与链上登记 {}.. 不一致 — 拒绝登记，计数 {}",
+                    &declared[..8.min(declared.len())],
+                    hex::encode(&onchain[..4]),
+                    SESSION_TX_PK_MISMATCHES.load(Relaxed)
+                );
+                None
+            }
         }
         None => {
             SESSION_TX_PK_UNREGISTERED.fetch_add(1, Relaxed);

@@ -110,6 +110,30 @@ export interface SubmitResult extends TxResult {
   path: SubmitPath;
 }
 
+/** 缓存"已确认未部署"的账户地址，避免每次提交都多打一发 RPC。 */
+const knownUndeployed = new Set<string>();
+
+/**
+ * 钱包智能账户在当前链未部署时，直发 invoke 必然失败且钱包插件不会代为
+ * 部署：插件按 chain id 缓存部署状态，devnet 与 Sepolia 同为 SN_SEPOLIA，
+ * 在 Sepolia 部署过的账户会被误判为已部署（本地联调高频踩坑）。这里显式
+ * 探测并返回可操作的错误，提示用户重连钱包触发插件自身的部署流程。
+ */
+async function assertWalletDeployed(account: AccountInterface): Promise<string | null> {
+  const addr = account.address.toLowerCase();
+  if (knownUndeployed.has(addr)) {
+    return '钱包账户在当前网络未部署（wallet account not deployed）：请断开并重新连接钱包（触发钱包插件的部署流程）；本地联调还需确认插件网络已指向本地 devnet。';
+  }
+  try {
+    await getProvider().getClassHashAt(addr);
+    return null;
+  } catch {
+    knownUndeployed.add(addr);
+    logger.warn('[starknet-paymaster] wallet account undeployed on current chain:', addr);
+    return '钱包账户在当前网络未部署（wallet account not deployed）：请断开并重新连接钱包（触发钱包插件的部署流程）；本地联调还需确认插件网络已指向本地 devnet。';
+  }
+}
+
 /**
  * 统一交易提交入口：paymaster 中继优先，失败/未配置回退 session 直签。
  * 两条路径都等待回执（经多 RPC failover provider）后返回。
@@ -120,6 +144,11 @@ export async function submitCalls(
 ): Promise<SubmitResult> {
   if (calls.length === 0) {
     return { hash: '', success: true, path: 'direct' };
+  }
+
+  const notDeployed = await assertWalletDeployed(account);
+  if (notDeployed) {
+    return { hash: '', success: false, error: notDeployed, path: 'direct' };
   }
 
   if (await isRelayConfigured()) {

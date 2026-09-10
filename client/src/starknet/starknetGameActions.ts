@@ -19,6 +19,7 @@ import { starknetConfig, WEI_PER_CHIP } from './config';
 import { POKER_VAULT_ANONYMIZER_ABI } from './abis';
 import { getProvider } from './contracts';
 import { submitCalls } from './paymaster';
+import { ensureTxSessionPkHex, txPkFeltHex, TX_SESSION_TTL_SECS } from './txSession';
 import { buyInPrivately, isPrivateBuyInConfigured } from './privacyBuyIn';
 import { logger } from '../helpers/logger';
 
@@ -156,9 +157,27 @@ export async function depositForBuyIn(
 ): Promise<TxResult> {
   const wei = chipsToWei(chipAmount);
   try {
-    // approve（如需）+ deposit 合并为一次提交：中继路径只占用一次 paymaster
-    // 通道；直签路径 session policy 对两个 entrypoint 均静默放行。
+    // approve（如需）+ 会话钥登记 + deposit 合并为一次提交：中继路径只占用
+    // 一次 paymaster 通道；直签路径 session policy 对三个 entrypoint 均静默
+    // 放行。
+    // P1-2 会话委托：set_session_tx_pk 与 deposit 同笔登记会话交易公钥。
+    // 链上登记用 x-only felt（compress 的 0x80 奇偶标志位会越出 felt252）；
+    // 完整 flagged 形式走 sit_down 的 sessionTxPk 声明，服务端按 x-only
+    // 掩码对拍。latest-wins 幂等；caller = 玩家钱包。
     const calls: Call[] = [];
+    const txPkHex = await ensureTxSessionPkHex();
+    const feltPkHex = txPkHex ? txPkFeltHex(txPkHex) : null;
+    if (feltPkHex) {
+      const expiresAt = Math.floor(Date.now() / 1000) + TX_SESSION_TTL_SECS;
+      calls.push(
+        getPokerVaultWrite(account).populate('set_session_tx_pk', [
+          BigInt(`0x${feltPkHex}`),
+          expiresAt,
+        ]),
+      );
+    } else {
+      logger.warn('[starknet] tx session unavailable — skipping session tx pk registration');
+    }
     const existing = await getStrkAllowance(account.address);
     if (existing < wei) {
       calls.push(

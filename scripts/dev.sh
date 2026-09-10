@@ -14,6 +14,8 @@
 #                                   # texas/.env.dev.local 里的地址快照；
 #                                   # devnet 重启后地址会变，勿混用）
 #   scripts/dev.sh --keep-devnet    # 脚本退出时不关 devnet
+#   scripts/dev.sh fund <地址> [n]   # 给任意地址充值 n 个 STRK（钱包联调用，
+#                                   # 需 devnet 已在运行；默认 100 STRK）
 #   scripts/dev.sh --debug          # 服务器用 debug 构建（默认 release，
 #                                   # 递归证明在 debug 下极慢，仅排查用）
 #
@@ -24,6 +26,16 @@
 # 环境变量：DEVNET_URL / DEVNET_PORT 覆盖 devnet 地址；ENV_DEV 覆盖账户
 # 文件位置（默认仓库根目录 .env.dev）；SCARB_HOME 覆盖 scarb 工具链位置
 # （默认 ~/.local/opt/toolchains/scarb-2.19.4）。
+#
+# 真实钱包联调：脚本会把 Argent(Ready) 钱包的智能账户类预声明进 devnet
+# （官方 v0.4.0 产物，scripts/assets/argent/）；钱包部署费从反事实账户
+# 地址自身余额扣，DEV_EXTRA_FUND（写在 .env.dev）配置的地址每次启动自动
+# 充值 10,000 STRK。
+# 注意：Ready 插件按 chain id 记账户部署状态，devnet 与 Sepolia 同为
+# SN_SEPOLIA——若该账户在真 Sepolia 已部署，插件会跳过部署步骤、直接发
+# invoke 而报 "not deployed"。解决：把插件网络也切到本地 devnet（内置
+# Devnet 网络固定指向 localhost:5050，可用 DEVNET_PORT=5050 运行本脚本
+# 对齐，或在插件里添加自定义网络 http://127.0.0.1:5051）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,6 +49,31 @@ SKIP_BUILD=0
 SKIP_DEPLOY=0
 KEEP_DEVNET=0
 NO_CLIENT=0
+
+# ---------- fund 子命令：给任意地址充值 STRK（真实钱包部署前必做）----------
+# 钱包插件的智能账户（Argent/Ready）部署费从反事实账户地址自身余额扣，
+# 该地址随 passkey/盐随机生成，只能在连接后从钱包 UI 读到再充值：
+#   scripts/dev.sh fund <地址> [STRK数量]（默认 100 STRK）
+# 须在参数解析之前处理，避免被下面的开关白名单拒绝。
+if [[ "${1:-}" == "fund" ]]; then
+  shift
+  TARGET="${1:-}"
+  [[ -n "$TARGET" ]] || { echo "用法: scripts/dev.sh fund <地址> [STRK数量]"; exit 1; }
+  AMT_STRK="${2:-100}"
+  AMT_FRI=$(python3 -c "print(int('$AMT_STRK') * 10**18)")
+  curl -sf "$DEVNET_URL/is_alive" >/dev/null 2>&1 || {
+    echo "devnet 未运行（${DEVNET_URL}）。先跑 scripts/dev.sh（加 --keep-devnet 保留）"; exit 1; }
+  if curl -sf "$DEVNET_URL" -X POST -H 'Content-Type: application/json' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"devnet_mint","params":{"address":"'"$TARGET"'","amount":'"$AMT_FRI"',"unit":"FRI"}}' \
+      >/dev/null 2>&1 \
+     || curl -sf -X POST "$DEVNET_URL/mint" -H 'Content-Type: application/json' \
+      -d '{"address":"'"$TARGET"'","amount":'"$AMT_FRI"'}' >/dev/null 2>&1; then
+    echo "[dev] 已向 $TARGET 充值 ${AMT_STRK} STRK"
+  else
+    echo "充值失败（devnet_mint 与 /mint 均不可用）"; exit 1
+  fi
+  exit 0
+fi
 
 for arg in "$@"; do
   case "$arg" in
@@ -126,15 +163,30 @@ if [[ "$SKIP_DEPLOY" != 1 ]]; then
   # 4a) 充值 STRK（费用代币；重复充值无害）。
   #     新版 devnet：devnet_mint JSON-RPC；旧版：HTTP POST /mint。
   MINT_AMT=10000000000000000000000   # 10,000 STRK（FRI）
-  if curl -sf "$DEVNET_URL" -X POST -H 'Content-Type: application/json' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"devnet_mint","params":{"address":"'"$OWNER"'","amount":'"$MINT_AMT"',"unit":"FRI"}}' \
-      >/dev/null 2>&1 \
-     || curl -sf -X POST "$DEVNET_URL/mint" -H 'Content-Type: application/json' \
-      -d '{"address":"'"$OWNER"'","amount":'"$MINT_AMT"'}' >/dev/null 2>&1; then
+  mint_strk() {
+    curl -sf "$DEVNET_URL" -X POST -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"devnet_mint","params":{"address":"'"$1"'","amount":'"$2"',"unit":"FRI"}}' \
+        >/dev/null 2>&1 \
+      || curl -sf -X POST "$DEVNET_URL/mint" -H 'Content-Type: application/json' \
+        -d '{"address":"'"$1"'","amount":'"$2"'}' >/dev/null 2>&1
+  }
+  if mint_strk "$OWNER" "$MINT_AMT"; then
     log "已为 $OWNER 充值 10,000 STRK"
   else
     log "警告: 充值失败（devnet_mint 与 /mint 均不可用；账户可能已有余额，继续）"
   fi
+  # 4a-b) 真实钱包联调地址自动充值：devnet 重建即清零，而浏览器 passkey
+  #       钱包的反事实地址固定不变——不预充，钱包首连部署账户必报余额
+  #       不足。地址写在 ENV_DEV 的 DEV_EXTRA_FUND=（空格/逗号分隔多个）。
+  EXTRA_FUND=$(grep -E '^DEV_EXTRA_FUND=' "$ENV_DEV" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]' || true)
+  for waddr in $(echo "$EXTRA_FUND" | tr ' ,' '  '); do
+    [[ -n "$waddr" ]] || continue
+    if mint_strk "$waddr" "$MINT_AMT"; then
+      log "已为联调钱包 $waddr 充值 10,000 STRK"
+    else
+      log "警告: 联调钱包 $waddr 充值失败"
+    fi
+  done
   # 4b) 账户未部署则先 deploy_account（.env.dev 账户是 Sepolia deployer，
   #     在全新 devnet 上不存在；OZ 类 = devnet 内置账户类，无需 declare）。
   #     新旧 devnet 的 block_id 形式不同：先试裸 "latest"，再试对象形式。
@@ -161,7 +213,36 @@ sys.exit(0 if h not in (None, "", "0x0", "0x00") else 1)
       exit 1
     }
   fi
-  # 4c) 合约部署（vault 绑定规范 STRK，现代接线）。
+  # 4c) 预声明 Argent(Ready) 钱包账户类：钱包插件的智能账户类只声明在
+  #     公链上（katana 会内置、starknet-devnet 不会），缺了它钱包首连
+  #     部署账户直接报 "Class ... is not declared"。产物是 Argent 官方
+  #     仓库 v0.4.0 的类（sierra hash 与线上/class 一致）；casm hash 若
+  #     因编译器版本差异不匹配，snops declare 会从报错里提取期望值重试。
+  ARGENT_CLASS=0x036078334509b514626504edc9fb252328d1a240e4e948bef8d0c08dff45927f
+  ARGENT_CASM_HASH=0x7a663375245780bd307f56fde688e33e5c260ab02b76741a57711c5b60d47f6
+  ARGENT_SIERRA="$ROOT/scripts/assets/argent/ArgentAccount.contract_class.json"
+  ARGENT_CASM="$ROOT/scripts/assets/argent/ArgentAccount.compiled_contract_class.json"
+  ARGENT_AT=$(curl -sf "$DEVNET_URL" -X POST -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"starknet_getClass","params":["latest","'"$ARGENT_CLASS"'"]}' 2>/dev/null) \
+    || ARGENT_AT=$(curl -sf "$DEVNET_URL" -X POST -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"starknet_getClass","params":[{"block_tag":"latest"},"'"$ARGENT_CLASS"'"]}' 2>/dev/null) \
+    || ARGENT_AT=""
+  if echo "$ARGENT_AT" | grep -q '"sierra_program"'; then
+    log "Argent 钱包账户类已在 devnet 声明，跳过"
+  else
+    [[ -f "$ARGENT_SIERRA" && -f "$ARGENT_CASM" ]] || {
+      echo "缺少 Argent 类产物（${ARGENT_SIERRA}）"; exit 1; }
+    log "预声明 Argent 钱包账户类（${ARGENT_CLASS}）…"
+    "$SNOPS" --url "$DEVNET_URL" --pk "$OPKEY" --addr "$OWNER" declare \
+      --class "$ARGENT_SIERRA" --compiled "$ARGENT_CASM" \
+      --compiled-hash "$ARGENT_CASM_HASH" >>/tmp/devnet-deploy.log 2>&1 || {
+      echo "Argent 类声明失败，日志见 /tmp/devnet-deploy.log"
+      tail -10 /tmp/devnet-deploy.log
+      exit 1
+    }
+    log "Argent 钱包账户类已声明（真实钱包可连接）"
+  fi
+  # 4d) 合约部署（vault 绑定规范 STRK，现代接线）。
   log "部署合约到 devnet（poker_contracts/scripts/local_deploy.sh）…"
   OWNER="$OWNER" OPKEY="$OPKEY" URL="$DEVNET_URL" \
     "$ROOT/poker_contracts/scripts/local_deploy.sh" >/tmp/devnet-deploy.log 2>&1 || {
@@ -228,29 +309,12 @@ log "服务器环境已生成: $ENV_FILE"
 # ---------- 5b) 前端环境（client/.env.development.local，gitignored）----------
 CLIENT_ENV="$ROOT/client/.env.development.local"
 if [[ "$NO_CLIENT" != 1 ]]; then
-  # 浏览器直签账户：devnet seed-0 预充值账户 #1（devnet 预部署 OZ 账户、
-  # 自带 1000 STRK，免钱包插件配置）；API 不可用时回退 seed 0 确定性常量。
-  CLIENT_ACCT=$(curl -sf "$DEVNET_URL" -X POST -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":1,"method":"devnet_getPredeployedAccounts","params":{}}' 2>/dev/null \
-    | python3 -c '
-import json, sys
-try:
-    a = json.load(sys.stdin)["result"][1]
-    print(a["address"]); print(a["private_key"])
-except Exception:
-    sys.exit(1)
-' 2>/dev/null) || CLIENT_ACCT=""
-  if [[ -n "$CLIENT_ACCT" ]]; then
-    CADDR=$(echo "$CLIENT_ACCT" | sed -n '1p')
-    CPK=$(echo "$CLIENT_ACCT" | sed -n '2p')
-  else
-    CADDR=0x78662e7352d062084b0010068b99288486c2d8b914f6e2a55ce945f8792c8b1
-    CPK=0x0e1406455b7d66b1690803be066cbe5e
-  fi
+  # 不注入任何直签/测试账户：身份一律来自真实连接的钱包（P1-2 身份绑定以
+  # 买入同笔 vault.set_session_tx_pk 登记为准）。历史注入方案（VITE_DEV_
+  # ACCOUNT* / ?dev=N）已移除；devAccount.ts 模块保留但无 env 即不激活。
   cat > "$CLIENT_ENV" <<EOF
 # 由 scripts/dev.sh 生成——本地 devnet 联调配置（覆盖 client/.env.development）。
-# 注意：直签账户启用时会顶掉真实钱包登录；要插 Ready 钱包实机联调时，
-# 删除本文件（回退 Sepolia 配置）或注释掉下面两行 VITE_DEV_ACCOUNT_*。
+# 不注入任何测试账户：身份一律来自真实连接的钱包。
 VITE_STARKNET_RPC_URL=$DEVNET_URL
 VITE_STARKNET_RPC_URLS=$DEVNET_URL
 VITE_STARKNET_CHAIN_ID=0x534e5f5345504f4c4941
@@ -261,11 +325,8 @@ VITE_SERVER_PORT=${PORT:-9001}
 # pSTRK/swap/私密池已退役：本地 devnet 不部署 anonymizer，走公开买入路径
 VITE_POKER_VAULT_ANONYMIZER_ADDRESS=
 VITE_STRK20_POOL_ADDRESS=
-# 浏览器直签账户（devnet 预充值账户 #1）
-VITE_DEV_ACCOUNT_ADDRESS=$CADDR
-VITE_DEV_ACCOUNT_PRIVATE_KEY=$CPK
 EOF
-  log "前端环境已生成: ${CLIENT_ENV}（直签账户 ${CADDR}）"
+  log "前端环境已生成: ${CLIENT_ENV}（无注入账户，使用真实钱包）"
 fi
 
 # ---------- 6) 启动（服务器 + 前端；Ctrl-C 一并停 devnet）----------
@@ -321,4 +382,5 @@ if [[ -n "${CLIENT_PID:-}" ]]; then
   log "前端就绪: http://localhost:5173（端口占用时 vite 自动顺延，日志 /tmp/texas-client.log）"
 fi
 log "全部已启动；Ctrl-C 一次性停止（前端 + 服务器 + devnet）"
+log "提示: 真实钱包（Ready/Argent）首连报余额不足时，先充值反事实地址: scripts/dev.sh fund <钱包地址> 100"
 wait

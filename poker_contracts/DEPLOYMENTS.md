@@ -90,6 +90,12 @@ chain id `SN_SEPOLIA`，RPC `https://starknet-sepolia-rpc.publicnode.com`。
 > 不再部署 PokerToken/pSTRK，vault 直接绑定规范 STRK（devnet 费用代币同址）。
 > 一键流程（devnet + 部署 + 服务器本地 prover 启动）：`scripts/dev.sh`；
 > Sepolia 测试网：`scripts/test.sh` + `texas/.env.test`。
+>
+> 真实钱包（Ready/Argent）联调：dev.sh 会把 Argent 账户类 v0.4.0
+> （`0x036078…927f`，官方产物在 `scripts/assets/argent/`）预声明进 devnet
+> ——katana 内置该类而 starknet-devnet 没有，缺了它钱包首连部署账户报
+> "Class ... is not declared"。钱包部署费从反事实地址自身余额扣，先充值：
+> `scripts/dev.sh fund <钱包地址> [STRK数量]`（devnet 重建后余额清零，需重充）。
 
 chain id `SN_SEPOLIA`。地址随 devnet 重启 + 重新部署而变化（当前快照）：
 

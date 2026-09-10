@@ -125,6 +125,18 @@ export const POKER_VAULT_ABI = [
     outputs: [],
   },
   {
+    // P1-2 会话委托：caller（玩家钱包）为自己登记 VM 层交易签名公钥。
+    // 买入 multicall 与 deposit 同笔提交；latest-wins，过期需为未来时间。
+    type: 'function',
+    name: 'set_session_tx_pk',
+    stateMutability: 'external',
+    inputs: [
+      { name: 'pk', type: 'core::felt252' },
+      { name: 'expires_at', type: 'core::integer::u64' },
+    ],
+    outputs: [],
+  },
+  {
     type: 'function',
     name: 'deposit_for',
     stateMutability: 'external',

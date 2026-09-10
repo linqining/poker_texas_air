@@ -29,6 +29,7 @@ import { logger } from '../../helpers/logger';
 import { STAND_UP_TIMEOUT_MS } from '../../clientConfig';
 import { useAccount } from '@starknet-react/core';
 import { submitBuyIn } from '../../starknet/starknetGameActions';
+import { ensureTxSessionPkHex } from '../../starknet/txSession';
 import { activeAccount } from '../../starknet/devAccount';
 
 export interface UseGameActionsParams {
@@ -295,6 +296,14 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     }
     logger.log('[SitDown] PokerVault deposit tx:', depositResult.hash);
 
+    // P1-2 会话委托：与买入同笔登记的会话交易公钥在此声明（服务端经
+    // vault active_session_tx_pk view 逐字节对拍，通过后成为座位 VM
+    // 签名验证锚）。wasm 缺失时为 undefined，服务端过渡期 fail-open。
+    const sessionTxPk = await ensureTxSessionPkHex();
+    if (!sessionTxPk) {
+      logger.warn('[SitDown] session tx pk unavailable — joining without delegation');
+    }
+
     // ----- 入座（带重试）：bots 无限循环手牌时 deck 每 ~20s 变更一层，
     // 新玩家取牌组→生成证明→提交的间隙可能撞上变更（Invalid remask proof）。
     // 服务器把 join 失败经 error 事件回传，客户端据此自动重取牌组重试。
@@ -350,6 +359,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
           pkHex,
           pkProof,
           depositTxHash: depositTxHashUsed,
+          sessionTxPk: sessionTxPk ?? undefined,
         });
         setTimeout(() => {
           if (!settled) {
