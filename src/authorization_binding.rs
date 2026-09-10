@@ -67,7 +67,7 @@ impl AdminAuthorizationBinding {
     #[allow(clippy::too_many_arguments)]
     pub fn verify_table_creator(
         kind: MethodKind,
-        context: &poker_l1::vm::contracts::dispatch::DispatchContext,
+        context: &poker_l1::contracts::dispatch::DispatchContext,
         selector: &[u8; 32],
         raw_args: &[u8],
         creator: poker_l1::Address,
@@ -189,7 +189,7 @@ fn hash256(domain: &[u8], payload: &[u8]) -> [u8; 32] {
 mod tests {
     use super::*;
     use poker_l1::signature::TaggedPubkey;
-    use poker_l1::vm::contracts::dispatch::DispatchContext;
+    use poker_l1::contracts::dispatch::DispatchContext;
 
     fn context(caller: poker_l1::Address) -> DispatchContext {
         DispatchContext {

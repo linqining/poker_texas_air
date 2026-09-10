@@ -34,7 +34,7 @@
 //! ```
 
 use crate::error::{TexasAirError, TexasAirResult};
-use starknet_crypto::FieldElement;
+use starknet_crypto::Felt;
 
 /// Domain separator, ASCII-encoded into a felt. The Cairo verifier must
 /// embed the identical value.
@@ -52,18 +52,18 @@ pub struct HandBindingInput {
     /// Hand identifier within the table; monotonic per table.
     pub hand_id: u64,
     /// Ordered seat addresses (seat order is binding-sensitive).
-    pub players: Vec<FieldElement>,
+    pub players: Vec<Felt>,
     /// Deck commitment chain: `deck_commit_0` (canonical aggregate-key deck)
     /// through the final post-shuffle commitment. Length must be 1..=10.
-    pub deck_commitments: Vec<FieldElement>,
+    pub deck_commitments: Vec<Felt>,
     /// Reveal-commitment digest over all public reveal tokens.
-    pub reveal_commitment: FieldElement,
+    pub reveal_commitment: Felt,
     /// Canonical state root before the hand.
-    pub state_root_pre: FieldElement,
+    pub state_root_pre: Felt,
     /// Canonical state root after the hand.
-    pub state_root_post: FieldElement,
+    pub state_root_post: Felt,
     /// The existing Poseidon settlement digest (`settlement_hash.cairo`).
-    pub settlement_digest: FieldElement,
+    pub settlement_digest: Felt,
 }
 
 impl HandBindingInput {
@@ -88,18 +88,18 @@ impl HandBindingInput {
 }
 
 /// Compute the unified hand binding digest.
-pub fn compute_hand_binding(input: &HandBindingInput) -> TexasAirResult<FieldElement> {
+pub fn compute_hand_binding(input: &HandBindingInput) -> TexasAirResult<Felt> {
     input.validate()?;
 
-    let mut fields: Vec<FieldElement> = Vec::with_capacity(
+    let mut fields: Vec<Felt> = Vec::with_capacity(
         5 + input.players.len() + input.deck_commitments.len(),
     );
     fields.push(domain_tag_felt());
-    fields.push(FieldElement::from(input.table_id));
-    fields.push(FieldElement::from(input.hand_id));
-    fields.push(FieldElement::from(input.players.len() as u64));
+    fields.push(Felt::from(input.table_id));
+    fields.push(Felt::from(input.hand_id));
+    fields.push(Felt::from(input.players.len() as u64));
     fields.extend_from_slice(&input.players);
-    fields.push(FieldElement::from(input.deck_commitments.len() as u64));
+    fields.push(Felt::from(input.deck_commitments.len() as u64));
     fields.extend_from_slice(&input.deck_commitments);
     fields.push(input.reveal_commitment);
     fields.push(input.state_root_pre);
@@ -111,17 +111,16 @@ pub fn compute_hand_binding(input: &HandBindingInput) -> TexasAirResult<FieldEle
 
 /// felt252 of [`HAND_BINDING_DOMAIN`] (big-endian, modulo the Stark prime;
 /// the ASCII string is 25 bytes, well below 2^251).
-fn domain_tag_felt() -> FieldElement {
-    FieldElement::from_byte_slice_be(HAND_BINDING_DOMAIN)
-        .expect("domain tag is a short ASCII string, always canonical")
+fn domain_tag_felt() -> Felt {
+    Felt::from_bytes_be_slice(HAND_BINDING_DOMAIN)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn felt(v: u64) -> FieldElement {
-        FieldElement::from(v)
+    fn felt(v: u64) -> Felt {
+        Felt::from(v)
     }
 
     fn sample() -> HandBindingInput {
@@ -143,7 +142,7 @@ mod tests {
         let a = compute_hand_binding(&input).unwrap();
         let b = compute_hand_binding(&input).unwrap();
         assert_eq!(a, b);
-        assert_ne!(a, FieldElement::ZERO);
+        assert_ne!(a, Felt::ZERO);
 
         // Manual layout check: the digest must equal poseidon_hash_many over
         // the documented field order.

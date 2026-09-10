@@ -14,8 +14,9 @@
 
 use std::time::Instant;
 
-use starknet_crypto::poseidon_hash_many;
-use starknet_crypto::FieldElement as Felt;
+// 2026-09-10 全仓统一：wire 与 crypto 层共用 starknet-crypto 0.8 的 Felt
+// （= starknet-types-core Felt），无跨 Felt 桥。
+use starknet_crypto::Felt;
 
 use hand_verify_native::air::{HandBatchClaim, KindCounts};
 use hand_verify_native::curve::Point;
@@ -27,7 +28,7 @@ use hand_verify_native::handbatch::{
 use hand_verify_native::{compose, curve, handbatch, mint, prove, recurse};
 
 fn hand_binding(seed: u64) -> Felt {
-    poseidon_hash_many(&[Felt::from(seed), Felt::from(0xB16Du64)])
+    recurse::hand_binding(seed)
 }
 
 struct RoundTrip {
@@ -248,12 +249,13 @@ fn vectors() {
     let hb = Felt::from(0xB16Du64);
     let g = Point::generator();
     // Deterministic statement points: small multiples of G.
-    let p2 = g.mul(Felt::from(2u32));
-    let p3 = g.mul(Felt::from(3u32));
-    let p4 = g.mul(Felt::from(4u32));
-    let p5 = g.mul(Felt::from(5u32));
-    let p6 = g.mul(Felt::from(6u32));
-    let p7 = g.mul(Felt::from(7u32));
+    let m = |k: u32| g.mul(Felt::from(k));
+    let p2 = m(2);
+    let p3 = m(3);
+    let p4 = m(4);
+    let p5 = m(5);
+    let p6 = m(6);
+    let p7 = m(7);
 
     let c_own = endorsement_challenge(hb, g, p2, p3);
     let c_rev = reveal_challenge(hb, p2, p3, p4, p5, p6, p7, Felt::from(8u32));
@@ -283,16 +285,16 @@ fn vectors() {
     let rho = hand_rho(hb, &eqs);
     let digest = handbatch::payload_digest(&[hb, Felt::from(1u32), Felt::from(2u32)]);
 
-    for (name, value) in [
-        ("hand_binding", hb),
-        ("endorsement_challenge", c_own),
-        ("reveal_challenge", c_rev),
-        ("leave_challenge", c_leave),
-        ("reconstruct_challenge", c_recon),
-        ("hand_rho", rho),
-        ("payload_digest", digest),
+    for (name, bytes) in [
+        ("hand_binding", hb.to_bytes_be()),
+        ("endorsement_challenge", c_own.to_bytes_be()),
+        ("reveal_challenge", c_rev.to_bytes_be()),
+        ("leave_challenge", c_leave.to_bytes_be()),
+        ("reconstruct_challenge", c_recon.to_bytes_be()),
+        ("hand_rho", rho.to_bytes_be()),
+        ("payload_digest", digest.to_bytes_be()),
     ] {
-        println!("{name}: 0x{}", hex(&value.to_bytes_be()));
+        println!("{name}: 0x{}", hex(&bytes));
     }
 }
 
@@ -503,15 +505,19 @@ mod tests {
     fn golden_vectors_pinned() {
         let hb = Felt::from(0xB16Du64);
         let g = Point::generator();
-        let p2 = g.mul(Felt::from(2u32));
-        let p3 = g.mul(Felt::from(3u32));
-        let p4 = g.mul(Felt::from(4u32));
-        let p5 = g.mul(Felt::from(5u32));
-        let p6 = g.mul(Felt::from(6u32));
-        let p7 = g.mul(Felt::from(7u32));
+        let m = |k: u32| g.mul(Felt::from(k));
+        let p2 = m(2);
+        let p3 = m(3);
+        let p4 = m(4);
+        let p5 = m(5);
+        let p6 = m(6);
+        let p7 = m(7);
 
         // Populated from `cargo run --release -- vectors` (see
-        // docs/golden-vectors.md); asserted here to pin formula drift.
+        // docs/golden-vectors.md); asserted here to pin formula drift — and,
+        // since the starknet-crypto 0.8 alignment, to pin that the 0.8
+        // poseidon output is byte-identical to the 0.6 vectors the corpus
+        // was generated with.
         assert_eq!(
             hex(&endorsement_challenge(hb, g, p2, p3).to_bytes_be()),
             crate_golden::ENDORSEMENT,

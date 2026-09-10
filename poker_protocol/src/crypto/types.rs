@@ -5,14 +5,12 @@
 
 use std::hash::{Hash, Hasher};
 
-#[cfg(feature = "stark-curve")]
 use crate::crypto::curve::StarkCurve;
 use crate::crypto::curve::{Curve, CurvePoint, ElGamalCiphertextGeneric};
-#[cfg(not(feature = "stark-curve"))]
-use crate::crypto::curve::Bls12381Curve;
 
 /// The default curve used by the project.
-/// Plan D 落地（2026-09-05）：Stark 曲线唯一世界，blst legacy 已移除。
+/// Plan D 落地（2026-09-05）：Stark 曲线唯一世界，blst legacy 已移除，
+/// `stark-curve` feature 不再是开关（保留仅为兼容旧 feature 名）。
 pub type DefaultCurve = StarkCurve;
 
 pub const N_CARDS: usize = 52;
@@ -68,7 +66,7 @@ impl ECPoint {
 // 与 `ECPoint` 对偶：`Scalar`（= `<DefaultCurve as Curve>::Scalar`）
 // 是外部曲线类型，无法直接 impl `BorshSerialize`/`BorshDeserialize`
 // （orphan rule），使用本地 newtype 包装。
-// 使用本地 newtype `ECScalar(BlsScalar)` 包装，borsh_impls.rs 中
+// 使用本地 newtype `ECScalar(Scalar)` 包装，borsh_impls.rs 中
 // impl Borsh 序列化为 32 字节大端序（与 Move 兼容）。
 //
 // 字节布局：与 `borsh_impls::write_scalar` 一致（32B 大端序）。

@@ -25,7 +25,7 @@
 #![allow(missing_docs)]
 
 use crate::error::{TexasAirError, TexasAirResult};
-use crate::hash_prover::{ArchivedHashProof, Blake2bStatement, HashProofProvider};
+use crate::hash_prover::{ArchivedHashProof, HashStatement, HashProofProvider};
 use flock_core::challenger::Challenger as _;
 use flock_core::challenger::FsChallenger;
 use flock_prover::r1cs_hashes::blake3::{BLAKE3_IV, Blake3Setup, Compression, blake3_compress};
@@ -182,7 +182,7 @@ pub struct ArchivedFlockMerkle {
 /// The flock backend archive: covered statements plus their proofs.
 #[derive(Debug, Clone, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct ArchivedFlockHashesProof {
-    pub statements: Vec<Blake2bStatement>,
+    pub statements: Vec<HashStatement>,
     pub chains: Vec<ArchivedFlockChain>,
     pub merkles: Vec<ArchivedFlockMerkle>,
 }
@@ -233,7 +233,7 @@ fn unpack_merkle(bytes: &[u8]) -> TexasAirResult<MerkleBundle> {
 /// message blocks cannot be swapped for a different statement's preimage.
 fn absorb_statement<Ch: flock_core::challenger::Challenger>(
     ch: &mut Ch,
-    statement: &Blake2bStatement,
+    statement: &HashStatement,
 ) {
     ch.observe_bytes(&(statement.message.len() as u64).to_le_bytes());
     ch.observe_bytes(&statement.message);
@@ -253,7 +253,7 @@ struct PathRun {
 /// statements (leaf + parents), every message exactly 64 bytes, and each
 /// parent message containing the previous digest as one half.  Returns the
 /// run length and the derived direction bits.
-fn recognize_path_run(statements: &[Blake2bStatement], start: usize) -> Option<PathRun> {
+fn recognize_path_run(statements: &[HashStatement], start: usize) -> Option<PathRun> {
     if start >= statements.len() || statements[start].message.len() != 64 {
         return None;
     }
@@ -289,7 +289,7 @@ pub struct FlockProvider;
 impl HashProofProvider for FlockProvider {
     fn prove_statements(
         &self,
-        statements: &[Blake2bStatement],
+        statements: &[HashStatement],
     ) -> TexasAirResult<ArchivedHashProof> {
         if statements.is_empty() {
             return Err(TexasAirError::SpecViolation(
@@ -339,7 +339,7 @@ impl HashProofProvider for FlockProvider {
 pub fn preheat_flock_setup() -> TexasAirResult<()> {
     let message = b"zchain.texas.flock.preheat".to_vec();
     let digest = blake3_chain_digest(&message);
-    let statement = crate::hash_prover::Blake2bStatement::new(message, digest);
+    let statement = crate::hash_prover::HashStatement::new(message, digest);
     FlockProvider.prove_statements(&[statement]).map(|_| ())
 }
 
@@ -519,14 +519,14 @@ enum Segment {
 /// A sub-proof verify job: statement slice plus the archived sub-proof it
 /// must authenticate against.
 enum Job<'a> {
-    Chain(&'a Blake2bStatement, &'a ArchivedFlockChain),
-    Merkle(&'a [Blake2bStatement], &'a PathRun, &'a ArchivedFlockMerkle),
+    Chain(&'a HashStatement, &'a ArchivedFlockChain),
+    Merkle(&'a [HashStatement], &'a PathRun, &'a ArchivedFlockMerkle),
 }
 
 /// Split an ordered statement list into chain/merkle segments.  Pure
 /// recognition (no proving), shared by prove and verify so the two sides
 /// cannot drift apart.
-fn segment_statements(statements: &[Blake2bStatement]) -> TexasAirResult<Vec<Segment>> {
+fn segment_statements(statements: &[HashStatement]) -> TexasAirResult<Vec<Segment>> {
     let mut segments = Vec::new();
     let mut i = 0usize;
     while i < statements.len() {
@@ -541,7 +541,7 @@ fn segment_statements(statements: &[Blake2bStatement]) -> TexasAirResult<Vec<Seg
     Ok(segments)
 }
 
-fn prove_statements_on_stack(statements: &[Blake2bStatement]) -> TexasAirResult<ArchivedHashProof> {
+fn prove_statements_on_stack(statements: &[HashStatement]) -> TexasAirResult<ArchivedHashProof> {
     // Every sub-proof runs its own Ligerito instance with an independent
     // Fiat–Shamir challenger (fresh transcript seeded from the domain plus
     // this statement's bytes), so the ~fixed per-instance cost
@@ -579,7 +579,7 @@ fn prove_statements_on_stack(statements: &[Blake2bStatement]) -> TexasAirResult<
 }
 
 fn prove_chain_statement(
-    statement: &Blake2bStatement,
+    statement: &HashStatement,
     index: u32,
 ) -> TexasAirResult<ArchivedFlockChain> {
     let (blocks, cv) = blake3_chain_blocks_with_cv(&statement.message);
@@ -602,7 +602,7 @@ fn prove_chain_statement(
 }
 
 fn verify_chain_statement(
-    statement: &Blake2bStatement,
+    statement: &HashStatement,
     archived: &ArchivedFlockChain,
 ) -> TexasAirResult<()> {
     if archived.cv_0 != bytes32(&BLAKE3_IV) {
@@ -629,7 +629,7 @@ fn verify_chain_statement(
 }
 
 fn prove_merkle_run(
-    statements: &[Blake2bStatement],
+    statements: &[HashStatement],
     run: &PathRun,
 ) -> TexasAirResult<ArchivedFlockMerkle> {
     let nodes = run.len - 1;
@@ -670,7 +670,7 @@ fn prove_merkle_run(
 }
 
 fn verify_merkle_run(
-    statements: &[Blake2bStatement],
+    statements: &[HashStatement],
     run: &PathRun,
     archived: &ArchivedFlockMerkle,
 ) -> TexasAirResult<()> {
@@ -726,11 +726,11 @@ mod tests {
     #[test]
     fn preimage_statements_prove_and_verify() {
         let statements = vec![
-            Blake2bStatement::new(
+            HashStatement::new(
                 b"zchain.texas.rules.v2".to_vec(),
                 blake3_chain_digest(b"zchain.texas.rules.v2"),
             ),
-            Blake2bStatement::new(vec![9u8; 200], blake3_chain_digest(&[9u8; 200])),
+            HashStatement::new(vec![9u8; 200], blake3_chain_digest(&[9u8; 200])),
         ];
         let proof = FlockProvider.prove_statements(&statements).expect("proof");
         FlockProvider
@@ -756,7 +756,7 @@ mod tests {
             m[32..].copy_from_slice(&value);
             m
         });
-        let mut statements = vec![Blake2bStatement::new(
+        let mut statements = vec![HashStatement::new(
             {
                 let mut m = [0u8; 64];
                 m[..32].copy_from_slice(&key);
@@ -778,7 +778,7 @@ mod tests {
                 msg[32..].copy_from_slice(&sibling);
             }
             node = blake3_hash64(&msg);
-            statements.push(Blake2bStatement::new(msg.to_vec(), node));
+            statements.push(HashStatement::new(msg.to_vec(), node));
         }
         let proof = FlockProvider.prove_statements(&statements).expect("proof");
         FlockProvider
@@ -800,13 +800,13 @@ mod mixed_tests {
 
     #[test]
     fn mixed_chain_then_merkle_segments_correctly() {
-        let chains: Vec<Blake2bStatement> = vec![
-            Blake2bStatement::new(
+        let chains: Vec<HashStatement> = vec![
+            HashStatement::new(
                 b"zchain.texas.rules.v2".to_vec(),
                 blake3_chain_digest(b"zchain.texas.rules.v2"),
             ),
-            Blake2bStatement::new(vec![7u8; 300], blake3_chain_digest(&[7u8; 300])),
-            Blake2bStatement::new(vec![8u8; 300], blake3_chain_digest(&[8u8; 300])),
+            HashStatement::new(vec![7u8; 300], blake3_chain_digest(&[7u8; 300])),
+            HashStatement::new(vec![8u8; 300], blake3_chain_digest(&[8u8; 300])),
         ];
         let witness = synthetic_smt_witness(0x5a, [0x11; 32], [0x22; 32]);
         let mut statements = chains;

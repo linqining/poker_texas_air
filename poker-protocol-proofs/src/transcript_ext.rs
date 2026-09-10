@@ -1,4 +1,4 @@
-pub use poker_protocol_core::{Challenge, CryptoTranscript};
+pub use poker_protocol_core::{Challenge, CryptoTranscript, PoseidonFeltTranscript};
 use poker_protocol_core::{Curve, CurvePoint, CurveScalar};
 use sha3::Digest;
 use std::collections::HashMap;
@@ -28,7 +28,9 @@ fn intern_label(label: &[u8]) -> &'static [u8] {
 // ========== MerlinTranscript (wraps merlin::Transcript) ==========
 
 /// Wrapper around `merlin::Transcript` implementing `CryptoTranscript`.
-/// 仅用于离线测试，不兼容 Move 合约。
+/// 仅用于离线测试与协议单测域，**不再是生产 transcript**：2026-09 起
+/// 生产证明统一走 [`PoseidonFeltTranscript`] + `poker_protocol::
+/// transcript_domains` 生产域（host/wasm/Cairo 三端 felt 直通一致）。
 pub struct MerlinTranscript {
     inner: merlin::Transcript,
 }
@@ -81,15 +83,17 @@ impl CryptoTranscript for MerlinTranscript {
     }
 }
 
-// ========== FiatShamirTranscript (SHA3-256, matches Move contract) ==========
+// ========== FiatShamirTranscript (SHA3-256, legacy Move-compatible domain) ==========
 
 /// Fiat-Shamir Transcript using SHA3-256, matching the Move contract implementation.
 ///
 /// 状态机：state = SHA3-256(current_state || len_label[4字节LE] || label || len_msg[4字节LE] || message)
-/// 与 Move 合约 bls_transcript.move 完全兼容（含 M-P13 长度前缀修复）。
+/// 与 Move 合约 bls_transcript 完全兼容（含 M-P13 长度前缀修复）。
 ///
-/// challenge 标量生成使用 Curve::hash_to_scalar（清位法），
-/// 而非 from_bytes_mod_order（模约简），与 Move 端一致。
+/// **2026-09 起为 legacy 域**：生产证明已迁移至 [`PoseidonFeltTranscript`]。
+/// 本类型仅在 epoch 过渡窗口验证在途旧证明与旧协议测试中使用；
+/// challenge 标量生成使用 Curve::hash_to_scalar（清位法）——注意这与
+/// PoseidonFeltTranscript 的 `from_bytes_mod_order` 归约不同，两域不可互验。
 #[derive(Debug)]
 pub struct FiatShamirTranscript {
     state: Vec<u8>,

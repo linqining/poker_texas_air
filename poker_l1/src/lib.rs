@@ -8,9 +8,9 @@
 //!
 //! 保留范围 = 证明与结算路径的实际闭包：
 //! - [`error`]：PokerL1Error / PokerL1Result
-//! - [`object_model`]：ObjectID / Object / Ownership / ObjectStore / Sparse Merkle Tree
+//! - [`object_model`]：ObjectID / Object / Ownership / Sparse Merkle Tree
 //! - [`signature`]：tagged pubkey / secp256k1 / ed25519
-//! - [`vm::contracts`]：`DispatchContext` / `DispatchResult` + [`vm::contracts::texas_poker`]
+//! - [`contracts`]：`DispatchContext` / `DispatchResult` + [`contracts::texas_poker`]
 //!   合约库（TexasPokerTable 状态机 / mental-poker 验证 / 确定性结算计划）——
 //!   AIR trace 生成对其命令流重放（MethodBatchV2 语义），是证明本体，非链机制
 //!
@@ -23,10 +23,10 @@
 #![warn(missing_docs)]
 #![warn(clippy::all, clippy::nursery)]
 
+pub mod contracts;
 pub mod error;
 pub mod object_model;
 pub mod signature;
-pub mod vm;
 
 /// 网络标识（chain_id）类型。保留：DispatchContext 的组成部分（hand_binding /
 /// trace 派生输入）。

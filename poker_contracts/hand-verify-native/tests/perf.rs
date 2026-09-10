@@ -11,14 +11,17 @@
 
 use std::time::{Duration, Instant};
 
-use starknet_crypto::FieldElement as Felt;
+use starknet_crypto::Felt;
 
 use hand_verify_native::air::{HandBatchClaim, KindCounts};
 use hand_verify_native::handbatch::{payload_digest, verify_hand};
 use hand_verify_native::{mint, prove};
 
 fn hand_binding(seed: u64) -> Felt {
-    starknet_crypto::poseidon_hash_many(&[Felt::from(seed), Felt::from(0xB16Du64)])
+    starknet_crypto::poseidon_hash_many(&[
+        Felt::from(seed),
+        Felt::from(0xB16Du64),
+    ])
 }
 
 struct Measurement {
@@ -34,7 +37,7 @@ struct Measurement {
 fn measure(counts: KindCounts, seed: u64) -> Measurement {
     let hb = hand_binding(seed);
     let payload = mint::mint_hand(
-        hb, counts.n_own, counts.n_reveal, counts.n_leave, counts.n_recon, seed,
+        hb, counts.n_own, 0, counts.n_reveal, counts.n_leave, counts.n_recon, seed,
     );
 
     let t = Instant::now();

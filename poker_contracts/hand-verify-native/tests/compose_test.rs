@@ -51,13 +51,18 @@ fn form2_composed_roundtrip() {
 fn form2_rejects_unverifiable_payload() {
     // 2 ownership statements whose scalars are inconsistent (minted honest
     // payload with a tampered response word) — mint manually.
-    use starknet_crypto::FieldElement as Felt;
-    use starknet_crypto::poseidon_hash_many;
+    use starknet_crypto::Felt;
 
-    let hb = poseidon_hash_many(&[Felt::from(702u64), Felt::from(0xB16Du64)]);
+    let hb = starknet_crypto::poseidon_hash_many(&[
+        Felt::from(702u64),
+        Felt::from(0xB16Du64),
+    ]);
     let mut payload =
-        hand_verify_native::mint::mint_hand(hb, 2, 0, 0, 0, 702);
-    payload[5 + 4] = payload[5 + 4] + Felt::from(1u32);
+        hand_verify_native::mint::mint_hand(hb, 2, 0, 0, 0, 0, 702);
+    // v3 头 6 词（n_own..n_action），首条 ownership = [pkx, pky, rx, ry, s]，
+    // response 词 s 在 6+4。篡改 s 走"方程不过"路径（structurally 合法、
+    // 验证必拒）；篡改坐标词只会命中 OffCurve 结构性拒绝，不是本测的意图。
+    payload[6 + 4] = payload[6 + 4] + Felt::from(1u32);
     let report = hand_verify_native::handbatch::verify_hand(hb, &payload).unwrap();
     assert!(!report.accepted(), "tampered payload must fail host verification");
 

@@ -8,10 +8,10 @@
 //! dev 模式（未配置 settlement 合约/操作员）只生成 calldata 并记日志，
 //! 保证无链环境可以跑完整流程（证明生成照常执行）。
 
-use poker_l1::vm::contracts::texas_poker::settlement::{
+use poker_l1::contracts::texas_poker::settlement::{
     derive_fold_win_plan, derive_settlement_plan, SettlementPlan,
 };
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::contracts::texas_poker::types::TexasPokerTable;
 use poker_texas_air::outer_aggregate::{prove_outer_aggregate, verify_outer_aggregate, VerifiedOuterAggregate};
 use poker_texas_air::orchestrator::Orchestrator;
 use poker_texas_air::starknet_settlement::{
@@ -20,15 +20,8 @@ use poker_texas_air::starknet_settlement::{
 use starknet::accounts::Account;
 use starknet::core::types::{Call, Felt};
 use starknet::core::utils::starknet_keccak;
-use starknet_ff::FieldElement as Ff;
 
 use super::mirror::TableMirror;
-
-/// starknet-ff (0.3) FieldElement → starknet (0.13) Felt 的别名。
-/// 两者均为 32 字节大端模元素，逐字节拷贝即可。
-fn scale_felt(f: Ff) -> Felt {
-    ff_to_felt(f)
-}
 
 /// 一手牌的完整结算产物。
 pub struct HandSettlement {
@@ -41,17 +34,17 @@ pub struct HandSettlement {
     /// 聚合摘要（32 字节大端）。
     pub aggregate_digest: [u8; 32],
     /// 重映射后的参与者（真实钱包 felt，settle 顺序）——Hand-batch 路径复用。
-    pub players_remapped: Vec<Ff>,
+    pub players_remapped: Vec<Felt>,
     /// 与 players 对应的净输赢（零和）。
     pub deltas: Vec<i128>,
     /// 重映射后的 Poseidon 结算摘要（register root / Hand-batch 路径共用）。
-    pub settlement_digest: Ff,
+    pub settlement_digest: Felt,
     /// 本手动作日志哈希（#18 Phase C 切片 1 = Poseidon 吸收链根）：
     /// settlement digest 吸收链尾词，dapv register 承诺与 v2 公开段尾词共用。
-    pub action_log_digest: Ff,
+    pub action_log_digest: Felt,
     /// 本手动作日志词条对（每条 2 felt：[日志打包词, 合法性词]，切片 2）——
     /// 电路 30 槽重放 + "合法默认"校验的见证。
-    pub action_entries: Vec<[Ff; 2]>,
+    pub action_entries: Vec<[Felt; 2]>,
     /// G 链首 receipt 的 pre state root（hand_binding 输入）。
     pub pre_state_root: [u8; 32],
     /// G 链末 receipt 的 post state root（hand_binding 输入）。
@@ -64,8 +57,8 @@ pub struct HandSettlement {
 pub fn settle_hand(
     mirror: &TableMirror,
     rake_recipient: Option<poker_l1::Address>,
-    wallet_map: &[(poker_l1::Address, Ff)],
-    action_log_digest: Ff,
+    wallet_map: &[(poker_l1::Address, Felt)],
+    action_log_digest: Felt,
     action_log: &[crate::pokergame::actions::ActionLogEntry],
 ) -> Result<HandSettlement, String> {
     // #18 Phase C 切片 1：词条 → 电路见证词组；未知动作名/超上限在构建期拒绝。
@@ -82,7 +75,7 @@ pub fn settle_hand(
             .ok_or_else(|| format!("unknown action name {:?} in action log", entry.action))?;
         let legality = legality_word(entry)
             .ok_or_else(|| format!("unknown action name {:?} in action log", entry.action))?;
-        action_entries.push([felt_to_ff(&word), felt_to_ff(&legality)]);
+        action_entries.push([word, legality]);
     }
     if mirror.tasks.is_empty() {
         return Err("mirror has no prove tasks for this hand".into());
@@ -183,18 +176,22 @@ pub fn settle_hand(
     //     见 hooks::hand_wallet_map），并按同一映射重算 settlement digest——
     //     合约 settle_hand 会用 calldata 的 players 重算 Poseidon 承诺并与
     //     register_aggregate 写入的 root 精确比对。
-    let remap_player = |p: Ff| -> Ff {
-        let p_felt = ff_to_felt(p);
-        let truncated: [u8; 20] = p_felt.to_bytes_be()[12..32]
-            .try_into()
-            .expect("32-byte felt tail is 20 bytes");
+    //     截断公式（felt 低 20 字节）唯一权威在 poker_l1
+    //     caller_id::wallet_to_address（与 mirror addr_from_starknet 同源，
+    //     e2e 对拍断言）；这里 felt → hex 后交由权威实现截断。
+    let remap_player = |p: Felt| -> Felt {
+        let truncated: [u8; 20] =
+            poker_l1::contracts::texas_poker::runtime::caller_id::wallet_to_address(
+                &format!("{p:#x}"),
+            )
+            .expect("canonical felt hex always truncates to 20 bytes");
         wallet_map
             .iter()
             .find(|(addr, _)| *addr == truncated)
             .map(|(_, wallet)| *wallet)
             .unwrap_or(p)
     };
-    let players_remapped: Vec<Ff> = settle.players().iter().map(|p| remap_player(*p)).collect();
+    let players_remapped: Vec<Felt> = settle.players().iter().map(|p| remap_player(*p)).collect();
 
     // 派彩单位换算：vault 的 chip_balance 以 STRK wei 记账（deposit 1:1 wei），
     // SettlementPlan 的 deltas 以服务端 chips（1 chip = WEI_PER_CHIP wei）计。
@@ -211,16 +208,16 @@ pub fn settle_hand(
         .collect::<Option<Vec<_>>>()
         .ok_or("delta wei overflow")?;
 
-    let mut digest_fields: Vec<Ff> = vec![Ff::from(u64::from(settle.hand_id()))];
+    let mut digest_fields: Vec<Felt> = vec![Felt::from(u64::from(settle.hand_id()))];
     for (p, d) in players_remapped.iter().zip(deltas_wei.iter()) {
         digest_fields.push(*p);
         let magnitude = u64::try_from(d.unsigned_abs()).map_err(|_| "delta magnitude overflow")?;
         if *d >= 0 {
-            digest_fields.push(Ff::from(1u64));
+            digest_fields.push(Felt::from(1u64));
         } else {
-            digest_fields.push(Ff::from(0u64));
+            digest_fields.push(Felt::from(0u64));
         }
-        digest_fields.push(Ff::from(magnitude));
+        digest_fields.push(Felt::from(magnitude));
     }
     // #18 Phase B：动作日志哈希为吸收链尾词（与合约 compute_settlement_digest
     // 及 settlement_private 电路同公式）。
@@ -236,7 +233,7 @@ pub fn settle_hand(
     )
     .map_err(|e| format!("RegisterAggregateCalldata::new failed: {e}"))?;
 
-    let register_calldata = register.to_felts().iter().map(|f| ff_to_felt(*f)).collect();
+    let register_calldata = register.to_felts();
     let settle_calldata = build_settle_calldata(digest, &settle, &players_remapped, &deltas_wei);
 
     // G 链首尾 state root（hand_binding 的输入）：首 receipt 的 pre、
@@ -277,20 +274,20 @@ pub fn settle_hand(
 fn build_settle_calldata(
     digest: [u8; 32],
     settle: &SettleHandCalldata,
-    players: &[Ff],
+    players: &[Felt],
     deltas_wei: &[i128],
 ) -> Vec<Felt> {
     let felts = AggregateDigestFelts::split(&digest).expect("32-byte digest always splits");
     let mut out = Vec::with_capacity(5 + players.len() * 2);
-    out.push(scale_felt(felts.hi));
-    out.push(scale_felt(felts.lo));
+    out.push(felts.hi);
+    out.push(felts.lo);
     out.push(Felt::from(settle.hand_id()));
     // #18 Phase B：legacy settle_hand 的动作日志哈希标量（hand_id 之后）。
-    out.push(ff_to_felt(settle.action_log_digest()));
+    out.push(settle.action_log_digest());
     out.push(Felt::from(players.len() as u64));
-    out.extend(players.iter().map(|p| scale_felt(*p)));
+    out.extend(players.iter().copied());
     out.push(Felt::from(deltas_wei.len() as u64));
-    out.extend(deltas_wei.iter().map(|d| scale_felt(i128_to_ff(*d))));
+    out.extend(deltas_wei.iter().map(|d| i128_to_felt(*d)));
     out
 }
 
@@ -380,23 +377,13 @@ pub async fn submit_settlement(
     Ok((register_hash, settle_hash))
 }
 
-/// starknet-ff (0.3) FieldElement → starknet (0.13) Felt。两者均为 32 字节大端。
-pub fn ff_to_felt(f: Ff) -> Felt {
-    Felt::from_bytes_be(&f.to_bytes_be())
-}
-
-/// starknet (0.13) Felt → starknet-ff (0.3) FieldElement。
-pub fn felt_to_ff(f: &Felt) -> Ff {
-    Ff::from_bytes_be(&f.to_bytes_be()).expect("any 32-byte value is a canonical felt252")
-}
-
-/// i128 → starknet-ff（负数取模补，与合约 `from_felt_signed_i128` 对齐；
+/// i128 → felt（负数取模补，与合约 `from_felt_signed_i128` 对齐；
 /// poker_texas_air::starknet_settlement::i128_to_felt 为私有，这里按同一语义实现）。
-pub fn i128_to_ff(value: i128) -> Ff {
+pub fn i128_to_felt(value: i128) -> Felt {
     if value >= 0 {
-        Ff::from(value.unsigned_abs())
+        Felt::from(value.unsigned_abs())
     } else {
-        -Ff::from(value.unsigned_abs())
+        -Felt::from(value.unsigned_abs())
     }
 }
 
@@ -404,10 +391,10 @@ pub fn i128_to_ff(value: i128) -> Ff {
 /// 打在 `fold(seat)` 应用之前，快照里该座位仍是未弃牌——派发前在副本上
 /// 落这记弃牌，`derive_fold_win_plan` 才能看到"恰好一名未弃牌"的终局形态。
 /// 座位越界时原样返回副本（防御，不 panic）。
-fn apply_pending_final_fold(snap: &TexasPokerTable, seat: u8) -> TexasPokerTable {
+pub(crate) fn apply_pending_final_fold(snap: &TexasPokerTable, seat: u8) -> TexasPokerTable {
     let mut table = snap.clone();
     if let Some(target) = table.seats.get_mut(usize::from(seat)) {
-        target.set_status(poker_l1::vm::contracts::texas_poker::types::SeatStatus::Folded);
+        target.set_status(poker_l1::contracts::texas_poker::types::SeatStatus::Folded);
     }
     // 对齐 VM end_without_showdown 的第一步：把本轮在途 bet（含翻前盲注）
     // 收进 pot。快照打在终局 fold 之前，盲注/当街下注尚未收集——
@@ -434,8 +421,8 @@ mod tests {
     #[test]
     fn pending_final_fold_yields_single_unfolded() {
         use poker_l1::object_model::ObjectID;
-        use poker_l1::vm::contracts::texas_poker::card::Card;
-        use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
+        use poker_l1::contracts::texas_poker::card::Card;
+        use poker_l1::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xF2; 20], 0),
             "fold-snapshot-test".into(),
@@ -474,10 +461,10 @@ mod tests {
             .try_into()
             .unwrap();
         folded.rules.rake_mode =
-            poker_l1::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+            poker_l1::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
         folded.rules.rake_bps = 500;
         folded.rules.rake_cap = 1_000;
-        let plan = poker_l1::vm::contracts::texas_poker::settlement::derive_fold_win_plan(&folded)
+        let plan = poker_l1::contracts::texas_poker::settlement::derive_fold_win_plan(&folded)
             .expect("fold plan derives after final fold applied");
         assert_eq!(plan.rake, 10, "400 - 200 uncalled = 200 contested * 5%");
         assert_eq!(plan.awards[0], 390);
@@ -490,7 +477,7 @@ mod tests {
     #[test]
     fn pending_final_fold_collects_preflop_blinds_into_pot() {
         use poker_l1::object_model::ObjectID;
-        use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
+        use poker_l1::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xF3; 20], 0),
             "preflop-fold-snapshot-test".into(),
@@ -515,7 +502,7 @@ mod tests {
         assert!(folded.seats.iter().all(|s| s.bet() == 0), "bets drained");
         let sum: u64 = folded.seats.iter().map(|s| s.total_bet()).sum();
         assert_eq!(sum, folded.pot, "Σ total_bet == pot after collection");
-        let plan = poker_l1::vm::contracts::texas_poker::settlement::derive_fold_win_plan(&folded)
+        let plan = poker_l1::contracts::texas_poker::settlement::derive_fold_win_plan(&folded)
             .expect("preflop fold-win plan must derive (no board → no rake)");
         assert_eq!(plan.rake, 0, "no flop, no drop");
         assert_eq!(plan.awards[0], 200);
@@ -523,11 +510,11 @@ mod tests {
 
     #[test]
     fn i128_felt_roundtrip_semantics() {
-        let pos = i128_to_ff(42);
-        assert_eq!(pos, Ff::from(42_u64));
-        let neg = i128_to_ff(-42);
+        let pos = i128_to_felt(42);
+        assert_eq!(pos, Felt::from(42_u64));
+        let neg = i128_to_felt(-42);
         // -42 mod P ≈ P - 42，非零且与 +42 不同。
-        assert_ne!(neg, Ff::from(42_u64));
-        assert_ne!(neg, Ff::ZERO);
+        assert_ne!(neg, Felt::from(42_u64));
+        assert_ne!(neg, Felt::ZERO);
     }
 }

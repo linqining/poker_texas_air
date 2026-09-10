@@ -41,7 +41,7 @@
 
 use bincode::Options;
 use borsh::{BorshDeserialize, BorshSerialize};
-use starknet_crypto::FieldElement;
+use starknet_crypto::Felt;
 use stwo::core::channel::{Channel, Poseidon252Channel};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
@@ -140,10 +140,13 @@ fn settlement_options() -> impl bincode::Options {
 /// felt252 的大端 32 字节序列化（全零 = 未提供）。
 pub type FeltBytes = [u8; 32];
 
-/// felt 字节 → [`FieldElement`]（拒绝非规范编码，≥ 圳 P）。
-pub fn felt_from_bytes(bytes: FeltBytes) -> Result<FieldElement, TexasAirError> {
-    FieldElement::from_bytes_be(&bytes)
-        .map_err(|error| TexasAirError::SerializationError(format!("felt not canonical: {error}")))
+/// felt 字节 → [`Felt`]（拒绝非规范编码，≥ P）。types-core 的
+/// `from_bytes_be` 无失败路径（≥ P 输入会被静默归约），用字节往返判定
+/// canonical——语义与旧 0.6 ff 库的 `Result` 完全一致。
+pub fn felt_from_bytes(bytes: FeltBytes) -> Result<Felt, TexasAirError> {
+    crate::state_root::felt_from_canonical_bytes(&bytes).ok_or_else(|| {
+        TexasAirError::SerializationError("felt not canonical".to_string())
+    })
 }
 
 fn limb_bytes(bytes: FeltBytes) -> [u32; FELT_LIMBS] {
@@ -284,9 +287,9 @@ impl SettlementPrivateStatement {
 /// 为吸收链尾词——#18 Phase B）。
 pub fn settlement_digest_fields(
     statement: &SettlementPrivateStatement,
-) -> Result<Vec<FieldElement>, TexasAirError> {
+) -> Result<Vec<Felt>, TexasAirError> {
     let mut fields = Vec::with_capacity(2 + 3 * MAX_PARTICIPANTS);
-    fields.push(FieldElement::from(statement.hand_id));
+    fields.push(Felt::from(statement.hand_id));
     for (player, delta) in statement
         .players
         .iter()
@@ -296,8 +299,8 @@ pub fn settlement_digest_fields(
         fields.push(felt_from_bytes(player)?);
         let magnitude = u64::try_from(delta.unsigned_abs())
             .map_err(|_| TexasAirError::ConstraintUnsatisfied("magnitude overflow".into()))?;
-        fields.push(FieldElement::from(if delta >= 0 { 1u64 } else { 0u64 }));
-        fields.push(FieldElement::from(magnitude));
+        fields.push(Felt::from(if delta >= 0 { 1u64 } else { 0u64 }));
+        fields.push(Felt::from(magnitude));
     }
     fields.push(felt_from_bytes(statement.action_log_digest)?);
     Ok(fields)
@@ -326,12 +329,12 @@ pub fn derive_claim_cms(
         }
         let commitment = felt_from_bytes(witness.payout_commitments[index])?;
         let delta = statement.signed_deltas[index];
-        let amount_low = FieldElement::from(delta as u64);
+        let amount_low = Felt::from(delta as u64);
         let cm = starknet_crypto::poseidon_hash_many(&[
             commitment,
             binding,
             amount_low,
-            FieldElement::ZERO,
+            Felt::ZERO,
         ]);
         cms[index] = cm.to_bytes_be();
     }
@@ -713,21 +716,21 @@ mod tests {
         // 独立复刻 submit.rs 的拼装口径，逐字段比对参考实现（#18 Phase B：
         // 动作日志哈希为吸收链尾词）。
         let statement = sample_statement();
-        let expected: Vec<FieldElement> = {
-            let mut fields = vec![FieldElement::from(statement.hand_id)];
+        let expected: Vec<Felt> = {
+            let mut fields = vec![Felt::from(statement.hand_id)];
             for (player, delta) in statement
                 .players
                 .iter()
                 .copied()
                 .zip(statement.signed_deltas.iter().copied())
             {
-                fields.push(FieldElement::from_bytes_be(&player).expect("canonical"));
+                fields.push(Felt::from_bytes_be(&player));
                 let magnitude = delta.unsigned_abs() as u64;
-                fields.push(FieldElement::from(if delta >= 0 { 1u64 } else { 0u64 }));
-                fields.push(FieldElement::from(magnitude));
+                fields.push(Felt::from(if delta >= 0 { 1u64 } else { 0u64 }));
+                fields.push(Felt::from(magnitude));
             }
             fields.push(
-                FieldElement::from_bytes_be(&statement.action_log_digest).expect("canonical"),
+                Felt::from_bytes_be(&statement.action_log_digest),
             );
             fields
         };
@@ -755,14 +758,14 @@ mod tests {
         // amount_lo, amount_hi]) 口径；Cairo span 与 hash_many 为同一 sponge。
         let statement = sample_statement();
         let witness = sample_witness();
-        let binding = FieldElement::from_bytes_be(&statement.hand_binding).expect("canonical");
+        let binding = Felt::from_bytes_be(&statement.hand_binding);
         let commitment =
-            FieldElement::from_bytes_be(&witness.payout_commitments[0]).expect("canonical");
+            Felt::from_bytes_be(&witness.payout_commitments[0]);
         let expected_cm = starknet_crypto::poseidon_hash_many(&[
             commitment,
             binding,
-            FieldElement::from(300u64), // amount_lo = delta
-            FieldElement::ZERO,         // amount_hi
+            Felt::from(300u64), // amount_lo = delta
+            Felt::ZERO,         // amount_hi
         ]);
         let cms = derive_claim_cms(&statement, &witness).expect("claim cms");
         assert_eq!(cms[0], expected_cm.to_bytes_be());
@@ -915,17 +918,17 @@ mod tests {
         }
     }
 
-    fn hex(felt: FieldElement) -> String {
+    fn hex(felt: Felt) -> String {
         format!("0x{felt:x}")
     }
 
     /// 动作名 → 大端 ASCII felt（与 texas pokergame::actions::action_word 一致）。
-    fn game_action_word(action: &str) -> FieldElement {
+    fn game_action_word(action: &str) -> Felt {
         let mut acc: u64 = 0;
         for b in action.as_bytes() {
             acc = (acc << 8) + u64::from(*b);
         }
-        FieldElement::from(acc)
+        Felt::from(acc)
     }
 
     /// 样例动作日志（3 条，含 auto 代打）：词条对 = [日志打包词, 合法性词]。
@@ -933,7 +936,7 @@ mod tests {
     /// seat(32)@170`；合法性词 `kind(2)|owed(64)@2|my_bet(64)@66|
     /// big_blind(64)@130`（非 auto = 0）——与 game 层 `action_entry_word` /
     /// `legality_word` 逐字段一致。
-    fn sample_action_entries() -> Vec<[FieldElement; 2]> {
+    fn sample_action_entries() -> Vec<[Felt; 2]> {
         const P2_40: &str = "0x10000000000";
         const P2_42: &str = "0x40000000000";
         const P2_106: &str = "0x400000000000000000000000000";
@@ -941,32 +944,32 @@ mod tests {
         const P2_2: &str = "0x4";
         const P2_66: &str = "0x40000000000000000";
         const P2_130: &str = "0x400000000000000000000000000000000";
-        let p = |hex: &str| FieldElement::from_hex_be(hex).expect("pow2");
+        let p = |hex: &str| Felt::from_hex(hex).expect("pow2");
         let (p2_40, p2_42, p2_106, p2_170) = (p(P2_40), p(P2_42), p(P2_106), p(P2_170));
         let (p2_2, p2_66, p2_130) = (p(P2_2), p(P2_66), p(P2_130));
         let log_word = |seat: u32, seq: u64, amount: u64, auto: bool, action: &str| {
             game_action_word(action)
-                + FieldElement::from(u8::from(auto) + 2) * p2_40
-                + FieldElement::from(amount) * p2_42
-                + FieldElement::from(seq) * p2_106
-                + FieldElement::from(seat) * p2_170
+                + Felt::from(u8::from(auto) + 2) * p2_40
+                + Felt::from(amount) * p2_42
+                + Felt::from(seq) * p2_106
+                + Felt::from(seat) * p2_170
         };
         let legality_word = |kind: u64, owed: u64, my_bet: u64, big_blind: u64| {
-            FieldElement::from(kind)
-                + FieldElement::from(owed) * p2_2
-                + FieldElement::from(my_bet) * p2_66
-                + FieldElement::from(big_blind) * p2_130
+            Felt::from(kind)
+                + Felt::from(owed) * p2_2
+                + Felt::from(my_bet) * p2_66
+                + Felt::from(big_blind) * p2_130
         };
         vec![
             // 非 auto：合法词 canonical 0。
-            [log_word(0, 1, 20, false, "CALL"), FieldElement::ZERO],
+            [log_word(0, 1, 20, false, "CALL"), Felt::ZERO],
             // auto FOLD：owed=500 / my_bet=20 / big_blind=20 → 差额 480 > 20 ⇒ Fold ✓
             [
                 log_word(1, 2, 0, true, "FOLD"),
                 legality_word(2, 500, 20, 20),
             ],
             // 非 auto：canonical 0。
-            [log_word(0, 3, 60, false, "RAISE"), FieldElement::ZERO],
+            [log_word(0, 3, 60, false, "RAISE"), Felt::ZERO],
         ]
     }
 
@@ -974,8 +977,8 @@ mod tests {
     /// `poseidon_hash_many([DOMAIN] ++ Σ packed_word)`，DOMAIN =
     /// starknet_keccak(b"zgame.action_log.v1") 的数值（与 texas
     /// `action_log_domain()` 同一冻结字面量）。
-    fn game_layer_action_log_digest(entries: &[[FieldElement; 2]]) -> FeltBytes {
-        let domain = FieldElement::from_hex_be(
+    fn game_layer_action_log_digest(entries: &[[Felt; 2]]) -> FeltBytes {
+        let domain = Felt::from_hex(
             "0x11b4269299cbd19c8d701730e13001ca46cbdd2d7a74ba25d7b30be4258fa6e",
         )
         .expect("canonical domain");
@@ -1010,19 +1013,19 @@ mod tests {
         let cms = derive_claim_cms(&statement, &witness).expect("cms");
 
         let mut inputs: Vec<String> = vec![
-            hex(FieldElement::from(statement.hand_id)),
+            hex(Felt::from(statement.hand_id)),
             hex(felt_from_bytes(digest).expect("canonical")),
-            hex(FieldElement::from(statement.n_participants)),
+            hex(Felt::from(statement.n_participants)),
             hex(felt_from_bytes(statement.hand_binding).expect("canonical")),
         ];
         for player in &statement.players {
             inputs.push(hex(felt_from_bytes(*player).expect("canonical")));
         }
         for delta in statement.signed_deltas.iter().copied() {
-            inputs.push(hex(FieldElement::from(u64::from(delta >= 0))));
+            inputs.push(hex(Felt::from(u64::from(delta >= 0))));
         }
         for delta in statement.signed_deltas.iter().copied() {
-            inputs.push(hex(FieldElement::from(delta.unsigned_abs() as u64)));
+            inputs.push(hex(Felt::from(delta.unsigned_abs() as u64)));
         }
         for commitment in &witness.payout_commitments {
             inputs.push(hex(felt_from_bytes(*commitment).expect("canonical")));
@@ -1031,10 +1034,10 @@ mod tests {
         inputs.push(hex(felt_from_bytes(statement.action_log_digest).expect("canonical")));
         // #18 Phase C 切片 1：词条区 = [count] ++ 60×1 打包词（不足补零）——
         // 电路重放整链并约束补零槽 canonical。
-        inputs.push(hex(FieldElement::from(entries.len() as u64)));
+        inputs.push(hex(Felt::from(entries.len() as u64)));
         for slot in 0..30usize {
-            let pair: [FieldElement; 2] =
-                entries.get(slot).copied().unwrap_or([FieldElement::ZERO; 2]);
+            let pair: [Felt; 2] =
+                entries.get(slot).copied().unwrap_or([Felt::ZERO; 2]);
             for word in pair {
                 inputs.push(hex(word));
             }
@@ -1044,10 +1047,10 @@ mod tests {
         // 公开段期望：[MAGIC, hand_id, digest, n, binding, cm_0..cm_7,
         // total_winnings, action_log_digest]（15 felt）
         let mut expected: Vec<String> = vec![
-            hex(FieldElement::from_bytes_be(&PROVE_MAGIC).expect("canonical")),
-            hex(FieldElement::from(statement.hand_id)),
+            hex(Felt::from_bytes_be(&PROVE_MAGIC)),
+            hex(Felt::from(statement.hand_id)),
             hex(felt_from_bytes(digest).expect("canonical")),
-            hex(FieldElement::from(statement.n_participants)),
+            hex(Felt::from(statement.n_participants)),
             hex(felt_from_bytes(statement.hand_binding).expect("canonical")),
         ];
         let mut total_winnings: u64 = 0;
@@ -1058,7 +1061,7 @@ mod tests {
             }
         }
         // v2 合约托管金额来源（Σ 赢家 |delta|，电路内累加）
-        expected.push(hex(FieldElement::from(total_winnings)));
+        expected.push(hex(Felt::from(total_winnings)));
         // 公开段尾词 = 动作日志哈希（v2 合约对注册承诺逐 felt 比对）
         expected.push(hex(felt_from_bytes(statement.action_log_digest).expect("canonical")));
 

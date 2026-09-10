@@ -11,6 +11,13 @@ description = "Apple-silicon-optimized end-to-end prover for Flock (R1CS over GF
 hash-count = ["flock-core/hash-count"]
 unsound-challenger = ["flock-core/unsound-challenger"]
 
+# 本仓补丁（见 third_party/PATCHES.md）：lib 测试目标停用——
+# vendored 测试套件在 debug profile 下深递归栈溢出（SIGABRT），且本 crate
+# 仅作为 poker_texas_air 的 hash 证明后端依赖（blake3_flock），其内部测试
+# 不在回归范围。需要恢复时删除本节即可。
+[lib]
+test = false
+
 [dependencies]
 flock-core = { path = "../flock-core" }
 rayon = "1.10"

@@ -58,6 +58,14 @@ pub struct OpenNoteDeposit {
 #[starknet::interface]
 pub trait IVaultLike<TContractState> {
     fn deposit_for(ref self: TContractState, player: ContractAddress, amount: u256);
+    /// P1-2 会话委托（私密路径）：anonymizer 即 vault 的 authorized_helper，
+    /// 在同一笔私交易里为 player 登记会话交易公钥。
+    fn set_session_tx_pk_for(
+        ref self: TContractState,
+        player: ContractAddress,
+        pk: felt252,
+        expires_at: u64,
+    );
     fn burn_chips(ref self: TContractState, player: ContractAddress, amount: u256);
     /// #25 全链路私密提现：烧 player 筹码并把背书 STRK 转给 recipient。
     /// vault 侧信任门 = unshield_helper（本合约需被 set_unshield_helper）。
@@ -84,6 +92,21 @@ pub trait IPokerVaultAnonymizer<TContractState> {
         player: ContractAddress,
         amount: u256,
         note_id: felt252,
+    ) -> Span<OpenNoteDeposit>;
+    /// P1-2 会话委托（私密买入 + 登记同笔完成）：与
+    /// [`IPokerVaultAnonymizer::privacy_invoke`] 同协议，但 BuyIn 操作额外
+    /// 在**同一笔私交易**里为 player 登记会话交易公钥
+    /// （vault `set_session_tx_pk_for`）——避免玩家钱包公开发起登记而
+    /// 建立 `main_wallet ↔ player` 链接（破坏 STRK20 付款人隐藏）。
+    /// `tx_pk == 0` 表示本次不登记（等价 privacy_invoke）。
+    fn privacy_invoke_with_session(
+        ref self: TContractState,
+        operation: felt252,
+        player: ContractAddress,
+        amount: u256,
+        note_id: felt252,
+        tx_pk: felt252,
+        tx_pk_expires_at: u64,
     ) -> Span<OpenNoteDeposit>;
 }
 
@@ -181,7 +204,89 @@ pub mod PokerVaultAnonymizer {
         self.owner.write(owner);
     }
 
-    #[abi(embed_v0)]
+        fn privacy_invoke_impl(
+        ref self: ContractState,
+        operation: felt252,
+        player: ContractAddress,
+        amount: u256,
+        note_id: felt252,
+        tx_pk: felt252,
+        tx_pk_expires_at: u64,
+    ) -> Span<OpenNoteDeposit> {
+        let pool = self.pool.read();
+        assert!(get_caller_address() == pool, "caller is not the pool");
+        assert!(!player.is_zero(), "player required");
+        assert!(amount > 0_u256, "amount must be > 0");
+
+        let vault = self.vault.read();
+        let vault_dispatcher = IVaultLikeDispatcher { contract_address: vault };
+        let token = vault_dispatcher.token();
+        let token_dispatcher = IERC20Dispatcher { contract_address: token };
+        let self_address = get_contract_address();
+
+        if operation == OP_WITHDRAW {
+            // Unshield（守恒模型，2026-09-07 修复）：withdraw_to 烧掉
+            // player 的 amount 筹码并让 vault 把背书 STRK 释放进 helper，
+            // helper 全额作为 recipient 的输出 note 记回池。
+            // 旧实现用 burn_chips（无代币移动）+ 要求用户先用池内
+            // 余额自筹注资——每领 X 销毁 X 价值（chips 烧掉、背书 STRK
+            // 滞留 vault 无人可领、用户拿回的只是自己的钱），且把
+            // "池内屏蔽余额 ≥ 领取额" 错立为前置。withdraw_to 模型下
+            // 输出 note 由 vault 出资，无需任何池内预存。
+            assert!(note_id != 0, "recipient note id required");
+            vault_dispatcher.withdraw_to(player, self_address, amount);
+            let remaining = token_dispatcher.balance_of(self_address);
+            assert!(!remaining.is_zero(), "no unshield funds in helper");
+            assert!(remaining.high == 0_u128, "unshield overflows u128");
+            let out: u128 = remaining.low;
+            let ok = token_dispatcher.approve(pool, remaining);
+            assert!(ok, "pool approve failed");
+
+            self.emit(UnshieldExecuted { player, amount, recipient_note_id: note_id, out });
+
+            let mut deposits = core::array::ArrayTrait::new();
+            deposits.append(OpenNoteDeposit { note_id, token, amount: out });
+            deposits.span()
+        } else if operation == OP_BUY_IN {
+            // P1-2：私密买入同笔登记会话钥（tx_pk != 0 时）。anonymizer
+            // 是 vault 的 authorized_helper（set_authorized_helper）。
+            if !tx_pk.is_zero() {
+                vault_dispatcher.set_session_tx_pk_for(player, tx_pk, tx_pk_expires_at);
+            }
+            // Buy in: approve the vault, then let it pull `amount` and
+            // credit the player's chips 1:1.
+            let ok = token_dispatcher.approve(vault, amount);
+            assert!(ok, "vault approve failed");
+            vault_dispatcher.deposit_for(player, amount);
+
+            // Change = remaining helper balance (pool-funded surplus). The
+            // pool pulls it via the approval below and credits the user's
+            // `note_id`. Pool note amounts are u128, so the change must
+            // fit — reject rather than silently truncate.
+            let remaining = token_dispatcher.balance_of(self_address);
+            if remaining.is_zero() {
+                self.emit(BuyInExecuted { player, amount, change: 0 });
+                let empty = core::array::ArrayTrait::new();
+                return empty.span();
+            }
+            assert!(remaining.high == 0_u128, "change overflows u128");
+            let change: u128 = remaining.low;
+            assert!(note_id != 0, "change note id required");
+            let ok = token_dispatcher.approve(pool, remaining);
+            assert!(ok, "pool approve failed");
+
+            self.emit(BuyInExecuted { player, amount, change });
+
+            let mut deposits = core::array::ArrayTrait::new();
+            deposits.append(OpenNoteDeposit { note_id, token, amount: change });
+            deposits.span()
+        } else {
+            assert!(false, "unknown operation");
+            core::array::ArrayTrait::new().span()
+        }
+    }
+
+#[abi(embed_v0)]
     impl AnonymizerImpl of super::IPokerVaultAnonymizer<ContractState> {
         fn privacy_invoke(
             ref self: ContractState,
@@ -190,73 +295,30 @@ pub mod PokerVaultAnonymizer {
             amount: u256,
             note_id: felt252,
         ) -> Span<OpenNoteDeposit> {
-            let pool = self.pool.read();
-            assert!(get_caller_address() == pool, "caller is not the pool");
-            assert!(!player.is_zero(), "player required");
-            assert!(amount > 0_u256, "amount must be > 0");
-
-            let vault = self.vault.read();
-            let vault_dispatcher = IVaultLikeDispatcher { contract_address: vault };
-            let token = vault_dispatcher.token();
-            let token_dispatcher = IERC20Dispatcher { contract_address: token };
-            let self_address = get_contract_address();
-
-            if operation == OP_WITHDRAW {
-                // Unshield（守恒模型，2026-09-07 修复）：withdraw_to 烧掉
-                // player 的 amount 筹码并让 vault 把背书 STRK 释放进 helper，
-                // helper 全额作为 recipient 的输出 note 记回池。
-                // 旧实现用 burn_chips（无代币移动）+ 要求用户先用池内
-                // 余额自筹注资——每领 X 销毁 X 价值（chips 烧掉、背书 STRK
-                // 滞留 vault 无人可领、用户拿回的只是自己的钱），且把
-                // "池内屏蔽余额 ≥ 领取额" 错立为前置。withdraw_to 模型下
-                // 输出 note 由 vault 出资，无需任何池内预存。
-                assert!(note_id != 0, "recipient note id required");
-                vault_dispatcher.withdraw_to(player, self_address, amount);
-                let remaining = token_dispatcher.balance_of(self_address);
-                assert!(!remaining.is_zero(), "no unshield funds in helper");
-                assert!(remaining.high == 0_u128, "unshield overflows u128");
-                let out: u128 = remaining.low;
-                let ok = token_dispatcher.approve(pool, remaining);
-                assert!(ok, "pool approve failed");
-
-                self.emit(UnshieldExecuted { player, amount, recipient_note_id: note_id, out });
-
-                let mut deposits = core::array::ArrayTrait::new();
-                deposits.append(OpenNoteDeposit { note_id, token, amount: out });
-                deposits.span()
-            } else if operation == OP_BUY_IN {
-                // Buy in: approve the vault, then let it pull `amount` and
-                // credit the player's chips 1:1.
-                let ok = token_dispatcher.approve(vault, amount);
-                assert!(ok, "vault approve failed");
-                vault_dispatcher.deposit_for(player, amount);
-
-                // Change = remaining helper balance (pool-funded surplus). The
-                // pool pulls it via the approval below and credits the user's
-                // `note_id`. Pool note amounts are u128, so the change must
-                // fit — reject rather than silently truncate.
-                let remaining = token_dispatcher.balance_of(self_address);
-                if remaining.is_zero() {
-                    self.emit(BuyInExecuted { player, amount, change: 0 });
-                    let empty = core::array::ArrayTrait::new();
-                    return empty.span();
-                }
-                assert!(remaining.high == 0_u128, "change overflows u128");
-                let change: u128 = remaining.low;
-                assert!(note_id != 0, "change note id required");
-                let ok = token_dispatcher.approve(pool, remaining);
-                assert!(ok, "pool approve failed");
-
-                self.emit(BuyInExecuted { player, amount, change });
-
-                let mut deposits = core::array::ArrayTrait::new();
-                deposits.append(OpenNoteDeposit { note_id, token, amount: change });
-                deposits.span()
-            } else {
-                assert!(false, "unknown operation");
-                core::array::ArrayTrait::new().span()
-            }
+            privacy_invoke_impl(ref self, operation, player, amount, note_id, 0, 0)
         }
+
+        fn privacy_invoke_with_session(
+            ref self: ContractState,
+            operation: felt252,
+            player: ContractAddress,
+            amount: u256,
+            note_id: felt252,
+            tx_pk: felt252,
+            tx_pk_expires_at: u64,
+        ) -> Span<OpenNoteDeposit> {
+            privacy_invoke_impl(
+                ref self,
+                operation,
+                player,
+                amount,
+                note_id,
+                tx_pk,
+                tx_pk_expires_at,
+            )
+        }
+
+
     }
 
     /// Vault / pool addresses for observability and SDK configuration.
@@ -485,6 +547,37 @@ mod tests {
         let vault = IPokerVaultDispatcher { contract_address: s.vault };
         assert!(vault.chip_balance(s.player) == 400, "chips not credited");
         assert!(tok.balance_of(s.anonymizer) == 0, "helper must be empty");
+    }
+
+    /// P1-2 私密买入 + 会话委托同笔登记：池在私交易里调
+    /// `privacy_invoke_with_session`（BuyIn + tx_pk）→ vault 侧
+    /// `set_session_tx_pk_for` 在同一笔内完成登记（anonymizer 须先被
+    /// 设为 vault 的 authorized_helper——生产部署顺序同此）。
+    #[test]
+    fn privacy_buy_in_registers_session_tx_pk_atomically() {
+        let test_addr = get_contract_address();
+        let s = setup(test_addr);
+        let tok = IMockTokenDispatcher { contract_address: s.token };
+        let vault = IPokerVaultDispatcher { contract_address: s.vault };
+
+        // 部署顺序：vault owner 把 anonymizer 设为 authorized_helper
+        //（与 burn_chips/withdraw_to 同一信任门）。
+        vault.set_authorized_helper(s.anonymizer);
+
+        tok.mint(test_addr, 400);
+        tok.transfer(s.anonymizer, 400);
+
+        let tx_pk = 0xC0DE_felt252;
+        let expiry = starknet::get_block_timestamp() + 86_400 * 30;
+        let anon = IPokerVaultAnonymizerDispatcher { contract_address: s.anonymizer };
+        let deposits = anon.privacy_invoke_with_session(0, s.player, 400, 0, tx_pk, expiry);
+
+        assert!(deposits.len() == 0, "no change expected");
+        assert!(vault.chip_balance(s.player) == 400, "chips credited");
+        assert!(
+            vault.active_session_tx_pk(s.player) == tx_pk,
+            "session tx pk registered in the SAME private tx as the buy-in"
+        );
     }
 
     #[test]

@@ -17,8 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use starknet_crypto::poseidon_hash_many;
-use starknet_crypto::FieldElement as Felt;
+use starknet_crypto::{poseidon_hash_many, Felt};
 
 use crate::air::KindCounts;
 use crate::handbatch::{payload_digest, verify_hand, VerifyReport};
@@ -273,7 +272,7 @@ pub fn prove_layer(
         .and_then(|v| v.as_str())
         .ok_or("public output missing from summary.json")?;
     let cairo_acc =
-        Felt::from_hex_be(cairo_acc).map_err(|e| format!("parse cairo acc: {e:?}"))?;
+        Felt::from_hex(cairo_acc).map_err(|e| format!("parse cairo acc: {e:?}"))?;
     if cairo_acc != expected_acc {
         return Err(format!(
             "accumulator parity failure: cairo {} != host {}",
@@ -314,7 +313,7 @@ pub fn prove_layer(
             .unwrap_or(0),
         program_hash: summary["public"]["program_hash"]
             .as_str()
-            .and_then(|h| Felt::from_hex_be(h).ok())
+            .and_then(|h| Felt::from_hex(h).ok())
             .ok_or("program hash missing")?,
         proof_bytes: std::fs::metadata(&proof_path).map(|m| m.len() as usize).unwrap_or(0),
         check_verify_ms,
@@ -389,17 +388,20 @@ fn felt_from_hex(hex_str: &str) -> Result<Felt, String> {
         let lo = (pair[1] as char).to_digit(16).ok_or("bad hex digit")? as u8;
         buf[31 - i] = hi * 16 + lo;
     }
-    Felt::from_bytes_be(&buf).map_err(|e| format!("felt out of range: {e:?}"))
-}
-
-fn felt_hex_pub(f: Felt) -> String {
-    format!("0x{}", f.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>())
+    // types-core 的 from_bytes_be 无失败路径（≥ P 静默归约），沿用原
+    // 旧 0.6 ff Result 语义：非 canonical 输入 fail-loud。
+    let felt = Felt::from_bytes_be(&buf);
+    if felt.to_bytes_be() != buf {
+        return Err("felt out of range".to_string());
+    }
+    Ok(felt)
 }
 
 /// 组装 action-sig 批次 payload（v3 header 6 词 + 每语句 10 词）。
 /// host 直验（fail-closed）：任一语句 off-curve / 签名不闭合 → Err。
+/// `_hand_binding`：v3 header 预留位（当前 payload 不绑定 hand_binding）。
 pub fn build_action_batch_payload(
-    hand_binding: Felt,
+    _hand_binding: Felt,
     table_id: u32,
     hand_id: u32,
     statements: &[ActionSigStatement],

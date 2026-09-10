@@ -5,12 +5,13 @@
 //! - 边池分层：仅争夺层（eligible ≥ 2）按比例分摊，余数按层序补齐
 //!   （`settlement.rs::allocate_rake`）
 //!
-//! 参数来源与链上相同的环境变量（`starknet/config.rs`）：`STARKNET_RAKE_BPS` /
-//! `STARKNET_RAKE_CAP`，缺省用 poker_l1 常量，保证链下显示与链上到账一致。
+//! 参数来源与链上相同的环境变量：`STARKNET_RAKE_BPS` / `STARKNET_RAKE_CAP`，
+//! 缺省用 poker_l1 常量，保证链下显示与链上到账一致（唯一解析点——
+//! 链下显示、VM 镜像、链上 calldata 全部读这里，防止第二份配置漂移）。
 
 use std::sync::OnceLock;
 
-use poker_l1::vm::contracts::texas_poker::constants::{DEFAULT_RAKE_BPS, DEFAULT_RAKE_CAP};
+use poker_l1::contracts::texas_poker::constants::{DEFAULT_RAKE_BPS, DEFAULT_RAKE_CAP};
 
 /// 抽水参数（进程级，从环境变量读一次）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

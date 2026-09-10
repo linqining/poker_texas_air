@@ -6,9 +6,10 @@
 //! IMPL-SEC-1：tag 解析常数时间（不因 scheme 不同而提前返回时间差异）。
 //! 所有 scheme 内部均使用常数时间实现。
 
-use crate::error::{PokerL1Error, PokerL1Result};
+use crate::error::PokerL1Result;
 use crate::signature::ed25519_scheme;
 use crate::signature::secp256k1_scheme;
+use crate::signature::stark_scheme;
 use crate::signature::tagged_pubkey::{SignatureScheme, TaggedPubkey};
 
 /// 统一签名验证：按 tagged pubkey 的 tag 路由到对应曲线验证器。
@@ -31,29 +32,14 @@ pub fn verify_signature(
     match scheme {
         SignatureScheme::Secp256k1 => secp256k1_scheme::verify(tagged_pubkey, sig, msg_hash),
         SignatureScheme::Ed25519 => ed25519_scheme::verify(tagged_pubkey, sig, msg_hash),
+        SignatureScheme::Stark => stark_scheme::verify(tagged_pubkey, sig, msg_hash),
     }
-}
-
-/// 仅校验 tagged pubkey 与签名 scheme 是否一致（不实际验证签名）。
-///
-/// 用于 tx 校验前置：若 scheme 不匹配则提前拒绝，避免无效的签名验证计算。
-pub fn check_scheme_match(
-    tagged_pubkey: &TaggedPubkey,
-    expected: SignatureScheme,
-) -> PokerL1Result<()> {
-    let actual = tagged_pubkey.scheme()?;
-    if actual != expected {
-        return Err(PokerL1Error::CurveMismatch {
-            pub_tag: tagged_pubkey.tag,
-            sig_tag: (expected.scheme_id() << 4) | 1,
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::PokerL1Error;
     use crate::signature::tagged_pubkey::encode_tag;
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
     use rand::rngs::OsRng;
@@ -119,24 +105,5 @@ mod tests {
         };
         let err = verify_signature(&tp, &full_sig, &msg).unwrap_err();
         assert!(matches!(err, PokerL1Error::InvalidSignature));
-    }
-
-    #[test]
-    fn check_scheme_match_passes_when_matching() {
-        let tp = TaggedPubkey {
-            tag: encode_tag(SignatureScheme::Secp256k1, 1),
-            raw: vec![0; 33],
-        };
-        check_scheme_match(&tp, SignatureScheme::Secp256k1).unwrap();
-    }
-
-    #[test]
-    fn check_scheme_match_fails_when_mismatch() {
-        let tp = TaggedPubkey {
-            tag: encode_tag(SignatureScheme::Ed25519, 1),
-            raw: vec![0; 32],
-        };
-        let err = check_scheme_match(&tp, SignatureScheme::Secp256k1).unwrap_err();
-        assert!(matches!(err, PokerL1Error::CurveMismatch { .. }));
     }
 }

@@ -1,64 +1,128 @@
-//! STARK curve arithmetic for the hand-verify spike.
+//! STARK curve access for the hand-verify spike — a thin adapter over
+//! `poker-protocol-core::stark_curve` (the protocol's single source of truth).
 //!
-//! Curve: `y² = x³ + x + β` over `F_P`, `P = 2²⁵¹ + 17·2¹⁹² + 1` (the felt252
-//! prime, handled natively by `starknet_crypto::Felt`), with group order
+//! Curve: `y² = x³ + x + β` over `F_P`, `P = 2²⁵¹ + 17·2¹⁹² + 1`, group order
 //! `n = 0x0800000000000010ffffffffffffffffb781126dcae7b2321e66a241adc64d2f`,
-//! cofactor 1. These are the same constants the Cairo EC_OP builtin uses, so
-//! host points map 1:1 to on-chain felts.
+//! cofactor 1 — the constants Cairo's EC_OP builtin uses, so host points map
+//! 1:1 to on-chain felts. Since the 2026-09 starknet-crypto 0.8 alignment the
+//! Jacobian formulas (dbl-2001-b / case-aware add / MSB double-and-add) live
+//! only in core's `StarkPoint`; this module keeps the spike's Cairo-shaped
+//! surface:
 //!
-//! Points use Jacobian coordinates with an explicit identity (Z = 0):
-//! doubling is dbl-2001-b (a = 1 folds its z⁴ term in), addition is the
-//! standard case-aware general Jacobian formulas. Performance is not the
-//! spike's goal (see `docs/PERFORMANCE.md`: the host fold is ~19 µs per
-//! scalar mul).
+//! - [`Point::from_affine`] validates on-curve (mirrors Cairo `EcPoint::new`,
+//!   fail-closed on off-curve words) — core's `from_affine_parts` is
+//!   unchecked, so the check stays here with `starknet_curve`'s `BETA`;
+//! - [`Point::mul`] takes a RAW felt scalar (any value < P), exactly like a
+//!   Cairo `EcState::add_mul` scalar: it reduces mod n via
+//!   `StarkScalar::from_bytes_mod_order` and multiplies by the canonical
+//!   scalar — EC-equivalent because the group order makes `m` and `m mod n`
+//!   the same multiplier (pinned by `mul_raw_equals_core_reduced_mul`).
 //!
-//! Two fields must not be confused (same discipline as
-//! `poker-protocol-core::stark_curve`): coordinates live in `F_P`, scalars in
-//! `Z_n`. `n < P`, so Felt arithmetic is *not* scalar arithmetic. EC scalars
-//! are used as raw felts (valid: multiplying a point of order n by m and by
-//! m mod n gives the same point); only the minting side reduces mod n, via
-//! `BigUint`.
+//! Two fields must not be confused (same discipline as core): coordinates
+//! live in `F_P`, scalars in `Z_n`. `n < P`, so Felt arithmetic is *not*
+//! scalar arithmetic; only the minting side reduces mod n (via core's
+//! `StarkScalar`).
 
 use std::ops::{Add, Neg, Sub};
 
 use num_bigint::BigUint;
-use starknet_crypto::FieldElement as Felt;
+use starknet_curve::curve_params::BETA;
+use starknet_crypto::Felt;
 
-fn hex_felt(s: &str) -> Felt {
-    Felt::from_hex_be(s).expect("hardcoded hex constant parses")
+use poker_protocol_core::curve::{Curve, CurvePoint, CurveScalar};
+use poker_protocol_core::stark_curve::{StarkCurve, StarkPoint, StarkScalar};
+
+/// A point on the STARK curve (Jacobian underneath; identity is `Z = 0`).
+///
+/// Semantic equality (cross-multiplied projective comparison) comes from
+/// core's `StarkPoint`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Point(StarkPoint);
+
+impl Point {
+    pub fn identity() -> Self {
+        Self(<StarkPoint as CurvePoint>::identity())
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.0.is_identity()
+    }
+
+    /// Affine construction with on-curve validation (mirrors Cairo
+    /// `EcPoint::new`): rejects points off the curve.
+    pub fn from_affine(x: Felt, y: Felt) -> Option<Self> {
+        if y * y != x * x * x + x + BETA {
+            return None;
+        }
+        Some(Self(StarkPoint::from_affine_parts(x, y)))
+    }
+
+    /// Base point `G` — core's `<StarkCurve as Curve>::base_g()` (same
+    /// `starknet_curve` constants the vendored Cairo programs hard-code).
+    pub fn generator() -> Self {
+        Self(<StarkCurve as Curve>::base_g())
+    }
+
+    pub fn to_affine(&self) -> Option<(Felt, Felt)> {
+        self.0.to_affine_parts()
+    }
+
+    pub fn neg(&self) -> Self {
+        Self(-self.0)
+    }
+
+    /// Scalar multiplication by a RAW felt (< P, no mod-n pre-condition) —
+    /// the Cairo `add_mul` discipline. The raw value is reduced mod n via
+    /// core's `StarkScalar::from_bytes_mod_order` and applied with core's
+    /// scalar multiplication; `m` and `m mod n` are the same multiplier in a
+    /// prime-order group.
+    pub fn mul(&self, scalar: Felt) -> Self {
+        let s = <StarkScalar as CurveScalar>::from_bytes_mod_order(&scalar.to_bytes_be());
+        Self(self.0 * s)
+    }
+
+    /// Raw access for the parity tests (core-side conversions).
+    pub fn as_core(&self) -> StarkPoint {
+        self.0
+    }
+
+    /// Wrap a core point that is known to be on-curve (mint side).
+    pub fn from_core(p: StarkPoint) -> Self {
+        Self(p)
+    }
 }
 
-/// `y² = x³ + x + β` — the `β` coefficient (0x06f21413...cee9e89).
-pub fn beta() -> Felt {
-    use std::sync::OnceLock;
-    static B: OnceLock<Felt> = OnceLock::new();
-    *B.get_or_init(|| {
-        hex_felt("06f21413efbe40de150e596d72f7a8c5609ad26c15c915c1f4cdfcb99cee9e89")
-    })
+impl Add for Point {
+    type Output = Point;
+
+    fn add(self, rhs: Point) -> Point {
+        Point(self.0 + rhs.0)
+    }
 }
 
-/// Group order `n`, decimal form (parsed via `from_dec_str` to avoid hex
-/// transcription mistakes; pinned to the on-curve + order tests below).
-const EC_ORDER_DEC: &str = "3618502788666131213697322783095070105526743751716087489154079457884512865583";
+impl Sub for Point {
+    type Output = Point;
 
-/// Base point `G`, decimal affine coordinates — byte-for-byte the constants
-/// used by the vendored `hand_verify_bench` Cairo programs.
-const GENERATOR_X_DEC: &str = "874739451078007766457464989774322083649278607533249481151382481072868806602";
-const GENERATOR_Y_DEC: &str = "152666792071518830868575557812948353041420400780739481342941381225525861407";
-
-fn dec_felt(s: &str) -> Felt {
-    Felt::from_dec_str(s).expect("hardcoded decimal constant parses")
+    fn sub(self, rhs: Point) -> Point {
+        Point(self.0 - rhs.0)
+    }
 }
 
-/// Group order as `BigUint` (mint-side mod-n arithmetic only).
+impl Neg for Point {
+    type Output = Point;
+
+    fn neg(self) -> Point {
+        Point::neg(&self)
+    }
+}
+
+/// Group order as `BigUint` (challenge-parity arithmetic in tests; mint-side
+/// mod-n reduction now goes through core's `StarkScalar` instead).
 pub fn ec_order() -> BigUint {
-    use std::sync::OnceLock;
-    static N: OnceLock<BigUint> = OnceLock::new();
-    N.get_or_init(|| BigUint::from_bytes_be(&dec_felt(EC_ORDER_DEC).to_bytes_be())).clone()
-
+    BigUint::from_bytes_be(&poker_protocol_core::stark_curve::ec_order_bytes_be())
 }
 
-/// Felt ↔ BigUint helpers (mint side).
+/// Felt ↔ BigUint helpers (feltmul's integer AIR works on `BigUint` limbs).
 pub fn felt_to_biguint(f: Felt) -> BigUint {
     BigUint::from_bytes_be(&f.to_bytes_be())
 }
@@ -70,142 +134,10 @@ pub fn biguint_to_felt(v: &BigUint) -> Option<Felt> {
     }
     let mut buf = [0u8; 32];
     buf[32 - bytes.len()..].copy_from_slice(&bytes);
-    Felt::from_bytes_be(&buf).ok()
-}
-
-/// `v mod n` (mint side).
-pub fn reduce_mod_n(v: &BigUint) -> BigUint {
-    v % ec_order()
-}
-
-/// A point on the STARK curve (Jacobian coordinates; `z == 0` is identity).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Point {
-    x: Felt,
-    y: Felt,
-    z: Felt,
-}
-
-impl Point {
-    pub const fn identity() -> Self {
-        Self { x: Felt::ONE, y: Felt::ONE, z: Felt::ZERO }
-    }
-
-    pub fn is_identity(&self) -> bool {
-        self.z == Felt::ZERO
-    }
-
-    /// Affine construction with on-curve validation (mirrors Cairo
-    /// `EcPoint::new`): rejects points off the curve.
-    pub fn from_affine(x: Felt, y: Felt) -> Option<Self> {
-        if y * y != x * x * x + x + beta() {
-            return None;
-        }
-        Some(Self { x, y, z: Felt::ONE })
-    }
-
-    pub fn generator() -> Self {
-        Self::from_affine(dec_felt(GENERATOR_X_DEC), dec_felt(GENERATOR_Y_DEC))
-            .expect("hardcoded generator is on curve")
-    }
-
-    pub fn to_affine(&self) -> Option<(Felt, Felt)> {
-        if self.is_identity() {
-            return None;
-        }
-        let z_inv = self.z.invert()?;
-        let z2 = z_inv * z_inv;
-        let z3 = z2 * z_inv;
-        Some((self.x * z2, self.y * z3))
-    }
-
-    pub fn neg(&self) -> Self {
-        if self.is_identity() {
-            return *self;
-        }
-        Self { x: self.x, y: Felt::ZERO - self.y, z: self.z }
-    }
-
-    /// dbl-2001-b for a = 1:
-    /// S = 4·X·Y², M = 3·X² + Z⁴, X' = M² − 2S, Y' = M·(S − X') − 8·Y⁴,
-    /// Z' = 2·Y·Z.
-    pub fn double(&self) -> Self {
-        if self.is_identity() {
-            return *self;
-        }
-        let y2 = self.y * self.y;
-        let s = (self.x * y2).double().double();
-        let x2 = self.x * self.x;
-        let z2 = self.z * self.z;
-        let m = x2.double() + x2 + z2 * z2;
-        let x3 = m * m - s.double();
-        let y3 = m * (s - x3) - (y2 * y2).double().double().double();
-        let z3 = (self.y * self.z).double();
-        Self { x: x3, y: y3, z: z3 }
-    }
-
-    /// MSB-first double-and-add scalar multiplication.
-    pub fn mul(&self, scalar: Felt) -> Self {
-        let mut acc = Self::identity();
-        for bit in scalar.to_bits_le().iter().rev() {
-            acc = acc.double();
-            if *bit {
-                acc = acc + *self;
-            }
-        }
-        acc
-    }
-}
-
-impl Add for Point {
-    type Output = Point;
-
-    /// Standard case-aware Jacobian addition.
-    fn add(self, rhs: Point) -> Point {
-        if self.is_identity() {
-            return rhs;
-        }
-        if rhs.is_identity() {
-            return self;
-        }
-        let z1z1 = self.z * self.z;
-        let z2z2 = rhs.z * rhs.z;
-        let u1 = self.x * z2z2;
-        let u2 = rhs.x * z1z1;
-        let s1 = self.y * z2z2 * rhs.z;
-        let s2 = rhs.y * z1z1 * self.z;
-        if u1 == u2 {
-            if s1 == s2 {
-                return self.double();
-            }
-            return Point::identity();
-        }
-        let h = u2 - u1;
-        let r = s2 - s1;
-        let h2 = h * h;
-        let h3 = h2 * h;
-        let v = u1 * h2;
-        let x3 = r * r - h3 - v.double();
-        let y3 = r * (v - x3) - s1 * h3;
-        let z3 = self.z * rhs.z * h;
-        Point { x: x3, y: y3, z: z3 }
-    }
-}
-
-impl Sub for Point {
-    type Output = Point;
-
-    fn sub(self, rhs: Point) -> Point {
-        self + rhs.neg()
-    }
-}
-
-impl Neg for Point {
-    type Output = Point;
-
-    fn neg(self) -> Point {
-        Point::neg(&self)
-    }
+    // Infallible on types-core, but values ≥ P cannot be represented as a
+    // felt — the caller-checked big-endian bytes are always < 2^252 here in
+    // practice (limb recombinations and mod-P/mod-n residues).
+    Some(Felt::from_bytes_be(&buf))
 }
 
 #[cfg(test)]
@@ -222,7 +154,7 @@ mod tests {
     #[test]
     fn group_order_times_generator_is_identity() {
         let g = Point::generator();
-        let n_felt = dec_felt(EC_ORDER_DEC);
+        let n_felt = Felt::from_bytes_be(&poker_protocol_core::stark_curve::ec_order_bytes_be());
         assert!(g.mul(n_felt).is_identity());
     }
 
@@ -234,6 +166,21 @@ mod tests {
         assert_eq!(g.mul(Felt::from(3u32)), three_g);
         assert_eq!(g.mul(Felt::from(2u32)), two_g);
         assert_eq!(g.mul(Felt::from(0u32)), Point::identity());
+    }
+
+    /// Delegation pin: a RAW felt scalar (≥ n, as Cairo would feed add_mul)
+    /// must multiply like core's canonical reduced scalar.
+    #[test]
+    fn mul_raw_equals_core_reduced_mul() {
+        let g = Point::generator();
+        let raw = Felt::from(0xB16D_C0DE_C0DE_1234u128); // arbitrary raw felt
+        let reduced =
+            <StarkScalar as CurveScalar>::from_bytes_mod_order(&raw.to_bytes_be());
+        assert_eq!(g.mul(raw).as_core(), g.as_core() * reduced);
+        // And a raw value ≥ n differs from itself minus n by exactly the
+        // group order, i.e. they are the same multiplier:
+        let n = Felt::from_bytes_be(&poker_protocol_core::stark_curve::ec_order_bytes_be());
+        assert_eq!(g.mul(raw + n), g.mul(raw));
     }
 
     #[test]
@@ -256,9 +203,10 @@ mod tests {
     fn group_order_is_the_expected_hex_constant() {
         // n = 0x0800000000000010ffffffffffffffffb781126dcae7b2321e66a241adc64d2f
         let n = ec_order();
-        let expected = hex_felt(
+        let expected = Felt::from_hex(
             "0800000000000010ffffffffffffffffb781126dcae7b2321e66a241adc64d2f",
-        );
+        )
+        .expect("hex constant");
         assert_eq!(biguint_to_felt(&n).unwrap(), expected);
     }
 }

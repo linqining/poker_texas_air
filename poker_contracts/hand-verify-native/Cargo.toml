@@ -1,12 +1,17 @@
 # 递归证明信封（form-③）+ 原生 Stwo hand_verify。
 #
 # 目录沿革：预研期独立 workspace → 2026-09-06 并入根 workspace →
-# 2026-09-07 挪入 poker_contracts/（预研隔离期结束；与合约同居一库，
-# Cairo 侧证明程序仍在 crate 内的 cairo/，由 prove-hand 编译——不经
-# scarb，合约编译器 2.11.4 与证明程序 corelib 2.19.4 是两套工具链）。
+# 2026-09-07 挪入 poker_contracts/（预研隔离期结束；与合约同居一库）。
+# Cairo 侧证明程序在 crate 内的 cairo/，由 prove-hand 编译（不经 scarb）。
+# 2026-09-10 单源化：cairo/src/dual/{hand_verify,hand_batch_stark,bg_stark}
+# .cairo 三文件 symlink 到合约树（poker_contracts/src/dual/ 为唯一源）；
+# 编译器均为 2.19 系（合约 scarb 2.19.4 / 证明 vendored cairo-lang 2.19.0-
+# rc.0），公共语法子集约束见 cairo/src/dual.cairo 注释。
 # snip36 结算模式（STARKNET_SETTLEMENT_MODE=snip36）由 texas 直接驱动
 # （牌局结束异步证明 → 提交）。运行时依赖仓库根 proving-tool 的
 # prove-hand 二进制（HAND_VERIFY_PROVE_HAND 可覆盖路径）。
+# starknet-crypto 0.8（与 poker-protocol-core / 根 crate 同源）；wire 层与
+# 内部统一 types-core Felt——全仓无跨 Felt 桥（见 src/handbatch.rs 注释）。
 #
 # 定位：「Stark-curve sigma + native Stwo」hand_verify——host 原生 EC
 # 验证 + O(1)-verify 语句 AIR + Cairo 路线递归信封（EC_OP in trace）。
@@ -23,20 +28,21 @@ description = "Native Stwo (no Cairo VM) spike for hand_verify: Stark-curve sigm
 name = "hand-verify-native"
 path = "src/main.rs"
 
-[dev-dependencies]
-# 挑战域对拍：action-sig v3 的 host RAW 挑战必须与协议 core 的归约标量
-# 在群阶意义下等价（raw ≡ core mod n）——跨 crate 公式漂移即测试红。
-poker-protocol-core = { path = "../../poker-protocol-core" }
-# core 的 Felt 类型载体（starknet-crypto 0.8 的 Felt = types-core Felt）；
-# 对拍测试用它把 0.6 FieldElement 的坐标转成 core 签名接受的类型。
-starknet-types-core = { version = "0.2", default-features = false }
-
 [dependencies]
 stwo = { version = "2.3", features = ["parallel", "prover"] }
 stwo-constraint-framework = { version = "2.3", features = ["prover"] }
 # Felt (field arithmetic mod P) + Poseidon (poseidon_hash_many) — same
-# backend the root protocol uses, so transcripts are Cairo-replayable.
-starknet-crypto = { version = "0.6", default-features = false, features = ["alloc"] }
+# backend (0.8.x) the root protocol uses, so transcripts are Cairo-replayable
+# and the EC layer can delegate to `poker-protocol-core::stark_curve` instead
+# of mirroring it (starknet-crypto 0.8 的 Felt = starknet-types-core Felt,
+# 与 core 同一实例；types-core 版本不经本 crate 直接声明，完全跟随 0.8 传递，
+# 锁文件中保持单版本 0.2.4)。
+starknet-crypto = { version = "0.8", default-features = false, features = ["alloc"] }
+# BETA / GENERATOR / 群阶常量（on-curve 校验与生成元；与 core 同源）。
+starknet-curve = "0.6"
+# 曲线后端与挑战公式的单一真源：EC 点运算、mod-n 标量、域标签（见
+# curve.rs / handbatch.rs 的委托与对拍测试）。
+poker-protocol-core = { path = "../../poker-protocol-core" }
 num-bigint = "0.4.8"
 bincode = "1"
 serde_json = "1"

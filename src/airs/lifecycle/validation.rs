@@ -6,7 +6,7 @@
 //! digest, replay native Texas Poker dispatch, compare the complete post table,
 //! and finally rebuild the row accepted by each AIR.
 
-use poker_l1::vm::contracts::texas_poker::dispatch::{JoinTableArgs, LeaveTableArgs};
+use poker_l1::contracts::texas_poker::dispatch::{JoinTableArgs, LeaveTableArgs};
 use stwo::core::fields::m31::M31;
 
 use super::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};

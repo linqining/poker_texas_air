@@ -16,7 +16,6 @@
 
 use poker_protocol::crypto::{DefaultCurve};
 use poker_protocol::crypto::curve::{Curve, CurveScalar};
-use poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript as _CT;
 use rand::rngs::OsRng;
 
 use super::mirror::TableMirror;
@@ -34,8 +33,8 @@ fn game_layer_join(
     let round = player.join_game_and_shuffle(&game.deck_encrypted, &agg_prev);
     let ms = &round.mask_and_shuffle_round;
     // 服务器侧验证（与 join_player_and_shuffle 相同的两步证明校验）
-    let mut transcript = poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript::new(
-        b"zk_mask_shuffle_proof_v2",
+    let mut transcript = poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript::new_domain(
+        poker_protocol::transcript_domains::MASK_SHUFFLE_V2_POSEIDON,
     );
     let input_cards: Vec<ZgCt> = game.deck_encrypted.clone();
     assert!(
@@ -130,7 +129,7 @@ fn play_full_hand_artifacts(
     // ---- 结算构建（#20 Phase 2 现行架构）：TableMirror 是 settle 时
     // 一次性重建器（非常驻 VM/第二本账）——从本手证明日志注入 deck，
     // 产出 ProveTask 链 + pre-payout 快照，供 dapv calldata 对拍 ----
-    use poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof;
+    use poker_l1::contracts::texas_poker::utils::create_pk_ownership_proof;
     let zpk1 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client1.pk)).unwrap();
     let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
     let proof1 = create_pk_ownership_proof(&sk1, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng))
@@ -138,8 +137,8 @@ fn play_full_hand_artifacts(
     let proof2 = create_pk_ownership_proof(&sk2, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng))
         .expect("proof p2");
     let plan = vec![
-        (p1, 1000u64, zpk1, proof1),
-        (p2, 1000u64, zpk2, proof2),
+        (p1, 1000u64, zpk1, None, proof1),
+        (p2, 1000u64, zpk2, None, proof2),
     ];
     let mut mirror = TableMirror::new(1, "e2e", creator, 4, 10, 20, creator);
     mirror
@@ -161,7 +160,7 @@ fn play_full_hand_artifacts(
     // ---- reveal / betting 交替推进到 river ----
     // 客户端语义：每个玩家对"待揭示密文"生成 token = sk·c1 + Schnorr 证明
     // （证明绑定完整密文——包括摊牌阶段，与真实客户端一致）。
-    use poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript as FsT;
+    use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript as PfT;
     use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof as ZgRevealProof;
 
     let clients: [&ClientPlayer; 2] = [&client1, &client2];
@@ -190,7 +189,7 @@ fn play_full_hand_artifacts(
                 let token = ct.gen_reveal_token(&client.sk);
                 let proof = ZgRevealProof::prove(
                     &client.sk, &client.pk, &ct, &token, &mut OsRng,
-                    &mut FsT::new(b"reveal_token_proof_v3"),
+                    &mut PfT::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
                 );
                 tokens.push(super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)).unwrap());
                 proofs.push(super::mirror::conv::reveal_token_proof(&proof).unwrap());
@@ -226,7 +225,7 @@ fn play_full_hand_artifacts(
     );
 
     // 平分检测（须在派奖前：派奖后 board 复位无法 derive）
-    let plan_check = poker_l1::vm::contracts::texas_poker::settlement::derive_settlement_plan(&mirror.table)
+    let plan_check = poker_l1::contracts::texas_poker::settlement::derive_settlement_plan(&mirror.table)
         .map_err(|e| format!("plan: {e}"))?;
     let all_zero_delta = mirror.table.seats.iter().enumerate().all(|(i, s)| {
         plan_check.awards.get(i).copied().unwrap_or(0) as i128 == s.total_bet() as i128
@@ -244,7 +243,7 @@ fn play_full_hand_artifacts(
 
     // ---- 结算：分池 + 证明 + calldata ----
     // #18 Phase B：动作日志哈希取一个确定样例（e2e 无 game 层动作日志）。
-    let action_log_digest = starknet_ff::FieldElement::from(0xA11CE_u64);
+    let action_log_digest = starknet_crypto::Felt::from(0xA11CE_u64);
     let settlement =
         super::submit::settle_hand(&mirror, Some(creator), &[], action_log_digest, &[])
             .map_err(|e| format!("settlement: {e}"))?;
@@ -274,13 +273,13 @@ fn play_full_hand_artifacts(
         &|_hb, _players| Ok(endorsements.clone()),
     )
     .map_err(|e| format!("dapv build: {e}"))?;
-    assert_ne!(dual.hand_binding, starknet_ff::FieldElement::ZERO);
+    assert_ne!(dual.hand_binding, starknet_crypto::Felt::ZERO);
     assert_eq!(dual.batch_words.len(), 5 + 5 * settlement.players_remapped.len());
     // #18 Phase B：register 7 felt（+动作日志承诺）、settle 前缀 +1 标量。
     assert_eq!(dual.register_calldata.len(), 7);
     assert_eq!(
         dual.register_calldata[3],
-        super::submit::ff_to_felt(action_log_digest),
+        action_log_digest,
         "register pins the action log commitment"
     );
     let expect_len = 1 + 1 + 32 + 1 + 1
@@ -288,7 +287,7 @@ fn play_full_hand_artifacts(
         + 1 + settlement.deltas.len()
         + 1 + dual.batch_words.len();
     assert_eq!(dual.settle_calldata.len(), expect_len);
-    assert_ne!(dual.proved.p_batch_commitment, starknet_ff::FieldElement::ZERO);
+    assert_ne!(dual.proved.p_batch_commitment, starknet_crypto::Felt::ZERO);
     assert_eq!(dual.proved.register_calldata.len(), 9);
     assert_eq!(
         dual.proved.settle_calldata.len(),
@@ -346,12 +345,15 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
     }
     let game_deck: Vec<ZgCt> = game.deck_encrypted.clone();
 
-    use poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof;
+    use poker_l1::contracts::texas_poker::utils::create_pk_ownership_proof;
     let zpk1 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client1.pk)).unwrap();
     let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
     let proof1 = create_pk_ownership_proof(&sk1, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng)).unwrap();
     let proof2 = create_pk_ownership_proof(&sk2, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng)).unwrap();
-    let plan = vec![(p1, 1000u64, zpk1, proof1), (p2, 1000u64, zpk2, proof2)];
+    let plan = vec![
+        (p1, 1000u64, zpk1, None, proof1),
+        (p2, 1000u64, zpk2, None, proof2),
+    ];
     let mut mirror = TableMirror::new(1, "e2e-prefix", creator, 4, 10, 20, creator);
     mirror
         .begin_reveal_hand(super::mirror::conv::ciphertexts(&game_deck).unwrap(), &plan, 0, 1)
@@ -364,7 +366,7 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
     );
 
     // hole reveal ×2（客户端 token 基于游戏层密文生成）
-    use poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript as FsT;
+    use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript as PfT;
     use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof as ZgRevealProof;
     let clients: [&ClientPlayer; 2] = [&client1, &client2];
     loop {
@@ -382,7 +384,7 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
             tokens.push(super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)).unwrap());
             proofs.push(super::mirror::conv::reveal_token_proof(
                 &ZgRevealProof::prove(&client.sk, &client.pk, &ct, &token, &mut OsRng,
-                    &mut FsT::new(b"reveal_token_proof_v3"))).unwrap());
+                    &mut PfT::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON))).unwrap());
         }
         mirror.submit_reveal_tokens(seat, tokens, proofs).expect("hole reveal");
     }
@@ -583,7 +585,7 @@ async fn live_flow_assignments_match_mirror_targets() {
         .start
         .clone()
         .expect("hand start recorded at advance_shuffle");
-    let mirror = super::mirror::build_from_log(1, &start, &[], 1).expect("mirror build from log");
+    let mirror = super::mirror::mirror_bootstrap(1, &start, 1).expect("mirror bootstrap");
     for (pk_hex, _player) in &pks {
         let key = GamePkHex::new(pk_hex.clone());
         let wallet = table.players().get(&key).unwrap().0.clone();
@@ -712,8 +714,8 @@ fn e2e_mixed_join_paths_materializes() {
     {
         let input_cards: Vec<ZgCt> = game.deck_encrypted.clone();
         // remask + shuffle 共享 transcript（挑战链顺序敏感）
-        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript::new(
-            b"zk_mask_shuffle_proof_v2",
+        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript::new_domain(
+            poker_protocol::transcript_domains::MASK_SHUFFLE_V2_POSEIDON,
         );
         assert!(
             ms.remask_proof.verify(&input_cards, &ms.mask_cards, &c2.pk, &mut transcript),
@@ -837,7 +839,6 @@ async fn sepolia_settle_smoke() {
     use starknet::core::types::{Call, Felt};
     use starknet::core::utils::starknet_keccak;
     use starknet::providers::Provider;
-        use starknet_ff::FieldElement as Ff;
 
     if std::env::var("STARKNET_SEPOLIA_SMOKE").as_deref() != Ok("1") {
         eprintln!("STARKNET_SEPOLIA_SMOKE != 1 — skipped (no on-chain txs)");
@@ -853,7 +854,6 @@ async fn sepolia_settle_smoke() {
     let op_key = std::env::var("STARKNET_OPERATOR_PRIVATE_KEY").expect("STARKNET_OPERATOR_PRIVATE_KEY");
     let dual_addr = std::env::var("STARKNET_DUAL_SETTLEMENT_ADDRESS").expect("STARKNET_DUAL_SETTLEMENT_ADDRESS");
     let vault_addr = std::env::var("STARKNET_VAULT_ADDRESS").expect("STARKNET_VAULT_ADDRESS");
-    let strk_addr = std::env::var("STARKNET_STRK_ADDRESS").expect("STARKNET_STRK_ADDRESS");
     // settlement_enabled() 要求 legacy 字段非空（dapv 模式下不消费，仅门控）。
     let legacy_addr = std::env::var("STARKNET_SETTLEMENT_ADDRESS").unwrap_or_else(|_| dual_placeholder());
 
@@ -878,12 +878,12 @@ async fn sepolia_settle_smoke() {
 
     // 2. 全部参与者重映射到 operator：链上筹码净零变动，零余额账户可结算。
     let op_felt = Felt::from_hex(&op_addr).expect("operator felt");
-    let op_ff = super::submit::felt_to_ff(&op_felt);
+    let op_ff = op_felt;
     let creator: poker_l1::Address = [0xC0; 20];
     let p1: poker_l1::Address = [0x11; 20];
     let p2: poker_l1::Address = [0x22; 20];
     let wallet_map = vec![(p1, op_ff), (p2, op_ff), (creator, op_ff)];
-    let action_log_digest = Ff::from(0xA11C3Du64);
+    let action_log_digest = starknet_crypto::Felt::from(0xA11C3Du64);
     let settlement =
         super::submit::settle_hand(&mirror, Some(creator), &wallet_map, action_log_digest, &[])
             .expect("settlement rebuild with operator remap");
@@ -892,10 +892,8 @@ async fn sepolia_settle_smoke() {
     // 3. 初始化全局 chain（与 main.rs 同一入口；dapv/linear 模式）。
     let config = super::config::StarknetConfig {
         rpc_url: rpc.clone(),
-        chain_id: "SN_SEPOLIA".into(),
         operator_address: op_addr.clone(),
         operator_private_key: op_key.clone(),
-        strk_address: strk_addr.clone(),
         vault_address: vault_addr.clone(),
         settlement_address: legacy_addr,
         dual_settlement_address: dual_addr.clone(),
@@ -906,8 +904,7 @@ async fn sepolia_settle_smoke() {
         prover_work_dir: "/tmp/zgame-prover".into(),
         auth_strict: false,
         treasury_address: op_addr.clone(),
-        rake_bps: 500,
-        rake_cap: 1_000,
+        table_registry_address: String::new(),
     };
     let chain = super::init(config);
     let operator = chain.operator().await.expect("operator account");
@@ -1004,4 +1001,522 @@ fn provider_of(rpc: &str) -> starknet::providers::JsonRpcClient<starknet::provid
 
 fn dual_placeholder() -> String {
     std::env::var("STARKNET_DUAL_SETTLEMENT_ADDRESS").unwrap_or_default()
+}
+
+// =============================================================================
+// 链运行时权威 e2e（Phase 2b 目标入口 TableRuntime）
+//
+// 一手完整牌局**只经过链运行时门面**驱动：create/join（签名认证）→ deck
+// 注入 → DealHole/Flop/Turn/River/Showdown reveal（签名提交，含确定性的
+// 乱序提前提交——入口队列持有 + 冲刷消化）→ betting（签名提交）→ 派奖。
+// 断言：签名防篡改/防重放、乱序命令不丢（fail-closed 收尾）、ProveTask
+// 收集、结算计划派生与守恒。
+// =============================================================================
+
+mod runtime_authority_e2e {
+    use super::*;
+    use poker_l1::contracts::texas_poker::runtime::caller_id;
+    use poker_l1::contracts::texas_poker::runtime::dispatch::{selectors, tx_message_hash};
+    use poker_l1::contracts::texas_poker::runtime::table_runtime::{
+        CallerIdentity, Submission, TableRuntime,
+    };
+    use poker_l1::contracts::texas_poker::runtime::dispatch::{
+        CreateTableArgs, JoinTableArgs, SeatIndexArgs, SubmitRevealTokensArgs,
+    };
+    use poker_l1::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+    use poker_l1::contracts::texas_poker::state_machine::normalize_until_blocked;
+    use poker_l1::contracts::texas_poker::types::{
+        CipherDeck, SeatMask, ShuffleState,
+    };
+    use poker_l1::object_model::ObjectID;
+    use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript as RtPfT;
+
+    /// 测试玩家钱包：Starknet felt hex（寻址）+ **随机会话密钥**
+    /// （授权锚——P1-2 会话委托：地址派生只用于寻址，交易签名按座位
+    /// 登记的会话公钥验证）。会话钥在 join 时随 JoinTableArgs 登记，
+    /// 对应生产路径中 vault `set_session_tx_pk[_for]` 核验后的放行。
+    struct RtWallet {
+        wallet: String,
+        address: [u8; 20],
+        session_sk: poker_protocol::crypto::types::Scalar,
+        session_pk: poker_l1::signature::TaggedPubkey,
+    }
+
+    impl RtWallet {
+        fn new(seed_byte: u8) -> Self {
+            use poker_protocol::crypto::curve::CurvePoint;
+            let wallet = format!("0x{:064x}", (seed_byte as u64) * 0x0100_0000_0000_0001);
+            let address = caller_id::wallet_to_address(&wallet).expect("test wallet parses");
+            // 跨 crate 对拍：poker_l1 权威公式与 texas addr_from_starknet 同源。
+            debug_assert_eq!(
+                super::super::mirror::TableMirror::addr_from_starknet(&wallet),
+                Some(address)
+            );
+            // 随机会话密钥（与钱包地址零派生关系——授权与寻址分离）。
+            let session_sk = poker_protocol::crypto::types::hash_to_scalar(&[
+                seed_byte, 0x5E, 0x55, 0x10, 0xCE
+            ]);
+            let raw = (poker_protocol::crypto::types::base_g() * session_sk)
+                .compress()
+                .as_ref()
+                .to_vec();
+            let session_pk = poker_l1::signature::TaggedPubkey::new(
+                poker_l1::signature::SignatureScheme::Stark,
+                poker_l1::signature::CURRENT_VERSION,
+                raw,
+            )
+            .expect("session pk tagged");
+            Self { wallet, address, session_sk, session_pk }
+        }
+
+        fn identity(&self) -> CallerIdentity {
+            CallerIdentity::from_wallet(&self.wallet).expect("test wallet parses")
+        }
+
+        fn sign(&self, msg_hash: &[u8; 32]) -> Vec<u8> {
+            poker_l1::signature::stark_scheme::sign(&self.session_sk, msg_hash).to_vec()
+        }
+    }
+
+    fn submission(
+        wallet: &RtWallet,
+        block_timestamp: u64,
+        selector: [u8; 32],
+        args: Vec<u8>,
+        nonce: u64,
+    ) -> Submission {
+        Submission {
+            wallet: wallet.wallet.clone(),
+            block_timestamp,
+            selector,
+            args,
+            signature: vec![],
+            nonce,
+        }
+    }
+
+    /// VM 当前 reveal 窗口中该座位待提交的密文（canonical 顺序）——
+    /// 与 TableMirror::pending_reveal_ciphertexts 同语义（直接在 VM 表上计算）。
+    fn pending_ciphertexts(
+        table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
+        seat_index: u8,
+    ) -> Result<Vec<ZgCt>, String> {
+        use poker_l1::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN;
+        use poker_l1::contracts::texas_poker::types::RevealTarget;
+        let Some(state) = table.reveal_token_state() else {
+            return Err("reveal phase is NONE".into());
+        };
+        let mut out = Vec::new();
+        for a in &state.assignments {
+            if a.pending_mask & (1u16 << seat_index) != 0 {
+                let ct = if table.reveal_phase() == REVEAL_PHASE_SHOWDOWN {
+                    let RevealTarget::Hole { seat_index: owner, card_slot } = a.target else {
+                        return Err("showdown assignment must target hole".into());
+                    };
+                    table
+                        .deck_state
+                        .owner_readable_hole_cards
+                        .get(owner, card_slot)
+                        .map(|p| p.full_ciphertext)
+                        .ok_or_else(|| "showdown partial ledger missing".to_string())?
+                } else {
+                    *table
+                        .deck_state
+                        .encrypted
+                        .get(a.encrypted_card_index as usize)
+                        .ok_or_else(|| "reveal card index out of range".to_string())?
+                };
+                out.push(super::super::mirror::conv::ciphertexts(std::slice::from_ref(
+                    &poker_protocol::crypto::ElGamalCiphertext { c1: ct.c1, c2: ct.c2 },
+                ))
+                .expect("ct bridge")
+                .remove(0));
+            }
+        }
+        Ok(out)
+    }
+
+    /// 签名一条提交（tx_message_hash 与 runtime 同公式——客户端契约）。
+    fn sign_submission(
+        wallet: &RtWallet,
+        table_id: &ObjectID,
+        sub: &Submission,
+    ) -> Submission {
+        let hash = tx_message_hash(
+            377,
+            table_id,
+            &wallet.address,
+            &sub.selector,
+            &sub.args,
+            sub.nonce,
+        );
+        let mut signed = sub.clone();
+        signed.signature = wallet.sign(&hash);
+        signed
+    }
+
+    #[test]
+    fn runtime_full_hand_signed_out_of_order_e2e() {
+        let creator = RtWallet::new(200);
+        let w1 = RtWallet::new(201);
+        let w2 = RtWallet::new(202);
+
+        // ---- 客户端 ceremony：join_game_and_shuffle → 终局 deck ----
+        let sk1 = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
+        let sk2 = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
+        let client1 = ClientPlayer { sk: sk1.clone(), pk: <DefaultCurve as Curve>::base_g() * &sk1 };
+        let client2 = ClientPlayer { sk: sk2.clone(), pk: <DefaultCurve as Curve>::base_g() * &sk2 };
+        let mut game = MentalPokerGame::new(poker_protocol::z_poker::GameConfig {
+            num_players: 2,
+            cards_per_player: 2,
+            community_cards: 5,
+        });
+        game_layer_join(&mut game, &client1);
+        game_layer_join(&mut game, &client2);
+        let pk_hex1 = hex_pk(&client1.pk);
+        let pk_hex2 = hex_pk(&client2.pk);
+        for _ in 0..2 {
+            game.deal_to_player(&pk_hex1, 1).expect("deal p1");
+            game.deal_to_player(&pk_hex2, 1).expect("deal p2");
+        }
+        let game_deck: Vec<ZgCt> = game.deck_encrypted.clone();
+        let vm_deck = super::super::mirror::conv::ciphertexts(&game_deck).expect("deck bridge");
+
+        // ---- 链运行时：开桌 + host 背书入座（P1-2 修复：签名通道不接受
+        //     join——未入座无验签锚；join 由服务端完成 vault 登记核验后
+        //     经 submit_unsigned 放行，此处直接模拟该路径）----
+        let table = poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
+            ObjectID::new([0x5A; 20], 77),
+            "rt-e2e".to_string(),
+            creator.address,
+            4,
+            10,
+            20,
+        );
+        let mut rt = TableRuntime::new(table, 377);
+        let mut now: u64 = 1_778_000_000_000;
+        // 按账户 nonce（P1-1）：两家各自从 1 计数——全局命名空间下必碰撞。
+        let mut nonces = [1u64, 1u64];
+        let table_id = rt.table.id;
+
+        rt.submit_unsigned(
+            creator.identity(),
+            now,
+            &selectors::create_table(),
+            &borsh::to_vec(&CreateTableArgs {
+                name: "rt-e2e".to_string(),
+                max_players: 4,
+                small_blind: 10,
+                big_blind: 20,
+                rit_mode: poker_l1::contracts::texas_poker::constants::RIT_MODE_DISABLED,
+            })
+            .expect("args"),
+        )
+        .expect("create_table");
+
+        // 负路径 1：自洽的签名 join 必须被拒（P1-2 回归）——未入座钱包
+        // 没有验签锚，任何持钥者不得为任意钱包构造冒名入座。
+        let join1_args = borsh::to_vec(&JoinTableArgs {
+            player: w1.address,
+            buy_in: 1000,
+            pk: super::super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(
+                client1.pk,
+            ))
+            .expect("pk bridge"),
+            tx_pk: w1.session_pk.clone(),
+            pk_ownership_proof: poker_l1::contracts::texas_poker::utils::create_pk_ownership_proof(
+                &sk1,
+                &<DefaultCurve as Curve>::Scalar::random(&mut OsRng),
+            )
+            .expect("ownership proof"),
+        })
+        .expect("join args");
+        let signed_join = sign_submission(
+            &w1,
+            &table_id,
+            &submission(&w1, now, selectors::join_table(), join1_args.clone(), nonces[0]),
+        );
+        let join_err = rt
+            .submit_signed(signed_join)
+            .expect_err("signed join must be rejected — joins are host-endorsed");
+        assert!(
+            format!("{join_err}").contains("no registered session tx public key"),
+            "join rejection reason, got: {join_err}"
+        );
+        assert!(rt.pending().is_empty(), "auth failure must not enqueue");
+
+        // 正路径：host 背书入座（vault 核验后的放行路径，P1-2(a)）。
+        rt.submit_unsigned(w1.identity(), now, &selectors::join_table(), &join1_args)
+            .expect("join p1 (host-endorsed after vault verification)");
+        let join2_args = borsh::to_vec(&JoinTableArgs {
+            player: w2.address,
+            buy_in: 1000,
+            pk: super::super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(
+                client2.pk,
+            ))
+            .expect("pk bridge"),
+            tx_pk: w2.session_pk.clone(),
+            pk_ownership_proof: poker_l1::contracts::texas_poker::utils::create_pk_ownership_proof(
+                &sk2,
+                &<DefaultCurve as Curve>::Scalar::random(&mut OsRng),
+            )
+            .expect("ownership proof"),
+        })
+        .expect("join args");
+        rt.submit_unsigned(w2.identity(), now, &selectors::join_table(), &join2_args)
+            .expect("join p2 (host-endorsed)");
+
+        // 负路径 2：签名被篡改必须拒绝（已入座 w1，锚存在，纯粹验签失败）。
+        let tamper_msg = tx_message_hash(
+            377,
+            &table_id,
+            &w1.address,
+            &[0xAA; 32],
+            &[0xBB; 4],
+            nonces[0],
+        );
+        let mut bad = submission(&w1, now, [0xAA; 32], vec![0xBB; 4], nonces[0]);
+        bad.signature = vec![0u8; 64];
+        bad.signature[63] ^= 0x01;
+        let _ = tamper_msg;
+        assert!(
+            rt.submit_signed(bad).is_err(),
+            "tampered signature must be rejected"
+        );
+        assert!(rt.pending().is_empty(), "auth failure must not enqueue");
+
+        // 负路径 3：跨会话钥顶替——w2 的会话钥签名冒充 w1（锚只认 w1
+        // 座位登记的会话钥——身份绑定在座位登记，不在公开派生）。
+        let forged_hash = tx_message_hash(
+            377,
+            &table_id,
+            &w1.address,
+            &[0xAA; 32],
+            &[0xBB; 4],
+            nonces[0],
+        );
+        let forged_sig = w2.sign(&forged_hash);
+        let forged = Submission {
+            wallet: w1.wallet.clone(),
+            block_timestamp: now,
+            selector: [0xAA; 32],
+            args: vec![0xBB; 4],
+            signature: forged_sig,
+            nonce: nonces[0],
+        };
+        assert!(
+            rt.submit_signed(forged).is_err(),
+            "cross-session substitution must be rejected"
+        );
+        assert!(rt.pending().is_empty(), "auth failure must not enqueue");
+
+        // ---- deck 注入 bootstrap（方案A：洗牌链在客户端完成）----
+        {
+            let t = &mut rt.table;
+            for seat in t.seats.iter_mut() {
+                seat.promote_waiting();
+            }
+            t.button = 0;
+            t.rake_mode = RAKE_MODE_PERCENTAGE;
+            t.rake_bps = 500;
+            t.rake_cap = 1_000;
+            let cards: [poker_protocol::crypto::ElGamalCiphertext; 52] =
+                vm_deck.try_into().expect("52 cards");
+            t.deck_state.encrypted = CipherDeck::Active(Box::new(cards));
+            t.deck_state.cards_dealt = 0;
+            t.deck_state.owner_readable_hole_cards.clear();
+            let mut contributor_mask: SeatMask = 0;
+            for idx in 0..usize::from(t.max_players) {
+                if super::super::mirror::seat_player_addr(&t.seats[idx]).is_some() {
+                    contributor_mask |= 1u16 << idx;
+                }
+            }
+            t.deck_state.contributor_mask = contributor_mask;
+            t.enter_initial_shuffling(ShuffleState { pending_mask: 0, completed_mask: 0 }, now)
+                .expect("enter shuffling");
+            let mut evts = Vec::new();
+            normalize_until_blocked(t, now, &mut evts).expect("normalize");
+            assert!(t.reveal_token_state().is_some(), "DealHole window must open");
+        }
+
+        // ---- 主循环：reveal（签名）+ betting（签名），turn 揭示**提前乱序提交** ----
+        let clients = [&client1, &client2];
+        let wallets = [&w1, &w2];
+        let mut early_turn_submitted = false;
+        // 最近一笔已提交的签名交易（结尾做重放负路径；bet/reveal 两种
+        // 都会立即应用或入队——重放检查在 nonce 水位前置，两种都覆盖）。
+        let mut last_applied_signed: Option<Submission> = None;
+        let mut steps = 0;
+        loop {
+            steps += 1;
+            assert!(steps < 200, "runtime hand did not terminate");
+            now += 1_000;
+            rt.flush_pending();
+
+            // 乱序容忍：flop 已揭示（board 3）、turn 窗口未开——提前提交
+            // turn 牌（deck[7]）的 reveal，必须入队等待而非失败。
+            if !early_turn_submitted && rt.table.community_cards.to_vec().len() == 3 {
+                let turn_ct = *rt
+                    .table
+                    .deck_state
+                    .encrypted
+                    .get(7)
+                    .expect("turn ciphertext");
+                for (seat, client) in clients.iter().enumerate() {
+                    let ct = super::super::mirror::conv::ciphertexts(std::slice::from_ref(
+                        &poker_protocol::crypto::ElGamalCiphertext { c1: turn_ct.c1, c2: turn_ct.c2 },
+                    ))
+                    .expect("ct bridge")
+                    .remove(0);
+                    let token = ct.gen_reveal_token(&client.sk);
+                    let proof = poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof::prove(
+                        &client.sk,
+                        &client.pk,
+                        &ct,
+                        &token,
+                        &mut OsRng,
+                        &mut RtPfT::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
+                    );
+                    let args = borsh::to_vec(&SubmitRevealTokensArgs {
+                        seat_index: seat as u8,
+                        reveal_tokens: vec![super::super::mirror::conv::ec_point(
+                            &poker_protocol::crypto::types::ECPoint(token),
+                        )
+                        .expect("token bridge")],
+                        proofs: vec![super::super::mirror::conv::reveal_token_proof(&proof)
+                            .expect("proof bridge")],
+                    })
+                    .expect("reveal args");
+                    rt.submit_signed(sign_submission(
+                        wallets[seat],
+                        &table_id,
+                        &submission(wallets[seat], now, selectors::submit_player_reveal_tokens(), args, nonces[seat]),
+                    ))
+                    .expect("early turn reveal must be held, not rejected");
+                    nonces[seat] += 1;
+                }
+                assert_eq!(rt.pending().len(), 2, "early turn reveals must sit in the queue");
+                early_turn_submitted = true;
+                continue;
+            }
+
+            if rt.table.reveal_token_state().is_some() {
+                let reveal_state = rt.table.reveal_token_state().unwrap();
+                let min_pending_seat = reveal_state
+                    .assignments
+                    .iter()
+                    .filter(|a| !a.is_ready())
+                    .filter_map(|a| (0u8..2).find(|s| a.pending_mask() & (1u16 << s) != 0))
+                    .min();
+                let Some(seat) = min_pending_seat else {
+                    rt.flush_pending();
+                    if rt.table.reveal_token_state().is_none() {
+                        continue;
+                    }
+                    break;
+                };
+                let client = clients[seat as usize];
+                let targets = pending_ciphertexts(&rt.table, seat).expect("pending targets");
+                let mut tokens = Vec::new();
+                let mut proofs = Vec::new();
+                for ct in &targets {
+                    let token = ct.gen_reveal_token(&client.sk);
+                    let proof = poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof::prove(
+                        &client.sk,
+                        &client.pk,
+                        ct,
+                        &token,
+                        &mut OsRng,
+                        &mut RtPfT::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
+                    );
+                    tokens.push(
+                        super::super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(
+                            token,
+                        ))
+                        .expect("token bridge"),
+                    );
+                    proofs.push(
+                        super::super::mirror::conv::reveal_token_proof(&proof).expect("proof bridge"),
+                    );
+                }
+                let args = borsh::to_vec(&SubmitRevealTokensArgs {
+                    seat_index: seat,
+                    reveal_tokens: tokens,
+                    proofs,
+                })
+                .expect("reveal args");
+                let signed = sign_submission(
+                    wallets[seat as usize],
+                    &table_id,
+                    &submission(wallets[seat as usize], now, selectors::submit_player_reveal_tokens(), args, nonces[seat as usize]),
+                );
+                rt.submit_signed(signed.clone()).expect("reveal submit");
+                last_applied_signed = Some(signed);
+                nonces[seat as usize] += 1;
+                continue;
+            }
+            if let Some(actor) = rt.table.current_turn_option() {
+                let other = 1u8 - actor;
+                let facing_bet = rt.table.seats[actor as usize].total_bet()
+                    < rt.table.seats[other as usize].total_bet();
+                let selector = if facing_bet { selectors::call() } else { selectors::check() };
+                let args = borsh::to_vec(&SeatIndexArgs { seat_index: actor }).expect("bet args");
+                let signed = sign_submission(
+                    wallets[actor as usize],
+                    &table_id,
+                    &submission(wallets[actor as usize], now, selector, args, nonces[actor as usize]),
+                );
+                rt.submit_signed(signed.clone()).expect("bet submit");
+                last_applied_signed = Some(signed);
+                nonces[actor as usize] += 1;
+                continue;
+            }
+            if rt.table.community_cards.to_vec().len() == 5 {
+                break;
+            }
+            panic!(
+                "stuck: no reveal, no betting turn, board {} cards",
+                rt.table.community_cards.to_vec().len()
+            );
+        }
+
+        // ---- 断言：牌面完整、乱序命令全部消化、任务已收集 ----
+        assert_eq!(rt.table.community_cards.to_vec().len(), 5, "board reaches river");
+        assert!(early_turn_submitted, "out-of-order case must have been exercised");
+        rt.finish().expect("pending queue must be fully digested (fail-closed)");
+
+        // 负路径 4：已应用签名交易的重放必须被按账户 nonce 水位拒绝
+        //（StaleTxNonce——含 "replay"，队列据此死信不重试）。
+        let replay = last_applied_signed.expect("at least one signed submission was made");
+        let replay_err = rt
+            .submit_signed(replay)
+            .expect_err("replay of an applied tx must be rejected");
+        assert!(
+            format!("{replay_err}").contains("replay"),
+            "replay must fail at the per-account nonce guard, got: {replay_err}"
+        );
+
+        assert!(
+            rt.tasks().len() >= 8,
+            "reveal/bet tasks must be collected for the proof layer, got {}",
+            rt.tasks().len()
+        );
+
+        // ---- 派奖前：结算计划派生 + 守恒 ----
+        let plan = poker_l1::contracts::texas_poker::settlement::derive_settlement_plan(&rt.table)
+            .expect("settlement plan");
+        let gross: u64 = rt.table.seats.iter().map(|s| s.total_bet()).sum();
+        let awards: u64 = plan.awards.iter().sum();
+        assert_eq!(awards + plan.rake, gross, "awards + rake must conserve the pot");
+
+        // ---- 派奖（服务器驱动 advance_deadline，时钟越过展示期）----
+        rt.submit_unsigned(
+            creator.identity(),
+            now + 10_000,
+            &selectors::advance_deadline(),
+            &Vec::new(),
+        )
+        .expect("payout advance");
+        assert_eq!(rt.table.pot, 0, "pot must be cleared after payout");
+    }
 }

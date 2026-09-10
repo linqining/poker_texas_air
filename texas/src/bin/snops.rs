@@ -8,6 +8,10 @@ use starknet::providers::{JsonRpcClient, Provider};
 use starknet::signers::{LocalWallet, SigningKey};
 use std::sync::Arc;
 
+/// 默认 UDC（Universal Deployer Contract）地址：主网原始 UDC（与旧
+/// `ContractFactory::new` 行为一致，starknet-contract 0.16 `UdcSelector::Legacy`）。
+const DEFAULT_UDC: &str = "0x041a78e741e5af2fec34b695679bc6891742439f7afb8484ecd7766661ad02bf";
+
 #[derive(Parser)]
 #[command(name = "snops")]
 struct Cli {
@@ -36,6 +40,9 @@ enum Cmd {
     Deploy {
         #[arg(long)] class_hash: String,
         #[arg(long, default_value = "")] calldata: String,
+        /// UDC（Universal Deployer Contract）地址，须与实际部署/预测地址用同一值。
+        #[arg(long, default_value = DEFAULT_UDC)]
+        udc: String,
     },
     Invoke {
         #[arg(long)] contract: String,
@@ -224,8 +231,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("CLASS_HASH={class_hash:#x}");
                 println!("TX={:#x}", res.transaction_hash);
             }
-            Cmd::Deploy { class_hash, calldata } => {
-                let factory = ContractFactory::new(felt(&class_hash), account);
+            Cmd::Deploy { class_hash, calldata, udc } => {
+                // 单一 UDC 地址贯穿"实际部署 + 预测地址"两处，避免两处各写一份漂移。
+                let udc = Felt::from_hex(&udc)?;
+                let factory = ContractFactory::new_with_udc(
+                    felt(&class_hash),
+                    account,
+                    starknet::contract::UdcSelector::Custom(udc),
+                );
                 let cd = parse_args_mixed(&calldata);
                 let salt = Felt::ZERO;
                 let res = factory.deploy_v3(cd.clone(), salt, true).send().await?;
@@ -236,9 +249,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &starknet::core::utils::UdcUniqueness::Unique(
                         starknet::core::utils::UdcUniqueSettings {
                             deployer_address: felt(&cli.addr),
-                            udc_contract_address: Felt::from_hex(
-                                "0x041a78e741e5af2fec34b695679bc6891742439f7afb8484ecd7766661ad02bf",
-                            )?,
+                            udc_contract_address: udc,
                         },
                     ),
                     &cd,

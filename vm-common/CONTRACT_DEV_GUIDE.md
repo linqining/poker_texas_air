@@ -300,10 +300,10 @@ pub struct PrecompileVersion {
 
 ### 7.1 在 poker_l1 添加业务合约
 
-1. 在 `poker_l1/src/vm/contracts/` 创建新文件（如 `my_contract.rs`）。
+1. 在 `poker_l1/src/contracts/` 创建新文件（如 `my_contract.rs`）。
 2. 实现 `Precompile` trait（`poker_l1::vm::precompile::Precompile`，含 `call()`）。
-3. 在 `poker_l1/src/vm/contracts/mod.rs` 注册模块。
-4. 在 `poker_l1/src/vm/contracts/dispatch.rs` 添加方法选择器（若需要方法路由）。
+3. 在 `poker_l1/src/contracts/mod.rs` 注册模块。
+4. 在 `poker_l1/src/contracts/dispatch.rs` 添加方法选择器（若需要方法路由）。
 5. 在 `poker_l1/src/vm/precompile.rs` 的 `PrecompileRegistry` 注册新合约。
 
 ### 7.2 在 vm-common 更新目录
@@ -380,7 +380,7 @@ let id = entry.id_bytes;
 | `poker_zkvm/src/syscalls/gas_strategy.rs` | ZkvmGasStrategy 实现（6 测试） |
 | `poker_l1/tests/gas_strategy_consistency.rs` | 跨 VM GasStrategy 一致性测试（8 测试） |
 | `poker_l1/tests/crypto_consistency.rs` | 跨 VM CryptoProvider 一致性测试（10 测试） |
-| `poker_l1/src/vm/contracts/` | 17 个业务合约实现 |
+| `poker_l1/src/contracts/` | 17 个业务合约实现 |
 | `poker_l1/src/vm/precompile.rs` | PrecompileRegistry（运行时分派） |
 
 ---

@@ -7,6 +7,15 @@ pub mod crypto;
 pub mod zk_shuffle;
 pub mod z_poker;
 
+/// 2026-09 Poseidon epoch：生产 transcript 域标签（felt 直通 ≤31B）与
+/// 语句摘要压缩函数门面。poker_l1 / texas / z_poker / 证明器统一从这里
+/// 引用，禁止散落硬编码标签（历史教训：leave 域分裂）。
+pub mod transcript_domains {
+    pub use poker_protocol_core::transcript_domains::*;
+}
+pub use poker_protocol_core::poseidon_bytes_digest;
+pub use poker_protocol_core::poseidon_points_commitment;
+
 /// BN254 direct-sigma settlement route: canonical card derivation and curve
 /// re-exports (docs/design/DUAL_PROOF_PROTOCOL.md). Curve-independent of protocol
 /// features — the sigma proofs themselves live in poker-protocol-proofs.
@@ -24,7 +33,9 @@ pub mod precompile_abi {
     pub use poker_protocol_abi::*;
 }
 
-#[cfg(all(feature = "stark-curve", feature = "borsh"))]
+// Plan D 后 Stark 曲线是唯一世界，`stark-curve` feature 恒真（保留声明
+// 仅为兼容旧 feature 名）；不再 cfg 门控。
+#[cfg(feature = "borsh")]
 pub mod precompile;
 
 #[cfg(feature = "borsh")]

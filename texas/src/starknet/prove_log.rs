@@ -1,45 +1,22 @@
-//! 手牌证明输入记录（Phase 2，TODO #20）。
+//! 手牌证明事实记录（单一状态架构）。
 //!
-//! 取代常驻 TableMirror（第二本账）：游戏层在**接受动作的同一条代码路径**
-//! 上把已验证输入追加进每手 [`HandProofLog`]（join 缓冲 → HandStart 快照 →
-//! reveal/下注/强制弃牌命令）。结算时 `hooks::on_hand_complete` 把日志克隆
-//! 出锁，由构建器（mirror.rs 的 TableMirror）**一次性**重放出 ProveTask 链
-//! 与 pre-payout 快照——VM 不再是持久同步副本，失步类 bug（2026-09-04
-//! hand 2 未结算的 insufficient-stack 根因）整类消失。
+//! 职责只剩两件：
+//! 1. **HandStart 快照**（deck 终局时刻的参与者/公钥/所有权证明/deck）——
+//!    实时 VM 镜像（`shadow::bootstrap`）的开局引导输入，以及结算时
+//!    钱包重映射与 snip36 动作签名材料的参与者来源；
+//! 2. **游戏层对账事实**（终局投入快照、逐笔派奖、台费）——结算时
+//!    `cross_check_snapshot` / `cross_check_deltas` 的比对基准。
 //!
-//! 记录纪律（与旧 mirror 单点派发相同）：
-//! - 只在游戏层**接受**动作后记录（非法输入到不了这里）；
-//! - reveal 令牌按 (pk, 令牌集) 去重（客户端幂等重试不重复记录）；
-//! - auto 代打（超时 fold/check/call）与手动动作走同一 accept 点，天然覆盖。
+//! 历史上的"已接受命令日志"（HandCommand 流 + 结算时 `build_from_log`
+//! 重放）已随单一状态重构删除：VM 状态只存在一份，就是实时镜像——
+//! 每个接受点同步 dispatch，结算直接取用，不再有第二份重放表示。
 
-// 别名约定与 mirror.rs 相同：zgame poker_protocol → ptx 类型桥。
+// 别名约定：zgame poker_protocol → ptx 类型桥（与 mirror.rs 相同）。
 use poker_protocol as ptx_protocol;
 pub use ptx_protocol::crypto::types::ECPoint as PtxECPoint;
 pub use ptx_protocol::crypto::ElGamalCiphertext as PtxElGamalCiphertext;
 
 use crate::pokergame::table::Table;
-
-/// 单条已接受的手牌命令（重放输入）。
-#[derive(Debug, Clone)]
-pub enum HandCommand {
-    /// 玩家揭牌令牌（DealHole / flop / turn / river / showdown 同一通道）。
-    RevealTokens {
-        /// 玩家 pk（游戏层座位标识，hex）。
-        pk_hex: String,
-        /// 客户端原始令牌（转换在构建时进行，与旧 mirror 接受点等价）。
-        tokens: Vec<poker_protocol::z_poker::protocol::RevealToken>,
-    },
-    /// 下注动作（含 auto 代打——同一 accept 点）。
-    Bet {
-        pk_hex: String,
-        /// "fold" | "check" | "call" | "raise"。
-        action: &'static str,
-        /// raise 语义：加注后本轮总下注额。
-        total_bet: Option<u64>,
-    },
-    /// 手牌进行中玩家被移除（超时踢出/离桌）的强制弃牌。
-    ForceFold { wallet: String },
-}
 
 /// HandStart 快照：deck 终局时刻的手牌静态事实（全部在盲注扣除前采集）。
 #[derive(Debug, Clone)]
@@ -57,14 +34,18 @@ pub struct HandStartData {
     pub deck: Vec<PtxElGamalCiphertext>,
 }
 
-/// 一名参与者（join 重放输入）。
+/// 一名参与者（开局引导输入：join 重放 + 结算记账户头）。
 #[derive(Debug, Clone)]
 pub struct HandParticipant {
     /// 游戏座位号（动作日志条目按它映射到本结构的 pk）。
     pub seat: u32,
+    /// 会话交易公钥（P1-2 会话委托，join 接受点经 vault 登记核验后的
+    /// 32B Stark 压缩点；None = 未登记——VM join 落未登记哨兵，签名路径
+    /// fail-closed，mirror 注入不受影响）。
+    pub tx_pk: Option<poker_l1::signature::TaggedPubkey>,
     /// 钱包 felt（hex，全精度——结算记账户头）。
     pub wallet: String,
-    /// 玩家 pk hex（游戏层座位标识；命令按它匹配座位）。
+    /// 玩家 pk hex（游戏层座位标识）。
     pub pk_hex: String,
     /// mental-poker ElGamal 公钥（ptx ECPoint）。
     pub pk: PtxECPoint,
@@ -75,20 +56,20 @@ pub struct HandParticipant {
     pub stack: u64,
 }
 
-/// 每手证明输入日志（挂在游戏 Table 上，`serde(skip)`）。
+/// 每手证明事实（挂在游戏 Table 上，`serde(skip)`）。
 #[derive(Debug, Clone, Default)]
 pub struct HandProofLog {
     /// HandStart 快照（deck 终局时写入；None = 本手未开局，无可证明结算）。
     pub start: Option<HandStartData>,
-    /// 已接受命令（时序即重放序）。
-    pub commands: Vec<HandCommand>,
-    /// reveal 去重键（pk + 令牌集哈希）——客户端幂等重试不重复记录。
-    seen_reveals: std::collections::HashSet<u64>,
     /// 本手终局投入快照（wallet → total_bet）——派彩前采集。
     /// `win_hand`（seat.rs）派彩时会清零赢家自己的 `total_bet`，而
     /// `take_settle_input` 在派彩后执行：不快照则摊牌手的对账恒为
     /// "vm 累计 vs game 0" 必拒（2026-09-07 线上两手复现）。
     pub final_total_bets: Option<Vec<(String, u64)>>,
+    /// 本手派奖记录（wallet → 净得金额，含边池/主池多次累加）——
+    /// 派奖接受点（win_hand 调用处）采集。与 final_total_bets 一起
+    /// 构成游戏层净输赢对账基准：game_delta = Σpayouts − final_total_bet。
+    pub payouts: Vec<(String, u64)>,
 }
 
 impl HandProofLog {
@@ -103,21 +84,9 @@ impl HandProofLog {
                 small_blind: 10,
                 deck: Vec::new(),
             }),
-            commands: Vec::new(),
-            seen_reveals: std::collections::HashSet::new(),
             final_total_bets: None,
+            payouts: Vec::new(),
         }
-    }
-
-    fn hash_reveal(pk_hex: &str, tokens: &[poker_protocol::z_poker::protocol::RevealToken]) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        pk_hex.hash(&mut h);
-        for t in tokens {
-            // RevealToken 未实现 Hash/Borsh：Debug 表示足以做去重键。
-            format!("{t:?}").hash(&mut h);
-        }
-        h.finish()
     }
 }
 
@@ -125,17 +94,34 @@ impl HandProofLog {
 /// 仅是 socket 层与下一次 HandStart 之间的交接缓冲，不是状态账本
 /// （上一手未入局的残留会被 HandStart 的"参与者过滤"自然淘汰）。
 static JOIN_BUFFER: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<(u32, String), (String, Vec<u8>)>>,
+    std::sync::Mutex<
+        std::collections::HashMap<(u32, String), (String, Vec<u8>, Option<Vec<u8>>)>,
+    >,
 > = std::sync::OnceLock::new();
 
-fn join_buffer() -> &'static std::sync::Mutex<std::collections::HashMap<(u32, String), (String, Vec<u8>)>> {
+fn join_buffer() -> &'static std::sync::Mutex<
+    std::collections::HashMap<(u32, String), (String, Vec<u8>, Option<Vec<u8>>)>,
+> {
     JOIN_BUFFER.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 /// SIT_DOWN / join 成功后记录 pk 所有权证明（下一手 HandStart 消费）。
-pub fn record_join(table_id: u32, wallet: &str, pk_hex: &str, proof_bytes: Vec<u8>) {
+/// `tx_pk`：**已核验**的会话交易公钥（32B 压缩点；None = 未登记/未声明，
+/// 该参与者的 VM 层签名路径未激活——mirror 注入不受影响，runtime 签名
+/// 路径 fail-closed）。核验在 join 接受点完成（vault
+/// `active_session_tx_pk` view 对拍），本函数只存结论。
+pub fn record_join(
+    table_id: u32,
+    wallet: &str,
+    pk_hex: &str,
+    proof_bytes: Vec<u8>,
+    tx_pk: Option<Vec<u8>>,
+) {
     if let Ok(mut g) = join_buffer().lock() {
-        g.insert((table_id, wallet.to_string()), (pk_hex.to_string(), proof_bytes));
+        g.insert(
+            (table_id, wallet.to_string()),
+            (pk_hex.to_string(), proof_bytes, tx_pk),
+        );
     }
 }
 
@@ -182,7 +168,7 @@ pub fn record_hand_start(table: &mut Table) {
         if seat.sitting_out || seat.is_waiting {
             continue;
         }
-        let Some((pk_hex, proof)) = joins.as_ref().and_then(|j| {
+        let Some((pk_hex, proof, tx_pk_bytes)) = joins.as_ref().and_then(|j| {
             j.get(&(table_id, player.wallet_address.0.clone())).cloned()
         }) else {
             tracing::warn!(
@@ -201,8 +187,17 @@ pub fn record_hand_start(table: &mut Table) {
                 break;
             }
         };
+        let tx_pk = tx_pk_bytes.and_then(|bytes| {
+            poker_l1::signature::TaggedPubkey::new(
+                poker_l1::signature::SignatureScheme::Stark,
+                poker_l1::signature::CURRENT_VERSION,
+                bytes,
+            )
+            .ok()
+        });
         plan.push((seat_id, HandParticipant {
             seat: seat_id,
+            tx_pk,
             wallet: player.wallet_address.0.clone(),
             pk_hex,
             pk,
@@ -237,10 +232,13 @@ pub fn record_hand_start(table: &mut Table) {
             small_blind: sb,
             deck,
         }),
-        commands: Vec::new(),
-        seen_reveals: std::collections::HashSet::new(),
         final_total_bets: None,
+        payouts: Vec::new(),
     };
+    // 实时 VM 镜像开局（单一状态表示的起点；镜像随桌挂载）。
+    if let Some(start) = table.hand_proof_log.start.as_ref() {
+        table.live_mirror = crate::starknet::shadow::bootstrap(table_id, start);
+    }
 }
 
 /// 派彩前快照终局投入（摊牌/fold-win 两条终局路径各调用一次；重复调用
@@ -264,57 +262,27 @@ pub fn record_final_bets(table: &mut Table) {
     table.hand_proof_log.final_total_bets = Some(bets);
 }
 
-/// reveal 令牌接受点（submit_reveal_tokens_for_pk 成功后）。
-pub fn record_reveal(table: &mut Table, pk_hex: &str, tokens: &[poker_protocol::z_poker::protocol::RevealToken]) {
-    if tokens.is_empty() {
-        return;
-    }
-    let log = &mut table.hand_proof_log;
-    if log.start.is_none() {
-        return; // 未开局（如重建桌后的迟到提交）
-    }
-    let key = HandProofLog::hash_reveal(pk_hex, tokens);
-    if !log.seen_reveals.insert(key) {
-        return; // 幂等重试
-    }
-    log.commands.push(HandCommand::RevealTokens {
-        pk_hex: pk_hex.to_string(),
-        tokens: tokens.to_vec(),
-    });
-}
-
-/// 下注动作接受点（betting.rs 各 handle_* 成功后；auto 代打同一路径）。
-pub fn record_bet(table: &mut Table, pk_hex: &str, action: &'static str, total_bet: Option<u64>) {
+/// 派奖接受点（determine_winner_by_ids / end_without_showdown 的
+/// win_hand 调用处；边池+主池多次派奖累加）。金额为净得（已扣台费）。
+pub fn record_payout(table: &mut Table, wallet: &str, amount: u64) {
     let log = &mut table.hand_proof_log;
     if log.start.is_none() {
         return;
     }
-    log.commands.push(HandCommand::Bet {
-        pk_hex: pk_hex.to_string(),
-        action,
-        total_bet,
-    });
+    log.payouts.push((wallet.to_string(), amount));
 }
 
-/// 手牌进行中移除玩家的强制弃牌接受点。
-pub fn record_force_fold(table: &mut Table, wallet: &str) {
-    let log = &mut table.hand_proof_log;
-    if log.start.is_none() {
-        return;
-    }
-    log.commands.push(HandCommand::ForceFold {
-        wallet: wallet.to_string(),
-    });
-}
-
-/// 结算输入：日志克隆 + 游戏层终局事实（对账基准）。
+/// 结算输入：HandStart 快照 + 游戏层终局事实（对账基准）。
 pub struct HandSettleInput {
     pub table_id: u32,
-    pub log: HandProofLog,
+    /// HandStart 快照（非 Optional：None 时 take_settle_input 直接返回 None）。
+    pub start: HandStartData,
     /// 游戏层事实（on_hand_complete 时刻）：summary.rake_collected。
     pub rake_collected: u64,
     /// 每座位的本手总投入（wallet hex → total_bet）。
     pub total_bets: Vec<(String, u64)>,
+    /// 本手派奖（wallet hex → 累计净得，净输赢对账的另一半）。
+    pub payouts: Vec<(String, u64)>,
     /// 已亮公共牌数。
     pub board_len: usize,
     /// 本手动作日志哈希（#18 Phase C 切片 1 起 = Poseidon 吸收链根，
@@ -327,10 +295,8 @@ pub struct HandSettleInput {
 
 /// on_hand_complete 时从游戏层提取结算输入（锁内仅克隆，重活全部在锁外）。
 pub fn take_settle_input(table: &Table) -> Option<HandSettleInput> {
-    if table.hand_proof_log.start.is_none() {
-        return None;
-    }
-    // 优先用派彩前快照（终局投入语义，与 VM 重放对账）；无快照（异常
+    let start = table.hand_proof_log.start.clone()?;
+    // 优先用派彩前快照（终局投入语义，与实时 VM 镜像对账）；无快照（异常
     // 路径/旧手）回退实时读取。
     let total_bets = table
         .hand_proof_log
@@ -353,12 +319,12 @@ pub fn take_settle_input(table: &Table) -> Option<HandSettleInput> {
     let action_log = window.to_vec();
     Some(HandSettleInput {
         table_id: table.summary.id,
-        log: table.hand_proof_log.clone(),
+        start,
         rake_collected: table.summary.rake_collected,
         total_bets,
+        payouts: table.hand_proof_log.payouts.clone(),
         board_len: table.mental_poker_game.list_revealed_community_cards().len(),
         action_log_digest,
         action_log,
     })
 }
-

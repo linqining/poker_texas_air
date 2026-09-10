@@ -3,8 +3,19 @@
 **预研隔离期已结束**：现为根 workspace 成员，位于
 `poker_contracts/hand-verify-native/`（2026-09-07 并入——与合约同居一库；
 构建产物在**仓库根 target/**，本目录无独立 target）。Cairo 侧证明程序在
-`cairo/src/`（由 proving-tool 的 prove-hand 编译，**不经 scarb**——合约
-编译器 2.11.4 与证明程序 corelib 2.19.4 是两套工具链，互不影响）。
+`cairo/src/`，由 proving-tool 的 prove-hand 编译（**不经 scarb**）。
+
+**dual 单源（2026-09-10 起）**：`cairo/src/dual/` 下的 `hand_verify.cairo`、
+`hand_batch_stark.cairo`、`bg_stark.cairo` 是指向 `poker_contracts/src/dual/`
+同名文件的**相对 symlink**——合约树是唯一可编辑源，证明侧零拷贝跟随（改
+dual 文件只改合约树那份；两编译器以同一程序哈希钉死等价）。两树仅两处
+**有意**差异：`dual.cairo` 模块清单（证明侧只声明 hand_verify 需要的三个
+mod，keccak/secp/fr/hand_batch 留在外面，避免 deprecated corelib 警告进
+可执行文件）与程序入口（`lib.cairo` / `recursion.cairo` vs scarb crate
+根）。公共源须保持在两套编译器——scarb 2.19.4（snforge）与 prove-hand
+（vendored cairo-lang 2.19.0-rc.0 + corelib-2.19.4）——的公共子集内，例如
+`Zero::is_zero(@a)` 显式形式（`a.is_zero()` 方法糖在 vendored RC 编译器下
+与 `Zeroable::is_zero` 二义）。
 
 ## 评估目标
 

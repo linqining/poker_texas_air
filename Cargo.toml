@@ -56,8 +56,12 @@ rayon = "1"
 proptest = "1"
 stwo = { version = "2.3", features = ["parallel", "prover"] }
 stwo-constraint-framework = { version = "2.3", features = ["prover"] }
-starknet-ff = { version = "0.3", features = ["serde"] }
-starknet-crypto = { version = "0.6", default-features = false, features = ["alloc"] }
+# 全仓统一 Felt 载体：starknet-crypto 0.8 的 Felt = starknet-types-core Felt
+# （与 starknet 0.17 / poker-protocol-core / hand-verify-native 同一类型实例），
+# 旧 ff wire 类型（0.3）已删除。Cargo.lock 中残留的 0.3 ff / 0.6 crypto 仅为
+# stwo 2.3 自身的传递依赖（其 Poseidon252MerkleHasher 哈希类型），与本仓代码无关。
+starknet-crypto = { version = "0.8", default-features = false, features = ["alloc"] }
+starknet-types-core = { version = "0.2", default-features = false }
 bincode = "1"
 
 [lib]
@@ -65,8 +69,6 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# 保留 Aggregator PoC 配置；生产 prove/verify 默认拒绝 descriptor-only 聚合
-aggregator = []
 # 测试辅助：暴露不可信负向测试工具；lib.rs 禁止其进入 release 构建
 test-helpers = []
 
@@ -83,11 +85,12 @@ vm-common = { path = "vm-common" }
 # ===== Stwo 证明后端 =====
 stwo = { workspace = true }
 stwo-constraint-framework = { workspace = true }
-# Poseidon252 哈希（state_root 用）— 必须与 Stwo 同版本（0.6.x），
-# 否则 starknet_crypto::poseidon_hash_many 的 Felt 类型与
-# starknet_ff::FieldElement 不兼容。
-starknet-ff = { workspace = true }
+# Poseidon252 哈希（state_root 用）— 全仓统一 starknet-crypto 0.8（Felt =
+# starknet-types-core Felt，与 starknet 0.17 / poker-protocol-core /
+# hand-verify-native 同一类型实例）。Poseidon 规格跨版本一致（golden
+# vectors 自证），不再有跨 Felt 桥。
 starknet-crypto = { workspace = true }
+starknet-types-core = { workspace = true }
 # ===== 通用依赖 =====
 borsh = { workspace = true }
 bincode = { workspace = true }

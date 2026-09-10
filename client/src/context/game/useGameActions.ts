@@ -241,6 +241,13 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
   };
 
   const sitDown = async (tableId: string, seatIdNum: number, amount: number) => {
+    // 关桌终态前置拦截：服务端 SIT_DOWN 也会以 TABLE_CLOSED 拒绝，
+    // 这里只是省一次无谓的买入流程。
+    if (currentTableRef.current?.closed) {
+      logger.warn('[SitDown] table is closed — rejected locally');
+      addMessage('本桌已关闭，不再接受入座 / Table closed');
+      return;
+    }
     const keys = playerKeys || getPlayerKeys();
     if (!keys) {
       logger.error('[SitDown] No player keys available');

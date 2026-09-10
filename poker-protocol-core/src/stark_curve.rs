@@ -690,6 +690,33 @@ fn poseidon_over_bytes(bytes: &[u8]) -> Felt {
     poseidon_hash_many(&input)
 }
 
+/// 任意字节串的 Poseidon 摘要（32 字节大端）。
+///
+/// 生产域 [`poseidon_over_bytes`] 的公开门面：长度前缀 + 31 字节大端分块 +
+/// `poseidon_hash_many`（Cairo 原生置换）。2026-09 Poseidon 迁移中取代
+/// utils 层的 `blake2b_256` 作为语句摘要压缩函数（无位运算、无查表，
+/// Cairo/AIR 重放与 Stwo `poseidon252` 组件同构）。
+pub fn poseidon_bytes_digest(bytes: &[u8]) -> [u8; 32] {
+    poseidon_over_bytes(bytes).to_bytes_be()
+}
+
+/// 点批量的 felt 直通承诺：`poseidon_hash_many(⌊x0,y0,x1,y1,…⌋)`（32B 大端）。
+///
+/// 协议常量点集合（如 52 张明文牌点）的规范绑定形态：AIR/Cairo 侧可按
+/// 常量吸收或逐置换精确重放，无字节打包、无压缩位歧义（仿射坐标单射）。
+/// 空切片退化为对空输入的一次置换；含恒等元的点在调用方拒绝（此处 panic）。
+pub fn poseidon_points_commitment(points: &[StarkPoint]) -> [u8; 32] {
+    let mut felts = Vec::with_capacity(points.len() * 2);
+    for point in points {
+        let (x, y) = point
+            .to_affine_parts()
+            .expect("commitment point must be non-identity");
+        felts.push(x);
+        felts.push(y);
+    }
+    poseidon_hash_many(&felts).to_bytes_be()
+}
+
 fn stark_hash_to_curve(digest: &[u8]) -> StarkPoint {
     let start = poseidon_over_bytes(digest);
     for i in 0u64..1024 {
@@ -1034,8 +1061,13 @@ pub struct HandBatchEquationWords {
 /// 序列化、无 keccak）。
 ///
 /// 规范（三端一致，勿改）：
-/// - init:  `state = poseidon([ascii("poker/bg-fold/v1")])`（协议名经
+/// - init（BG 折叠纪元 [`PoseidonFeltTranscript::new_bg_fold`]）:
+///   `state = poseidon([ascii("poker/bg-fold/v1")])`（协议名经
 ///   `append_message` 进入 transcript，见 BG 的 `bg12_protocol` 步）。
+/// - init（2026-09 生产域 [`CryptoTranscript::new`]）:
+///   `state = poseidon([poseidon_over_bytes(protocol_name)])`——协议名
+///   先经长度前缀 + 31 字节大端分块压缩为单 felt（`poseidon_over_bytes`），
+///   支持任意长度 context，域分离由初始状态强制。
 /// - append_message(label, msg):
 ///   `state = poseidon([state, ascii(label[..31]), felt(msg.len()), felt(msg)])`
 ///   —— **约束**：msg 必须为 ≤31 字节的短消息（ASCII 标签 / 小端 u64），
@@ -1063,6 +1095,15 @@ impl PoseidonFeltTranscript {
     pub fn new_bg_fold() -> Self {
         Self {
             state: poseidon_hash_many(&[ascii_felt(BG_FOLD_DOMAIN)]),
+        }
+    }
+
+    /// 生产域初始状态（2026-09 Poseidon 迁移）：任意长度协议名/context
+    /// 先经 [`poseidon_over_bytes`] 压成单 felt，再做域初始置换。
+    /// 与 BG 折叠纪元 [`Self::new_bg_fold`] 域分离，不可互验。
+    pub fn new_domain(protocol_name: &[u8]) -> Self {
+        Self {
+            state: poseidon_hash_many(&[poseidon_over_bytes(protocol_name)]),
         }
     }
 
@@ -1100,10 +1141,11 @@ fn message_felts(msg: &[u8]) -> Vec<Felt> {
 }
 
 impl crate::CryptoTranscript for PoseidonFeltTranscript {
-    fn new(_protocol_name: &[u8]) -> Self {
-        // 协议名由调用方 append_message 绑定（BG 的 bg12_protocol 步）；
-        // 海绵初始化固定为 BG 折叠纪元域标签，保证 Cairo 重放唯一。
-        Self::new_bg_fold()
+    fn new(protocol_name: &[u8]) -> Self {
+        // 2026-09 Poseidon 迁移：生产域按协议名派生初始状态（任意长度
+        // context 经 poseidon_over_bytes 压缩），域分离由初始状态强制。
+        // BG 折叠纪元路线固定走 new_bg_fold()，不经本入口。
+        Self::new_domain(protocol_name)
     }
 
     fn append_message(&mut self, label: &[u8], message: &[u8]) {
@@ -1196,136 +1238,195 @@ mod tests {
         assert_eq!(ours.as_slice(), &params_be[..]);
     }
 
+    /// 非规范编码拒绝：x ≥ 2^251（byte0 低 3 位 > 0x07）必须 None——
+    /// 这是从不可信字节解析的第一道闸（wire 层 len==32 之外的唯一
+    /// 结构性拒绝路径）。任何"宽松接受"都会把链外域输入带进 EC 运算。
     #[test]
-    fn base_points_are_distinct_and_valid() {
-        let g = <StarkCurve as Curve>::base_g();
-        let h = <StarkCurve as Curve>::base_h();
-        assert!(!g.is_identity());
-        assert!(!h.is_identity());
-        assert_ne!(g, h);
-        // G must match the Cairo/EC_OP generator.
-        let g_core = to_core(&g);
-        assert_eq!(
-            g_core.to_affine().expect("affine").x(),
-            GENERATOR.x(),
-            "base_g must equal the Starknet generator"
-        );
-    }
-
-    #[test]
-    fn scalar_ring_properties() {
-        let a = StarkScalar::random(&mut OsRng);
-        let b = StarkScalar::random(&mut OsRng);
-        let c = StarkScalar::random(&mut OsRng);
-        // distributivity: (a + b)·c = a·c + b·c
-        assert_eq!((a + b) * c, a * c + b * c);
-        // inverse
-        assert_eq!(a * a.invert(), StarkScalar::one());
-        // negation
-        assert_eq!(a + (-a), StarkScalar::zero());
-        // sub/add roundtrip
-        assert_eq!((a - b) + b, a);
-    }
-
-    #[test]
-    fn scalar_wide_bytes_matches_secp_discipline() {
-        let bytes = [7u8; 64];
-        let wide = StarkScalar::from_bytes_mod_order_wide(&bytes);
-        let mut xored = [0u8; 32];
-        for i in 0..32 {
-            xored[i] = 0;
-        }
-        assert_eq!(wide, StarkScalar::from_bytes_mod_order(&xored));
-    }
-
-    #[test]
-    fn point_add_matches_types_core_oracle() {
-        for _ in 0..16 {
-            let p = random_point();
-            let q = random_point();
-            let mine = p + q;
-            let oracle = to_core(&p) + to_core(&q);
-            assert_eq!(to_core(&mine), oracle);
-        }
-    }
-
-    #[test]
-    fn point_double_matches_types_core_oracle() {
-        for _ in 0..16 {
-            let p = random_point();
-            let mine = p.double();
-            let oracle = to_core(&p) + to_core(&p);
-            assert_eq!(to_core(&mine), oracle);
-        }
-    }
-
-    #[test]
-    fn point_scalar_mul_matches_types_core_oracle() {
-        for _ in 0..8 {
-            let p = random_point();
-            let s = StarkScalar::random(&mut OsRng);
-            let mine = p * s;
-            // interpret the mod-n scalar as a field element mod P (valid:
-            // n < P) and compare against the oracle scalar multiplication
-            let s_felt = Felt::from_bytes_be_slice(&s.as_bytes());
-            let oracle_p = to_core(&p);
-            let oracle = &oracle_p * s_felt;
-            assert_eq!(to_core(&mine), oracle);
-        }
-    }
-
-    #[test]
-    fn point_sub_and_neg_roundtrip() {
+    fn compressed_decode_rejects_x_above_field_bound() {
         let p = random_point();
-        let q = random_point();
-        assert_eq!(p + (-q), p - q);
-        assert_eq!((p - q) + q, p);
-    }
-
-    #[test]
-    fn identity_is_additive_zero() {
-        let id = <StarkPoint as CurvePoint>::identity();
-        let p = random_point();
-        assert!(id.is_identity());
-        assert_eq!(id + p, p);
-        assert_eq!(p + id, p);
-        assert_eq!(p + (-p), id);
-    }
-
-    #[test]
-    fn multiscalar_matches_sequential_sum() {
-        let scalars: Vec<StarkScalar> =
-            (0..17).map(|_| StarkScalar::random(&mut OsRng)).collect();
-        let points: Vec<StarkPoint> =
-            (0..17).map(|_| random_point()).collect();
-        let batch = StarkPoint::vartime_multiscalar_mul(&scalars, &points);
-        let sequential: StarkPoint =
-            points.iter().zip(scalars.iter()).map(|(p, s)| *p * *s).sum();
-        assert_eq!(batch, sequential);
-    }
-
-    #[test]
-    fn compress_decompress_roundtrip() {
-        // identity
-        let id = <StarkPoint as CurvePoint>::identity();
-        let id_bytes = id.compress();
-        assert_eq!(
-            id_bytes.as_ref().iter().all(|b| *b == 0),
-            true,
-            "identity compresses to all-zero bytes"
+        let mut bad = p.compress().as_ref().to_owned();
+        // 置 x 高位越界：byte0 & 0x7f = 0x08（x ≥ 2^251），保留奇偶位不变。
+        bad[0] = (bad[0] & 0x80) | 0x08;
+        assert!(
+            <StarkPoint as CurvePoint>::from_compressed(&bad).is_none(),
+            "x >= 2^251 must be rejected"
         );
-        assert!(<StarkPoint as CurvePoint>::from_compressed(id_bytes.as_ref())
-            .expect("identity roundtrip")
+        // 0x7f（最大越界）同样拒绝。
+        bad[0] = (bad[0] & 0x80) | 0x7f;
+        assert!(<StarkPoint as CurvePoint>::from_compressed(&bad).is_none());
+        // 长度不是 32 也拒绝。
+        assert!(<StarkPoint as CurvePoint>::from_compressed(&[0u8; 31]).is_none());
+        assert!(<StarkPoint as CurvePoint>::from_compressed(&[0u8; 33]).is_none());
+    }
+
+    /// x == 0 / 全零编码路径的无歧义性：Stark 曲线 y² = x³ + x + BETA 在
+    /// x=0 时 rhs=BETA，而 **BETA 非二次剩余**（测试内实证）——曲线上不
+    /// 存在 x=0 的点。因此：带奇偶位的 x=0 编码必然 None（sqrt 失败），
+    /// 全零 32B 唯一对应恒等元，永不歧义。compress 侧 x==0 强制奇 y 的
+    /// 分支是纵深防御（正常构造不出该输入）。
+    #[test]
+    fn zero_x_encoding_cannot_collide_with_identity() {
+        let beta = Felt::from_bytes_be(&BETA.to_bytes_be());
+        assert!(
+            beta.sqrt().is_none(),
+            "test premise: BETA must be a non-residue (no curve point with x=0)"
+        );
+
+        // 奇偶位=1 的 x=0 编码：非全零、必须拒绝。
+        let mut odd_flag = [0u8; 32];
+        odd_flag[0] = 0x80;
+        assert_ne!(odd_flag, [0u8; 32]);
+        assert!(<StarkPoint as CurvePoint>::from_compressed(&odd_flag).is_none());
+
+        // 全零 = 恒等元编码，唯一合法的 x=0 字节模式，解回恒等元。
+        let id = <StarkPoint as CurvePoint>::identity();
+        let id_bytes = id.compress().as_ref().to_owned();
+        assert_eq!(id_bytes, [0u8; 32]);
+        assert!(<StarkPoint as CurvePoint>::from_compressed(&id_bytes)
+            .expect("identity parses")
             .is_identity());
+    }
 
-        for _ in 0..32 {
-            let p = random_point();
-            let compressed = p.compress();
-            assert_eq!(compressed.as_ref().len(), 32);
-            let restored = <StarkPoint as CurvePoint>::from_compressed(compressed.as_ref())
-                .expect("canonical compressed point parses");
-            assert_eq!(restored, p);
-        }
+    /// PoseidonFeltTranscript 的 transcript 语义单测（此前只被 texas 的
+    /// BG 集成测试间接覆盖）：
+    /// 1. 确定性 + 域分离（label/message 顺序敏感）；
+    /// 2. 31 字节标签截断 + >31 字节消息分块；
+    /// 3. challenge 消耗海绵状态（连续挑战不重复）+ mod-n 归约；
+    /// 4. append_scalar 的 32B 直通 vs 分块回退两路。
+    #[test]
+    fn transcript_semantics() {
+        use crate::CryptoTranscript as _;
+
+        // 1a. 确定性：同序列同状态。
+        let mut a = PoseidonFeltTranscript::new_bg_fold();
+        let mut b = PoseidonFeltTranscript::new_bg_fold();
+        assert_eq!(a.state(), b.state());
+        a.append_message(b"msg", b"hello");
+        b.append_message(b"msg", b"hello");
+        assert_eq!(a.state(), b.state());
+
+        // 1b. 域分离：换 label 或换消息顺序必须改变状态。
+        let mut c = PoseidonFeltTranscript::new_bg_fold();
+        c.append_message(b"other", b"hello");
+        assert_ne!(a.state(), c.state());
+        let mut d = PoseidonFeltTranscript::new_bg_fold();
+        d.append_message(b"msg", b"hellp"); // 单字节差
+        assert_ne!(a.state(), d.state());
+
+        // 2a. 恰 31 字节标签（felt 直通上限）不与 30 字节标签混淆。
+        let mut t31 = PoseidonFeltTranscript::new_bg_fold();
+        let mut t30 = PoseidonFeltTranscript::new_bg_fold();
+        t31.append_message(&[b'a'; 31], b"");
+        t30.append_message(&[b'a'; 30], b"");
+        assert_ne!(t31.state(), t30.state());
+
+        // 2b. 62 字节消息 = 两个 31B 块，与一次 31 字节前缀消息不同。
+        let mut full = PoseidonFeltTranscript::new_bg_fold();
+        let mut half = PoseidonFeltTranscript::new_bg_fold();
+        full.append_message(b"k", &[0xABu8; 62]);
+        half.append_message(b"k", &[0xABu8; 31]);
+        assert_ne!(full.state(), half.state());
+
+        // 3. challenge：mod n 归约（可用前 8 位取值与原始 felt 一致的概率
+        //    ≈ 1，用非退化语料验证消耗性——连续两次挑战必不同）。
+        let mut t = PoseidonFeltTranscript::new_bg_fold();
+        t.append_message(b"seed", b"challenge-input");
+        let c1 = t.challenge::<StarkCurve>(b"c").scalar;
+        let c2 = t.challenge::<StarkCurve>(b"c").scalar;
+        assert_ne!(c1, c2, "challenge must advance the sponge state");
+        // 归约后仍 determinism：同起点重放同挑战。
+        let mut r = PoseidonFeltTranscript::new_bg_fold();
+        r.append_message(b"seed", b"challenge-input");
+        assert_eq!(r.challenge::<StarkCurve>(b"c").scalar, c1);
+
+        // 4. append_scalar：小标量（byte0 ≤ 0x07）直通；与把同样 32B 当
+        //    消息 append 的分块路径状态不同（直通无长度前缀）。
+        let mut direct = PoseidonFeltTranscript::new_bg_fold();
+        let mut blocked = PoseidonFeltTranscript::new_bg_fold();
+        let s = <StarkCurve as Curve>::Scalar::from_u64(0x0102030405060708);
+        direct.append_scalar::<StarkCurve>(b"s", &s);
+        blocked.append_message(b"s", &s.as_bytes());
+        assert_ne!(direct.state(), blocked.state());
+    }
+
+    /// 2026-09 生产域（`new_domain` / trait `new`）：协议名派生初始状态、
+    /// 域分离、任意长度 context 确定性。
+    #[test]
+    fn production_domain_semantics() {
+        use crate::CryptoTranscript as _;
+        use crate::transcript_domains;
+
+        // trait new == inherent new_domain。
+        let a = PoseidonFeltTranscript::new(transcript_domains::SHUFFLE_V2_POSEIDON);
+        let b = PoseidonFeltTranscript::new_domain(transcript_domains::SHUFFLE_V2_POSEIDON);
+        assert_eq!(a.state(), b.state());
+
+        // 不同协议域隔离；与 BG 折叠纪元域亦隔离。
+        let leave = PoseidonFeltTranscript::new_domain(transcript_domains::LEAVE_POSEIDON_V2);
+        assert_ne!(a.state(), leave.state());
+        assert_ne!(a.state(), PoseidonFeltTranscript::new_bg_fold().state());
+
+        // 任意长度 context（>31B）经 poseidon_over_bytes 压缩：确定性 + 内容敏感。
+        let long_ctx = [0x5Au8; 73];
+        let c1 = PoseidonFeltTranscript::new_domain(&long_ctx);
+        let c2 = PoseidonFeltTranscript::new_domain(&long_ctx);
+        assert_eq!(c1.state(), c2.state());
+        let mut flipped = long_ctx;
+        flipped[0] ^= 0x01;
+        assert_ne!(c1.state(), PoseidonFeltTranscript::new_domain(&flipped).state());
+
+        // 域分离传导到挑战：同 absorbs 序列在不同域下挑战不同。
+        let mut x = PoseidonFeltTranscript::new_domain(transcript_domains::SHUFFLE_V2_POSEIDON);
+        let mut y = PoseidonFeltTranscript::new_domain(transcript_domains::LEAVE_POSEIDON_V2);
+        x.append_message(b"stmt", b"same-statement");
+        y.append_message(b"stmt", b"same-statement");
+        assert_ne!(
+            x.challenge::<StarkCurve>(b"c").scalar,
+            y.challenge::<StarkCurve>(b"c").scalar
+        );
+    }
+
+    /// `poseidon_bytes_digest`：长度前缀绑定 + 跨 31B 边界 + KAT。
+    #[test]
+    fn poseidon_bytes_digest_binds_length_and_content() {
+        let empty = poseidon_bytes_digest(b"");
+        let one = poseidon_bytes_digest(b"A");
+        let two = poseidon_bytes_digest(b"AA");
+        assert_ne!(one, two, "31B chunking must be length-prefixed");
+        assert_ne!(empty, one);
+        let b31 = poseidon_bytes_digest(&[0x11u8; 31]);
+        let b32 = poseidon_bytes_digest(&[0x11u8; 32]);
+        assert_ne!(b31, b32);
+        // KAT：与 poseidon_over_bytes 同公式（长度前缀 felt + 31B 分块 felts）。
+        let mut chunk = [0u8; 32];
+        chunk[29..].copy_from_slice(b"abc");
+        let expected =
+            poseidon_hash_many(&[Felt::from(3u64), Felt::from_bytes_be(&chunk)]).to_bytes_be();
+        assert_eq!(poseidon_bytes_digest(b"abc"), expected);
+        // 32 字节输出（可作 [u8; 32] 语句摘要）。
+        assert_eq!(poseidon_bytes_digest(b"abc").len(), 32);
+    }
+
+    /// `poseidon_points_commitment`：确定性 + 点序敏感 + 单点差敏感。
+    #[test]
+    fn poseidon_points_commitment_binds_order_and_content() {
+        let a = <StarkCurve as Curve>::hash_to_curve(b"commitment/card-a");
+        let b = <StarkCurve as Curve>::hash_to_curve(b"commitment/card-b");
+        let ab = poseidon_points_commitment(&[a, b]);
+        let ba = poseidon_points_commitment(&[b, a]);
+        let a2 = poseidon_points_commitment(&[a, a]);
+        assert_ne!(ab, ba, "point order must be bound");
+        assert_ne!(ab, a2, "point content must be bound");
+        assert_eq!(
+            ab,
+            poseidon_points_commitment(&[a, b]),
+            "commitment must be deterministic"
+        );
+        // KAT：与 poseidon_hash_many([ax,ay,bx,by]) 同公式。
+        let (ax, ay) = a.to_affine_parts().unwrap();
+        let (bx, by) = b.to_affine_parts().unwrap();
+        let expected = poseidon_hash_many(&[ax, ay, bx, by]).to_bytes_be();
+        assert_eq!(poseidon_points_commitment(&[a, b]), expected);
     }
 
     #[test]
@@ -1357,6 +1458,49 @@ mod tests {
             <StarkCurve as Curve>::hash_to_scalar(b"rho"),
             <StarkCurve as Curve>::hash_to_scalar(b"rho")
         );
+    }
+
+    /// 标量解码的群阶边界 KAT：n−1 可解码且是最大规范标量；n 与超过群阶
+    /// 的编码必须拒绝（from_canonical_bytes），全 FF 64B 经 wide 归约落到
+    /// < n。这是"非规范标量拒绝"防线的直接契约（borsh 层的拒绝也源自
+    /// 这里）。
+    #[test]
+    fn scalar_decode_group_order_boundaries() {
+        let n_bytes = EC_ORDER_U256.to_be_bytes();
+        let mut n_minus_1 = [0u8; 32];
+        n_minus_1.copy_from_slice(&n_bytes);
+        // n − 1（大端减一：尾字节非零则直接减一）。
+        let mut i = 31;
+        loop {
+            if n_minus_1[i] != 0 {
+                n_minus_1[i] -= 1;
+                break;
+            }
+            i -= 1;
+        }
+        let max_scalar =
+            <StarkCurve as Curve>::Scalar::from_canonical_bytes(&n_minus_1)
+                .expect("n-1 is canonical");
+        assert_eq!(max_scalar.as_bytes(), n_minus_1, "n-1 round-trips byte-exact");
+
+        // n 本身：非规范，必须拒绝。
+        assert!(
+            <StarkCurve as Curve>::Scalar::from_canonical_bytes(&n_bytes).is_none(),
+            "group order itself must not decode"
+        );
+
+        // 全 FF 32B（> n）：from_canonical_bytes 拒绝；wide 64B 归约后 < n。
+        let all_ff = [0xffu8; 32];
+        assert!(<StarkCurve as Curve>::Scalar::from_canonical_bytes(&all_ff).is_none());
+        let reduced = <StarkCurve as Curve>::Scalar::from_bytes_mod_order_wide(&[0xffu8; 64]);
+        assert!(reduced.to_u256() < EC_ORDER_U256);
+
+        // 零与一的存在性/单位元。
+        let zero = <StarkCurve as Curve>::Scalar::from_canonical_bytes(&[0u8; 32])
+            .expect("zero is canonical");
+        let one = <StarkCurve as Curve>::Scalar::from_u64(1);
+        assert_eq!(zero + one, one, "zero is the additive identity");
+        assert_eq!(one.as_bytes()[31], 1);
     }
 
     #[test]

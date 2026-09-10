@@ -32,7 +32,7 @@
 //! increment of the native form-② stack.
 
 use num_bigint::BigUint;
-use starknet_crypto::FieldElement as Felt;
+use starknet_crypto::Felt;
 use stwo::core::fields::m31::BaseField;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 

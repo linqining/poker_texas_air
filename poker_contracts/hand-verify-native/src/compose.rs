@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use starknet_crypto::FieldElement as Felt;
+use starknet_crypto::Felt;
 
 use crate::air::{HandBatchClaim, KindCounts};
 use crate::handbatch::{payload_digest, verify_hand};
@@ -71,7 +71,7 @@ fn parse_summary(text: &str) -> CairoSummary {
         .split("\"program_hash\": \"")
         .nth(1)
         .and_then(|rest| rest.split('"').next())
-        .map(|h| Felt::from_hex_be(h).expect("program hash parses"))
+        .map(|h| Felt::from_hex(h).expect("program hash parses"))
         .expect("program hash present");
     // Public output: the executable's return value is the last output-builtin
     // entry; verify_hand returns `true` iff every residual is the identity.
@@ -150,7 +150,8 @@ pub fn run_compose(
     }
     let cairo_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cairo/src/lib.cairo");
 
-    let hand_binding = starknet_crypto::poseidon_hash_many(&[Felt::from(seed), Felt::from(0xB16Du64)]);
+    // Same binding derivation as the recursion envelope.
+    let hand_binding = crate::recurse::hand_binding(seed);
     let payload = mint::mint_hand(
         hand_binding,
         counts.n_own,

@@ -15,8 +15,8 @@
 //!
 //! ## borsh 兼容性
 //!
-//! `poker_l1` 的 `L1ProveTask` 与 `poker_texas_air` 的 `ProveTask` 字段类型
-//! 对齐（TexasPokerTable / TexasPokerEvent 都是 poker_l1 类型，两端可见同一类型）；
+//! `poker_l1` 的 `ProveTask` 与 `poker_texas_air` 的 `ProveTask` 是同名镜像
+//! 定义，字段类型对齐（TexasPokerTable / TexasPokerEvent 都是 poker_l1 类型，两端可见同一类型）；
 //! `method_kind` 在 poker_l1 用 `u8`，在 poker_texas_air 用 `MethodKind`
 //! （`#[borsh(use_discriminant=true)]` + `#[repr(u8)]`），borsh 单字节布局一致。
 
@@ -67,7 +67,7 @@ pub enum MethodInput {
         /// 买入金额。
         buy_in: u64,
     },
-    /// `create_table`（name + max_players + small_blind + big_blind）。
+    /// `create_table`（name + max_players + small_blind + big_blind + rit_mode）。
     CreateTable {
         /// 桌台名称。
         name: String,
@@ -77,6 +77,8 @@ pub enum MethodInput {
         small_blind: u64,
         /// 大盲注。
         big_blind: u64,
+        /// Run It Twice 桌面策略（poker_l1 `RIT_MODE_*` 常量；缺省 DISABLED）。
+        rit_mode: u8,
     },
     /// `submit_shuffle_v2` 的窄派生输入。
     SubmitShuffleV2 {
@@ -139,6 +141,7 @@ mod tests {
                 max_players: 6,
                 small_blind: 50,
                 big_blind: 100,
+                rit_mode: 1,
             },
             MethodInput::SubmitShuffleV2 { seat_index: 2 },
             MethodInput::SubmitPlayerRevealTokens { seat_index: 3 },

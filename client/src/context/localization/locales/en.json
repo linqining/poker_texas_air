@@ -48,6 +48,7 @@
   "game_state-info_river": "River",
   "game_state-info_showdown": "Showdown",
   "game_table_empty-seat": "Empty Seat",
+  "game_table_closed": "Table closed — no new hands",
   "game_ui_all-in": "All In",
   "game_ui_bet": "Bet",
   "game_ui_call": "Call",

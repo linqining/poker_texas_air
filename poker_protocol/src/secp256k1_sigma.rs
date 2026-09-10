@@ -3,8 +3,9 @@
 //! Owns the canonical card derivation for the SECP256K1 G1 epoch and re-exports
 //! the curve for downstream consumers. Cards are deterministically derived
 //! with the same domain separation as the Ristretto route
-//! (`texas_poker/card/{i}`), mapped into SECP256K1 G1 through the halo2curves
-//! RFC 9380 SVDW suite. The contract side embeds the same 52 points as
+//! (`texas_poker/card/{i}`), mapped into SECP256K1 G1 through the k256
+//! XMD:SHA-256 SSWU suite (backend.rs 的 hash-to-curve 配置). The contract
+//! side embeds the same 52 points as
 //! immutable constants — no on-chain hash-to-curve is needed.
 
 use poker_protocol_core::{Secp256k1Curve, Curve, CurvePoint};

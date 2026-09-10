@@ -13,14 +13,20 @@
 //!   `s = w + c·sk mod n`;
 //! - reconstruct: CP-DLEQ — `P_i = sk·G_i`, `(A, B) = (w·G1, w·G2)`,
 //!   `s = w + c·sk mod n`.
+//!
+//! Felt discipline (2026-09-10 全仓统一)：铸造就地运行在
+//! `starknet_crypto::Felt`（types-core，与 texas / 根 crate 同一实例），
+//! mod-n 归约走 core 的 `StarkScalar`，无本地 num-bigint 镜像、无跨 Felt 桥。
 
-use starknet_crypto::poseidon_hash_many;
-use starknet_crypto::FieldElement as Felt;
+use starknet_crypto::{poseidon_hash_many, Felt};
 
-use crate::curve::{biguint_to_felt, felt_to_biguint, reduce_mod_n, Point};
+use poker_protocol_core::curve::CurveScalar;
+use poker_protocol_core::stark_curve::StarkScalar;
+
+use crate::curve::Point;
 use crate::handbatch::{
-    endorsement_challenge, leave_challenge, reconstruct_challenge, reveal_challenge,
-    LeaveCard, WORDS_PER_LEAVE_HEADER,
+    endorsement_challenge, leave_challenge, reconstruct_challenge,
+    reveal_challenge, LeaveCard, WORDS_PER_LEAVE_HEADER,
 };
 
 /// Deterministic pseudo-random felt chain.
@@ -39,14 +45,21 @@ impl RandChain {
     }
 }
 
+/// `a + b·c mod n` on raw felts — core's `StarkScalar` Montgomery arithmetic
+/// (the old num-bigint mirror is gone with the 0.8 alignment).
 fn scalar_add_mod_n(a: Felt, b: Felt, c: Felt) -> Felt {
-    let sum = felt_to_biguint(a) + felt_to_biguint(b) * felt_to_biguint(c);
-    biguint_to_felt(&reduce_mod_n(&sum)).expect("value < n < P")
+    let s = to_scalar(a) + to_scalar(b) * to_scalar(c);
+    Felt::from_bytes_be(&s.to_bytes_be())
+}
+
+/// Raw felt → canonical scalar (`< n` after reduction).
+fn to_scalar(f: Felt) -> StarkScalar {
+    <StarkScalar as CurveScalar>::from_bytes_mod_order(&f.to_bytes_be())
 }
 
 fn scalar_from_felt(f: Felt) -> Felt {
-    let reduced = reduce_mod_n(&felt_to_biguint(f));
-    biguint_to_felt(&reduced).expect("value < n < P")
+    let reduced = to_scalar(f);
+    Felt::from_bytes_be(&reduced.to_bytes_be())
 }
 
 /// Mint an honest full-hand payload bound to `hand_binding`. Statement order
@@ -79,7 +92,7 @@ pub fn mint_hand(
         action_blocks.push(mint_action(g, &mut rand, "call"));
     }
 
-    let mut payload = Vec::new();
+    let mut payload: Vec<Felt> = Vec::new();
     payload.push(Felt::from(n_own as u64)); // n_own
     payload.push(Felt::from(0u64)); // n_shuffle (unsupported → must stay 0)
     payload.push(Felt::from(n_reveal as u64)); // n_reveal
@@ -97,7 +110,7 @@ pub fn mint_hand(
         let s = scalar_add_mod_n(w, c, sk);
         let (pkx, pky) = pk.to_affine().unwrap();
         let (rx, ry) = r.to_affine().unwrap();
-        payload.extend_from_slice(&[pkx, pky, rx, ry, s]);
+        payload.extend([pkx, pky, rx, ry, s]);
     }
 
     // Reveal: c1 = nonce·G, token = sk·c1, (t1, t2) = (w·G, w·c1),
@@ -120,9 +133,9 @@ pub fn mint_hand(
         let (tokx, toky) = token.to_affine().unwrap();
         let (t1x, t1y) = t1.to_affine().unwrap();
         let (t2x, t2y) = t2.to_affine().unwrap();
-        payload.extend_from_slice(&[
-            pkx, pky, c1x, c1y, c2x, c2y, tokx, toky, t1x, t1y, t2x, t2y, nonce, s,
-        ]);
+        payload.extend(
+            [pkx, pky, c1x, c1y, c2x, c2y, tokx, toky, t1x, t1y, t2x, t2y, nonce, s],
+        );
     }
 
     payload.extend(leave_blocks.into_iter().flatten());
@@ -167,7 +180,12 @@ fn rand_u64(rand: &mut RandChain) -> u64 {
 }
 
 /// Mint one leave block peeling a random layer, with `n_cards` cards.
-fn mint_leave(hand_binding: Felt, g: Point, rand: &mut RandChain, n_cards: usize) -> Vec<Felt> {
+fn mint_leave(
+    hand_binding: Felt,
+    g: Point,
+    rand: &mut RandChain,
+    n_cards: usize,
+) -> Vec<Felt> {
     let sk = scalar_from_felt(rand.next());
     let w = rand.next();
     let nonce = scalar_from_felt(rand.next());
@@ -189,7 +207,7 @@ fn mint_leave(hand_binding: Felt, g: Point, rand: &mut RandChain, n_cards: usize
         cards.push(LeaveCard { in_c1, in_c2, out_c1, out_c2, a });
         for (section, p) in [in_c1, in_c2, out_c1, out_c2, a].into_iter().enumerate() {
             let (x, y) = p.to_affine().unwrap();
-            words[section].extend_from_slice(&[x, y]);
+            words[section].extend([x, y]);
         }
     }
 
@@ -207,7 +225,7 @@ fn mint_leave(hand_binding: Felt, g: Point, rand: &mut RandChain, n_cards: usize
     block.push(nonce);
     block.push(s);
     for section in words {
-        block.extend_from_slice(&section);
+        block.extend(section);
     }
     block
 }

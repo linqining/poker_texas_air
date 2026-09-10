@@ -1,7 +1,6 @@
 // 诊断探针：复现浏览器 reveal token 的原生验证（对照 ProofVerificationFailed）
 use poker_protocol::crypto::{DefaultCurve, ElGamalCiphertext};
-use poker_protocol::zk_shuffle::reveal_token_proof::REVEAL_TOKEN_PROOF_LABEL;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, PoseidonFeltTranscript};
 use poker_protocol::z_poker::convert::{hex_to_ecpoint, hex_to_scalar, scalar_to_hex};
 use poker_protocol::z_poker::protocol::ClientPlayer;
 
@@ -43,7 +42,7 @@ fn main() {
         let upk = hex_to_ecpoint(p["user_public_key_hex"].as_str().unwrap()).unwrap();
         println!("token[{}] upk==player_pk: {}", i, upk == expected_pk);
 
-        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
         let proof = poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof::<DefaultCurve> {
             user_public_key: upk,
             commitment_t1: t1,
@@ -59,13 +58,13 @@ fn main() {
         let native_token = player.generate_reveal_token(&ct);
         let native_token_hex = poker_protocol::z_poker::convert::ecpoint_to_hex(&native_token.reveal_token);
         println!("token[{}] native token == browser token: {}", i, native_token_hex.to_lowercase() == reveal_token_hex);
-        let mut t2 = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut t2 = PoseidonFeltTranscript::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
         let nres = native_token.proof.verify(&ct, &native_token.reveal_token, &expected_pk, &mut t2);
         println!("token[{}] native proof self-verify: {:?}", i, nres);
 
         // 手工重算两条 Chaum-Pedersen 等式，定位失败点
         use poker_protocol::crypto::Curve as _;
-        let mut tt = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut tt = PoseidonFeltTranscript::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
         tt.append_scalar::<DefaultCurve>(b"reveal_token_nonce", &native_token.proof.nonce);
         tt.append_point::<DefaultCurve>(b"pk", &expected_pk);
         tt.append_point::<DefaultCurve>(b"c1", &ct.c1);

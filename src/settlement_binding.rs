@@ -4,7 +4,7 @@
 //! `SettlementPlanCommitted` event plus per-seat awards. STWO binds this compact projection; it
 //! does not re-run the BLS12-381 reveal proof, hand evaluator, or side-pot planner in AIR.
 
-use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
+use poker_l1::contracts::texas_poker::events::TexasPokerEvent;
 
 use crate::error::{TexasAirError, TexasAirResult};
 
@@ -177,8 +177,13 @@ impl SettlementPlanBinding {
         let expected_winners = awards
             .iter()
             .enumerate()
-            .filter_map(|(seat, amount)| (*amount > 0).then_some(seat as u8))
-            .collect::<Vec<_>>();
+            .fold(0u16, |mask, (seat, amount)| {
+                if *amount > 0 {
+                    mask | (1u16 << seat)
+                } else {
+                    mask
+                }
+            });
         if **winners != expected_winners {
             return Err(TexasAirError::SpecViolation(
                 "HandSettled winners do not match fixed-seat awards".into(),
@@ -268,7 +273,7 @@ mod tests {
         }
     }
 
-    fn settled_event(pot: u64, winners: Vec<u8>) -> TexasPokerEvent {
+    fn settled_event(pot: u64, winners: u16) -> TexasPokerEvent {
         TexasPokerEvent::HandSettled {
             table_id: ObjectID::new([0x11; 20], 7),
             pot,
@@ -294,7 +299,7 @@ mod tests {
             award_event(0, 5),
             award_event(4, 95),
             rake_event(200, 10, 190),
-            settled_event(200, vec![0, 4]),
+            settled_event(200, 0b10001),
         ])
         .unwrap();
 
@@ -316,7 +321,7 @@ mod tests {
                 plan_event(1, 10, 0, 10),
                 plan_event(1, 10, 0, 10),
                 award_event(0, 10),
-                settled_event(10, vec![0]),
+                settled_event(10, 1),
             ])
             .is_err()
         );
@@ -328,7 +333,7 @@ mod tests {
             SettlementPlanBinding::from_events(&[
                 plan_event(3, 10, 0, 10),
                 award_event(0, 10),
-                settled_event(10, vec![0]),
+                settled_event(10, 1),
             ])
             .is_err()
         );
@@ -336,7 +341,7 @@ mod tests {
             SettlementPlanBinding::from_events(&[
                 plan_event(1, 10, 1, 10),
                 award_event(0, 10),
-                settled_event(10, vec![0]),
+                settled_event(10, 1),
             ])
             .is_err()
         );
@@ -344,7 +349,7 @@ mod tests {
             SettlementPlanBinding::from_events(&[
                 plan_event(1, 10, 0, 10),
                 award_event(SETTLEMENT_SEATS as u8, 10),
-                settled_event(10, vec![0]),
+                settled_event(10, 1),
             ])
             .is_err()
         );
@@ -352,7 +357,7 @@ mod tests {
             SettlementPlanBinding::from_events(&[
                 plan_event(1, 10, 0, 10),
                 award_event(0, 9),
-                settled_event(10, vec![0]),
+                settled_event(10, 1),
             ])
             .is_err()
         );
@@ -360,7 +365,7 @@ mod tests {
             SettlementPlanBinding::from_events(&[
                 plan_event(1, 10, 0, 10),
                 award_event_for_other_table(0, 10),
-                settled_event(10, vec![0]),
+                settled_event(10, 1),
             ])
             .is_err()
         );
@@ -382,7 +387,7 @@ mod tests {
             SettlementPlanBinding::from_events(&[
                 plan_event(1, 10, 0, 10),
                 award_event(0, 10),
-                settled_event(9, vec![0]),
+                settled_event(9, 1),
             ])
             .is_err()
         );
@@ -390,7 +395,7 @@ mod tests {
             SettlementPlanBinding::from_events(&[
                 plan_event(1, 10, 0, 10),
                 award_event(0, 10),
-                settled_event(10, vec![1]),
+                settled_event(10, 2),
             ])
             .is_err()
         );
@@ -398,7 +403,7 @@ mod tests {
             SettlementPlanBinding::from_events(&[
                 plan_event(1, 10, 1, 9),
                 award_event(0, 9),
-                settled_event(10, vec![0]),
+                settled_event(10, 1),
             ])
             .is_err()
         );

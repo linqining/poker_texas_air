@@ -19,7 +19,7 @@
 //! the statements the proof actually covers.
 
 use crate::error::{TexasAirError, TexasAirResult};
-use crate::hash_prover::{ArchivedHashProof, Blake2bStatement, HashProofProvider};
+use crate::hash_prover::{ArchivedHashProof, HashStatement, HashProofProvider};
 use crate::state_root::{StateRoot, hot_table_state_bytes};
 
 /// One proven `(hot_bytes, root)` endpoint statement.
@@ -37,7 +37,7 @@ impl StateRootEndpointStatement {
     /// The statement message is the domain-prefixed hot bytes, so the flock
     /// chain proves `root = BLAKE3_chain(domain || hot_bytes)` directly.
     pub fn from_table(
-        table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
     ) -> TexasAirResult<Self> {
         Ok(Self::from_preimage(hot_table_state_bytes(table)?))
     }
@@ -67,7 +67,7 @@ pub struct ArchivedStateRootBindingProof {
 /// Both the synthetic-root helper and `verify_roots` derive it identically,
 /// so the binding statement is never ambiguous.
 #[must_use]
-pub fn synthetic_image_message(image: &[starknet_ff::FieldElement]) -> Vec<u8> {
+pub fn synthetic_image_message(image: &[starknet_crypto::Felt]) -> Vec<u8> {
     let mut message = Vec::with_capacity(image.len() * 32);
     for field in image {
         message.extend_from_slice(&field.to_bytes_be());
@@ -75,10 +75,10 @@ pub fn synthetic_image_message(image: &[starknet_ff::FieldElement]) -> Vec<u8> {
     message
 }
 
-fn provider_statements(endpoints: &[StateRootEndpointStatement; 2]) -> [Blake2bStatement; 2] {
+fn provider_statements(endpoints: &[StateRootEndpointStatement; 2]) -> [HashStatement; 2] {
     [
-        Blake2bStatement::new(endpoints[0].message.clone(), endpoints[0].root),
-        Blake2bStatement::new(endpoints[1].message.clone(), endpoints[1].root),
+        HashStatement::new(endpoints[0].message.clone(), endpoints[0].root),
+        HashStatement::new(endpoints[1].message.clone(), endpoints[1].root),
     ]
 }
 
@@ -203,10 +203,10 @@ impl ArchivedStateRootBindingProof {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+    use poker_l1::contracts::texas_poker::types::TexasPokerTable;
 
     fn table(id: u8) -> TexasPokerTable {
-        poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
+        poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             poker_l1::object_model::ObjectID::new([id; 20], 7),
             format!("binding-{id}"),
             [0xCD; 20],

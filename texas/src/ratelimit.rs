@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::relayer::util::now_ms;
 
 use axum::extract::{ConnectInfo, Request};
 use axum::http::StatusCode;
@@ -37,13 +37,6 @@ static BUCKETS: OnceLock<Mutex<Buckets>> = OnceLock::new();
 
 fn buckets() -> &'static Mutex<Buckets> {
     BUCKETS.get_or_init(|| Mutex::new(Buckets(HashMap::new())))
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// 固定窗口取令牌。返回 false 表示超限。

@@ -89,7 +89,8 @@ impl TryFrom<u8> for CurveId {
 pub enum TranscriptId {
     Merlin = 1,
     FiatShamirSha3 = 2,
-    /// Poseidon252 transcript reserved for the Ristretto AIR protocol.
+    /// Poseidon252 transcript：Ristretto AIR 协议保留 + 2026-09 起 Stark
+    /// 曲线 sigma 证明的生产域（`PoseidonFeltTranscript`，felt 直通）。
     Poseidon252 = 3,
     /// Flock BLAKE3 transcript used by the trustless Ristretto AIR v2 route.
     FlockBlake3 = 4,
@@ -285,6 +286,12 @@ impl ShuffleVerifyRequest {
                 ShuffleProofSystem::BayerGrothV2,
                 TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
             )
+            // 2026-09 Poseidon 迁移：生产域（epoch 双收，旧域仅限在途证明）。
+            | (
+                CurveId::StarkCurve,
+                ShuffleProofSystem::BayerGrothV2,
+                TranscriptId::Poseidon252,
+            )
             | (
                 CurveId::Ristretto255,
                 ShuffleProofSystem::RistrettoAirV1,
@@ -425,6 +432,12 @@ impl ReconstructionVerifyRequest {
                 CurveId::StarkCurve,
                 ReconstructionProofSystem::BayerGrothOrderedV2,
                 TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
+            ) => {}
+            // 2026-09 Poseidon 迁移：生产域（epoch 双收，旧域仅限在途证明）。
+            (
+                CurveId::StarkCurve,
+                ReconstructionProofSystem::BayerGrothOrderedV2,
+                TranscriptId::Poseidon252,
             ) => {}
             (CurveId::Ristretto255, _, _) => {
                 return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8))
@@ -578,6 +591,12 @@ impl ReconstructionV3VerifyRequest {
                 CurveId::StarkCurve,
                 ReconstructionProofSystem::BayerGrothSlotOrV3,
                 TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
+            )
+            // 2026-09 Poseidon 迁移：生产域（epoch 双收，旧域仅限在途证明）。
+            | (
+                CurveId::StarkCurve,
+                ReconstructionProofSystem::BayerGrothSlotOrV3,
+                TranscriptId::Poseidon252,
             )
             | (
                 CurveId::Ristretto255,
@@ -784,7 +803,21 @@ pub enum AbiError {
 
 impl std::fmt::Display for AbiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::UnexpectedEof => write!(f, "request truncated: unexpected end of input"),
+            Self::InvalidMagic => write!(f, "request magic mismatch"),
+            Self::UnsupportedVersion(v) => write!(f, "unsupported ABI version {v}"),
+            Self::UnsupportedCurve(c) => write!(f, "unsupported curve id {c}"),
+            Self::UnsupportedProofSystem(p) => write!(f, "unsupported proof system id {p}"),
+            Self::UnsupportedTranscript(t) => write!(f, "unsupported transcript id {t}"),
+            Self::InvalidFlags => write!(f, "invalid flags word"),
+            Self::InvalidDeckSize => write!(f, "deck size out of the allowed range"),
+            Self::ContextTooLarge => write!(f, "context field exceeds the allowed length"),
+            Self::InvalidPointSize => write!(f, "point section has invalid width"),
+            Self::InvalidProofSize => write!(f, "proof section has invalid width"),
+            Self::TrailingBytes => write!(f, "trailing bytes after the request"),
+            Self::VerifierUnavailable => write!(f, "no verifier registered for this request"),
+        }
     }
 }
 

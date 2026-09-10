@@ -8,7 +8,9 @@ use crate::zk_shuffle::bayer_groth::BayerGrothShuffleProof;
 use crate::zk_shuffle::reconstruction::{
     ReconstructProof, ReconstructProofV3, ReconstructionV3Statement,
 };
-use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript, MerlinTranscript};
+use crate::zk_shuffle::transcript_ext::{
+    CryptoTranscript, FiatShamirTranscript, MerlinTranscript, PoseidonFeltTranscript,
+};
 use crate::zk_shuffle::{ShuffleProof, VersionedShuffleProof};
 use borsh::BorshDeserialize;
 use poker_protocol_abi::{
@@ -150,11 +152,16 @@ impl ShuffleVerifier for NativeBls12381ShuffleVerifier {
                 &public_key,
                 &mut FiatShamirTranscript::new(&request.context),
             ),
-            // Poseidon252 is reserved for the Ristretto AIR verifier. The
-            // native BLS backend must fail closed rather than reinterpret it.
-            TranscriptId::Poseidon252 | TranscriptId::Keccak256 => {
-                Err(NativePrecompileError::UnsupportedProofSystem)
-            }
+            // 2026-09 Poseidon 迁移：Stark 曲线生产域（epoch 双收，旧域仅限
+            // 在途证明；Keccak256 仍保留给 secp256k1 路线，此处 fail closed）。
+            TranscriptId::Poseidon252 => verify_shuffle(
+                &proof,
+                &input,
+                &output,
+                &public_key,
+                &mut PoseidonFeltTranscript::new_domain(&request.context),
+            ),
+            TranscriptId::Keccak256 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::Poseidon2M31 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
@@ -205,9 +212,17 @@ impl ReconstructionVerifier for NativeBls12381ReconstructionVerifier {
                 &user_public_key,
                 &mut FiatShamirTranscript::new(&request.context),
             ),
-            TranscriptId::Poseidon252 | TranscriptId::Keccak256 => {
-                Err(NativePrecompileError::UnsupportedProofSystem)
-            }
+            // 2026-09 Poseidon 迁移：Stark 曲线生产域。
+            TranscriptId::Poseidon252 => verify_reconstruction(
+                &proof,
+                &cards,
+                &output_cards,
+                &swap_out_cards,
+                &user_readable_cards,
+                &user_public_key,
+                &mut PoseidonFeltTranscript::new_domain(&request.context),
+            ),
+            TranscriptId::Keccak256 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::Poseidon2M31 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
@@ -261,9 +276,13 @@ impl ReconstructionV3Verifier for NativeBls12381ReconstructionV3Verifier {
                 &statement,
                 &mut FiatShamirTranscript::new(&request.context),
             ),
-            TranscriptId::Poseidon252 | TranscriptId::Keccak256 => {
-                Err(NativePrecompileError::UnsupportedProofSystem)
-            }
+            // 2026-09 Poseidon 迁移：Stark 曲线生产域。
+            TranscriptId::Poseidon252 => verify_reconstruction_v3(
+                &proof,
+                &statement,
+                &mut PoseidonFeltTranscript::new_domain(&request.context),
+            ),
+            TranscriptId::Keccak256 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::FlockBlake3 => Err(NativePrecompileError::UnsupportedProofSystem),
             TranscriptId::Poseidon2M31 => Err(NativePrecompileError::UnsupportedProofSystem),
         }
@@ -333,7 +352,15 @@ impl From<AbiError> for NativePrecompileError {
 
 impl std::fmt::Display for NativePrecompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::Abi(e) => write!(f, "proof ABI rejected request: {e}"),
+            Self::UnsupportedCurve => write!(f, "curve is not supported by this verifier"),
+            Self::UnsupportedProofSystem => write!(f, "proof system is not supported"),
+            Self::LegacyProofDisabled => write!(f, "legacy proof route is disabled"),
+            Self::InvalidPointEncoding => write!(f, "point encoding has invalid width"),
+            Self::InvalidProofEncoding => write!(f, "proof encoding has invalid width"),
+            Self::VerificationFailed => write!(f, "native verification failed"),
+        }
     }
 }
 
@@ -468,6 +495,66 @@ mod tests {
 
         let mut changed = decoded;
         changed.proof[0] ^= 1;
+        assert!(NativeBls12381ShuffleVerifier.verify(&changed).is_err());
+    }
+
+    /// 2026-09 Poseidon 迁移：生产域（Poseidon252 + transcript_domains 标签）
+    /// 在原生 precompile 分发上完整 prove → encode → decode → verify 闭环，
+    /// 且篡改/换域均拒绝。
+    #[test]
+    fn abi_roundtrip_matches_native_shuffle_verification_poseidon_epoch() {
+        let n = 8;
+        let secret_key = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
+        let public_key = <DefaultCurve as Curve>::base_g() * secret_key;
+        let input: Vec<_> = (0..n)
+            .map(|i| {
+                let message =
+                    DefaultCurve::hash_to_curve(format!("precompile/poseidon/card/{i}").as_bytes());
+                let randomness = <DefaultCurve as Curve>::Scalar::random(&mut OsRng);
+                ElGamalCiphertextGeneric::encrypt(&message, &public_key, &randomness)
+            })
+            .collect();
+        let permutation = vec![3, 0, 7, 1, 6, 2, 5, 4];
+        let rerandomizers: Vec<_> = (0..n)
+            .map(|_| <DefaultCurve as Curve>::Scalar::random(&mut OsRng))
+            .collect();
+        let output: Vec<_> = (0..n)
+            .map(|i| input[permutation[i]].re_encrypt(&public_key, &rerandomizers[i]))
+            .collect();
+        let context = crate::transcript_domains::SHUFFLE_V2_POSEIDON;
+        let proof = ShuffleProof::prove(
+            &input,
+            &output,
+            &permutation,
+            &rerandomizers,
+            &public_key,
+            &mut OsRng,
+            &mut PoseidonFeltTranscript::new_domain(context),
+        )
+        .unwrap();
+
+        let request = build_bls12381_shuffle_request(
+            context,
+            b"table=1/hand=2/call=3/seat=4",
+            TranscriptId::Poseidon252,
+            &public_key,
+            &input,
+            &output,
+            &proof,
+        )
+        .unwrap();
+        let encoded = request.encode().unwrap();
+        let decoded = ShuffleVerifyRequest::decode(&encoded).unwrap();
+        NativeBls12381ShuffleVerifier.verify(&decoded).unwrap();
+
+        // 同一证明换回旧域 ID 必须拒绝（挑战域不同）。
+        let mut changed = decoded.clone();
+        changed.transcript = TranscriptId::FiatShamirSha3;
+        assert!(NativeBls12381ShuffleVerifier.verify(&changed).is_err());
+
+        // context（域标签）篡改必须拒绝。
+        let mut changed = decoded.clone();
+        changed.context.push(0);
         assert!(NativeBls12381ShuffleVerifier.verify(&changed).is_err());
     }
 

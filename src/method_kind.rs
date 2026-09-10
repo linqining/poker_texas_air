@@ -1,6 +1,6 @@
 //! 当前 method AIR 的枚举与 selector 计算。
 //!
-//! 保留与 [`poker_l1::vm::contracts::texas_poker::dispatch`] 一致的稳定 discriminant 空间，
+//! 保留与 [`poker_l1::contracts::texas_poker::dispatch`] 一致的稳定 discriminant 空间，
 //! 当前包含 19 个 active selector；5/10/15/16 已退休且不重排。
 //!
 //! # 分类
@@ -10,8 +10,6 @@
 //! - **B+ 档（资金动作，2 个）**：addon（下一手生效）/rebuy（立即生效）
 //! - **C 档（密码学协议，4 个）**：4 个启用 AIR
 
-use blake2::Blake2bVar;
-use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
 
 /// 方法选择器长度（32 字节 = blake2b_256 输出）。
@@ -19,17 +17,10 @@ pub const METHOD_SELECTOR_LEN: usize = 32;
 
 /// 计算方法选择器：`blake2b_256(method_name)[0..32]`。
 ///
-/// 与 [`poker_l1::vm::contracts::texas_poker::dispatch::compute_method_selector`] 算法一致。
-///
-/// # Panics
-///
-/// 当 Blake2bVar 初始化失败（理论不应发生，因为 32 <= 64）时 panic。
+/// 直接转发 [`poker_l1::contracts::texas_poker::runtime::dispatch::compute_method_selector`]，
+/// 保证与 L1 dispatch 的 selector 空间单一来源。
 pub fn compute_method_selector(method_name: &str) -> [u8; METHOD_SELECTOR_LEN] {
-    let mut h = Blake2bVar::new(METHOD_SELECTOR_LEN).expect("32 <= 64");
-    h.update(method_name.as_bytes());
-    let mut out = [0u8; METHOD_SELECTOR_LEN];
-    h.finalize_variable(&mut out).expect("32 <= 64");
-    out
+    poker_l1::contracts::texas_poker::runtime::dispatch::compute_method_selector(method_name)
 }
 
 /// 当前方法种类的枚举。
@@ -230,19 +221,6 @@ pub enum MethodTier {
     Crypto,
 }
 
-impl MethodTier {
-    /// 该档位方法的预估单 AIR LOC。
-    #[must_use]
-    pub const fn estimated_loc(self) -> usize {
-        match self {
-            Self::Lifecycle => 800,
-            Self::Action => 1_000,
-            Self::Funds => 600,
-            Self::Crypto => 3_000,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,8 +274,24 @@ mod tests {
 
     #[test]
     fn test_selector_matches_l1_dispatch() {
-        // 验证 selector 与 L1 dispatch 算法一致：blake2b_256(method_name)[0..32]
-        let expected = compute_method_selector("create_table");
+        // 非循环自证：期望值是 blake2b-256("create_table")[0..32] 的硬编码摘要，
+        // 断言转发到 poker_l1 dispatch 后 selector 空间仍未漂移。
+        let expected = [
+            0xac, 0x94, 0xb9, 0x7b, 0x9e, 0xcd, 0x10, 0xd3, 0x7c, 0x4c, 0x5d, 0xb0, 0xfb, 0xb8,
+            0x9d, 0x9a, 0xf5, 0xcd, 0xb4, 0xed, 0x25, 0x42, 0x34, 0xe3, 0x1b, 0x1a, 0x8e, 0xda,
+            0xf5, 0xec, 0x84, 0x75,
+        ];
         assert_eq!(MethodKind::CreateTable.selector(), expected);
+        // 全部 19 个 kind：selector 必须与 poker_l1 dispatch 函数逐字节一致。
+        for kind in MethodKind::all() {
+            assert_eq!(
+                kind.selector(),
+                poker_l1::contracts::texas_poker::runtime::dispatch::compute_method_selector(
+                    kind.method_name()
+                ),
+                "selector 漂移: {}",
+                kind.method_name()
+            );
+        }
     }
 }

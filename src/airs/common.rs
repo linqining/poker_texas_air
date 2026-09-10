@@ -59,7 +59,7 @@ pub const COMMON_NUM_COLUMNS: usize = 37;
 // ===== 常量辅助 =====
 
 /// MAX_TOTAL_BET = 10^18，全局筹码上界。
-/// 对齐 `poker_l1/src/vm/contracts/texas_poker/constants.rs:MAX_TOTAL_BET`。
+/// 对齐 `poker_l1/src/contracts/texas_poker/constants.rs:MAX_TOTAL_BET`。
 /// 用于 addon/rebuy/join 的全局上界检查：`chip_pool + amount <= MAX_TOTAL_BET`。
 pub const MAX_TOTAL_BET: u64 = 1_000_000_000_000_000_000;
 

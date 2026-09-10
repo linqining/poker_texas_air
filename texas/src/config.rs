@@ -16,6 +16,9 @@ pub struct Config {
     pub max_players_per_table: u32,
     /// 初始 Table 1 使用的链上 table ID（环境相关，按部署环境配置）。
     pub default_chain_table_id: String,
+    /// 关桌管理端点的 bearer token（`OPERATOR_ADMIN_TOKEN`）。
+    /// 未配置时仅 debug 构建（本地联调）允许关桌，release 构建拒绝。
+    pub operator_admin_token: Option<String>,
 }
 
 impl Config {
@@ -36,6 +39,7 @@ impl Config {
             leave_grace_secs: std::env::var("LEAVE_GRACE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(10),
             max_players_per_table: std::env::var("MAX_PLAYERS_PER_TABLE").ok().and_then(|s| s.parse().ok()).unwrap_or(5),
             default_chain_table_id: std::env::var("DEFAULT_CHAIN_TABLE_ID").unwrap_or_else(|_| "0xe5736dc65ee19df22daa13c8218ad42c28c31cb5b1f174e73740858371664b33".to_string()),
+            operator_admin_token: std::env::var("OPERATOR_ADMIN_TOKEN").ok().filter(|s| !s.trim().is_empty()),
         }
     }
 }

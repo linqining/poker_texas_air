@@ -13,7 +13,6 @@ use crate::pokergame::table_summary::TableSummaryV2;
 use poker_protocol::z_poker::{MentalPokerGame, GameConfig};
 use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Plaintext, Scalar};
 use poker_protocol::z_poker::convert::{ecpoint_to_hex, scalar_to_hex};
-use poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript;
 use poker_protocol::crypto::CurvePoint;
 use poker_protocol::crypto::CurveScalar;
 /// 对齐 Move 合约 MIN_PLAYERS_TO_START = 2
@@ -144,6 +143,9 @@ pub struct ClientTable {
     pub reconstruct_state: Option<ReconstructPublicState>,
     /// 链上 Table 对象的 Object ID（hex 字符串）。
     pub chain_table_id: Option<String>,
+    /// 桌台已关闭（终态）：客户端据此禁用入座并提示。关桌后不再开局。
+    #[serde(default)]
+    pub closed: bool,
 }
 
 
@@ -177,19 +179,6 @@ pub struct Table {
     pub chain_table_id: Option<String>,
     #[serde(skip)]
     pub event_tx: Option<tokio::sync::mpsc::Sender<crate::pokergame::table::events::TableEvent>>,
-    /// 标记事件处理器是否已自行调用 `sync_table_state`。
-    /// 由 4 个生命周期/shuffle/reveal 处理器在 self-sync 后置 true，
-    /// `apply_event_to_socket` 末尾的统一 end-sync 检查此标志：
-    /// 若为 true 则跳过 end-sync 并重置为 false，避免双重 sync。
-    /// 仅在事件处理流程内有效，每次 end-sync 检查后都会被重置。
-    #[serde(skip)]
-    pub already_synced: bool,
-    /// Phase 2.3: 上次成功同步链上状态的时间戳。
-    /// 由 `sync_table_state` 和 `sync_deck_from_chain` 在写锁块末尾设置。
-    /// 用于 `verify_*_with_retry` 判断内存 crypto 数据新鲜度（阈值 2000ms），
-    /// 以及 tick 循环跳过冗余 fetch（阈值 3000ms）。
-    #[serde(skip)]
-    pub last_synced_at: Option<std::time::Instant>,
     /// #16/#17：座位 → 已接受的最大动作 seq（跨手单调，抗审查承诺向量）。
     #[serde(skip)]
     pub accepted_seq: HashMap<u32, u64>,
@@ -202,11 +191,24 @@ pub struct Table {
     pub hand_log_start: usize,
     /// 本手 id（开局时分配；动作签名域 v2 与结算记账同源）。
     pub current_hand_id: u32,
-    /// #20 Phase 2：本手证明输入日志（HandStart 快照 + 已接受命令）。
-    /// 结算时一次性重放为 ProveTask 链（取代常驻 mirror 第二本账）。
+    /// 本手证明事实（单一状态架构）：HandStart 快照 + 游戏层对账基准
+    /// （终局投入/逐笔派奖）；结算取用实时 VM 镜像（live_mirror），
+    /// 本结构是对账与动作签名材料的来源。
     /// `record_hand_start`（deck 终局时）整体重置。
     #[serde(skip)]
     pub hand_proof_log: crate::starknet::prove_log::HandProofLog,
+    /// 实时 VM 镜像（单一状态表示）：deck 终局时挂载，随桌存在，
+    /// 结算时 take。挂在 Table 上而非全局表——无跨桌串流。
+    #[serde(skip)]
+    pub live_mirror: Option<crate::starknet::shadow::ShadowHand>,
+    /// 关桌标志（终态）：置位后不再开局（game_loop 跳过 auto-start）、
+    /// 不再接受入座（SIT_DOWN 拒绝）。"关桌后不开新手"的服务端权威执行点。
+    #[serde(skip)]
+    pub closed: bool,
+    /// 链上注册表（PokerTableRegistry）分配的 table_id；None = 无链上
+    /// 锚点（未配置注册表，或注册失败降级为纯链下）。
+    #[serde(skip)]
+    pub registry_table_id: Option<u64>,
 }
 
 impl Table {
@@ -430,6 +432,7 @@ impl Table {
             reveal_token_state: self.get_reveal_token_public_state(),
             reconstruct_state: self.get_reconstruct_public_state(),
             chain_table_id: self.chain_table_id.clone(),
+            closed: self.closed,
         }
     }
 
@@ -512,14 +515,29 @@ impl Table {
             pk_to_seat: HashMap::new(),
             chain_table_id: Some(chain_table_id),
             event_tx: None,
-            already_synced: false,
-            last_synced_at: None,
             accepted_seq: HashMap::new(),
             action_log: Vec::new(),
             hand_proof_log: crate::starknet::prove_log::HandProofLog::default(),
+            live_mirror: None,
             hand_log_start: 0,
             current_hand_id: 0,
+            closed: false,
+            registry_table_id: None,
         }
+    }
+
+    /// 关桌（终态，幂等）：置位后 game_loop 不再开局、SIT_DOWN 被拒。
+    /// 返回 false 表示桌台此前已关闭。
+    pub fn close_table(&mut self) -> bool {
+        if self.closed {
+            return false;
+        }
+        self.closed = true;
+        true
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// 注入事件 sender，使 Table 内部方法能通过 `emit_event` 发送 socket 事件。

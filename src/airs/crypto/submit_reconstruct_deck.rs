@@ -28,7 +28,7 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use poker_l1::vm::contracts::texas_poker::constants::RECONSTRUCT_PHASE_COLLECTING;
+use poker_l1::contracts::texas_poker::constants::RECONSTRUCT_PHASE_COLLECTING;
 
 use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
 use crate::method_kind::MethodKind;

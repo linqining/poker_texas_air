@@ -1,25 +1,32 @@
 //! # poker_texas_air — Texas Poker method AIR + host verification
 //!
-//! VM 与 AIR 当前统一保留 19 个 active MethodKind；退休 discriminant 5/10/15/16 均 fail-closed。批量
-//! Aggregator 仍是 descriptor-only PoC，不能作为递归压缩证明使用。
+//! VM 与 AIR 当前统一保留 19 个 active MethodKind；退休 discriminant 5/10/15/16 均 fail-closed。
 //!
-//! ## 架构分层
+//! ## 架构分层（生产路径）
 //!
-//! - **Layer 0**: Method AIRs（19 个 active stable discriminant）
-//! - **Layer 1**: Host verification receipts（legacy replay-backed）与
-//!   `texas_tagged` direct state-transition AIR（mid-round, fail-closed）
-//! - **Layer 2**: Host-verified outer precompile（O(N) child replay + final digest AIR）
-//! - **Layer 3**: Texas 自有递归协议（尚未实现，生产验证入口保持关闭）
+//! - **Layer 0**: Method AIRs（19 个 active stable discriminant，`airs::`）
+//! - **Layer 1**: [`prove_task::ProveTask`] → [`orchestrator::Orchestrator`]：完整 VM
+//!   dispatch replay + 逐方法 method AIR 证明；批内连续性由
+//!   [`tagged_method`] 与 [`verified_chain`] 维护
+//! - **Layer 2**: [`method_precompile_dual`] 把 method proof 与 canonical
+//!   precompile request/receipt 打包为可转移 dual-proof；[`outer_aggregate`]
+//!   做 O(N) host-verified 聚合（descriptor-only Aggregator AIR 不作为递归压缩
+//!   证明使用），[`starknet_settlement`] 消费其 settlement 语句
+//! - **Canonical direct AIR**: [`texas_canonical_air`] 为完整 canonical Texas
+//!   transition 的 direct-AIR 路径（hand-bench 端到端基准与 settlement/rake
+//!   opening 消费）
+//! - Texas 自有递归协议尚未实现，生产验证入口保持关闭
 //!
 //! ## 设计文档
 //!
-//! 详见 `.trae/documents/poker_texas_air_custom_circuit_plan.md`。
+//! 详见 `docs/STATUS.md`（canonical-AIR 覆盖与信任边界）与
+//! `docs/design/DUAL_PROOF_PROTOCOL.md`（结算双证明架构）。
 //!
 //! ## 复用率 ~85%
 //!
 //! - state root 在可信 host 端从 canonical Borsh preimage 重算，并与完整公开输入一起
 //!   混入 Fiat–Shamir；当前 method AIR 内没有嵌入 Poseidon verifier 组件
-//! - 直接复用 `poker_l1::vm::contracts::texas_poker::types::TexasPokerTable`（业务类型）
+//! - 直接复用 `poker_l1::contracts::texas_poker::types::TexasPokerTable`（业务类型）
 
 #![cfg_attr(texas_release_tests, allow(unexpected_cfgs))]
 #![deny(unsafe_code)]
@@ -45,10 +52,8 @@ pub mod deck_commitment;
 pub mod method_precompile_dual;
 pub mod error;
 pub mod hand_binding;
-pub mod merkle_tree;
 pub mod method_kind;
 pub mod outer_aggregate;
-pub mod outer_precompile;
 pub mod precompile_binding;
 pub mod proof_archive;
 pub mod prove_timing;
@@ -77,10 +82,6 @@ pub mod tagged_method;
 pub mod texas_canonical;
 /// Direct AIR and archive format for complete canonical Texas transitions.
 pub mod texas_canonical_air;
-/// Finalized state-kernel receipt binding for direct Texas proofs.
-pub mod texas_receipt;
-/// No-replay canonical heterogeneous Texas transition proving path.
-pub mod texas_tagged;
 pub mod verified_chain;
 
 // ===== Post-commit Prover =====
@@ -89,18 +90,14 @@ pub mod verified_chain;
 pub mod orchestrator;
 pub mod prove_task;
 
-// ===== Layer 2: Aggregator AIR =====
-// 阶段 4 PoC：Aggregator AIR 不再 feature-gated。
-// descriptor-only prove/verify 生产入口默认拒绝，只保留显式测试入口。
+// ===== Layer 2: Aggregation =====
+// 阶段 4：outer_aggregate 做 O(N) host-verified 聚合；descriptor-only
+// Aggregator AIR 的 prove/verify 生产入口默认拒绝，只保留显式测试入口。
 pub mod authorization_binding;
 /// Lookup-backed Blake2b compression scheduler and fixed-value SMT path proof.
 pub mod blake2b_lookup_compression;
 /// Lookup-backed Blake2b G component for the host-zero compression path.
 pub mod blake2b_lookup_g;
-/// Stwo 2.3 LogUp byte-XOR foundation for the lookup-optimized Blake2b port.
-pub mod blake2b_lookup_xor;
-/// Sequential in-AIR Blake2b-256 compression for the fixed SMT ABI.
-pub mod blake2b_smt_air;
 /// Fixed-width Blake2b SMT compression witness ABI for the host-zero route.
 pub mod blake2b_smt_witness;
 /// Binary-field BLAKE3 (flock) hash-proving backend.
@@ -109,19 +106,13 @@ pub mod blake3_flock;
 /// fixed-width rake opening consumed by raked settlement terminals.
 pub mod canonical_rake_opening;
 pub mod canonical_reveal_opening;
-/// Fixed-width, lookup-authenticated reveal-assignment ledger opening.
-pub mod canonical_settlement_air;
-pub mod canonical_settlement_air_plan;
 /// Lookup-backed authentication of canonical state-image byte preimages.
 pub mod canonical_state_hash;
-/// Public-proof composition that binds canonical Texas transitions to L1
-/// fixed-width Blake2b state-object openings.
-pub mod canonical_state_opening;
-/// Backend-agnostic Blake2b statement proving seam shared by the M31 lookup
-/// stack and the binary-field flock backend.
+pub mod state_image_admission;
+/// Backend-agnostic hash-statement proving seam ([`hash_prover::HashStatement`])
+/// shared by the M31 lookup stack and the binary-field flock backend (the
+/// process-wide default backend is the BLAKE3 flock chain digest).
 pub mod hash_prover;
-/// Bounded, non-terminal reveal-timeout kick cascade scope.
-pub mod reveal_timeout_cascade;
 /// Unified admission STARK skeleton: the Path A recursive-aggregator
 /// RistrettoAirV2 player sigma proofs: ownership, reveal tokens, deck
 /// remasking, and fold/leave transitions.

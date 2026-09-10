@@ -93,7 +93,7 @@ pub fn fr_mul(a: u256, b: u256) -> u256 {
 
 /// `−a mod n` (canonical input; zero maps to zero).
 pub fn fr_neg(a: u256) -> u256 {
-    if a.is_zero() {
+    if Zero::is_zero(@a) {
         0
     } else {
         STARK_N - a
@@ -432,11 +432,11 @@ pub fn leave_equations(
         let out_c2x = *out_c2.at(2 * i); let out_c2y = *out_c2.at(2 * i + 1);
         let ax = *a.at(2 * i); let ay = *a.at(2 * i + 1);
         // on-curve fail-closed
-        let in_c1_p = match EcPointTrait::new(in_c1x, in_c1y) { Option::Some(p) => p, Option::None => { return Option::None; } };
+        let _in_c1_p = match EcPointTrait::new(in_c1x, in_c1y) { Option::Some(p) => p, Option::None => { return Option::None; } };
         let in_c2_p = match EcPointTrait::new(in_c2x, in_c2y) { Option::Some(p) => p, Option::None => { return Option::None; } };
         let out_c1_p = match EcPointTrait::new(out_c1x, out_c1y) { Option::Some(p) => p, Option::None => { return Option::None; } };
         let out_c2_p = match EcPointTrait::new(out_c2x, out_c2y) { Option::Some(p) => p, Option::None => { return Option::None; } };
-        let a_p = match EcPointTrait::new(ax, ay) { Option::Some(p) => p, Option::None => { return Option::None; } };
+        let _a_p = match EcPointTrait::new(ax, ay) { Option::Some(p) => p, Option::None => { return Option::None; } };
         let _ = out_c1_p;
         // d2 = in_c2 − out_c2
         let d2 = in_c2_p - out_c2_p;
@@ -512,7 +512,7 @@ pub fn verify_hand_batch_stark(hand_binding: felt252, payload: Span<felt252>) ->
         Option::Some(v) => v,
         Option::None => { return false; },
     };
-    let n_shuffle_u32: u32 = match n_shuffle.try_into() {
+    let _n_shuffle_u32: u32 = match n_shuffle.try_into() {
         Option::Some(v) => v,
         Option::None => { return false; },
     };

@@ -1,10 +1,25 @@
 //! Canonical helpers for constructing tagged-seat test fixtures.
 
-use poker_l1::vm::contracts::texas_poker::utils::g1_generator as g1_gen;
+use poker_l1::signature::{SignatureScheme, StarkTxPubkey, CURRENT_VERSION};
+use poker_l1::contracts::texas_poker::utils::g1_generator as g1_gen;
 use poker_l1::Address;
-use poker_l1::vm::contracts::texas_poker::card::HoleCards;
-use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, PlayingSeat, Seat, SeatStatus};
+use poker_l1::contracts::texas_poker::card::HoleCards;
+use poker_l1::contracts::texas_poker::types::{EMPTY_PLAYER, PlayingSeat, Seat, SeatStatus};
+use poker_protocol::crypto::curve::CurvePoint;
 use poker_protocol::crypto::types::ECPoint;
+
+/// 结构合法的会话交易公钥 fixture（Stark v1 + 32B 压缩点，非恒等元
+/// ——`Seat::occupied` 的结构校验与签名路径均可用；定宽 `StarkTxPubkey`）。
+pub fn well_formed_tx_pk_fixture() -> StarkTxPubkey {
+    StarkTxPubkey {
+        tag: poker_l1::signature::encode_tag(SignatureScheme::Stark, CURRENT_VERSION),
+        raw: g1_gen()
+            .compress()
+            .as_ref()
+            .try_into()
+            .expect("stark compressed point is 32B"),
+    }
+}
 
 /// Install or replace a fixture player while preserving every meaningful payload of an existing
 /// live/departed variant. A vacant slot becomes an active playing seat with a deterministic key.
@@ -17,6 +32,7 @@ pub fn set_player(seat: &mut Seat, player: Address) {
                 player,
                 0,
                 ECPoint(g1_gen()),
+                well_formed_tx_pk_fixture().to_tagged(),
                 SeatStatus::Active,
             )
             .expect("fixture player must create a canonical active seat");

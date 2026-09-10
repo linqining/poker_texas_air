@@ -7,7 +7,7 @@
 use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::{DefaultCurve, EcPoint};
 use poker_protocol::z_poker::protocol::ClientPlayer;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, PoseidonFeltTranscript};
 use rand_core::OsRng;
 
 type Ct = ElGamalCiphertextGeneric<DefaultCurve>;
@@ -68,7 +68,7 @@ fn leave_exclusion_dleq_verifies_over_subdeck() {
         .filter(|(i, _)| !excluded.contains(i))
         .map(|(_, ct)| ct.clone())
         .collect();
-    let mut transcript = FiatShamirTranscript::new(b"zk_leave_proof_v1");
+    let mut transcript = PoseidonFeltTranscript::new_domain(poker_protocol::transcript_domains::LEAVE_POSEIDON_V2);
     assert!(
         round.leave_proof.verify(&sub_input, &sub_output, &leaver.pk, &mut transcript),
         "DLEq over the stripped subdeck must verify"
@@ -107,7 +107,7 @@ fn leave_without_exclusions_still_works_and_full_deck_leaks() {
     let (deck, _) = deck_with_hole(8, &[]);
     let leaver = ClientPlayer::new();
     let round = leaver.leave_game(&deck);
-    let mut transcript = FiatShamirTranscript::new(b"zk_leave_proof_v1");
+    let mut transcript = PoseidonFeltTranscript::new_domain(poker_protocol::transcript_domains::LEAVE_POSEIDON_V2);
     assert!(
         round.leave_proof.verify(&round.input_cards, &round.output_cards, &leaver.pk, &mut transcript),
         "legacy full-strip leave must still verify (service-side rejects it when hole slots exist)"
@@ -126,7 +126,7 @@ fn tampered_excluded_slot_rejected_by_subdeck_dleq() {
     let round = leaver.leave_game_with_exclusions(&deck, &[2]);
 
     // 若验证方错误地把全部牌送进 DLEq（不排除），必须验证失败。
-    let mut transcript = FiatShamirTranscript::new(b"zk_leave_proof_v1");
+    let mut transcript = PoseidonFeltTranscript::new_domain(poker_protocol::transcript_domains::LEAVE_POSEIDON_V2);
     assert!(
         !round.leave_proof.verify(&round.input_cards, &round.output_cards, &leaver.pk, &mut transcript),
         "DLEq must NOT verify when the un-stripped excluded slot is mixed in"

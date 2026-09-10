@@ -12,11 +12,7 @@
 use starknet::accounts::Account;
 use starknet::core::types::{Call, Felt};
 
-use super::chain::parse_felt;
-
-fn selector(name: &str) -> Felt {
-    starknet::core::utils::starknet_keccak(name.as_bytes())
-}
+use super::chain::{parse_felt, selector};
 
 fn vault_address() -> Result<Felt, String> {
     let chain = super::chain().ok_or("starknet chain not initialized")?;
@@ -201,8 +197,9 @@ pub async fn schedule_leave_release(wallet: &str, last_hand_id: u32, hand_settle
     }
 }
 
-/// 全量释放玩家锁（force_unlock）：仅在"已离桌且最后一手已结算"时调用。
-async fn release_player_lock(wallet: &str) {
+/// 全量释放玩家锁（force_unlock）：仅在"已离桌且最后一手已结算"或
+/// "桌台关闭、在座玩家集体离场"时调用。
+pub(crate) async fn release_player_lock(wallet: &str) {
     let Some(chain) = super::chain() else { return };
     let vault = match vault_address() {
         Ok(v) => v,
@@ -220,11 +217,7 @@ async fn release_player_lock(wallet: &str) {
         }
     };
     let locked_wei = match chain
-        .call_contract(
-            vault,
-            starknet::core::utils::starknet_keccak("locked_balance".as_bytes()),
-            vec![player],
-        )
+        .call_contract(vault, selector("locked_balance"), vec![player])
         .await
     {
         Ok(felts) => {
@@ -266,8 +259,9 @@ fn normalize_wallet(w: &str) -> String {
     w.trim().trim_start_matches("wallet:").to_lowercase()
 }
 
-pub(crate) fn wallet_of_felt(p: &starknet_ff::FieldElement) -> String {
-    format!("0x{}", p.to_bytes_be().iter().map(|b| format!("{b:02x}")).collect::<String>())
+/// 钱包 felt → `0x` 前缀全 64 位 hex（hooks / dual_settle 的结算参与者键）。
+pub(crate) fn wallet_of_felt(p: &starknet_crypto::Felt) -> String {
+    format!("0x{}", super::chain::hex_encode(&p.to_bytes_be()))
 }
 
 /// 玩家是否有活跃在局 session（view；结算编排用它过滤续钟调用，
@@ -287,6 +281,86 @@ pub async fn vault_session_active(wallet: &str) -> bool {
         .and_then(|felts| felts.first().cloned())
         .map(|f| f == Felt::ONE)
         .unwrap_or(false)
+}
+
+/// P1-2 会话委托：查钱包在 vault 上当前**有效**登记的会话交易公钥
+/// （`active_session_tx_pk`；未登记/已过期 = None）。
+///
+/// join 接受点用它核验"客户端声明的会话钥 == 链上登记钥"——登记在
+/// 买入时完成（非私密路径玩家 multicall `set_session_tx_pk`；STRK20
+/// 私密路径 anonymizer 同笔私交易 `set_session_tx_pk_for`）。view 调用
+/// 零链上足迹（重连不产生任何交易）。
+pub async fn vault_active_session_tx_pk(wallet: &str) -> Option<[u8; 32]> {
+    let chain = super::chain()?;
+    let vault = vault_address().ok()?;
+    let player = parse_felt(wallet)?;
+    let felts = chain
+        .call_contract(vault, selector("active_session_tx_pk"), vec![player])
+        .await
+        .ok()?;
+    let pk = felts.first()?;
+    let bytes = pk.to_bytes_be();
+    if bytes.iter().all(|&b| b == 0) {
+        return None; // 未登记
+    }
+    Some(bytes)
+}
+
+/// P1-2 会话委托核验（join 接受点）：客户端声明的会话交易公钥（32B 压缩
+/// 点 hex）与链上 vault 登记逐字节一致 → `Some(bytes)`（随 join 缓冲进入
+/// 座位状态，成为该座 VM 层交易签名验证锚）；未声明 / 格式错 / 链上未
+/// 登记 / 不一致 → `None`（该参与者签名路径未激活——过渡期仅告警，
+/// TableRuntime 接线后对 None fail-closed）。
+/// P1-2 会话委托门的事件计数（监控/告警接线用；测试断言同源）。
+/// `mismatches` 是**攻击信号**（有人以该钱包名义声明了错误的钥），
+/// `unregistered` 是旧客户端/未登记的正常过渡态。
+pub static SESSION_TX_PK_MISMATCHES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static SESSION_TX_PK_UNREGISTERED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub async fn verify_session_tx_pk(wallet: &str, declared_hex: Option<&str>) -> Option<Vec<u8>> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let declared = declared_hex?.trim();
+    if declared.is_empty() {
+        return None;
+    }
+    let body = declared.strip_prefix("0x").unwrap_or(declared);
+    let bytes = match hex::decode(body) {
+        Ok(b) if b.len() == 32 => b,
+        _ => {
+            SESSION_TX_PK_MISMATCHES.fetch_add(1, Relaxed);
+            tracing::warn!(
+                target: "session_tx_pk_mismatch",
+                "[session-tx-pk] ATTACK SIGNAL: {wallet} 声明的会话公钥格式非法（期望 32B hex）— 计数 {}",
+                SESSION_TX_PK_MISMATCHES.load(Relaxed)
+            );
+            return None;
+        }
+    };
+    match vault_active_session_tx_pk(wallet).await {
+        Some(onchain) if onchain.as_slice() == bytes.as_slice() => Some(bytes),
+        Some(onchain) => {
+            SESSION_TX_PK_MISMATCHES.fetch_add(1, Relaxed);
+            tracing::warn!(
+                target: "session_tx_pk_mismatch",
+                "[session-tx-pk] ATTACK SIGNAL: {wallet} 声明 {}.. 与链上登记 {}.. 不一致 — 拒绝登记，计数 {}",
+                &declared[..8.min(declared.len())],
+                hex::encode(&onchain[..4]),
+                SESSION_TX_PK_MISMATCHES.load(Relaxed)
+            );
+            None
+        }
+        None => {
+            SESSION_TX_PK_UNREGISTERED.fetch_add(1, Relaxed);
+            tracing::debug!(
+                target: "session_tx_pk_unregistered",
+                "[session-tx-pk] {wallet} 链上未登记会话公钥（旧客户端/未买入登记）— 计数 {}",
+                SESSION_TX_PK_UNREGISTERED.load(Relaxed)
+            );
+            None
+        }
+    }
 }
 
 /// operator 账户 nonce 竞态判定（结算 bundle / vault 调用共用）：

@@ -1,11 +1,16 @@
-//! 手牌证明构建器（Phase 2，TODO #20）：把游戏层记录的手牌日志
-//! （`prove_log::HandProofLog`）**一次性**重放进 poker_l1 的 TexasPokerTable
-//! VM，产出该手的 ProveTask 链与 pre-payout 快照，供结算生成证明与 calldata。
+//! 实时 VM 镜像的机械层（`TableMirror` + 开局引导 + 类型桥接）。
 //!
-//! 权威状态只有游戏层一本账；本类型不再常驻、不再被接受点实时同步——
-//! `hooks::on_hand_complete` 在锁外用克隆的日志构建即弃。重放输入与游戏层
-//! 接受的输入逐字节相同，构建失败 = 记录异常，显式放弃该手上链（绝不带着
-//! 分歧状态结算）。
+//! 手牌只有一份 VM 状态表示：`shadow.rs` 的实时镜像在每个接受点同步
+//! dispatch（单一状态），结算时经其 `finish` 直接取用 ProveTask 链与
+//! pre-payout 快照。本模块不再持有"日志重放"路径——历史的
+//! `build_from_log`（结算时构建第二份 VM 状态）已随单一状态重构删除。
+//!
+//! 剩余职责：
+//! - [`TableMirror`]：dispatch 包装（认证上下文 + ProveTask 收集）与
+//!   已接受命令的应用原语（reveal 重排 / bet / force_fold）；
+//! - [`mirror_bootstrap`]：实时镜像的开局引导（join 重放 + deck 注入 +
+//!   DealHole 窗口），与 shadow.rs 共用；
+//! - [`conv`]：zgame poker_protocol → ptx 类型的桥接。
 //!
 //! 类型桥接：服务端现有代码把前端 JSON 解析为 zgame poker_protocol（0.2.0）类型；
 //! poker_l1 使用 poker_texas_air 内的 poker_protocol（0.1.0）类型。两份副本的
@@ -13,12 +18,13 @@
 
 use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
-use poker_l1::vm::contracts::dispatch::DispatchContext;
-use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch};
-use poker_l1::vm::contracts::texas_poker::dispatch::{
+use poker_l1::contracts::dispatch::DispatchContext;
+use poker_l1::contracts::texas_poker::dispatch::{self as texas_dispatch};
+use poker_l1::contracts::texas_poker::dispatch::{
     RaiseArgs, SeatIndexArgs, SubmitRevealTokensArgs,
 };
-use poker_l1::vm::contracts::texas_poker::types::{CipherDeck, SeatMask, ShuffleState, TexasPokerTable};
+use poker_l1::contracts::texas_poker::runtime::caller_id::wallet_to_address;
+use poker_l1::contracts::texas_poker::types::{CipherDeck, SeatMask, ShuffleState, TexasPokerTable};
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 // 别名：源仓库里 ptx_protocol 是 poker_protocol 的重命名依赖；迁入工作区后
 // cargo 不允许同一路径依赖出现两次，这里用 use 别名等价替代。
@@ -31,7 +37,7 @@ pub use ptx_protocol::crypto::DefaultCurve as PtxCurve;
 
 
 /// 单桌镜像。生命周期：建桌 → 每手 start → 操作 → 结算 → 下一手。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TableMirror {
     pub table: TexasPokerTable,
     /// 当前手牌收集的证明任务（每手结算后清空）。
@@ -104,12 +110,12 @@ impl TableMirror {
             },
             chain_id: 377,
             block_height: self.block_height,
-            block_timestamp: now_ms(),
+            block_timestamp: crate::relayer::util::now_ms(),
         }
     }
 
-    /// dispatch 一个动作并收集产出的 ProveTask。
-    pub fn apply(
+    /// dispatch 一个动作并收集产出的 ProveTask（仅本模块的应用原语调用）。
+    fn apply(
         &mut self,
         caller: poker_l1::Address,
         selector: &[u8; 32],
@@ -127,22 +133,34 @@ impl TableMirror {
         Ok(())
     }
 
-    /// 玩家入座（对应 SIT_DOWN_V2 的 join 步骤）。
+    /// 玩家入座（对应 SIT_DOWN_V2 的 join 步骤；仅 `begin_reveal_hand` 重放调用）。
     ///
     /// `player` 为玩家 Starknet 地址（20 字节），`pk` 为其 mental-poker ElGamal 公钥
     /// （与前端 pkHex 同源），`pk_ownership_proof` 为 80 字节 Schnorr 证明。
-    pub fn join(
+    fn join(
         &mut self,
         player: poker_l1::Address,
         buy_in_chips: u64,
         pk: PtxECPoint,
+        tx_pk: Option<poker_l1::signature::TaggedPubkey>,
         pk_ownership_proof: Vec<u8>,
     ) -> Result<(), String> {
-        use poker_l1::vm::contracts::texas_poker::dispatch::JoinTableArgs;
+        use poker_l1::contracts::texas_poker::dispatch::JoinTableArgs;
         let args = borsh::to_vec(&JoinTableArgs {
             player,
             buy_in: buy_in_chips,
             pk,
+            // P1-2 会话委托：核验过的会话交易公钥（None = 未登记哨兵，
+            // 签名路径 fail-closed；mirror 注入路径不需要 tx 签名）。
+            tx_pk: tx_pk.unwrap_or_else(|| {
+                poker_l1::signature::TaggedPubkey {
+                    tag: poker_l1::signature::encode_tag(
+                        poker_l1::signature::SignatureScheme::Stark,
+                        poker_l1::signature::CURRENT_VERSION,
+                    ),
+                    raw: vec![0u8; 32],
+                }
+            }),
             pk_ownership_proof,
         })
         .map_err(|e| format!("encode join args: {e}"))?;
@@ -159,7 +177,7 @@ impl TableMirror {
     pub fn begin_reveal_hand(
         &mut self,
         deck: Vec<PtxElGamalCiphertext>,
-        plan: &[(poker_l1::Address, u64, PtxECPoint, Vec<u8>)],
+        plan: &[(poker_l1::Address, u64, PtxECPoint, Option<poker_l1::signature::TaggedPubkey>, Vec<u8>)],
         button_rank: u8,
         hand_id: u32,
     ) -> Result<(), String> {
@@ -174,8 +192,8 @@ impl TableMirror {
 
         // join：按升序座位计划重放（VM find_empty_seat 顺序填座 →
         // mirror 座位 rank == 游戏座位 rank）。
-        for (player, buy_in, pk, proof) in plan {
-            self.join(*player, *buy_in, pk.clone(), proof.clone())
+        for (player, buy_in, pk, tx_pk, proof) in plan {
+            self.join(*player, *buy_in, pk.clone(), tx_pk.clone(), proof.clone())
                 .map_err(|e| format!("begin_reveal join: {e}"))?;
         }
         if self.table.seats.iter().all(|s| seat_player_addr(s).is_none()) {
@@ -191,13 +209,13 @@ impl TableMirror {
 
         // button 对齐：游戏层按钮在参与座位中的 rank（VM post_blinds 据此
         // 计算盲注位置，与游戏层盲注玩家保持一致）。
-        self.table.button = button_rank.min(self.table.seats.len().saturating_sub(1) as u8);
+        self.table.button = button_rank.min(self.table.max_players.saturating_sub(1) as u8);
 
         // 抽水规则：到手牌进入翻后（flop 及以后，即出现公共牌的争夺底池）才抽，
         // 翻前结束（无人跟注的 uncontested 底池）不抽。VM 结算的硬性不变量
         // `uncontested pot must not be raked` 天然满足前半条；这里启用百分比
         // 模式使"到翻后的争夺底池"按 bps 抽水（有单手 cap）。
-        self.table.rake_mode = poker_l1::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+        self.table.rake_mode = poker_l1::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
         self.table.rake_bps = self.rake_bps;
         self.table.rake_cap = self.rake_cap;
 
@@ -212,7 +230,7 @@ impl TableMirror {
         self.table.deck_state.cards_dealt = 0;
         self.table.deck_state.owner_readable_hole_cards.clear();
         let mut contributor_mask: SeatMask = 0;
-        for idx in 0..self.table.seats.len().min(16) {
+        for idx in 0..usize::from(self.table.max_players) {
             if seat_player_addr(&self.table.seats[idx]).is_some() {
                 contributor_mask |= 1u16 << idx;
             }
@@ -224,15 +242,15 @@ impl TableMirror {
                     pending_mask: 0,
                     completed_mask: 0,
                 },
-                now_ms(),
+                crate::relayer::util::now_ms(),
             )
             .map_err(|e| format!("mirror enter_initial_shuffling failed: {e}"))?;
         // 规范化推进：武装 deadline + 驱动 ShuffleComplete → DealHole，
         // 与 dispatch 后的 canonical 归一化保持一致。
         let mut events = Vec::new();
-        poker_l1::vm::contracts::texas_poker::state_machine::normalize_until_blocked(
+        poker_l1::contracts::texas_poker::state_machine::normalize_until_blocked(
             &mut self.table,
-            now_ms(),
+            crate::relayer::util::now_ms(),
             &mut events,
         )
         .map_err(|e| format!("mirror normalize after deck injection: {e}"))?;
@@ -255,9 +273,9 @@ impl TableMirror {
                 // showdown：验证目标是 ledger 保存的完整密文（与客户端生成
                 // 证明所用密文逐字节一致）；其他阶段用当前 deck 密文。
                 let ct = if self.table.reveal_phase()
-                    == poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN
+                    == poker_l1::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN
                 {
-                    let poker_l1::vm::contracts::texas_poker::types::RevealTarget::Hole {
+                    let poker_l1::contracts::texas_poker::types::RevealTarget::Hole {
                         seat_index: owner,
                         card_slot,
                     } = a.target
@@ -284,8 +302,8 @@ impl TableMirror {
         Ok(out)
     }
 
-    /// 玩家洗牌提交（对应 WS `SHUFFLE_SUBMIT`）。
-    /// 玩家揭牌令牌提交。
+    /// 玩家揭牌令牌提交（tokens/proofs 须已按 VM canonical 顺序重排，
+    /// 见 [`Self::apply_recorded_reveal`]）。
     pub fn submit_reveal_tokens(
         &mut self,
         seat_index: u8,
@@ -302,27 +320,30 @@ impl TableMirror {
         self.apply(caller, &texas_dispatch::selectors::submit_player_reveal_tokens(), args)
     }
 
-    /// 牌组重构提交（失败牌补救路径；镜像尽力跟随）。
-    pub fn fold(&mut self, seat_index: u8) -> Result<(), String> {
+    /// 弃牌（仅 [`Self::apply_recorded_bet`] 调用）。
+    pub(crate) fn fold(&mut self, seat_index: u8) -> Result<(), String> {
         let caller = self.seat_player(seat_index)?;
         let args = borsh::to_vec(&SeatIndexArgs { seat_index }).map_err(|e| e.to_string())?;
         self.apply(caller, &texas_dispatch::selectors::fold(), args)
     }
 
-    pub fn check(&mut self, seat_index: u8) -> Result<(), String> {
+    /// 过牌（[`Self::apply_recorded_bet`] 与 e2e 对拍测试调用）。
+    pub(crate) fn check(&mut self, seat_index: u8) -> Result<(), String> {
         let caller = self.seat_player(seat_index)?;
         let args = borsh::to_vec(&SeatIndexArgs { seat_index }).map_err(|e| e.to_string())?;
         self.apply(caller, &texas_dispatch::selectors::check(), args)
     }
 
-    pub fn call(&mut self, seat_index: u8) -> Result<(), String> {
+    /// 跟注（[`Self::apply_recorded_bet`] 与 e2e 对拍测试调用）。
+    pub(crate) fn call(&mut self, seat_index: u8) -> Result<(), String> {
         let caller = self.seat_player(seat_index)?;
         let args = borsh::to_vec(&SeatIndexArgs { seat_index }).map_err(|e| e.to_string())?;
         self.apply(caller, &texas_dispatch::selectors::call(), args)
     }
 
     /// 加注。`total_bet` 是加注后本轮总下注额（与 WS RAISE 语义一致）。
-    pub fn raise(&mut self, seat_index: u8, total_bet: u64) -> Result<(), String> {
+    /// 仅 [`Self::apply_recorded_bet`] 调用。
+    pub(crate) fn raise(&mut self, seat_index: u8, total_bet: u64) -> Result<(), String> {
         let caller = self.seat_player(seat_index)?;
         let args = borsh::to_vec(&RaiseArgs {
             seat_index,
@@ -339,7 +360,7 @@ impl TableMirror {
         // pre-payout 表。派奖后 board 复位、pot 清零，无法再派生 settlement plan。
         if matches!(
             self.table.hand_phase,
-            poker_l1::vm::contracts::texas_poker::types::HandPhase::ShowdownDisplay { .. }
+            poker_l1::contracts::texas_poker::types::HandPhase::ShowdownDisplay { .. }
         ) {
             self.mark_pre_settlement();
         }
@@ -378,11 +399,17 @@ impl TableMirror {
         !self.tasks.is_empty()
     }
 
-    /// 从 Starknet felt 地址派生 poker_l1 地址（32 字节大端取低 20 字节）。
-    pub fn addr_from_starknet(felt_hex: &str) -> Option<poker_l1::Address> {
-        let felt = super::chain::parse_felt(felt_hex)?;
-        let bytes = felt.to_bytes_be();
-        Some(bytes[12..32].try_into().expect("20 bytes"))
+    /// 从 Starknet felt 地址派生 poker_l1 地址。
+    ///
+    /// 截断公式（felt 低 20 字节）的**唯一权威**在
+    /// `poker_l1::...::runtime::caller_id::wallet_to_address`（e2e 有对拍
+    /// 断言）。本封装仅补 texas 侧的输入面：钱包端会以上送十进制 felt 串
+    /// （bigint.toString()），`wallet_to_address` 只吃 hex——先经
+    /// [`chain::parse_felt`] 解出 felt 再 hex 化喂给权威实现，两条输入
+    /// 路径最终落在同一公式上。
+    pub fn addr_from_starknet(felt_str: &str) -> Option<poker_l1::Address> {
+        let felt = super::chain::parse_felt(felt_str)?;
+        wallet_to_address(&format!("{felt:#x}")).ok()
     }
 
     /// 应用一条记录的 reveal 令牌命令（移植原 `mirror_sync_reveal` 锁内逻辑：
@@ -507,39 +534,11 @@ impl TableMirror {
     }
 }
 
-/// 从记录的手牌日志构建本手证明工件（一次性；构建即弃，无常驻状态）。
-///
-/// `hand_id` 由调用方（hooks 的单调序列）分配，满足链上 register_aggregate
-/// 的 first_hand_id 严格递增校验。
-/// 重放构建入口：失败时把完整命令日志落盘（Debug 格式，含全部令牌），
-/// 供离线复现相位失步（目录可用 TEXAS_REPLAY_DUMP_DIR 覆盖）。
-pub fn build_from_log(
+/// 实时镜像（shadow.rs）的开局引导：按 HandStart 快照构建镜像、按升序
+/// 座位 join、注入终局 deck、直接进入 DealHole reveal 窗口。
+pub(crate) fn mirror_bootstrap(
     table_id: u32,
     start: &super::prove_log::HandStartData,
-    commands: &[super::prove_log::HandCommand],
-    hand_id: u32,
-) -> Result<TableMirror, String> {
-    if let Err(e) = build_from_log_inner(table_id, start, commands, hand_id) {
-        let dir = std::env::var("TEXAS_REPLAY_DUMP_DIR")
-            .unwrap_or_else(|_| "/tmp/texas-replay-failures".to_string());
-        let _ = std::fs::create_dir_all(&dir);
-        let path = format!("{dir}/table{table_id}-hand{hand_id}-{}.txt", now_ms());
-        let body = format!(
-            "error: {e}\n\nstart: {start:#?}\n\ncommands ({}):\n{commands:#?}\n",
-            commands.len()
-        );
-        let _ = std::fs::write(&path, body);
-        tracing::warn!("[mirror-replay] failure forensics dumped to {path}");
-        Err(e)
-    } else {
-        build_from_log_inner(table_id, start, commands, hand_id)
-    }
-}
-
-fn build_from_log_inner(
-    table_id: u32,
-    start: &super::prove_log::HandStartData,
-    commands: &[super::prove_log::HandCommand],
     hand_id: u32,
 ) -> Result<TableMirror, String> {
     let bb = start.small_blind.saturating_mul(2);
@@ -552,108 +551,33 @@ fn build_from_log_inner(
         bb,
         [0xC0; 20],
     );
-    let mut plan: Vec<(poker_l1::Address, u64, PtxECPoint, Vec<u8>)> = Vec::new();
-    let mut by_pk: std::collections::HashMap<&str, poker_l1::Address> = std::collections::HashMap::new();
-    let mut by_wallet: std::collections::HashMap<&str, poker_l1::Address> = std::collections::HashMap::new();
+    let mut plan: Vec<(
+        poker_l1::Address,
+        u64,
+        PtxECPoint,
+        Option<poker_l1::signature::TaggedPubkey>,
+        Vec<u8>,
+    )> = Vec::new();
     for p in &start.participants {
         let addr = TableMirror::addr_from_starknet(&p.wallet)
             .ok_or_else(|| format!("bad wallet felt: {}", p.wallet))?;
-        by_pk.insert(p.pk_hex.as_str(), addr);
-        by_wallet.insert(p.wallet.as_str(), addr);
-        plan.push((addr, p.stack, p.pk.clone(), p.pk_ownership_proof.clone()));
+        plan.push((
+            addr,
+            p.stack,
+            p.pk.clone(),
+            p.tx_pk.clone(),
+            p.pk_ownership_proof.clone(),
+        ));
     }
     mirror
         .begin_reveal_hand(start.deck.clone(), &plan, start.button_rank, hand_id)
         .map_err(|e| format!("begin_reveal: {e}"))?;
-
-    // 游戏层接受异步乱序提交（reveal 令牌可晚于下注到达），而 VM 重放是
-    // 相位序敏感的。重放分两遍（2026-09-08 线上 4/7 手 "not in betting
-    // round" / "reveal phase is NONE" / pot 不匹配均源于乱序）：
-    //   1) 先按日志序应用全部 reveal——当前窗口内的立即生效并推进相位；
-    //      相位不匹配的进缓冲（属于尚未到达的窗口）；
-    //   2) 再按日志序重放 Bet/ForceFold，每条前后冲刷缓冲：下注完成推进
-    //      街道时，对应窗口打开，缓冲中的 board/showdown reveal 随之消化。
-    let mut deferred_reveals: Vec<(u8, &[poker_protocol::z_poker::protocol::RevealToken])> =
-        Vec::new();
-
-    for cmd in commands {
-        if let super::prove_log::HandCommand::RevealTokens { pk_hex, tokens } = cmd {
-            let Some(addr) = by_pk.get(pk_hex.as_str()) else {
-                return Err(format!("reveal from unknown pk {pk_hex}"));
-            };
-            let Some(seat) = mirror.seat_index_of(*addr) else {
-                return Err(format!("reveal from non-participant pk {pk_hex}"));
-            };
-            if let Err(e) = mirror.apply_recorded_reveal(seat, tokens) {
-                tracing::debug!(
-                    "[mirror-replay] reveal seat {seat} deferred (phase mismatch): {e}"
-                );
-                deferred_reveals.push((seat, tokens.as_slice()));
-            } else {
-                flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
-            }
-        }
-    }
-
-    for cmd in commands {
-        match cmd {
-            super::prove_log::HandCommand::Bet { pk_hex, action, total_bet } => {
-                let Some(addr) = by_pk.get(pk_hex.as_str()) else {
-                    return Err(format!("bet from unknown pk {pk_hex}"));
-                };
-                let Some(seat) = mirror.seat_index_of(*addr) else {
-                    return Err(format!("bet from non-participant pk {pk_hex}"));
-                };
-                // 先冲刷缓冲 reveal：可能正是补齐当前窗口、解锁下注相位的那条。
-                flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
-                mirror
-                    .apply_recorded_bet(seat, action, *total_bet)
-                    .map_err(|e| format!("bet replay ({action} seat {seat}): {e}"))?;
-                flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
-            }
-            super::prove_log::HandCommand::ForceFold { wallet } => {
-                let Some(addr) = by_wallet.get(wallet.as_str()) else {
-                    continue; // 非本手参与者（跨手残留命令）：跳过
-                };
-                if let Some(seat) = mirror.seat_index_of(*addr) {
-                    mirror.apply_recorded_force_fold(seat);
-                    flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
-                }
-            }
-            super::prove_log::HandCommand::RevealTokens { .. } => {} // 已在第一遍处理
-        }
-    }
-    // 收尾再冲刷一次；仍未消化的 reveal 属于真正无法重放的提交（如跨手
-    // 残留），告警放行——相位完整性由后续 pre-payout/证明检查兜底。
-    flush_deferred_reveals(&mut mirror, &mut deferred_reveals);
-    if !deferred_reveals.is_empty() {
-        tracing::warn!(
-            "[mirror-replay] {} deferred reveal(s) never matched a VM window — dropped",
-            deferred_reveals.len()
-        );
-    }
-
-    // 摊牌展示期 → 派奖前快照 + 推进 VM 复位（与旧 game_loop tick 的
-    // mirror_advance_showdown_display 等价；fold-win 快照已在终局 fold 命令
-    // 中打好，此处 no-op）。
-    if matches!(
-        mirror.table.hand_phase,
-        poker_l1::vm::contracts::texas_poker::types::HandPhase::ShowdownDisplay { .. }
-    ) {
-        mirror.mark_pre_settlement();
-        mirror
-            .advance_deadline()
-            .map_err(|e| format!("payout advance: {e}"))?;
-    }
-    if !mirror.has_provable_activity() {
-        return Err("hand has no prove tasks".into());
-    }
     Ok(mirror)
 }
 
 /// 从座位提取玩家地址（settle_hand 参与者来源）。
-pub fn seat_player_addr(seat: &poker_l1::vm::contracts::texas_poker::types::Seat) -> Option<poker_l1::Address> {
-    use poker_l1::vm::contracts::texas_poker::types::Seat;
+pub fn seat_player_addr(seat: &poker_l1::contracts::texas_poker::types::Seat) -> Option<poker_l1::Address> {
+    use poker_l1::contracts::texas_poker::types::Seat;
     match seat {
         Seat::Playing { playing } => Some(playing.occupied.player),
         Seat::Waiting { occupied } => Some(occupied.player),
@@ -691,33 +615,4 @@ pub mod conv {
         let bytes = borsh::to_vec(proof).map_err(|e| e.to_string())?;
         borsh::from_slice(&bytes).map_err(|e| format!("reveal token proof borsh bridge: {e}"))
     }
-}
-
-/// 冲刷缓冲的乱序 reveal：反复尝试直到一轮内无进展（应用一条 reveal
-/// 可能推进相位、解锁另一条）。
-fn flush_deferred_reveals(
-    mirror: &mut TableMirror,
-    deferred: &mut Vec<(u8, &[poker_protocol::z_poker::protocol::RevealToken])>,
-) {
-    let mut progressed = true;
-    while progressed {
-        progressed = false;
-        let mut i = 0;
-        while i < deferred.len() {
-            let (seat, tokens) = deferred[i];
-            if mirror.apply_recorded_reveal(seat, tokens).is_ok() {
-                deferred.remove(i);
-                progressed = true;
-            } else {
-                i += 1;
-            }
-        }
-    }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }

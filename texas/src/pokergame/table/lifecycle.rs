@@ -43,8 +43,12 @@ impl Table {
                 .map(|idx| crate::pokergame::rake::fold_win_rake(total_win, &seat_bets.iter().map(|(_, b)| *b).collect::<Vec<_>>(), idx, flop_seen))
                 .unwrap_or(0);
             let net_win = total_win.saturating_sub(rake);
+            let winner_wallet = winner.player.as_ref().map(|p| p.wallet_address.0.clone());
             if let Some(seat) = self.local_seats.get_mut(&winner_id) {
                 seat.win_hand(net_win);
+            }
+            if let Some(w) = winner_wallet {
+                crate::starknet::prove_log::record_payout(self, &w, net_win);
             }
             self.summary.rake_collected = rake;
             // 与摊牌路径同口径：派奖后 pot 记净额（record_hand_history 的

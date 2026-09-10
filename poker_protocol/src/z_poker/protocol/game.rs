@@ -3,9 +3,9 @@ use crate::crypto::{
 };
 use crate::z_poker::convert::hex_to_ecpoint;
 use crate::zk_shuffle::error::VerificationError;
-use crate::zk_shuffle::reveal_token_proof::{RevealTokenProof, REVEAL_TOKEN_PROOF_LABEL};
-// 兼容 Move 合约：生产代码使用 FiatShamirTranscript（SHA3-256），
-// 而非 FiatShamirTranscript（STROBE），因为 Move 合约使用 SHA3-256 状态机。
+use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
+// 2026-09 Poseidon epoch：生产证明统一 PoseidonFeltTranscript +
+// transcript_domains 生产域（旧 Move/SHA3 域停发）。
 use super::expel::{ExpelRecord, ExpelSessionPhase, ExpelStateResponse, ExpelSummary};
 use super::rounds::ShuffleRound;
 use super::types::{
@@ -15,7 +15,7 @@ use super::types::{
 use crate::crypto::curve::{Curve, CurvePoint, CurveScalar};
 use crate::z_poker::card::{standard_deck, PlayingCard};
 use crate::z_poker::key_manager::KeyManager;
-use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use crate::zk_shuffle::transcript_ext::PoseidonFeltTranscript;
 use rand_core::OsRng;
 use std::collections::HashMap;
 
@@ -26,7 +26,6 @@ use std::collections::HashMap;
 /// 方案A deck 注入的 canonical-match 前提。
 /// Plan D：STARK 曲线世界的明文牌 = DefaultCurve::hash_to_curve
 /// （poseidon try-and-increment，与本仓库主协议一致）。
-#[cfg(feature = "stark-curve")]
 pub fn new_plain_text() -> Vec<Plaintext> {
     (0..N_CARDS)
         .map(|i| {
@@ -210,7 +209,7 @@ impl MentalPokerGame {
             return Err(VerificationError::PlayerNotFound);
         }
 
-        let mut transcript = FiatShamirTranscript::new(b"zk_shuffle_proof_v2");
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::SHUFFLE_V2_POSEIDON);
         if !round.verify(&self.key_manager.get_aggregated_pk(), &mut transcript) {
             return Err(VerificationError::ProofVerificationFailed);
         }
@@ -487,7 +486,7 @@ impl MentalPokerGame {
                 &token.encrypted_card,
                 &token.reveal_token,
                 &token.user_public_key,
-                &mut FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL),
+                &mut PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
             )
             .map(|_| true)
             .map_err(|_| VerificationError::ProofVerificationFailed)
@@ -532,7 +531,7 @@ impl MentalPokerGame {
                 &token.encrypted_card,
                 &token.reveal_token,
                 &token.user_public_key,
-                &mut FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL),
+                &mut PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
             )
             .map(|_| true)
             .map_err(|_| VerificationError::ProofVerificationFailed)
@@ -693,11 +692,11 @@ impl MentalPokerGame {
 
         let agg_pk = self.key_manager.get_aggregated_pk();
         let mut rng = OsRng;
-        let mut transcript = FiatShamirTranscript::new(b"poker_protocol_force_shuffle");
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::FORCE_SHUFFLE_POSEIDON_V1);
 
         let round = ShuffleRound::execute(&self.deck_encrypted, &agg_pk, &mut transcript, &mut rng);
 
-        let mut transcript = FiatShamirTranscript::new(b"poker_protocol_force_shuffle");
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::FORCE_SHUFFLE_POSEIDON_V1);
         if !round.verify(&agg_pk, &mut transcript) {
             return Err(VerificationError::ProofVerificationFailed);
         }
@@ -730,7 +729,7 @@ impl MentalPokerGame {
 
         let player_card = hand[card_index].clone();
         let reveal_token = player_card.encrypted_card.gen_reveal_token(&sk);
-        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
         let proof = RevealTokenProof::<DefaultCurve>::prove(
             &sk,
             &player.pk,
@@ -767,7 +766,7 @@ impl MentalPokerGame {
         let ct_for_self =
             ElGamalCiphertext::encrypt(&comm_plaintext, &player.pk, &Scalar::random(&mut OsRng));
         let reveal_token = ct_for_self.gen_reveal_token(&sk);
-        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
         let proof = RevealTokenProof::<DefaultCurve>::prove(
             &sk,
             &player.pk,
@@ -1031,7 +1030,7 @@ impl MentalPokerGame {
                     let sk = &self.entrusted_sk[pk];
                     let pk_val = &self.players[pk].pk;
                     let reveal_token = card_ct.gen_reveal_token(sk);
-                    let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+                    let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
                     let proof = RevealTokenProof::<DefaultCurve>::prove(
                         sk,
                         pk_val,
@@ -1087,7 +1086,7 @@ mod tests {
     use crate::crypto::{DefaultCurve, ElGamalCiphertext, Scalar};
     use crate::z_poker::protocol::ClientPlayer;
     use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
-    use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+    use crate::zk_shuffle::transcript_ext::PoseidonFeltTranscript;
     use rand_core::OsRng;
 
     /// Verify that `submit_reveal_token` returns `InvalidPublicKey` error
@@ -1114,7 +1113,7 @@ mod tests {
         let encrypted_card = ElGamalCiphertext::encrypt(&pt, &player.pk, &r);
         let reveal_token = encrypted_card.gen_reveal_token(&player.sk);
 
-        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
         let proof = RevealTokenProof::<DefaultCurve>::prove(
             &player.sk,
             &player.pk,

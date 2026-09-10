@@ -36,7 +36,7 @@
 #![allow(missing_docs)]
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use starknet_ff::FieldElement;
+use starknet_crypto::Felt;
 
 use crate::error::{TexasAirError, TexasAirResult};
 
@@ -57,15 +57,15 @@ pub const COMPRESSED_KEY_COUNT: usize =
 /// applies.  Index layout: `[0..12]` head full rounds (3 per round),
 /// `[12..95]` partial rounds (lane 2 only), `[95..107]` tail full rounds
 /// (the first of which carries the accumulated partial-round image).
-pub fn compressed_round_keys() -> &'static [FieldElement; COMPRESSED_KEY_COUNT] {
-    static KEYS: std::sync::OnceLock<[FieldElement; COMPRESSED_KEY_COUNT]> =
+pub fn compressed_round_keys() -> &'static [Felt; COMPRESSED_KEY_COUNT] {
+    static KEYS: std::sync::OnceLock<[Felt; COMPRESSED_KEY_COUNT]> =
         std::sync::OnceLock::new();
     KEYS.get_or_init(|| {
-        let raw: [[FieldElement; 3]; ROUND_COUNT] = crate::poseidon252_round_keys::RAW_ROUND_KEYS
+        let raw: [[Felt; 3]; ROUND_COUNT] = crate::poseidon252_round_keys::RAW_ROUND_KEYS
             .each_ref()
             .map(|row| {
                 row.each_ref()
-                    .map(|v| FieldElement::from_dec_str(v).expect("round key decimal string"))
+                    .map(|v| Felt::from_dec_str(v).expect("round key decimal string"))
             });
 
         let mut out = Vec::with_capacity(COMPRESSED_KEY_COUNT);
@@ -76,13 +76,13 @@ pub fn compressed_round_keys() -> &'static [FieldElement; COMPRESSED_KEY_COUNT] 
         // Partial rounds: the lane-2 constant plus the accumulated image of
         // every previous partial constant under the mix, with lane 2 reset
         // after each emission (it is consumed by the s-box).
-        let mut acc = [FieldElement::ZERO; 3];
+        let mut acc = [Felt::ZERO; 3];
         for row in raw.iter().skip(N_FULL_ROUNDS / 2).take(N_PARTIAL_ROUNDS) {
             acc[0] += row[0];
             acc[1] += row[1];
             acc[2] += row[2];
             out.push(acc[2]);
-            acc[2] = FieldElement::ZERO;
+            acc[2] = Felt::ZERO;
             mix(&mut acc);
         }
 
@@ -101,14 +101,14 @@ pub fn compressed_round_keys() -> &'static [FieldElement; COMPRESSED_KEY_COUNT] 
 }
 
 /// Optimized mix: `t = s0+s1+s2; s0 = t+2·s0; s1 = t−2·s1; s2 = t−3·s2`.
-pub fn mix(state: &mut [FieldElement; 3]) {
+pub fn mix(state: &mut [Felt; 3]) {
     let t = state[0] + state[1] + state[2];
     state[0] = t + state[0].double();
     state[1] = t - state[1].double();
-    state[2] = t - FieldElement::THREE * state[2];
+    state[2] = t - Felt::THREE * state[2];
 }
 
-fn cube(x: FieldElement) -> FieldElement {
+fn cube(x: Felt) -> Felt {
     x * x * x
 }
 
@@ -132,7 +132,7 @@ fn round_key_index(pos: usize) -> usize {
 }
 
 /// One Hades round, bit-exact with `starknet_crypto`'s `round_comp`.
-pub fn apply_round(state: &mut [FieldElement; 3], pos: usize) {
+pub fn apply_round(state: &mut [Felt; 3], pos: usize) {
     let keys = compressed_round_keys();
     let idx = round_key_index(pos);
     if is_full_round(pos) {
@@ -151,7 +151,7 @@ pub fn apply_round(state: &mut [FieldElement; 3], pos: usize) {
 
 /// The Starknet Poseidon permutation, bit-exact with
 /// `starknet_crypto::poseidon_permute_comp` (unit-tested).
-pub fn permute_comp(state: &mut [FieldElement; 3]) {
+pub fn permute_comp(state: &mut [Felt; 3]) {
     for pos in 0..ROUND_COUNT {
         apply_round(state, pos);
     }
@@ -160,15 +160,15 @@ pub fn permute_comp(state: &mut [FieldElement; 3]) {
 /// The absorb schedule of `poseidon_hash_many`: `n` message felts become
 /// `(n + 2) / 2` permutations; the tail pair is `(last, 1)` for an odd
 /// message and `(1, 0)` for an even one.
-pub fn absorb_schedule(msg: &[FieldElement]) -> Vec<[FieldElement; 2]> {
+pub fn absorb_schedule(msg: &[Felt]) -> Vec<[Felt; 2]> {
     let n = msg.len();
     let perms = (n + 2) / 2;
     let mut pairs = Vec::with_capacity(perms);
     for i in 0..perms {
         match (msg.get(2 * i).copied(), msg.get(2 * i + 1).copied()) {
             (Some(a), Some(b)) => pairs.push([a, b]),
-            (Some(a), None) => pairs.push([a, FieldElement::ONE]),
-            (None, None) => pairs.push([FieldElement::ONE, FieldElement::ZERO]),
+            (Some(a), None) => pairs.push([a, Felt::ONE]),
+            (None, None) => pairs.push([Felt::ONE, Felt::ZERO]),
             (None, Some(_)) => unreachable!("odd index cannot be present without even"),
         }
     }
@@ -177,8 +177,8 @@ pub fn absorb_schedule(msg: &[FieldElement]) -> Vec<[FieldElement; 2]> {
 
 /// Native sponge over an absorb schedule (mirror of
 /// `starknet_crypto::poseidon_hash_many` semantics).
-pub fn sponge(pairs: &[[FieldElement; 2]]) -> [FieldElement; 3] {
-    let mut state = [FieldElement::ZERO; 3];
+pub fn sponge(pairs: &[[Felt; 2]]) -> [Felt; 3] {
+    let mut state = [Felt::ZERO; 3];
     for pair in pairs {
         state[0] += pair[0];
         state[1] += pair[1];
@@ -194,7 +194,7 @@ pub fn sponge(pairs: &[[FieldElement; 2]]) -> [FieldElement; 3] {
 pub const LIMBS: usize = 16;
 
 /// felt252 ↔ 16 little-endian 16-bit limbs.
-pub fn felt_to_limbs(f: &FieldElement) -> [u16; LIMBS] {
+pub fn felt_to_limbs(f: &Felt) -> [u16; LIMBS] {
     let bytes = f.to_bytes_be();
     let mut limbs = [0u16; LIMBS];
     for (i, limb) in limbs.iter_mut().enumerate() {
@@ -203,14 +203,18 @@ pub fn felt_to_limbs(f: &FieldElement) -> [u16; LIMBS] {
     limbs
 }
 
-pub fn limbs_to_felt(limbs: &[u16; LIMBS]) -> FieldElement {
+pub fn limbs_to_felt(limbs: &[u16; LIMBS]) -> Felt {
     let mut bytes = [0u8; 32];
     for (i, limb) in limbs.iter().enumerate() {
         let [hi, lo] = limb.to_be_bytes();
         bytes[30 - 2 * i] = hi;
         bytes[31 - 2 * i] = lo;
     }
-    FieldElement::from_bytes_be(&bytes).expect("limb vector below 2^256 is a field element")
+    // 语义与旧 0.6 ff Result 路径一致：≥ P 的 limb 向量必须 fail-loud
+    // （types-core 的 from_bytes_be 会静默归约，这里显式守住 canonical）。
+    let felt = Felt::from_bytes_be(&bytes);
+    assert_eq!(felt.to_bytes_be(), bytes, "limb vector must be a canonical felt252");
+    felt
 }
 
 /// Stark prime as 16-bit LE limbs: `2^251 + 17·2^192 + 1`.
@@ -430,7 +434,7 @@ pub struct Poseidon252ChainSpec {
 }
 
 impl Poseidon252ChainSpec {
-    pub fn from_message(initial_state: [&FieldElement; 3], message: &[FieldElement]) -> Self {
+    pub fn from_message(initial_state: [&Felt; 3], message: &[Felt]) -> Self {
         Self {
             initial_state: initial_state.each_ref().map(|f| f.to_bytes_be()),
             message: message.iter().map(|f| f.to_bytes_be()).collect(),
@@ -438,11 +442,11 @@ impl Poseidon252ChainSpec {
     }
 
     /// The canonical `poseidon_hash_many` statement: zero initial state.
-    pub fn hash_many(message: &[FieldElement]) -> Self {
+    pub fn hash_many(message: &[Felt]) -> Self {
         Self::from_message([
-            &FieldElement::ZERO,
-            &FieldElement::ZERO,
-            &FieldElement::ZERO,
+            &Felt::ZERO,
+            &Felt::ZERO,
+            &Felt::ZERO,
         ], message)
     }
 
@@ -453,7 +457,7 @@ impl Poseidon252ChainSpec {
             ));
         }
         for felt in self.initial_state.iter().chain(self.message.iter()) {
-            if FieldElement::from_bytes_be(felt).is_err() {
+            if crate::state_root::felt_from_canonical_bytes(felt).is_none() {
                 return Err(TexasAirError::SpecViolation(
                     "poseidon252 chain carries a non-canonical felt".into(),
                 ));
@@ -464,20 +468,20 @@ impl Poseidon252ChainSpec {
 
     fn initial_limbs(&self) -> [[u16; LIMBS]; 3] {
         self.initial_state.each_ref().map(|f| {
-            felt_to_limbs(&FieldElement::from_bytes_be(f).expect("validated canonical felt"))
+            felt_to_limbs(&Felt::from_bytes_be(f))
         })
     }
 
-    fn message_felts(&self) -> Vec<FieldElement> {
+    fn message_felts(&self) -> Vec<Felt> {
         self.message
             .iter()
-            .map(|f| FieldElement::from_bytes_be(f).expect("validated canonical felt"))
+            .map(|f| Felt::from_bytes_be(f))
             .collect()
     }
 
     /// The `(n + 2) / 2` absorb pairs, including the `poseidon_hash_many`
     /// tail.
-    pub fn absorb_pairs(&self) -> Vec<[FieldElement; 2]> {
+    pub fn absorb_pairs(&self) -> Vec<[Felt; 2]> {
         absorb_schedule(&self.message_felts())
     }
 
@@ -487,7 +491,7 @@ impl Poseidon252ChainSpec {
     }
 
     /// The native anchor: full terminal sponge state.
-    pub fn anchor_state(&self) -> [FieldElement; 3] {
+    pub fn anchor_state(&self) -> [Felt; 3] {
         sponge(&self.absorb_pairs())
     }
 
@@ -1292,7 +1296,7 @@ mod tests {
             seed = seed
                 .wrapping_mul(0x9E3779B97F4A7C15)
                 .wrapping_add(0xBF58476D1CE4E5B9);
-            let felt = |salt: u64| FieldElement::from(seed ^ salt.rotate_left(17));
+            let felt = |salt: u64| Felt::from(seed ^ salt.rotate_left(17));
             let mut state = [felt(1), felt(2), felt(3)];
             let mut reference = state;
             permute_comp(&mut state);
@@ -1306,8 +1310,8 @@ mod tests {
     #[test]
     fn sponge_matches_poseidon_hash_many() {
         for n in [0usize, 1, 2, 3, 5, 8, 13] {
-            let message: Vec<FieldElement> = (0..n)
-                .map(|i| FieldElement::from(1000u64 + i as u64 * 7919))
+            let message: Vec<Felt> = (0..n)
+                .map(|i| Felt::from(1000u64 + i as u64 * 7919))
                 .collect();
             let spec = Poseidon252ChainSpec::hash_many(&message);
             let expected = starknet_crypto::poseidon_hash_many(&message);
@@ -1332,18 +1336,20 @@ mod tests {
         assert_eq!(bytes[7], 0x11);
         assert_eq!(bytes[8..31], [0u8; 23]);
         assert_eq!(bytes[31], 0x01);
-        assert!(FieldElement::from_bytes_be(&bytes).is_err());
+        // types-core 的 from_bytes_be 无失败路径（≥ P 静默归约），canonical
+        // 判定走字节往返（P 归约后必非原字节）。
+        assert!(crate::state_root::felt_from_canonical_bytes(&bytes).is_none());
 
-        let value = FieldElement::from(0x0123456789abcdeu64);
+        let value = Felt::from(0x0123456789abcdeu64);
         assert_eq!(limbs_to_felt(&felt_to_limbs(&value)), value);
     }
 
     #[test]
     fn witness_round_reproduces_native_permutation() {
         let mut state = [
-            FieldElement::from(11u64),
-            FieldElement::from(22u64),
-            FieldElement::from(33u64),
+            Felt::from(11u64),
+            Felt::from(22u64),
+            Felt::from(33u64),
         ];
         let mut native = state;
         let scope = RoundScope {
@@ -1387,8 +1393,8 @@ mod tests {
 
     #[test]
     fn full_chain_witness_tracks_the_native_sponge() {
-        let message: Vec<FieldElement> = (0..5)
-            .map(|i| FieldElement::from(9000u64 + i as u64 * 104729))
+        let message: Vec<Felt> = (0..5)
+            .map(|i| Felt::from(9000u64 + i as u64 * 104729))
             .collect();
         let spec = Poseidon252ChainSpec::hash_many(&message);
         let trace = build_chain_trace(&spec).expect("witness builds");
@@ -1422,7 +1428,7 @@ mod tests {
 
     #[test]
     fn gadget_rows_are_self_consistent() {
-        let message = [FieldElement::from(7u64), FieldElement::from(9u64)];
+        let message = [Felt::from(7u64), Felt::from(9u64)];
         let spec = Poseidon252ChainSpec::hash_many(&message);
         let trace = build_chain_trace(&spec).expect("witness builds");
         let p_big = {
@@ -1455,7 +1461,7 @@ mod tests {
 
     #[test]
     fn gadget_row_counts_match_the_round_structure() {
-        let message = [FieldElement::from(7u64), FieldElement::from(9u64)];
+        let message = [Felt::from(7u64), Felt::from(9u64)];
         let spec = Poseidon252ChainSpec::hash_many(&message);
         let layout = spec.layout();
         let trace = build_chain_trace(&spec).expect("witness builds");

@@ -86,6 +86,11 @@ chain id `SN_SEPOLIA`，RPC `https://starknet-sepolia-rpc.publicnode.com`。
 
 ## 当前部署：本地 devnet（starknet-devnet --seed 0，端口 5051）
 
+> 2026-09-10 起 `scripts/local_deploy.sh` 已切现代接线（与主网/Sepolia 一致）：
+> 不再部署 PokerToken/pSTRK，vault 直接绑定规范 STRK（devnet 费用代币同址）。
+> 一键流程（devnet + 部署 + 服务器本地 prover 启动）：`scripts/dev.sh`；
+> Sepolia 测试网：`scripts/test.sh` + `texas/.env.test`。
+
 chain id `SN_SEPOLIA`。地址随 devnet 重启 + 重新部署而变化（当前快照）：
 
 | 合约 | 地址 |
@@ -466,3 +471,62 @@ chips −X / note +X 分文不丢。前端两动作删去自筹 withdraw 桥与�
 | 接线 | vault `set_unshield_helper(0x7ee059dd...)` TX `0x18fbf4fa...`（旧 v3 `0x6fd4be6e...` 保留 authorized_helper 语义但 OP_WITHDRAW 已废弃） |
 | 测试 | snforge 91/91（withdraw 三负例改守恒语义：unshield 门/超额/零 note） |
 | env | client `VITE_POKER_VAULT_ANONYMIZER_ADDRESS` 已切新地址（vite 已重启） |
+
+## Fiat–Shamir transcript Poseidon epoch 迁移（2026-09-11）
+
+链下证明侧（不涉及合约部署，无新 class hash）：
+
+- **生产 transcript**：Stark 曲线全部 sigma 证明（shuffle V2 / mask+shuffle /
+  reveal-token / leave / fold / reconstruct V2+V3）从 SHA3-256
+  （`FiatShamirTranscript`）与 Merlin（`MerlinTranscript`，leave 路径遗留）
+  统一切换到 `PoseidonFeltTranscript`（felt 直通，Cairo 原生置换）。
+  域标签见 `poker-protocol-core/src/transcript_domains.rs`，全部带 epoch
+  后缀（如 `zk_shuffle_poseidon_v3`、`zk_leave_poseidon_v2`）。
+- **语句摘要**：reconstruction V3 `context_digest` / `prior_state_digest`
+  压缩函数 blake2b → `poseidon_hash_many`（域标签
+  `...context.v2.poseidon` / `...prior_state.v4.poseidon`）。
+- **明文牌常量承诺**（2026-09-11，prior_state v4）：52 张明文牌点为协议
+  常量，prior-state 材料以 `poseidon_hash_many(52×(x,y))` 单 32B 承诺吸收
+  （`plaintext_cards_commitment()`，进程级 OnceLock 缓存，KAT
+  `00667136...85f7` 钉死），替代 len + 52×32B 逐点字节。每次 digest 重算
+  从 ~5.98ms（52×hash_to_curve 开方）降到 ~16µs（暖缓存），重放路径不再
+  依赖开方；材料 1.78KB → 309B。
+- **ABI**：`TranscriptId::Poseidon252` 放行 `(StarkCurve, BayerGrothV2 /
+  BayerGrothOrderedV2 / BayerGrothSlotOrV3)` 组合；`Merlin` /
+  `FiatShamirSha3` 双收仅限 epoch 过渡窗口的在途证明。
+- **Cairo 合约零改动**：dual settlement 链上验证走 handbatch foldable
+  epoch 聚合挑战（`poseidon_hash_span` 直通），不重放 per-proof
+  transcript；secp256k1 路线（Keccak-256）不受影响。
+- **epoch 纪律**：一场 hand 内必须使用同一 epoch 的标签集合；切换只能
+  发生在 hand 边界。跨端对拍锚点：
+  `transcript_domains::tests::poseidon_epoch_challenge_kat`。
+
+## PokerTableRegistry — 桌台注册表（2026-09-11 代码就绪，待部署）
+
+"关桌后不开新手"的链上锚定层（设计讨论定稿：注册表只回答"这张桌承诺过
+什么规则"与"还开着吗"两个问题；**不碰钱**、不进任何证明约束）。
+
+| 项 | 值 |
+| --- | --- |
+| 合约 | `poker_table_registry.cairo` → `PokerTableRegistry` |
+| 构造 | `owner, close_grace_secs`（owner = 运营兜底关闭主体；grace = 闲置后任何人可关的宽限秒数，建议生产 604800 = 7 天） |
+| 接口 | `create_table(params_hash) -> table_id`（permissionless，**合约分配 id 从 1 递增**）/ `close_table(id)`（creator/owner 随时，他人需过 grace；**终态**）/ `is_open(id)` / `get_table(id)` / `table_count()` |
+| params_hash | `poseidon_hash_many([max_players, small_blind, big_blind])`——字段顺序即跨端契约，Rust 锚点 `texas/src/starknet/table_registry.rs::compute_params_hash` 测试向量 |
+| 生命周期 | `Vacant → Open → Closed`（只追加，无 update；规则变更 = 关旧桌 + 开新桌） |
+| 语义边界 | 恶意宿主自报 table_id 可绕过链上检查——注册表是绊线与审计轨迹不是缰绳；真正防线 = 客户端只在 Open 桌玩 + mental poker 需在座玩家配合才能开局 + vault TTL 兜底 |
+
+服务端接线（`STARKNET_TABLE_REGISTRY_ADDRESS` 配置即启用，留空行为不变）：
+
+- 启动引导：初始桌台 `create_table` 上链拿 `registry_table_id`（登记后
+  `is_open` 读回核验），失败降级纯链下并告警；
+- 关桌：`POST /api/tables/:id/close`（`OPERATOR_ADMIN_TOKEN` bearer；未配
+  置 token 仅 debug 构建放行）→ 本地 closed 标志（game_loop 跳过开局、
+  SIT_DOWN 以 `TABLE_CLOSED` 拒绝）→ 广播终态 → 释放在座玩家 vault 会话
+  锁 → 链上 `close_table`；
+- 客户端：`closed` 快照字段 → 坐下按钮替换为"本桌已关闭"提示 + `sitDown`
+  本地拦截。
+
+部署：devnet `local_deploy.sh` 已加 PokerTableRegistry（`REGISTRY_GRACE`
+可覆盖宽限期，devnet 默认 3600）；Sepolia/主网部署脚本待随下一次批量
+部署补充。**本地 scarb 2.11.4 无法解析钉定的 starknet 2.19.4（既有环境
+限制），合约需在 scarb ≥2.19 工具链 `scarb build && snforge test` 验证。**

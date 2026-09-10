@@ -5,7 +5,7 @@
 //! 每个 method AIR 的公开输入包含 `pre_state_root` 和 `post_state_root`。
 //! Aggregator AIR 的核心约束为 `left.post_state_root == right.pre_state_root`。
 //!
-use starknet_ff::FieldElement;
+use starknet_crypto::Felt;
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::{M31, P as M31_MODULUS};
 
@@ -28,7 +28,7 @@ use crate::state_root::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchCallPublicInput {
     /// Consensus/execution context supplied to the VM dispatch.
-    pub context: poker_l1::vm::contracts::dispatch::DispatchContext,
+    pub context: poker_l1::contracts::dispatch::DispatchContext,
     /// Exact routed Texas Poker selector.
     pub selector: [u8; 32],
     /// Exact Borsh argument bytes consumed by the VM.
@@ -50,9 +50,9 @@ pub struct DispatchCallPublicInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TexasPublicInputs {
     /// 调用前表台的完整 canonical state-root preimage（变长）。
-    pub pre_image: Vec<FieldElement>,
+    pub pre_image: Vec<Felt>,
     /// 调用后表台的完整 canonical state-root preimage（变长）。
-    pub post_image: Vec<FieldElement>,
+    pub post_image: Vec<Felt>,
     /// 调用前 ObjectDb hot-v30 state root（从 `pre_image` 解码后重算）。
     pub pre_state_root: StateRoot,
     /// 调用后 ObjectDb hot-v30 state root（从 `post_image` 解码后重算）。
@@ -105,8 +105,8 @@ impl TexasPublicInputs {
     ///
     /// 当 preimage 编码失败（字段序列化异常）时返回错误。
     pub fn from_tables(
-        pre_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
-        post_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        pre_table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
+        post_table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
         kind: MethodKind,
         table_id: u64,
         hand_id: u32,
@@ -142,14 +142,14 @@ impl TexasPublicInputs {
     /// root 由域分隔 BLAKE3 over image 字节编码重算，确保配套的 proven binding 通过。
     #[must_use]
     pub fn with_consistent_roots(
-        pre_image: Vec<FieldElement>,
-        post_image: Vec<FieldElement>,
+        pre_image: Vec<Felt>,
+        post_image: Vec<Felt>,
         kind: MethodKind,
         table_id: u64,
         hand_id: u32,
         call_seq: u32,
     ) -> Self {
-        let synthetic_root = |image: &[FieldElement]| {
+        let synthetic_root = |image: &[Felt]| {
             StateRoot(crate::state_root::state_root_digest(
                 &crate::state_root_binding::synthetic_image_message(image),
             ))
@@ -249,7 +249,7 @@ impl TexasPublicInputs {
     /// authenticated by consensus anchors.
     pub fn bind_dispatch_call(
         &mut self,
-        context: poker_l1::vm::contracts::dispatch::DispatchContext,
+        context: poker_l1::contracts::dispatch::DispatchContext,
         selector: [u8; 32],
         raw_args: Vec<u8>,
     ) -> TexasAirResult<()> {
@@ -290,57 +290,30 @@ impl TexasPublicInputs {
 
     /// 构造一个固定的、自洽的「占位」公开输入（机制测试用）。
     ///
-    /// image 为测试专用的 24 个 `FieldElement::ONE`，root 为其真实 Poseidon 哈希（自洽）。
+    /// image 为测试专用的 24 个 `Felt::ONE`，root 为其真实 Poseidon 哈希（自洽）。
     /// 用于不需要真实 table 的 AIR 机制测试（仅验证 prove/verify 流程，不验证 state 绑定语义）。
+    #[cfg(test)]
     #[must_use]
     pub fn synthetic_placeholder(kind: MethodKind) -> Self {
-        let image = vec![FieldElement::ONE; 24];
+        let image = vec![Felt::ONE; 24];
         Self::with_consistent_roots(image.clone(), image, kind, 0, 0, 0)
-    }
-
-    /// 构造自洽占位 PI 并指定元数据（机制测试用，使 PI 与 AIR struct 的
-    /// table_id/hand_id/call_seq/version 一致，通过 `verify_air_statement`）。
-    #[must_use]
-    pub fn synthetic_for_test(
-        kind: MethodKind,
-        table_id: u64,
-        hand_id: u32,
-        call_seq: u32,
-    ) -> Self {
-        let image = vec![FieldElement::ONE; 24];
-        Self::with_consistent_roots(image.clone(), image, kind, table_id, hand_id, call_seq)
-    }
-
-    /// 返回 synthetic_placeholder 对应的 AIR 端 state_root limb（pre/post）。
-    ///
-    /// 机制测试需让 AIR struct 与 trace 的 state_root 列 == PI 的 root 经
-    /// `state_root_to_air_limbs` 转换后的值，否则 `verify_air_statement` 失败。
-    /// 此 helper 暴露这些 limb，供测试填入 AIR/trace。
-    #[must_use]
-    pub fn synthetic_air_roots(kind: MethodKind) -> ([M31; 4], [M31; 4]) {
-        use crate::state_root::state_root_to_air_limbs;
-        let pi = Self::synthetic_placeholder(kind);
-        (
-            state_root_to_air_limbs(pi.pre_state_root),
-            state_root_to_air_limbs(pi.post_state_root),
-        )
     }
 
     /// 把公开输入 mix 进 Fiat-Shamir channel（prover 与 verifier 共用，顺序固定）。
     ///
     /// # 顺序契约（不可变更）
     ///
-    /// 1. `pre_image` 的全部变长 FieldElement（每个分解为 8 个大端 u32 word）
-    /// 2. `post_image` 的全部变长 FieldElement（同上）
+    /// 1. `pre_image` 的全部变长 Felt（每个分解为 8 个大端 u32 word）
+    /// 2. `post_image` 的全部变长 Felt（同上）
     /// 3. `pre_state_root`（8 个 u32 word）
     /// 4. `post_state_root`（8 个 u32 word）
     /// 5. `kind`（u32）、`table_id`（u64）、`hand_id`（u32）、`call_seq`（u32）
     ///
-    /// `FieldElement` → u32 word 用 [`field_element_to_u32_words`]（无损 8-word 大端分解）。
+    /// `Felt` → u32 word 用 [`field_element_to_u32_words`]（无损 8-word 大端分解）。
     /// 用 `mix_u32s`/`mix_u64`，而非 `mix_felts`，因为 Fr 是非原生域元素，按原始字节 mix
     /// 是标准做法（与 Starknet 把 252-bit 元素序列化为字节一致）。
     pub fn mix_into<C: Channel>(&self, channel: &mut C) {
-        // 1-2. pre/post image：每个 FieldElement → 8 u32 word，扁平拼接后一次性 mix。
+        // 1-2. pre/post image：每个 Felt → 8 u32 word，扁平拼接后一次性 mix。
         let mut felts_u32: Vec<u32> =
             Vec::with_capacity((self.pre_image.len() + self.post_image.len()) * 8);
         for f in &self.pre_image {
@@ -444,7 +417,7 @@ impl TexasPublicInputs {
                 "state-root preimage must not be empty".into(),
             ));
         }
-        let endpoint = |image: &[FieldElement],
+        let endpoint = |image: &[Felt],
                         root: StateRoot,
                         label: &str|
          -> TexasAirResult<
@@ -561,7 +534,7 @@ mod tests {
         // 这验证了「root = BLAKE3(preimage) 由证明承载」这条绑定生效。
         let mut pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
         let binding = proven_binding(&pi);
-        pi.pre_state_root = StateRoot::from_field(FieldElement::ONE);
+        pi.pre_state_root = StateRoot::from_field(Felt::ONE);
         assert!(
             pi.verify_roots(&binding).is_err(),
             "篡改 root 后 verify_roots 应失败"
@@ -574,7 +547,7 @@ mod tests {
         // 篡改 image（不改 root、不改证明）→ 端点语句与证明脱钩 → 失败。
         let mut pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
         let binding = proven_binding(&pi);
-        pi.pre_image[0] = FieldElement::from(12345u64);
+        pi.pre_image[0] = Felt::from(12345u64);
         assert!(
             pi.verify_roots(&binding).is_err(),
             "篡改 image 后 verify_roots 应失败"
@@ -586,7 +559,7 @@ mod tests {
     fn test_verify_roots_rejects_empty_preimage() {
         let pi = TexasPublicInputs {
             pre_image: vec![],
-            post_image: vec![FieldElement::ONE; 24],
+            post_image: vec![Felt::ONE; 24],
             pre_state_root: StateRoot::zero(),
             post_state_root: StateRoot::zero(),
             kind: MethodKind::Call,

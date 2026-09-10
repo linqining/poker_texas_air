@@ -11,7 +11,7 @@
 
 use std::time::Instant;
 
-use poker_l1::vm::contracts::texas_poker::types::TableRules;
+use poker_l1::contracts::texas_poker::types::TableRules;
 use poker_texas_air::canonical_rake_opening::CanonicalRakeOpening;
 use poker_texas_air::texas_canonical::{
     CanonicalActionPayload, CanonicalPhase, CanonicalRoundAdvanceOpening, CanonicalSeat,
@@ -796,7 +796,7 @@ fn full_hand_v3_dual() {
     use poker_protocol_proofs::CryptoTranscript;
     use rand::SeedableRng;
     use rayon::prelude::*;
-    use starknet_crypto::FieldElement;
+    use starknet_crypto::Felt;
     use std::collections::HashMap;
 
     type Point = <Secp256k1Curve as Curve>::Point;
@@ -822,12 +822,12 @@ fn full_hand_v3_dual() {
         hi.copy_from_slice(&bytes[..17]);
         lo.copy_from_slice(&bytes[17..]);
         [
-            FieldElement::from_byte_slice_be(&hi).expect("17 bytes are canonical"),
-            FieldElement::from_byte_slice_be(&lo).expect("16 bytes are canonical"),
+            Felt::from_bytes_be_slice(&hi),
+            Felt::from_bytes_be_slice(&lo),
         ]
     };
     let deck_commitment = |deck: &[Ct]| {
-        let felts: Vec<FieldElement> = deck
+        let felts: Vec<Felt> = deck
             .iter()
             .flat_map(|ct| {
                 let c1 = point_bytes(&ct.c1);
@@ -841,7 +841,7 @@ fn full_hand_v3_dual() {
     let seat_address = |seat: usize| {
         let mut addr = [0u8; 20];
         addr[16..].copy_from_slice(&(0xD1CEu32 + seat as u32).to_be_bytes());
-        FieldElement::from_byte_slice_be(&addr).expect("20 bytes are canonical")
+        Felt::from_bytes_be_slice(&addr)
     };
 
     let mut client_prove = std::time::Duration::ZERO;
@@ -1088,19 +1088,19 @@ fn full_hand_v3_dual() {
         }
     }
     let settlement_digest = {
-        let mut fields = vec![FieldElement::from(1u64)]; // hand_id
+        let mut fields = vec![Felt::from(1u64)]; // hand_id
         for (seat, delta) in deltas.iter().enumerate() {
             fields.push(seat_address(seat));
             if *delta >= 0 {
-                fields.push(FieldElement::from(1u64));
+                fields.push(Felt::from(1u64));
             } else {
-                fields.push(FieldElement::from(0u64));
+                fields.push(Felt::from(0u64));
             }
-            fields.push(FieldElement::from(delta.unsigned_abs() as u64));
+            fields.push(Felt::from(delta.unsigned_abs() as u64));
         }
         // #18 Phase B：与线上同公式——digest 吸收链尾词 = 动作日志哈希
         //（bench 无 game 层动作日志，取固定样例词）。
-        fields.push(FieldElement::from(0xA11CEu64));
+        fields.push(Felt::from(0xA11CEu64));
         starknet_crypto::poseidon_hash_many(&fields)
     };
     let decrypt_elapsed = started.elapsed();
@@ -1126,8 +1126,8 @@ fn full_hand_v3_dual() {
                     })
                     .collect::<Vec<_>>(),
             ),
-            state_root_pre: FieldElement::from(0xDEAD_u64),
-            state_root_post: FieldElement::from(0xC0DE_u64),
+            state_root_pre: Felt::from(0xDEAD_u64),
+            state_root_post: Felt::from(0xC0DE_u64),
             settlement_digest,
         },
     )
@@ -1138,8 +1138,8 @@ fn full_hand_v3_dual() {
     let g_attestation = starknet_crypto::poseidon_hash_many(&[
         binding,
         settlement_digest,
-        FieldElement::from(0xDEAD_u64),
-        FieldElement::from(0xC0DE_u64),
+        Felt::from(0xDEAD_u64),
+        Felt::from(0xC0DE_u64),
     ]);
     let binding_elapsed = started.elapsed();
 

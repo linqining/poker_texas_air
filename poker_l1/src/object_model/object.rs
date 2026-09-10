@@ -1,10 +1,13 @@
 //! Object 结构（SubTask 2.1 + 2.4）。
 //!
-//! spec：`Object { id, version, owner, type, data, assigned_validator }`。
+//! spec：`Object { id, version, owner, type, data }`。
 //! - `version`：每次修改 tx 执行成功后 += 1，旧版本保留为不可变历史。
 //! - 结算后 `owner` 变为 `Immutable`，后续仅可读不可写。
-//! - `assigned_validator`：GameTurn 通道路由目标（Game 对象创建时计算）。
 //! - content-hash = blake2b_256(BCS(Object))，用于对象完整性校验。
+//!
+//! 历史留档（2026-09 死代码清理）：`assigned_validator`（GameTurn 通道路由目标）
+//! 全 workspace 恒 None 且无持久化 schema 写入（state_codec 只序列化 typed table
+//! schema，不序列化 Object 壳），字段已删除。
 
 use super::id::ObjectID;
 use super::ownership::Ownership;
@@ -23,7 +26,7 @@ pub type Version = u64;
 /// 对象数据（BCS 序列化的 typed bytes）。
 pub type ObjectData = Vec<u8>;
 
-/// 对象（spec：id / version / owner / type / data / assigned_validator）。
+/// 对象（spec：id / version / owner / type / data）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Object {
     /// 对象唯一 ID（NEW-L4：creator_address + creation_nonce）。
@@ -36,8 +39,6 @@ pub struct Object {
     pub object_type: ObjectType,
     /// 序列化的 typed 数据。
     pub data: ObjectData,
-    /// 被分配的 validator（GameTurn 通道路由目标；None 表示无分配）。
-    pub assigned_validator: Option<Address>,
 }
 
 impl Object {
@@ -47,7 +48,6 @@ impl Object {
         owner: Ownership,
         object_type: impl Into<ObjectType>,
         data: ObjectData,
-        assigned_validator: Option<Address>,
     ) -> Self {
         Self {
             id,
@@ -55,7 +55,6 @@ impl Object {
             owner,
             object_type: object_type.into(),
             data,
-            assigned_validator,
         }
     }
 
@@ -98,7 +97,6 @@ mod tests {
             Ownership::AddressOwned { owner: [1u8; 20] },
             "Game",
             b"sample data".to_vec(),
-            Some([5u8; 20]),
         )
     }
 
@@ -164,7 +162,6 @@ mod tests {
             Ownership::AddressOwned { owner },
             "X",
             vec![],
-            None,
         );
         assert!(o.can_write(&owner));
         assert!(!o.can_write(&other));

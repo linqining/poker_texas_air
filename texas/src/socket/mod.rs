@@ -62,6 +62,8 @@ pub(crate) struct TableSummary {
     pub current_number_players: usize,
     pub small_blind: u64,
     pub big_blind: u64,
+    /// 桌台已关闭（终态）：大厅据此置灰入口，客户端不再引导入座。
+    pub closed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,10 +145,10 @@ pub(crate) struct TableMessagePayload {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// 已废弃的 v1 入座消息：只用于识别并提示改用 SIT_DOWN_V2。
 pub(crate) struct SitDownPayload {
     pub table_id: u32,
     pub seat_id: u32,
-    pub amount: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,6 +171,13 @@ pub(crate) struct SitDownV2Payload {
     /// 玩家 Starknet 钱包地址（买入校验与结算参与者地址来源）。缺省回退 token 中的用户地址。
     #[serde(default)]
     pub wallet_address: Option<String>,
+    /// P1-2 会话委托：客户端声明的会话交易公钥（Stark Schnorr 32B 压缩点
+    /// hex，64 字符）。服务端经 vault `active_session_tx_pk` view 对拍核验
+    /// 后随 join 缓冲登记——它是该座位 VM 层交易签名的验证锚。买入时与
+    /// deposit 同一笔 multicall 完成链上登记（私密路径由 anonymizer 在
+    /// 同笔私交易 `set_session_tx_pk_for` 完成）。
+    #[serde(default)]
+    pub session_tx_pk: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -238,10 +247,6 @@ pub(crate) struct ReconstructSubmitPayload {
     pub pk_hex: GamePkHex,
     pub output_cards: Vec<ElGamalCiphertextJson>,
     pub swap_cards: Vec<ElGamalCiphertextJson>,
-    /// Task 4: 用户可读牌（每个 swap_out 对应一张），on-chain 模式下需要传给 Move 合约
-    /// 旧客户端不发送该字段，缺省按空处理。
-    #[serde(default)]
-    pub user_readable_cards: Vec<ElGamalCiphertextJson>,
     pub proof: ReconstructProofJson,
 }
 
@@ -265,14 +270,6 @@ pub(crate) struct CommunityRevealResultPayload {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReconstructInitiatePayload {
     pub table_id: u32,
-    pub target_socket_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ReconstructVotePayload {
-    pub table_id: u32,
-    pub vote: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -387,9 +384,6 @@ pub(crate) struct GameState {
     pub disconnect_cancellers: HashMap<String, tokio::sync::watch::Sender<bool>>,
 }
 
-impl GameState {
-}
-
 pub struct SocketState {
     pub db: Database,
     pub state: RwLock<GameState>,
@@ -441,13 +435,6 @@ impl SocketState {
         processed.insert(key, ());
     }
 
-    /// 已弃用：原从 relayer 缓存同步 deck 的逻辑。
-    /// 移除 RelayerState 后，`sync_table_state`（relayer/mod.rs）已直接将
-    /// `summary.crypto` 同步到 `table.summary.crypto`，本函数无需再做事。
-    pub async fn sync_deck_from_relayer_cache(&self, _table_id: u32) {
-        // no-op: table.summary.crypto 已由 sync_table_state 同步
-    }
-
     /// 为所有已注册的 table 创建事件 channel 并 spawn consumer 任务。
     ///
     /// 在 `main.rs` 中 `SocketIo` 实例创建后调用。对每个 table：
@@ -494,6 +481,7 @@ impl SocketState {
                 current_number_players: t.players().len(),
                 small_blind: t.summary.min_bet,
                 big_blind: t.summary.min_bet * 2,
+                closed: t.is_closed(),
             })
             .collect()
     }
@@ -508,6 +496,51 @@ impl SocketState {
                 name: p.name.clone(),
             })
             .collect()
+    }
+
+    /// 关桌（终态，"关桌后不开新手"的服务端权威执行点）：
+    /// 写锁内置 closed 标志（幂等）→ 广播终态视图 → 异步释放所有在座
+    /// 玩家的 vault 会话锁 + 链上注册表关桌写链。
+    /// 返回 `Ok(false)` = 桌台此前已关闭（幂等重复调用）。
+    pub async fn close_table(self: &Arc<Self>, table_id: u32, reason: &str) -> Result<bool, String> {
+        let (seated_wallets, registry_id) = {
+            let mut gs = self.state.write().await;
+            let Some(table) = gs.tables.get_mut(&table_id) else {
+                return Err(format!("table {table_id} not found"));
+            };
+            if !table.close_table() {
+                return Ok(false);
+            }
+            let wallets: Vec<String> =
+                table.players().values().map(|w| w.0.clone()).collect();
+            (wallets, table.registry_table_id)
+        };
+        tracing::info!(
+            "[TABLE-CLOSE] table {table_id} closed (reason={reason}); releasing {} seated player lock(s)",
+            seated_wallets.len()
+        );
+
+        // 终态视图广播（客户端据此禁用入座并提示）
+        if let Some(io) = get_socket_io() {
+            broadcast::broadcast_to_table(
+                &io,
+                self,
+                table_id,
+                Some("Table closed — no new hands will start"),
+            )
+            .await;
+        }
+
+        // 副作用异步化：锁释放/链上写不阻塞管理端点；本地 closed 标志已生效
+        tokio::spawn(async move {
+            for wallet in seated_wallets {
+                crate::starknet::lock::release_player_lock(&wallet).await;
+            }
+            if let Some(registry_id) = registry_id {
+                crate::starknet::table_registry::close_table(registry_id).await;
+            }
+        });
+        Ok(true)
     }
 
     pub async fn get_action_sender(&self, table_id: u32) -> Option<tokio::sync::mpsc::Sender<ActionRequest>> {
@@ -563,12 +596,6 @@ impl SocketState {
             Some(io) => io,
             None => return,
         };
-
-        // 非阻塞地从 relayer 已同步好的 TableSummaryV2 缓存中同步 deck_encrypted。
-        // 客户端会用此 deck 生成 remask proof，如果 deck 过期会导致上链验证失败。
-        // 这里只读 relayer 内存缓存（已被链上事件同步），不做阻塞式 RPC 调用，
-        // 避免阻塞 SHUFFLE_NOTICE 推送。
-        self.sync_deck_from_relayer_cache(table_id).await;
 
         let shuffle_notice_data = {
             let gs = self.state.read().await;
@@ -718,7 +745,7 @@ impl SocketState {
         seat_id: u32,
         amount: u64,
     ) -> Result<(bool, JoinResult), JoinError> {
-        let mirror_pk_proof = pk_proof_json.to_proof()
+        let pk_proof_bytes = pk_proof_json.to_proof()
             .map(|p| crate::relayer::proof_bytes::serialize_pk_ownership_proof(&p))
             .unwrap_or_default();
         let socket_id = player.socket_id.clone();
@@ -730,11 +757,15 @@ impl SocketState {
         let player_bankroll = player.bankroll;
 
                 // #20 Phase 2：缓冲 join 证明（下一手 HandStart 消费）。
+                // 会话交易公钥经 SIT_DOWN_V2 接受点核验后随 join 缓冲
+                // 传递（见 socket/handlers.rs）；本路径（重连/机器人等
+                // 次级 join）不携带——None = 未登记。
                 crate::starknet::prove_log::record_join(
                     table_id,
                     &player_wallet_address,
                     pk_hex.clone().0.as_str(),
-                    mirror_pk_proof,
+                    pk_proof_bytes,
+                    None,
                 );
 
 
@@ -855,12 +886,8 @@ impl SocketState {
     ) -> Result<(), String> {
         let mut gs = self.state.write().await;
         if let Some(table) = gs.tables.get_mut(&table_id) {
-            let result = table.submit_player_reveal_tokens(pk_hex, tokens.clone());
-            if result.is_ok() {
-                // #20 Phase 2：记录已接受的 reveal 令牌（结算时一次性重放）。
-                crate::starknet::prove_log::record_reveal(table, &pk_hex.0, &tokens);
-            }
-            result
+            // reveal 喂食在 Table::submit_player_reveal_tokens 内统一完成。
+            table.submit_player_reveal_tokens(pk_hex, tokens.clone())
         } else {
             Err("Table not found".to_string())
         }

@@ -27,7 +27,7 @@ mod tests {
     use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
     use crate::zk_shuffle::reveal_token_proof::REVEAL_TOKEN_PROOF_LABEL;
     use crate::zk_shuffle::transcript_ext::{
-        CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
+        CryptoTranscript, MerlinTranscript, PoseidonFeltTranscript,
     };
     use rand_core::OsRng;
 
@@ -221,9 +221,10 @@ mod tests {
         // 1. 先验证 remask_proof（吸收 remask 数据到 transcript）
         // 2. 再验证 shuffle_proof（在 remask 数据之后继续吸收 shuffle 数据）
 
-        // 兼容 Move 合约：验证时使用与 prove 相同的 FiatShamirTranscript 和协议名
-        // remask proof 应通过
-        let mut transcript = FiatShamirTranscript::new(b"zk_mask_shuffle_proof_v2");
+        // 与 prove（rounds.rs）相同的生产域 transcript（2026-09 Poseidon epoch）
+        let mut transcript = PoseidonFeltTranscript::new_domain(
+            crate::transcript_domains::MASK_SHUFFLE_V2_POSEIDON,
+        );
         assert!(
             round
                 .remask_proof

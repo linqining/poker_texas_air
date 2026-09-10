@@ -74,8 +74,8 @@ impl Table {
             Some(c) => c,
             None => return Err("Player not found in reconstruct state".to_string()),
         };
-        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript::new(
-            poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_PROOF_LABEL,
+        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript::new_domain(
+            poker_protocol::transcript_domains::RECONSTRUCT_V2_POSEIDON,
         );
         if proof.verify(&self.reconstruct_state.cards, &output_cards,
         &swap_cards, &user_readable_cards.readable_cards,

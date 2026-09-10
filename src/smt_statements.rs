@@ -4,7 +4,7 @@
 //! leaf `H1(key || value)` and one internal node `H1(left || right)` per
 //! height, where `H1` is a single BLAKE3 compression over 64 bytes (see
 //! [`crate::blake3_flock::blake3_hash64`]).  Expressing the path as plain
-//! [`Blake2bStatement`]s lets the shared hash-prover seam batch it with the
+//! [`HashStatement`]s lets the shared hash-prover seam batch it with the
 //! rules and state-image statements: the flock backend recognizes the run
 //! structurally (each parent message contains the previous digest as one
 //! 32-byte half) and proves it as ONE Merkle-path statement binding the
@@ -27,7 +27,7 @@
 use crate::blake2b_smt_witness::{Blake2bSmtFixedValuePathWitness, SMT_PATH_SIBLINGS};
 use crate::blake3_flock::blake3_hash64;
 use crate::error::{TexasAirError, TexasAirResult};
-use crate::hash_prover::Blake2bStatement;
+use crate::hash_prover::HashStatement;
 
 /// `1 + 256` statements per fixed-value opening: leaf plus every parent.
 pub const SMT_PATH_STATEMENTS: usize = SMT_PATH_SIBLINGS + 1;
@@ -58,14 +58,14 @@ pub fn smt_internal_message(left: &[u8; 32], right: &[u8; 32]) -> Vec<u8> {
 /// public root, mirroring the incumbent witness preflight.
 pub fn smt_path_statements(
     witness: &Blake2bSmtFixedValuePathWitness,
-) -> TexasAirResult<[Blake2bStatement; SMT_PATH_STATEMENTS]> {
+) -> TexasAirResult<[HashStatement; SMT_PATH_STATEMENTS]> {
     if !witness.terminal_node_matches_root() {
         return Err(TexasAirError::ConstraintUnsatisfied(
             "SMT statement witness terminal node does not match the root".into(),
         ));
     }
     let mut statements = Vec::with_capacity(SMT_PATH_STATEMENTS);
-    statements.push(Blake2bStatement::new(
+    statements.push(HashStatement::new(
         smt_leaf_message(&witness.key, &witness.value),
         witness.nodes[0],
     ));
@@ -82,7 +82,7 @@ pub fn smt_path_statements(
         } else {
             (sibling, child)
         };
-        statements.push(Blake2bStatement::new(
+        statements.push(HashStatement::new(
             smt_internal_message(&left, &right),
             witness.nodes[height],
         ));
@@ -98,7 +98,7 @@ pub fn smt_path_statements(
 /// prover's Merkle-path statement this binds `key/value` to `root`.
 pub fn verify_smt_path_statements(
     witness: &Blake2bSmtFixedValuePathWitness,
-    statements: &[Blake2bStatement],
+    statements: &[HashStatement],
 ) -> TexasAirResult<()> {
     if !witness.terminal_node_matches_root() {
         return Err(TexasAirError::ConstraintUnsatisfied(

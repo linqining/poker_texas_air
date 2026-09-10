@@ -144,6 +144,8 @@ export interface Table {
   winMessages: string[];
   /** 本手已收台费（摊牌结算时按链上口径收取，0 = 未抽水） */
   rakeCollected: number;
+  /** 桌台已关闭（终态）：服务端不再开局、不再接受入座。 */
+  closed?: boolean;
 }
 
 export interface GameMessage {

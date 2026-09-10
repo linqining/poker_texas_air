@@ -25,6 +25,8 @@ use poker_protocol_core::stark_curve::action_sig_challenge;
 use poker_protocol_core::StarkCurve;
 use rand_core::{CryptoRng, RngCore};
 
+use crate::z_poker::convert;
+
 /// StarkCurve 签名核心（`w` 注入便于确定性测试）。
 /// 方程：`s = w + c·sk`，`c = poseidon(label, table, hand, seq, action,
 /// amount, R_x, R_y) mod n`。
@@ -78,22 +80,23 @@ pub fn verify_game_action_generic(
     lhs == rhs
 }
 
+// hex 编解码薄包装（2026-09-10 收敛）：单一权威在 z_poker::convert
+// （曲线/标量 hex 家族的第三份拷贝在此删除；Option 语义保持——
+// convert 的 Result<_, String> 经 .ok() 折叠，接受/拒绝行为不变）。
 fn stark_scalar_from_hex(hex_str: &str) -> Option<<StarkCurve as Curve>::Scalar> {
-    let bytes = hex::decode(hex_str).ok()?;
-    <StarkCurve as Curve>::Scalar::from_canonical_bytes(&bytes)
+    convert::hex_to_scalar(hex_str).ok()
 }
 
 fn stark_point_from_hex(hex_str: &str) -> Option<<StarkCurve as Curve>::Point> {
-    let bytes = hex::decode(hex_str).ok()?;
-    <StarkCurve as Curve>::Point::from_compressed(&bytes)
+    convert::hex_to_curve_point::<StarkCurve>(hex_str).ok()
 }
 
 fn stark_point_to_hex(p: &<StarkCurve as Curve>::Point) -> String {
-    hex::encode(p.compress().as_ref())
+    convert::curve_point_to_hex::<StarkCurve>(p)
 }
 
 fn stark_scalar_to_hex(s: &<StarkCurve as Curve>::Scalar) -> String {
-    hex::encode(<StarkCurve as Curve>::Scalar::as_bytes(s))
+    convert::scalar_to_hex(s)
 }
 
 /// 对外（StarkCurve）签名：返回 `(r_compressed_hex, s_hex)`。

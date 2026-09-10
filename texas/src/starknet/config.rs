@@ -40,14 +40,10 @@ impl SettleMode {
 pub struct StarknetConfig {
     /// JSON-RPC 端点（如 https://starknet-sepolia-rpc.publicnode.com）。
     pub rpc_url: String,
-    /// 链 ID（SN_SEPOLIA / SN_MAIN 或 hex 形式）。留空默认 SN_SEPOLIA。
-    pub chain_id: String,
     /// 结算操作员账户地址（调用 register_aggregate / settle_hand 的 prover）。
     pub operator_address: String,
     /// 操作员签名私钥（hex，含或不含 0x 前缀均可）。
     pub operator_private_key: String,
-    /// canonical STRK20 代币地址。留空跳过 STRK 余额查询。
-    pub strk_address: String,
     /// PokerVault 合约地址。留空跳过筹码余额/买入校验。
     pub vault_address: String,
     /// PokerSettlement 合约地址。留空只生成 calldata 不提交交易。
@@ -84,20 +80,19 @@ pub struct StarknetConfig {
     /// 平台 treasury 地址（抽水接收方，`STARKNET_TREASURY_ADDRESS`）。
     /// 留空回退 operator 地址。
     pub treasury_address: String,
-    /// 抽水比例（basis points，`STARKNET_RAKE_BPS`，默认 500 = 5%）。
-    pub rake_bps: u16,
-    /// 单手抽水上限（chips，`STARKNET_RAKE_CAP`，默认 1000）。
-    pub rake_cap: u64,
+    /// PokerTableRegistry 合约地址（`STARKNET_TABLE_REGISTRY_ADDRESS`）。
+    /// 留空 = 纯链下模式（不建链上桌台锚点）。
+    pub table_registry_address: String,
+    // 抽水参数不在本结构：链上/链下同一来源
+    // `crate::pokergame::rake::rake_params`（STARKNET_RAKE_BPS/CAP）。
 }
 
 impl StarknetConfig {
     pub fn from_env() -> Self {
         Self {
             rpc_url: std::env::var("STARKNET_RPC_URL").unwrap_or_default(),
-            chain_id: std::env::var("STARKNET_CHAIN_ID").unwrap_or_else(|_| "SN_SEPOLIA".to_string()),
             operator_address: std::env::var("STARKNET_OPERATOR_ADDRESS").unwrap_or_default(),
             operator_private_key: std::env::var("STARKNET_OPERATOR_PRIVATE_KEY").unwrap_or_default(),
-            strk_address: std::env::var("STARKNET_STRK_ADDRESS").unwrap_or_default(),
             vault_address: std::env::var("STARKNET_VAULT_ADDRESS").unwrap_or_default(),
             settlement_address: std::env::var("STARKNET_SETTLEMENT_ADDRESS").unwrap_or_default(),
             dual_settlement_address: std::env::var("STARKNET_DUAL_SETTLEMENT_ADDRESS").unwrap_or_default(),
@@ -137,14 +132,8 @@ impl StarknetConfig {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(false),
             treasury_address: std::env::var("STARKNET_TREASURY_ADDRESS").unwrap_or_default(),
-            rake_bps: std::env::var("STARKNET_RAKE_BPS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(500),
-            rake_cap: std::env::var("STARKNET_RAKE_CAP")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1_000),
+            table_registry_address: std::env::var("STARKNET_TABLE_REGISTRY_ADDRESS")
+                .unwrap_or_default(),
         }
     }
 
@@ -153,27 +142,11 @@ impl StarknetConfig {
         !self.rpc_url.is_empty()
     }
 
-    /// Hand-batch 路径是否可用（RPC + dual 合约 + 操作员密钥）。
-    pub fn dual_settlement_enabled(&self) -> bool {
-        self.rpc_enabled()
-            && !self.dual_settlement_address.is_empty()
-            && !self.operator_address.is_empty()
-            && !self.operator_private_key.is_empty()
-    }
-
-    /// 本手是否尝试 Hand-batch 路径（模式 + 合约地址共同决定）。
-    pub fn try_dapv(&self) -> bool {
-        match self.settlement_mode.as_str() {
-            "dapv" => self.dual_settlement_enabled(),
-            "legacy" => false,
-            // auto / 未设置：优先 DAPV，未配置则静默走 legacy。
-            _ => self.dual_settlement_enabled(),
-        }
-    }
-
-    /// Hand-batch 失败后是否允许回退 legacy（仅 auto 模式）。
-    pub fn dapv_fallback_legacy(&self) -> bool {
-        self.settlement_mode != "dapv"
+    /// 桌台注册表是否启用（`STARKNET_TABLE_REGISTRY_ADDRESS` 配置即开启）。
+    /// 开启后：建桌写注册表拿合约分配 id、关桌写链、开局前可读回状态；
+    /// 未开启 = 纯链下模式（table_id 用服务端本地分配，行为不变）。
+    pub fn table_registry_enabled(&self) -> bool {
+        !self.table_registry_address.is_empty()
     }
 
     /// 是否启用 snip36 递归证明结算模式（牌局结束异步证明后提交；

@@ -25,7 +25,7 @@ use stwo_constraint_framework::{
 };
 
 use crate::error::{TexasAirError, TexasAirResult};
-use crate::hash_prover::{ArchivedHashProof, Blake2bStatement, HashProofProvider as _};
+use crate::hash_prover::{ArchivedHashProof, HashStatement, HashProofProvider as _};
 use crate::trace_gen::MethodTrace;
 
 pub const CANONICAL_REVEAL_OPENING_MAGIC: [u8; 4] = *b"ZR4A";
@@ -936,7 +936,7 @@ pub fn prove_canonical_reveal_ledger_opening(
     // AIR rather than replaying this routine on untrusted archive data.
     opening.validate()?;
     let message = opening.message()?;
-    let statement = Blake2bStatement::new(
+    let statement = HashStatement::new(
         message.clone(),
         crate::blake3_flock::blake3_chain_digest(&message),
     );
@@ -1072,7 +1072,7 @@ mod tests {
             version: CANONICAL_REVEAL_OPENING_VERSION,
             pending_union: empty_pending_union_proof(),
             hash: ArchivedHashProof::Flock(crate::blake3_flock::ArchivedFlockHashesProof {
-                statements: vec![Blake2bStatement::new(value.message().unwrap(), [9; 32])],
+                statements: vec![HashStatement::new(value.message().unwrap(), [9; 32])],
                 chains: Vec::new(),
                 merkles: Vec::new(),
             }),
@@ -1089,7 +1089,7 @@ mod tests {
             version: CANONICAL_REVEAL_OPENING_VERSION,
             pending_union: empty_pending_union_proof(),
             hash: ArchivedHashProof::Flock(crate::blake3_flock::ArchivedFlockHashesProof {
-                statements: vec![Blake2bStatement::new(value.message().unwrap(), [0; 32])],
+                statements: vec![HashStatement::new(value.message().unwrap(), [0; 32])],
                 chains: Vec::new(),
                 merkles: Vec::new(),
             }),
@@ -1113,7 +1113,7 @@ mod tests {
             version: CANONICAL_REVEAL_OPENING_VERSION,
             pending_union: empty_pending_union_proof(),
             hash: ArchivedHashProof::Flock(crate::blake3_flock::ArchivedFlockHashesProof {
-                statements: vec![Blake2bStatement::new(value.message().unwrap(), [0; 32])],
+                statements: vec![HashStatement::new(value.message().unwrap(), [0; 32])],
                 chains: Vec::new(),
                 merkles: Vec::new(),
             }),

@@ -48,6 +48,7 @@
   "game_state-info_river": "河牌",
   "game_state-info_showdown": "摊牌",
   "game_table_empty-seat": "空位",
+  "game_table_closed": "本桌已关闭，不再开局",
   "game_ui_all-in": "全押",
   "game_ui_bet": "下注",
   "game_ui_call": "跟注",

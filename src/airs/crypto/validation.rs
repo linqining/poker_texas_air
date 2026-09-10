@@ -25,7 +25,7 @@ use crate::precompile_binding::{
 use crate::prove_task::MethodInput;
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::state_root_to_air_limbs;
-use poker_l1::vm::contracts::texas_poker::dispatch::{
+use poker_l1::contracts::texas_poker::dispatch::{
     FoldWithProofArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs, SubmitShuffleV2Args,
 };
 
@@ -369,8 +369,8 @@ pub(crate) fn validate_submit_reconstruct_deck(
 }
 
 fn reveal_version_increment(
-    pre: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
-    post: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    pre: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
+    post: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<u8> {
     let expected_post_version = u64::from(pre.call_seq).checked_add(1).ok_or_else(|| {
         TexasAirError::SpecViolation("submit_player_reveal_tokens: pre-version overflow".into())

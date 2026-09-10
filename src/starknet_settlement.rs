@@ -31,9 +31,9 @@
 //! single felt before submitting a `settle_hand` call; the Cairo contract
 //! validates equality against the registered halves in storage.
 
-use poker_l1::vm::contracts::texas_poker::settlement::SettlementPlan;
-use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, Seat, TexasPokerTable};
-use starknet_ff::FieldElement;
+use poker_l1::contracts::texas_poker::settlement::SettlementPlan;
+use poker_l1::contracts::texas_poker::types::{EMPTY_PLAYER, Seat, TexasPokerTable};
+use starknet_crypto::Felt;
 
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::outer_aggregate::VerifiedOuterAggregate;
@@ -50,9 +50,9 @@ pub const MAX_SETTLE_PARTICIPANTS: usize = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AggregateDigestFelts {
     /// High half (`bytes[0..16]`).
-    pub hi: FieldElement,
+    pub hi: Felt,
     /// Low half (`bytes[16..32]`).
-    pub lo: FieldElement,
+    pub lo: Felt,
 }
 
 impl AggregateDigestFelts {
@@ -79,7 +79,7 @@ impl AggregateDigestFelts {
     ///
     /// Returns [`TexasAirError::SpecViolation`] if either felt exceeds the
     /// canonical 128-bit range, indicating corruption or a wrong digest.
-    pub fn merge(hi: FieldElement, lo: FieldElement) -> TexasAirResult<[u8; 32]> {
+    pub fn merge(hi: Felt, lo: Felt) -> TexasAirResult<[u8; 32]> {
         let hi_bytes = felt_to_bytes16(hi)?;
         let lo_bytes = felt_to_bytes16(lo)?;
         let mut out = [0u8; 32];
@@ -90,7 +90,7 @@ impl AggregateDigestFelts {
 
     /// Single-felt projection used by the `settle_hand` ABI (low half).
     #[must_use]
-    pub const fn settle_abi_single_felt(self) -> FieldElement {
+    pub const fn settle_abi_single_felt(self) -> Felt {
         self.lo
     }
 }
@@ -107,15 +107,15 @@ pub struct PlayerDelta {
 /// Strict calldata DTO for `register_aggregate`.
 #[derive(Debug, Clone)]
 pub struct RegisterAggregateCalldata {
-    aggregate_hi: FieldElement,
-    aggregate_lo: FieldElement,
+    aggregate_hi: Felt,
+    aggregate_lo: Felt,
     first_hand_id: u64,
     last_hand_id: u64,
-    pre_state_hi: FieldElement,
-    pre_state_lo: FieldElement,
-    post_state_hi: FieldElement,
-    post_state_lo: FieldElement,
-    settlement_roots: Vec<FieldElement>,
+    pre_state_hi: Felt,
+    pre_state_lo: Felt,
+    post_state_hi: Felt,
+    post_state_lo: Felt,
+    settlement_roots: Vec<Felt>,
 }
 
 impl RegisterAggregateCalldata {
@@ -141,7 +141,7 @@ impl RegisterAggregateCalldata {
         aggregates: &[VerifiedOuterAggregate],
         first_hand_id: u32,
         last_hand_id: u32,
-        settlement_roots: Vec<FieldElement>,
+        settlement_roots: Vec<Felt>,
     ) -> TexasAirResult<Self> {
         if first_hand_id > last_hand_id {
             return Err(TexasAirError::SpecViolation(format!(
@@ -253,13 +253,13 @@ impl RegisterAggregateCalldata {
 
     /// Aggregate digest (high half).
     #[must_use]
-    pub const fn aggregate_hi(&self) -> FieldElement {
+    pub const fn aggregate_hi(&self) -> Felt {
         self.aggregate_hi
     }
 
     /// Aggregate digest (low half).
     #[must_use]
-    pub const fn aggregate_lo(&self) -> FieldElement {
+    pub const fn aggregate_lo(&self) -> Felt {
         self.aggregate_lo
     }
 
@@ -277,19 +277,19 @@ impl RegisterAggregateCalldata {
 
     /// Pre-settlement external state root, split into dual felts.
     #[must_use]
-    pub const fn pre_state_root(&self) -> (FieldElement, FieldElement) {
+    pub const fn pre_state_root(&self) -> (Felt, Felt) {
         (self.pre_state_hi, self.pre_state_lo)
     }
 
     /// Post-settlement external state root, split into dual felts.
     #[must_use]
-    pub const fn post_state_root(&self) -> (FieldElement, FieldElement) {
+    pub const fn post_state_root(&self) -> (Felt, Felt) {
         (self.post_state_hi, self.post_state_lo)
     }
 
     /// Per-hand settlement commitment roots.
     #[must_use]
-    pub fn settlement_roots(&self) -> &[FieldElement] {
+    pub fn settlement_roots(&self) -> &[Felt] {
         &self.settlement_roots
     }
 
@@ -298,17 +298,17 @@ impl RegisterAggregateCalldata {
     /// pre_root: (felt252, felt252), post_root: (felt252, felt252),
     /// settlement_roots: Span<felt252>)`.
     #[must_use]
-    pub fn to_felts(&self) -> Vec<FieldElement> {
+    pub fn to_felts(&self) -> Vec<Felt> {
         let mut out = Vec::with_capacity(9 + self.settlement_roots.len());
         out.push(self.aggregate_hi);
         out.push(self.aggregate_lo);
-        out.push(FieldElement::from(self.first_hand_id));
-        out.push(FieldElement::from(self.last_hand_id));
+        out.push(Felt::from(self.first_hand_id));
+        out.push(Felt::from(self.last_hand_id));
         out.push(self.pre_state_hi);
         out.push(self.pre_state_lo);
         out.push(self.post_state_hi);
         out.push(self.post_state_lo);
-        out.push(FieldElement::from(self.settlement_roots.len()));
+        out.push(Felt::from(self.settlement_roots.len()));
         out.extend(self.settlement_roots.iter().copied());
         out
     }
@@ -318,17 +318,17 @@ impl RegisterAggregateCalldata {
 #[derive(Debug, Clone)]
 pub struct SettleHandCalldata {
     /// Single-felt projection of the registered aggregate digest (low half).
-    aggregate_digest: FieldElement,
+    aggregate_digest: Felt,
     hand_id: u64,
     /// Hand action-log digest (#18 Phase B): absorbed as the settlement
     /// digest's tail word and carried in the settle calldata so the contract
     /// recompute matches the registered root byte-for-byte.
-    action_log_digest: FieldElement,
-    players: Vec<FieldElement>,
+    action_log_digest: Felt,
+    players: Vec<Felt>,
     deltas: Vec<i128>,
     /// Poseidon commitment over (hand_id, address, sign, magnitude,
     /// action_log_digest).
-    settlement_digest: FieldElement,
+    settlement_digest: Felt,
 }
 
 impl SettleHandCalldata {
@@ -358,7 +358,7 @@ impl SettleHandCalldata {
         pre_table: &TexasPokerTable,
         plan: &SettlementPlan,
         rake_recipient: Option<[u8; 20]>,
-        action_log_digest: FieldElement,
+        action_log_digest: Felt,
     ) -> TexasAirResult<Self> {
         if pre_table.hand_id != hand_id {
             return Err(TexasAirError::SpecViolation(format!(
@@ -477,7 +477,7 @@ impl SettleHandCalldata {
 
     /// Single-felt projection of the aggregate digest for `settle_hand` ABI.
     #[must_use]
-    pub const fn aggregate_digest(&self) -> FieldElement {
+    pub const fn aggregate_digest(&self) -> Felt {
         self.aggregate_digest
     }
 
@@ -489,13 +489,13 @@ impl SettleHandCalldata {
 
     /// The hand's action-log digest (#18 Phase B settlement digest tail word).
     #[must_use]
-    pub const fn action_log_digest(&self) -> FieldElement {
+    pub const fn action_log_digest(&self) -> Felt {
         self.action_log_digest
     }
 
     /// Participant addresses (felt252 encoding, big-endian 20-byte).
     #[must_use]
-    pub fn players(&self) -> &[FieldElement] {
+    pub fn players(&self) -> &[Felt] {
         &self.players
     }
 
@@ -508,7 +508,7 @@ impl SettleHandCalldata {
     /// The Poseidon settlement commitment this calldata recomputes; the
     /// on-chain contract recomputes the same commitment and rejects mismatches.
     #[must_use]
-    pub const fn settlement_digest(&self) -> FieldElement {
+    pub const fn settlement_digest(&self) -> Felt {
         self.settlement_digest
     }
 
@@ -516,16 +516,16 @@ impl SettleHandCalldata {
     /// `(aggregate_digest: felt252, hand_id: u64, action_log_digest: felt252,
     /// players: Span<ContractAddress>, deltas: Span<i128>)`.
     #[must_use]
-    pub fn to_felts(&self) -> Vec<FieldElement> {
+    pub fn to_felts(&self) -> Vec<Felt> {
         let mut out = Vec::with_capacity(5 + self.players.len() * 2);
         out.push(self.aggregate_digest);
-        out.push(FieldElement::from(self.hand_id));
+        out.push(Felt::from(self.hand_id));
         out.push(self.action_log_digest);
-        out.push(FieldElement::from(self.players.len()));
+        out.push(Felt::from(self.players.len()));
         for player in &self.players {
             out.push(*player);
         }
-        out.push(FieldElement::from(self.deltas.len()));
+        out.push(Felt::from(self.deltas.len()));
         for delta in &self.deltas {
             out.push(i128_to_felt(*delta));
         }
@@ -572,29 +572,29 @@ fn validate_i128_abi(delta: i128) -> TexasAirResult<()> {
 }
 
 /// Encode a player address as a felt252 (big-endian 20 bytes).
-fn address_to_felt(addr: [u8; 20]) -> TexasAirResult<FieldElement> {
+fn address_to_felt(addr: [u8; 20]) -> TexasAirResult<Felt> {
     if addr == EMPTY_PLAYER {
         return Err(TexasAirError::SpecViolation(
             "settle_hand: empty player address in participant set".into(),
         ));
     }
-    FieldElement::from_byte_slice_be(&addr)
-        .map_err(|e| TexasAirError::SpecViolation(format!("address encoding failed: {e}")))
+    // 20 字节 = 160 bit < P，canonical 恒成立。
+    Ok(Felt::from_bytes_be_slice(&addr))
 }
 
 /// Encode a signed i128 into the Starknet prime as a felt.
 ///
 /// Negative values become the modular complement `-magnitude`; the contract
 /// reads these back into `i128` via the two's-complement felt representation.
-fn i128_to_felt(value: i128) -> FieldElement {
+fn i128_to_felt(value: i128) -> Felt {
     if value >= 0 {
         let magnitude =
             u64::try_from(value).expect("non-negative delta fits in u64 after validate_i128_abi");
-        FieldElement::from(magnitude)
+        Felt::from(magnitude)
     } else {
         let magnitude = u64::try_from(value.unsigned_abs())
             .expect("abs delta fits in u64 after validate_i128_abi");
-        -FieldElement::from(magnitude)
+        -Felt::from(magnitude)
     }
 }
 
@@ -608,42 +608,42 @@ fn i128_to_felt(value: i128) -> FieldElement {
 fn compute_settlement_digest(
     hand_id: u64,
     participants: &[PlayerDelta],
-    action_log_digest: FieldElement,
-) -> TexasAirResult<FieldElement> {
-    let mut fields: Vec<FieldElement> = Vec::with_capacity(2 + participants.len() * 3);
-    fields.push(FieldElement::from(hand_id));
+    action_log_digest: Felt,
+) -> TexasAirResult<Felt> {
+    let mut fields: Vec<Felt> = Vec::with_capacity(2 + participants.len() * 3);
+    fields.push(Felt::from(hand_id));
     for p in participants {
         fields.push(address_to_felt(p.address)?);
         if p.delta >= 0 {
-            fields.push(FieldElement::from(1_u64));
+            fields.push(Felt::from(1_u64));
             let magnitude = u64::try_from(p.delta)
                 .expect("non-negative delta fits in u64 after validate_i128_abi");
-            fields.push(FieldElement::from(magnitude));
+            fields.push(Felt::from(magnitude));
         } else {
-            fields.push(FieldElement::from(0_u64));
+            fields.push(Felt::from(0_u64));
             let magnitude = u64::try_from(p.delta.unsigned_abs())
                 .expect("abs delta fits in u64 after validate_i128_abi");
-            fields.push(FieldElement::from(magnitude));
+            fields.push(Felt::from(magnitude));
         }
     }
     fields.push(action_log_digest);
     Ok(starknet_crypto::poseidon_hash_many(&fields))
 }
 
-/// Convert a 16-byte big-endian slice into a `FieldElement`.
+/// Convert a 16-byte big-endian slice into a `Felt`.
 ///
 /// A 128-bit value is always a canonical felt252 (Stark prime ≈ 2^251).
-fn bytes16_to_felt(bytes: &[u8; 16]) -> FieldElement {
-    FieldElement::from_byte_slice_be(bytes).expect("16 bytes (128 bits) always fit in felt252")
+fn bytes16_to_felt(bytes: &[u8; 16]) -> Felt {
+    Felt::from_bytes_be_slice(bytes)
 }
 
-/// Convert a `FieldElement` back to a 16-byte big-endian slice.
+/// Convert a `Felt` back to a 16-byte big-endian slice.
 ///
 /// # Errors
 ///
 /// Returns [`TexasAirError::SpecViolation`] if the felt exceeds the 128-bit
 /// canonical range, indicating corruption or a wrong digest.
-fn felt_to_bytes16(felt: FieldElement) -> TexasAirResult<[u8; 16]> {
+fn felt_to_bytes16(felt: Felt) -> TexasAirResult<[u8; 16]> {
     let bytes = felt.to_bytes_be();
     if bytes[..16].iter().any(|b| *b != 0) {
         return Err(TexasAirError::SpecViolation(
@@ -659,20 +659,21 @@ fn felt_to_bytes16(felt: FieldElement) -> TexasAirResult<[u8; 16]> {
 mod tests {
     use super::*;
     use crate::state_root::StateRoot;
+    use crate::test_support::well_formed_tx_pk_fixture;
     use crate::verified_chain::{VerificationReceipt, VerifiedChain};
 
     /// 测试用动作日志哈希样例（#18 Phase B 吸收链尾词；值本身不重要，
     /// 重要的是参与 digest 吸收与 calldata 布局）。
-    fn action_log_sample() -> FieldElement {
-        FieldElement::from(0xA11CE_u64)
+    fn action_log_sample() -> Felt {
+        Felt::from(0xA11CE_u64)
     }
-    use poker_l1::vm::contracts::texas_poker::utils::g1_generator as g1_gen;
+    use poker_l1::contracts::texas_poker::utils::g1_generator as g1_gen;
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::card::{BoardCards, HoleCards};
-    use poker_l1::vm::contracts::texas_poker::settlement::{
+    use poker_l1::contracts::texas_poker::card::{BoardCards, HoleCards};
+    use poker_l1::contracts::texas_poker::settlement::{
         SettlementPlan, SettlementRunoutSchedule,
     };
-    use poker_l1::vm::contracts::texas_poker::types::{
+    use poker_l1::contracts::texas_poker::types::{
         DeckState, HandPhase, OccupiedSeat, PlayingSeat, PlayingSeatStatus, TableRules,
     };
     use poker_protocol::crypto::types::ECPoint;
@@ -708,6 +709,7 @@ mod tests {
                     player,
                     stack: 1000,
                     pk: ECPoint(g1_gen()),
+                    tx_pk: well_formed_tx_pk_fixture(),
                     pending_addon: 0,
                     time_bank_ms: 30_000,
                 },
@@ -731,7 +733,7 @@ mod tests {
             name: "test".to_string(),
             creator: [0xAA; 20],
             rules: TableRules::new(9, 5, 10),
-            seats: vec![
+            seats: [
                 playing_seat([0x11; 20], 50),
                 playing_seat([0x22; 20], 50),
                 vacant_seat(),
@@ -789,8 +791,8 @@ mod tests {
 
     #[test]
     fn merge_rejects_oversize_felt() {
-        let oversized = FieldElement::from(u128::MAX) + FieldElement::from(1_u64);
-        let err = AggregateDigestFelts::merge(oversized, FieldElement::ZERO).unwrap_err();
+        let oversized = Felt::from(u128::MAX) + Felt::from(1_u64);
+        let err = AggregateDigestFelts::merge(oversized, Felt::ZERO).unwrap_err();
         assert!(matches!(err, TexasAirError::SpecViolation(_)));
     }
 
@@ -808,13 +810,13 @@ mod tests {
         let addr0 = address_to_felt([0x11; 20]).unwrap();
         let addr1 = address_to_felt([0x22; 20]).unwrap();
         let expected = starknet_crypto::poseidon_hash_many(&[
-            FieldElement::from(7_u64),
+            Felt::from(7_u64),
             addr0,
-            FieldElement::from(1_u64),
-            FieldElement::from(50_u64),
+            Felt::from(1_u64),
+            Felt::from(50_u64),
             addr1,
-            FieldElement::from(0_u64),
-            FieldElement::from(50_u64),
+            Felt::from(0_u64),
+            Felt::from(50_u64),
             action_log_sample(),
         ]);
         assert_eq!(calldata.settlement_digest(), expected);
@@ -895,16 +897,16 @@ mod tests {
         // + 2 deltas = 9（#18 Phase B：action_log 插在 hand_id 之后）。
         assert_eq!(felts.len(), 9);
         assert_eq!(felts[0], calldata.aggregate_digest());
-        assert_eq!(felts[1], FieldElement::from(7_u64));
+        assert_eq!(felts[1], Felt::from(7_u64));
         assert_eq!(felts[2], action_log_sample(), "action log after hand_id");
-        assert_eq!(felts[3], FieldElement::from(2_u64));
-        assert_eq!(felts[6], FieldElement::from(2_u64));
+        assert_eq!(felts[3], Felt::from(2_u64));
+        assert_eq!(felts[6], Felt::from(2_u64));
         // Sorted: [0x11..] < [0x22..], so felts[4] is seat 0, felts[5] is seat 1.
         assert_eq!(felts[4], address_to_felt([0x11; 20]).unwrap());
         assert_eq!(felts[5], address_to_felt([0x22; 20]).unwrap());
         // Deltas: winner +50, loser -50 (modular complement).
-        assert_eq!(felts[7], FieldElement::from(50_u64));
-        assert_eq!(felts[8], -FieldElement::from(50_u64));
+        assert_eq!(felts[7], Felt::from(50_u64));
+        assert_eq!(felts[8], -Felt::from(50_u64));
     }
 
     #[test]
@@ -917,7 +919,7 @@ mod tests {
             &[agg_a, agg_b],
             10,
             11,
-            vec![FieldElement::from(1_u64), FieldElement::from(2_u64)],
+            vec![Felt::from(1_u64), Felt::from(2_u64)],
         );
         assert!(ok.is_ok());
     }
@@ -933,7 +935,7 @@ mod tests {
             &[agg_a, agg_b],
             11,
             12,
-            vec![FieldElement::from(1_u64), FieldElement::from(2_u64)],
+            vec![Felt::from(1_u64), Felt::from(2_u64)],
         )
         .unwrap_err();
         assert!(matches!(err, TexasAirError::SpecViolation(_)));
@@ -949,7 +951,7 @@ mod tests {
             &[agg_a, agg_b],
             10,
             11,
-            vec![FieldElement::from(1_u64), FieldElement::from(2_u64)],
+            vec![Felt::from(1_u64), Felt::from(2_u64)],
         )
         .unwrap_err();
         assert!(matches!(err, TexasAirError::SpecViolation(_)));
@@ -966,7 +968,7 @@ mod tests {
             &[agg_a, agg_b],
             10,
             11,
-            vec![FieldElement::from(1_u64), FieldElement::from(2_u64)],
+            vec![Felt::from(1_u64), Felt::from(2_u64)],
         )
         .unwrap_err();
         assert!(matches!(err, TexasAirError::SpecViolation(_)));
@@ -977,15 +979,15 @@ mod tests {
         let chain = chain_from(vec![receipt_with_state(1, 5, 0, [0x01; 32], [0x02; 32])]);
         let agg = mock_aggregate(chain, [0xAA; 32]);
         let c =
-            RegisterAggregateCalldata::new(&[agg], 5, 5, vec![FieldElement::from(42_u64)]).unwrap();
+            RegisterAggregateCalldata::new(&[agg], 5, 5, vec![Felt::from(42_u64)]).unwrap();
         let felts = c.to_felts();
         // 2 (digest) + 2 (hand range) + 4 (state roots) + 1 (length) + 1 (root) = 10
         assert_eq!(felts.len(), 10);
         assert_eq!(felts[0], c.aggregate_hi());
         assert_eq!(felts[1], c.aggregate_lo());
-        assert_eq!(felts[2], FieldElement::from(5_u64));
-        assert_eq!(felts[3], FieldElement::from(5_u64));
-        assert_eq!(felts[8], FieldElement::from(1_u64));
-        assert_eq!(felts[9], FieldElement::from(42_u64));
+        assert_eq!(felts[2], Felt::from(5_u64));
+        assert_eq!(felts[3], Felt::from(5_u64));
+        assert_eq!(felts[8], Felt::from(1_u64));
+        assert_eq!(felts[9], Felt::from(42_u64));
     }
 }

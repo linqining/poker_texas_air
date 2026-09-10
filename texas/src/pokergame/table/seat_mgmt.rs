@@ -1,6 +1,6 @@
 use super::*;
 use poker_protocol::crypto::EcPoint;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript;
 use crate::pokergame::game_state::LeaveGameRoundJson;
 
 impl Table {
@@ -19,14 +19,14 @@ impl Table {
         // 对齐 Move：手牌进行中使用 kick_player_internal，保留 seat 供 side pot 计算
         if self.is_playing() {
             self.kick_player_internal(pk);
-            // #20 Phase 2：记录强制弃牌命令（结算时一次性重放）。
+            // 实时 VM 镜像接受点（单一状态表示）：强制弃牌同步 dispatch。
             if let Some(player) = self
                 .local_seats
                 .values()
                 .find_map(|s| s.player.as_ref().filter(|p| &p.pk_hex == pk))
             {
                 let wallet = player.wallet_address.0.clone();
-                crate::starknet::prove_log::record_force_fold(self, &wallet);
+                self.mirror_on_force_fold(&wallet);
             }
         } else {
             self.stand_player_by_pk(pk);
@@ -202,9 +202,11 @@ impl Table {
         if sub_input.is_empty() {
             return Err("leave stripped nothing".to_string());
         }
-        // 兼容 Move 合约 leave_proof::verify 与 poker_protocol 生产代码：
-        // 必须使用 FiatShamirTranscript 和协议名 zk_leave_proof_v1。
-        let mut transcript = FiatShamirTranscript::new(b"zk_leave_proof_v1");
+        // 2026-09 Poseidon epoch：与 poker_l1 状态机同一 leave 生产域
+        // （修复此前 Merlin/FiatShamirSha3 同标签不同海绵的域分裂）。
+        let mut transcript = PoseidonFeltTranscript::new_domain(
+            poker_protocol::transcript_domains::LEAVE_POSEIDON_V2,
+        );
         if !leave_round.leave_proof.verify(&sub_input, &sub_output, player_pk, &mut transcript) {
             return Err("Invalid leave proof".to_string());
         }
@@ -417,7 +419,7 @@ impl Table {
     /// end_without_showdown，无 fold 记录），结算走 showdown 计划但
     /// 公共牌不满 5 张 → build failed，客户端上手牌凭空消失
     /// （2026-09-08 hand 1788804569 线上）。局内筹码由 30s 下注超时
-    /// 正常 fold（有 record_bet 记录，可证明）；下一手开始时仍未重连
+    /// 正常 fold（实时镜像已 dispatch，可证明）；下一手开始时仍未重连
     /// 才由 start_preflop_shuffle 转 sitting_out。
     pub fn mark_player_disconnected_mid_hand(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
         let seat = self.find_player_by_pk(pk)?;

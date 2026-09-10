@@ -1,5 +1,6 @@
 use wasm_bindgen::prelude::*;
 use serde::{Serialize, Deserialize};
+use poker_protocol::z_poker::convert;
 use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext, DefaultCurve, CurveScalar, CurvePoint};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
@@ -17,38 +18,29 @@ fn console_log(msg: &str) {
     let _ = log(&format!("[client-wasm] {}", msg));
 }
 
+// hex 编码薄弱化（2026-09-10 收敛）：单一权威在
+// poker_protocol::z_poker::convert（此前的逐行重写拷贝删除）。
+// wasm_bindgen 边界的 String/&str 转换留在本包装层。
+//
+// 2026-09-07 回归注记：hex_to_ecpoint 曾按 BLS12-381 时代断言 48 字节，
+// Stark 压缩点 32 字节 → 浏览器洗牌全挂（2026-09-06 重建 pkg 首次把
+// 遗留代码编进产物后爆发）。长度校验现为 convert/from_compressed 的
+// 单一实现（≠32B 一律拒绝），回归测试 ecpoint_hex_rejects_wrong_length
+// 继续守护。
 pub fn scalar_to_hex(s: &Scalar) -> String {
-    hex::encode(s.as_bytes())
+    convert::scalar_to_hex(s)
 }
 
 fn hex_to_scalar(hex_str: &str) -> Result<Scalar, String> {
-    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    if bytes.len() != 32 {
-        return Err("Scalar must be 32 bytes".to_string());
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Scalar::from_canonical_bytes(&arr)
-        .ok_or_else(|| "non-canonical scalar encoding".to_string())
+    convert::hex_to_scalar(hex_str)
 }
 
 pub fn ecpoint_to_hex(p: &EcPoint) -> String {
-    hex::encode(p.compress().as_ref())
+    convert::ecpoint_to_hex(p)
 }
 
 fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
-    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    // DefaultCurve = StarkCurve：压缩点为 32 字节（x 大端 + 首字节 0x80 位
-    // 记 y 奇偶——StarkCompressedPoint 编码，见 stark_curve::compress）。
-    // 此前按 48 字节（BLS12-381 时代）断言——Stark 迁移时漏改；2026-09-06
-    // 重建 pkg 后首次进入产物，浏览器洗牌路径全部失败（hex 往返 c1/c2/pk）。
-    if bytes.len() != 32 {
-        return Err(format!(
-            "EC point must be 32 bytes (Stark compressed x||parity), got {}",
-            bytes.len()
-        ));
-    }
-    EcPoint::from_compressed(&bytes).ok_or_else(|| "Invalid EC point".to_string())
+    convert::hex_to_ecpoint(hex_str)
 }
 
 fn ct_to_json(ct: &ElGamalCiphertext) -> String {
@@ -738,10 +730,10 @@ pub fn encrypt_plaintext(plaintext_hex: &str, pk_hex: &str) -> Result<JsValue, J
 
 
 /// #16 抗审查动作签名：以牌局身份 SK 对 (table_id, hand_id, seq, action,
-/// amount) 签名（Starknet-Poseidon 域分离同族：`zgame.action-sig.v2`，与
+/// amount) 签名（Starknet-Poseidon 域分离同族：`zgame.action-sig.v3`，与
 /// texas 服务端 `game_action.rs` 验签口径逐字节一致）。返回 `{ r_hex, s_hex }`
 /// ——客户端把 `(seq, r_hex, s_hex)` 附在动作消息上；服务端按座位 pk 验签。
-/// v2：hand_id 进签名域，签名升级为逐手归属凭证（endorsement 通道已删除）。
+/// v3：hand_id 进签名域，签名升级为逐手归属凭证（endorsement 通道已删除）。
 ///
 /// `sk_hex` 为 ClientPlayer 的 sk（32 字节大端 hex，localStorage `sk` 同源）；
 /// `hand_id` 为开局广播分配的本手 id。
@@ -766,16 +758,86 @@ pub fn sign_action(
         .map(|v| serde_wasm_bindgen::to_value(&v).unwrap_or(JsValue::NULL))
 }
 
+
+// =============================================================================
+// P1-2 会话委托：VM 层交易签名的会话密钥（2026-09-10）
+//
+// 与 ElGamal 会话密钥（WasmClientPlayer）平行的第二把会话钥：它是玩家在
+// VM/链运行时（TableRuntime）交易签名的**授权锚**——买入时经 vault
+// `set_session_tx_pk`（非私密路径玩家 multicall / 私密路径 anonymizer 同笔
+// 私交易 `set_session_tx_pk_for`）登记到链上，join 时随 payload 声明、
+// 服务端 view 对拍核验。重连只需 localStorage 恢复（get_sk_hex/from_sk），
+// 零钱包交互。
+//
+// 签名核心单一源：poker-protocol-core::tx_schnorr（与 poker_l1
+// `signature::stark_scheme` 同一实现）。sig = R_compressed(32B) ‖ s(32B)；
+// 域常量 zchain.schnorr.v1 / zchain.schnorr.nonce.v1 见 core——此前
+// "必须与 poker_l1 逐字节同步"的本地重声明已删除（漂移面收敛为零）。
+// =============================================================================
+
+/// VM 交易会话密钥（随机新鲜钥，与钱包地址零派生关系）。
+#[wasm_bindgen]
+pub struct WasmTxSession {
+    sk: Scalar,
+    pk: EcPoint,
+}
+
+#[wasm_bindgen]
+impl WasmTxSession {
+    /// 生成随机会话密钥（进入牌桌前调用一次；sk 存 localStorage）。
+    #[wasm_bindgen(constructor)]
+    pub fn generate() -> WasmTxSession {
+        let sk = Scalar::random(&mut OsRng);
+        let pk = base_g() * &sk;
+        WasmTxSession { sk, pk }
+    }
+
+    /// 从 localStorage 的 sk hex 恢复（重连路径——零钱包交互）。
+    pub fn from_sk(sk_hex: &str) -> Result<WasmTxSession, JsValue> {
+        let sk = hex_to_scalar(sk_hex).map_err(|e| JsValue::from_str(&e))?;
+        let pk = base_g() * &sk;
+        Ok(WasmTxSession { sk, pk })
+    }
+
+    /// 会话公钥（32B 压缩点 hex）——join payload 的 `sessionTxPk` 字段与
+    /// 链上登记 felt 使用同一编码。
+    pub fn get_pk_hex(&self) -> String {
+        hex::encode(self.pk.compress().as_ref())
+    }
+
+    /// 会话私钥 hex（localStorage 持久化）。
+    pub fn get_sk_hex(&self) -> String {
+        scalar_to_hex(&self.sk)
+    }
+
+    /// Stark Schnorr 签名（msg_hash = 32B hex；返回 64B 签名的 hex）——
+    /// 消息哈希公式见 poker_l1 `dispatch::tx_message_hash`（客户端须用
+    /// 同一公式构造待签哈希）。核心在 poker-protocol-core::tx_schnorr
+    /// （与 poker_l1 stark_scheme 同一实现，确定性 nonce + 域分离挑战）。
+    pub fn sign(&self, msg_hash_hex: &str) -> Result<String, JsValue> {
+        let hash_bytes = hex::decode(msg_hash_hex.trim_start_matches("0x"))
+            .map_err(|e| JsValue::from_str(&format!("Invalid msg hash hex: {e}")))?;
+        if hash_bytes.len() != 32 {
+            return Err(JsValue::from_str("msg hash must be 32 bytes"));
+        }
+        let mut msg = [0u8; 32];
+        msg.copy_from_slice(&hash_bytes);
+
+        let sig = poker_protocol_core::tx_schnorr::sign(&self.sk, &msg);
+        Ok(hex::encode(sig))
+    }
+}
+
 #[cfg(test)]
 mod curve_hex_tests {
     use super::*;
 
     /// 2026-09-07 回归：hex_to_ecpoint 曾按 BLS12-381 时代断言 48 字节，
-    /// Stark 压缩点 33 字节 → 浏览器洗牌全挂（2026-09-06 重建 pkg 首次
+    /// Stark 压缩点 32 字节 → 浏览器洗牌全挂（2026-09-06 重建 pkg 首次
     /// 把遗留代码编进产物后爆发）。roundtrip 必须闭环。
     #[test]
     fn ecpoint_hex_roundtrip() {
-        use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar};
+        use poker_protocol::crypto::curve::{Curve, CurveScalar};
         let sk = Scalar::from_u64(12345);
         let p = <DefaultCurve as Curve>::base_g() * sk;
         let hex = ecpoint_to_hex(&p);
@@ -810,6 +872,48 @@ mod curve_hex_tests {
             ),
             "sign→verify roundtrip through hex must hold (domain: table_id, hand_id, seq, action, amount)"
         );
+    }
+
+/// 跨 crate 已知答案向量（P2-2）：与 poker_l1 stark_scheme 测试同一
+    /// sk/msg/期望签名——签名核心已收敛到 poker-protocol-core::tx_schnorr
+    /// （2026-09-10），本向量从"防对方漂移"升级为"同一实现的自证"：
+    /// wasm 侧接线（hex 边界/类型转发）漂移时在此失败。
+    /// sk = hash_to_scalar(b"zgame.tx-vector.kat.v1")。
+    #[test]
+    fn tx_session_known_answer_vector_matches_poker_l1() {
+        let sk_hex = "02d6ef6369a765d8c8d80b9df96637ac2bec0b85e8cb1da3e59aff65c1b9c72c";
+        let session = WasmTxSession::from_sk(sk_hex).expect("KAT sk");
+        assert_eq!(
+            session.get_pk_hex(),
+            "82496bd9c700a1c1252d27b5b8063bdeab149411436157dc3dfe1dd29c79faa3",
+            "KAT pk mismatch — derivation drifted from poker_l1"
+        );
+        let sig = session.sign(&hex::encode([0x42u8; 32])).expect("KAT sign");
+        assert_eq!(
+            sig,
+            "80e93d41175f69487f916da094a1cacb0d2b1dfc0c4c5caa386c7263ca78a09e007bfd2b92bf6112390243cc66f4b77fdfd71c03021a1d33c9ccae0543200c42",
+            "KAT mismatch — wasm signature space drifted from poker_l1"
+        );
+    }
+
+    /// P1-2 会话委托：密钥恢复一致 + 签名确定性（与 poker_l1 stark_scheme
+    /// 同公式——同 sk 同消息必得同签名，重放/对拍基准）。
+    #[test]
+    fn tx_session_restore_and_deterministic_sign() {
+        let session = WasmTxSession::generate();
+        let sk_hex = session.get_sk_hex();
+        let pk_hex = session.get_pk_hex();
+        let restored = WasmTxSession::from_sk(&sk_hex).expect("restore");
+        assert_eq!(restored.get_pk_hex(), pk_hex, "restore derives same pk");
+
+        let msg = [0x42u8; 32];
+        let sig1 = session.sign(&hex::encode(msg)).expect("sign");
+        let sig2 = restored.sign(&hex::encode(msg)).expect("sign");
+        assert_eq!(sig1, sig2, "deterministic nonce: same sk+msg => same sig");
+        assert_eq!(sig1.len(), 128, "64-byte signature hex");
+        // 不同消息不同签名
+        let other = session.sign(&hex::encode([0x43u8; 32])).expect("sign");
+        assert_ne!(sig1, other);
     }
 }
 

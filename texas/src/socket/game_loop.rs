@@ -180,8 +180,9 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
         return false;
     }
 
-    // #20 Phase 2：无常驻 mirror（VM 派奖推进在结算构建内完成）。
-    // tick 只负责：游戏手已结束（hand_over）而链上结算未成功时，有界重试上链。
+    // #20 Phase 2：VM 派奖推进在实时镜像（shadow.rs）收尾时完成，tick 不
+    // 持有第二份 VM 状态。tick 只负责：游戏手已结束（hand_over）而链上结算
+    // 未成功时，有界重试上链。
     // 严禁在此恢复 fill/autoplay/replay 等事后追赶补丁（见计划文档禁止事项）。
     {
         let hand_over = {
@@ -661,6 +662,19 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
 
             // Auto-start logic (do_start_hand: start_shuffle)
             if active_count >= MIN_START_NUM as usize {
+                // 关桌闸（终态）："关桌后不开新手"的服务端权威执行点——
+                // 已关闭的桌跳过倒计时与开局，循环保持存活（已进行中的手
+                // 会正常打完并结算， Waiting 分支自然停在这里）。
+                let closed = { state.state.read().await.tables.get(&table_id).is_some_and(|t| t.is_closed()) };
+                if closed {
+                    if ready_at != 0 {
+                        let mut gs = state.state.write().await;
+                        if let Some(table) = gs.tables.get_mut(&table_id) {
+                            table.set_ready_at(0);
+                        }
+                    }
+                    return true;
+                }
                 let io_c = io.clone();
                 let state_c = state.clone();
                 if ready_at != 0 {
@@ -961,7 +975,12 @@ pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>,
                 table.advance_to_next_phase();
                 // advance_to_next_phase 启动 reveal phase，turn 由 on_reveal_complete 设置。
                 // 仅在 Showdown（无 reveal）时不需要设置 turn。
+            } else if table.live_mirror.is_some() {
+                // 权威模式（Phase 2b）：turn 轮转由 VM 视图同步负责
+                // （apply_betting_view），此处不再手动轮转。
+                table.set_betting_started_at(now_ms());
             } else {
+                // 本地兜底模式（不可证明手）：turn 轮转由本地驱动。
                 let last_turn = table.turn().unwrap_or(1);
                 table.set_turn(table.next_unfolded_player(last_turn, 1));
                 table.set_betting_started_at(now_ms());

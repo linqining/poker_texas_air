@@ -279,7 +279,15 @@ impl From<AbiError> for RistrettoAirSubmissionError {
 
 impl std::fmt::Display for RistrettoAirSubmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::InvalidPointEncoding => {
+                write!(f, "compressed point does not have the 32-byte ABI width")
+            }
+            Self::IdentityPublicKey => {
+                write!(f, "aggregate public key cannot be the identity")
+            }
+            Self::Abi(e) => write!(f, "proof ABI rejected request: {e}"),
+        }
     }
 }
 

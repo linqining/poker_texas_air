@@ -1,10 +1,10 @@
 //! Betting-round and reveal-phase advancement AIR component.
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use poker_l1::vm::contracts::texas_poker::constants::{
+use poker_l1::contracts::texas_poker::constants::{
     ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER, ROUND_SHOWDOWN, ROUND_TURN,
 };
-use poker_l1::vm::contracts::texas_poker::types::NO_SEAT;
+use poker_l1::contracts::texas_poker::types::NO_SEAT;
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
 

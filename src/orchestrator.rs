@@ -658,6 +658,7 @@ impl Orchestrator {
             max_players,
             small_blind,
             big_blind,
+            rit_mode,
         } = &method_input
         else {
             return Err(TexasAirError::SpecViolation(format!(
@@ -671,6 +672,7 @@ impl Orchestrator {
             max_players: *max_players,
             small_blind: *small_blind,
             big_blind: *big_blind,
+            rit_mode: *rit_mode,
         };
         let pre_version = u64::from(task.pre_table.call_seq);
         let post_version = u64::from(task.post_table.call_seq);
@@ -794,9 +796,9 @@ impl Orchestrator {
 
     /// 读取 `table.seats[seat_index]`，越界返回错误。
     fn seat(
-        table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
         seat_index: u8,
-    ) -> TexasAirResult<poker_l1::vm::contracts::texas_poker::types::Seat> {
+    ) -> TexasAirResult<poker_l1::contracts::texas_poker::types::Seat> {
         table
             .seats
             .get(usize::from(seat_index))
@@ -1617,7 +1619,7 @@ impl Orchestrator {
         }
         let version_increment = 1;
         let reset_cascade = if task.post_table.round_state()
-            == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+            == poker_l1::contracts::texas_poker::constants::ROUND_WAITING
             && task.post_table.pot == 0
         {
             let composition =
@@ -1628,7 +1630,7 @@ impl Orchestrator {
                     crate::airs::composition::SettlementKind::WithoutShowdown => true,
                     crate::airs::composition::SettlementKind::ResetOnly => {
                         task.pre_table.round_state()
-                            == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+                            == poker_l1::contracts::texas_poker::constants::ROUND_WAITING
                             && task.pre_table.pot == 0
                             && pre_seat.bet() == 0
                     }
@@ -1852,7 +1854,7 @@ impl Orchestrator {
             ));
         };
         let replay_args = task.replay_args()?;
-        let args: poker_l1::vm::contracts::texas_poker::dispatch::FoldWithProofArgs =
+        let args: poker_l1::contracts::texas_poker::dispatch::FoldWithProofArgs =
             borsh::from_slice(&replay_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "fold_with_proof raw args borsh: {error}"
@@ -1973,7 +1975,7 @@ impl Orchestrator {
             ));
         };
         let replay_args = task.replay_args()?;
-        let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
+        let args: poker_l1::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
             borsh::from_slice(&replay_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "submit_shuffle_v2 raw args borsh: {error}"
@@ -2006,9 +2008,9 @@ impl Orchestrator {
             pi.dispatch_call_digest,
         );
         let request = build_bls12381_shuffle_request(
-            b"zk_shuffle_proof_v2",
+            poker_protocol::transcript_domains::SHUFFLE_V2_POSEIDON,
             &call_context,
-            TranscriptId::FiatShamirSha3,
+            TranscriptId::Poseidon252,
             &aggregated_pk.0,
             &task.pre_table.deck_state.encrypted,
             &args.output_cards,
@@ -2083,7 +2085,7 @@ impl Orchestrator {
             ));
         };
         let replay_args = task.replay_args()?;
-        let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
+        let args: poker_l1::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
             borsh::from_slice(&replay_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "submit_player_reveal_tokens raw args borsh: {error}"
@@ -2178,7 +2180,7 @@ impl Orchestrator {
             ));
         };
         let replay_args = task.replay_args()?;
-        let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
+        let args: poker_l1::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
             borsh::from_slice(&replay_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "submit_reconstruct_deck raw args borsh: {error}"
@@ -2202,9 +2204,9 @@ impl Orchestrator {
             pi.dispatch_call_digest,
         );
         let request = build_bls12381_reconstruction_v3_request(
-            poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_V3_PROOF_LABEL,
+            poker_protocol::transcript_domains::RECONSTRUCT_V3_POSEIDON,
             &call_context,
-            TranscriptId::FiatShamirSha3,
+            TranscriptId::Poseidon252,
             &args.statement,
             &args.proof,
         )
@@ -2269,7 +2271,7 @@ impl Orchestrator {
 /// Authentication of the task source remains an external consensus responsibility.
 pub(crate) fn validate_full_dispatch_task(task: &ProveTask) -> TexasAirResult<()> {
     let mut replayed_post = task.pre_table.clone();
-    let replay_args = poker_l1::vm::contracts::texas_poker::dispatch::replay_dispatch_args(
+    let replay_args = poker_l1::contracts::texas_poker::dispatch::replay_dispatch_args(
         task.method_kind as u8,
         &task.raw_args,
         &task.context,
@@ -2281,7 +2283,7 @@ pub(crate) fn validate_full_dispatch_task(task: &ProveTask) -> TexasAirResult<()
             task.method_kind.method_name()
         ))
     })?;
-    let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
+    let result = poker_l1::contracts::texas_poker::dispatch::dispatch(
         &task.context,
         &mut replayed_post,
         &task.selector(),
@@ -2353,7 +2355,7 @@ pub(crate) fn replay_reveal_settlement_binding(
     task: &ProveTask,
 ) -> TexasAirResult<crate::settlement_binding::SettlementPlanBinding> {
     let mut replayed_post = task.pre_table.clone();
-    let replay_args = poker_l1::vm::contracts::texas_poker::dispatch::replay_dispatch_args(
+    let replay_args = poker_l1::contracts::texas_poker::dispatch::replay_dispatch_args(
         task.method_kind as u8,
         &task.raw_args,
         &task.context,
@@ -2364,7 +2366,7 @@ pub(crate) fn replay_reveal_settlement_binding(
             "submit_player_reveal_tokens canonical replay payload failed: {error}"
         ))
     })?;
-    let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
+    let result = poker_l1::contracts::texas_poker::dispatch::dispatch(
         &task.context,
         &mut replayed_post,
         &task.selector(),
@@ -2432,21 +2434,21 @@ fn validate_native_betting_action(
     let mut events = Vec::new();
     let vm_result = match action {
         NativeMidRoundAction::Fold { seat_index } => {
-            poker_l1::vm::contracts::texas_poker::state_machine::apply_fold(
+            poker_l1::contracts::texas_poker::state_machine::apply_fold(
                 &mut expected,
                 seat_index,
                 &mut events,
             )
         }
         NativeMidRoundAction::Check { seat_index } => {
-            poker_l1::vm::contracts::texas_poker::state_machine::apply_check(
+            poker_l1::contracts::texas_poker::state_machine::apply_check(
                 &mut expected,
                 seat_index,
                 &mut events,
             )
         }
         NativeMidRoundAction::Call { seat_index } => {
-            poker_l1::vm::contracts::texas_poker::state_machine::apply_call(
+            poker_l1::contracts::texas_poker::state_machine::apply_call(
                 &mut expected,
                 seat_index,
                 &mut events,
@@ -2455,14 +2457,14 @@ fn validate_native_betting_action(
         NativeMidRoundAction::Raise {
             seat_index,
             total_bet,
-        } => poker_l1::vm::contracts::texas_poker::state_machine::apply_raise(
+        } => poker_l1::contracts::texas_poker::state_machine::apply_raise(
             &mut expected,
             seat_index,
             total_bet,
             &mut events,
         ),
         NativeMidRoundAction::Bet { seat_index, amount } => {
-            poker_l1::vm::contracts::texas_poker::state_machine::apply_bet(
+            poker_l1::contracts::texas_poker::state_machine::apply_bet(
                 &mut expected,
                 seat_index,
                 amount,
@@ -2470,10 +2472,10 @@ fn validate_native_betting_action(
             )
         }
         NativeMidRoundAction::ForceFold { seat_index } => {
-            poker_l1::vm::contracts::texas_poker::state_machine::apply_fold_internal(
+            poker_l1::contracts::texas_poker::state_machine::apply_fold_internal(
                 &mut expected,
                 seat_index,
-                poker_l1::vm::contracts::texas_poker::constants::FOLD_REASON_FORCE_ADMIN,
+                poker_l1::contracts::texas_poker::constants::FOLD_REASON_FORCE_ADMIN,
                 &mut events,
             )
         }
@@ -2486,7 +2488,7 @@ fn validate_native_betting_action(
     // In schema v15 this is also where a rotated betting actor receives its
     // non-zero consensus deadline, so replaying only the immediate action no
     // longer reconstructs the committed post table.
-    poker_l1::vm::contracts::texas_poker::state_machine::normalize_until_blocked(
+    poker_l1::contracts::texas_poker::state_machine::normalize_until_blocked(
         &mut expected,
         task.context.block_timestamp,
         &mut events,
@@ -2714,7 +2716,7 @@ fn input_mismatch(method: &str, expected: &str, actual: &MethodInput) -> TexasAi
 
 /// 在 post_table 中找到 player 占用的座位（join_table 用）。
 fn find_join_seat(
-    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
     player: &poker_l1::Address,
 ) -> TexasAirResult<u8> {
     table
@@ -2729,7 +2731,7 @@ fn find_join_seat(
 
 /// 统计活跃占用座数（与合约 `count_active_occupied` 语义一致）。
 fn count_active_occupied(
-    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
 ) -> u8 {
     table.seats.iter().filter(|s| s.is_occupied()).count() as u8
 }
@@ -2740,15 +2742,17 @@ mod tests {
     use crate::test_support as seat_fixture;
     use poker_l1::object_model::ObjectID;
     use poker_l1::signature::TaggedPubkey;
-    use poker_l1::vm::contracts::dispatch::DispatchContext;
-    use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
-    use poker_l1::vm::contracts::texas_poker::constants::{ROUND_FLOP, ROUND_PREFLOP};
-    use poker_l1::vm::contracts::texas_poker::dispatch::{
+    use poker_l1::contracts::dispatch::DispatchContext;
+    use poker_l1::contracts::texas_poker::betting::BettingRound;
+    use poker_l1::contracts::texas_poker::constants::{
+        ROUND_FLOP, ROUND_PREFLOP, RIT_MODE_DISABLED,
+    };
+    use poker_l1::contracts::texas_poker::dispatch::{
         self as texas_dispatch, AddonArgs, BetArgs, CreateTableArgs, RaiseArgs, RebuyArgs,
         SeatIndexArgs, SetLeaveAfterHandArgs,
     };
-    use poker_l1::vm::contracts::texas_poker::state_machine;
-    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, SeatStatus, TexasPokerTable};
+    use poker_l1::contracts::texas_poker::state_machine;
+    use poker_l1::contracts::texas_poker::types::{EMPTY_PLAYER, SeatStatus, TexasPokerTable};
 
     fn make_table(name: &str) -> TexasPokerTable {
         TexasPokerTable::new(
@@ -2819,7 +2823,7 @@ mod tests {
         // authenticated test consensus timestamp before crossing the codec boundary.
         if matches!(
             pre_table.hand_phase,
-            poker_l1::vm::contracts::texas_poker::types::HandPhase::Betting { deadline_ms: 0, .. }
+            poker_l1::contracts::texas_poker::types::HandPhase::Betting { deadline_ms: 0, .. }
         ) {
             pre_table
                 .arm_betting_deadline(context.block_timestamp)
@@ -2892,6 +2896,7 @@ mod tests {
             max_players: 6,
             small_blind: 50,
             big_blind: 100,
+            rit_mode: RIT_MODE_DISABLED,
         };
         let (task, _) = dispatch_task(
             pre,
@@ -2928,6 +2933,7 @@ mod tests {
                 max_players: 6,
                 small_blind: 50,
                 big_blind: 100,
+                rit_mode: RIT_MODE_DISABLED,
             })
             .unwrap(),
         );
@@ -2944,6 +2950,7 @@ mod tests {
                 max_players: 6,
                 small_blind: 50,
                 big_blind: 100,
+                rit_mode: RIT_MODE_DISABLED,
             })
             .unwrap(),
         );
@@ -2982,6 +2989,7 @@ mod tests {
             max_players: 6,
             small_blind: 50,
             big_blind: 100,
+            rit_mode: RIT_MODE_DISABLED,
         })
         .expect("create_table args should serialize");
         let (task, post) = dispatch_task(
@@ -3070,7 +3078,7 @@ mod tests {
     fn assert_terminal_admin_fold_archive(task: &ProveTask, post: &TexasPokerTable) {
         assert_eq!(
             post.round_state(),
-            poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+            poker_l1::contracts::texas_poker::constants::ROUND_WAITING
         );
         assert!(post.current_turn_option().is_none());
         assert!(post.betting_round().is_none());
@@ -3134,7 +3142,7 @@ mod tests {
         assert_eq!(task.method_kind, MethodKind::AdvanceDeadline);
         assert_eq!(
             post.round_state(),
-            poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+            poker_l1::contracts::texas_poker::constants::ROUND_WAITING
         );
         assert_eq!(post.pot, 0);
         assert_eq!(post.seats[1].stack(), 1_450);
@@ -3809,7 +3817,7 @@ mod tests {
         assert_eq!(post.call_seq, pre.call_seq.saturating_add(1));
         assert_eq!(
             post.round_state(),
-            poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+            poker_l1::contracts::texas_poker::constants::ROUND_WAITING
         );
         assert_eq!(post.pot, 0);
         assert_eq!(post.seats[1].stack(), 1_100);
@@ -3871,7 +3879,7 @@ mod tests {
         let mut pre = make_table("pre");
         enter_betting_fixture(
             &mut pre,
-            poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP,
+            poker_l1::contracts::texas_poker::constants::ROUND_PREFLOP,
             BettingRound::new(100, 100),
             0,
             0,
@@ -4165,15 +4173,15 @@ mod tests {
         // 包含 roots/seq，也不会产生 VerificationReceipt。
         orch.proven.push(ProvenTask {
             method_kind: MethodKind::CreateTable,
-            pre_state_root: StateRoot::from_field(FieldElement::from(1u64)),
-            post_state_root: StateRoot::from_field(FieldElement::from(2u64)),
+            pre_state_root: StateRoot::from_field(Felt::from(1u64)),
+            post_state_root: StateRoot::from_field(Felt::from(2u64)),
             call_seq: 0,
         });
         orch.proven.push(ProvenTask {
             method_kind: MethodKind::Fold,
             // pre != 上一个的 post(2)
-            pre_state_root: StateRoot::from_field(FieldElement::from(3u64)),
-            post_state_root: StateRoot::from_field(FieldElement::from(4u64)),
+            pre_state_root: StateRoot::from_field(Felt::from(3u64)),
+            post_state_root: StateRoot::from_field(Felt::from(4u64)),
             call_seq: 1,
         });
         assert!(
@@ -4183,6 +4191,6 @@ mod tests {
     }
 }
 
-// 避免未使用 import 警告（FieldElement 在下方测试模块用）。
+// 避免未使用 import 警告（Felt 在下方测试模块用）。
 #[cfg(test)]
-use starknet_ff::FieldElement;
+use starknet_crypto::Felt;

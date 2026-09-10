@@ -10,6 +10,14 @@
 /// - `withdraw()` is permissionless but only up to the caller's chip balance.
 /// - Pausing halts new deposits and withdrawals (settlement application is
 ///   also gated in this deployment for simplicity).
+/// - Session tx-pk storage visibility (P1-2, 2026-09-10): `session_tx_pk` /
+///   expiry are PUBLIC storage — the privacy buy-in path (anonymizer +
+///   `set_session_tx_pk_for`) hides the PAYER, not the chip-holder's state
+///   deltas (`chip_balances` / `session_last_activity` are already public).
+///   The exposed binding is "chip-holder address ↔ session key ↔ validity
+///   window", i.e. a playing window on an already-public address; it never
+///   links to the funding wallet. Do not treat it as a privacy defect —
+///   changing it would require a shielded registry.
 use openzeppelin::access::ownable::OwnableComponent;
 use openzeppelin::security::pausable::PausableComponent;
 use openzeppelin::token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTrait};
@@ -83,6 +91,40 @@ pub trait IPokerVault<TContractState> {
     fn lock_ttl(self: @TContractState) -> u64;
     /// View: 是否存在活跃在局 session。
     fn session_active(self: @TContractState, player: ContractAddress) -> bool;
+
+    /// 会话委托公钥登记（P1-2 修复的链上锚点，2026-09-10）：玩家把当前
+    /// **会话交易公钥**（Stark Schnorr 32B 压缩点，felt）登记到 vault。
+    /// 游戏服务器在 join 接受点经 [`IPokerVault::session_tx_pk`] 核验
+    /// "座位声称的会话钥 == 链上登记钥"，VM 层交易签名按座位登记钥
+    /// 验证——替代可公开推导的确定性身份（sk = H(wallet) 的冒名面）。
+    ///
+    /// 生命周期：买入/rebuy 时与 deposit/lock **同一笔 multicall** 调用
+    /// （单钱包交互）；重连只需服务端 view，零钱包交互；latest-wins——
+    /// 新登记自动顶掉旧钥（换设备/钥泄露后自救）。不设 owner 门与
+    /// pause 门：密钥轮换是安全通道，应急暂停时也应可用。
+    ///
+    /// 校验：`pk != 0`；`expires_at > block.timestamp`（撤销用
+    /// [`IPokerVault::clear_session_tx_pk`]，而不是登记一个已过期值）。
+    fn set_session_tx_pk(ref self: TContractState, pk: felt252, expires_at: u64);
+    /// 私密买入路径的代理登记（STRK20 隐私兼容）：仅 `authorized_helper`
+    /// （PokerVaultAnonymizer，与 `burn_chips`/`withdraw_to` 同一信任门）
+    /// 可代 `player` 登记——anonymizer 在**同一笔 private tx** 里
+    /// `[deposit_for + set_session_tx_pk_for]`，避免玩家钱包公开发起
+    /// 登记而建立 `main_wallet ↔ player` 链接（破坏 STRK20 付款人隐藏）。
+    fn set_session_tx_pk_for(
+        ref self: TContractState,
+        player: ContractAddress,
+        pk: felt252,
+        expires_at: u64,
+    );
+    /// 撤销会话委托（仅登记人本人；踢出/登出的链上侧自主撤销通道）。
+    fn clear_session_tx_pk(ref self: TContractState);
+    /// View: 登记的 `(pk, expires_at)`（pk = 0 表示未登记）。
+    fn session_tx_pk(self: @TContractState, player: ContractAddress) -> (felt252, u64);
+    /// View: 当前**有效**的会话公钥——未登记或已过期返回 0
+    /// （`block.timestamp >= expires_at` 视为过期）。
+    fn active_session_tx_pk(self: @TContractState, player: ContractAddress) -> felt252;
+
     /// Read chip balance of a player.
     fn chip_balance(self: @TContractState, player: ContractAddress) -> u256;
     /// Token (STRK20) address.
@@ -165,6 +207,10 @@ pub mod PokerVault {
         /// #33 在局 session 活跃标志（与 last=0 哨兵解耦——测试/新链的
         /// block timestamp 可能为 0）。
         session_active: Map<ContractAddress, bool>,
+        /// P1-2 会话委托公钥：player → Stark Schnorr 32B 压缩点（0 = 未登记）。
+        session_tx_pk: Map<ContractAddress, felt252>,
+        /// P1-2 会话委托过期时刻（秒；`block.timestamp >= expires_at` 失效）。
+        session_tx_pk_expires_at: Map<ContractAddress, u64>,
         /// #33 自助解锁 TTL（秒；0 = 禁用自助解锁）。constructor 默认 12h。
         lock_ttl: u64,
         /// Per-player payout claim commitments (0 = unregistered).
@@ -192,8 +238,22 @@ pub mod PokerVault {
         Locked: Locked,
         SessionRefreshed: SessionRefreshed,
         Unlocked: Unlocked,
+        SessionTxPkRegistered: SessionTxPkRegistered,
+        SessionTxCleared: SessionTxCleared,
         PayoutCommitmentRegistered: PayoutCommitmentRegistered,
         EscrowFunded: EscrowFunded,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct SessionTxPkRegistered {
+        player: ContractAddress,
+        pk: felt252,
+        expires_at: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct SessionTxCleared {
+        player: ContractAddress,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -277,6 +337,22 @@ pub mod PokerVault {
         self.authorized_helper.write(starknet::get_contract_address());
         // #33：自助解锁 TTL 默认 12h（owner 可经 set_lock_ttl 调整）
         self.lock_ttl.write(43200);
+    }
+
+    /// P1-2 会话委托登记写入的共享内部（参数校验 + 存储 + 事件）。
+    fn write_session_tx_pk(
+        ref self: ContractState,
+        player: ContractAddress,
+        pk: felt252,
+        expires_at: u64,
+    ) {
+        assert!(!player.is_zero(), "Session tx pk player must be non-zero");
+        assert!(!pk.is_zero(), "Session tx pk must be non-zero");
+        let now = starknet::get_block_timestamp();
+        assert!(expires_at > now, "Session tx pk expiry must be in the future");
+        self.session_tx_pk.write(player, pk);
+        self.session_tx_pk_expires_at.write(player, expires_at);
+        self.emit(SessionTxPkRegistered { player, pk, expires_at });
     }
 
     /// #33：可花费余额 = 余额 − 锁定。所有玩家侧取款路径共用。
@@ -450,6 +526,50 @@ pub mod PokerVault {
         /// View: 是否存在活跃在局 session。
         fn session_active(self: @ContractState, player: ContractAddress) -> bool {
             self.session_active.read(player)
+        }
+
+        fn set_session_tx_pk(ref self: ContractState, pk: felt252, expires_at: u64) {
+            write_session_tx_pk(ref self, starknet::get_caller_address(), pk, expires_at);
+        }
+
+        fn set_session_tx_pk_for(
+            ref self: ContractState,
+            player: ContractAddress,
+            pk: felt252,
+            expires_at: u64,
+        ) {
+            assert!(
+                starknet::get_caller_address() == self.authorized_helper.read(),
+                "Only the authorized helper"
+            );
+            write_session_tx_pk(ref self, player, pk, expires_at);
+        }
+
+        fn clear_session_tx_pk(ref self: ContractState) {
+            let player = starknet::get_caller_address();
+            assert!(
+                !self.session_tx_pk.read(player).is_zero(),
+                "No session tx pk registered"
+            );
+            self.session_tx_pk.write(player, Zero::zero());
+            self.session_tx_pk_expires_at.write(player, 0_u64);
+            self.emit(SessionTxCleared { player });
+        }
+
+        fn session_tx_pk(self: @ContractState, player: ContractAddress) -> (felt252, u64) {
+            (self.session_tx_pk.read(player), self.session_tx_pk_expires_at.read(player))
+        }
+
+        fn active_session_tx_pk(self: @ContractState, player: ContractAddress) -> felt252 {
+            let pk = self.session_tx_pk.read(player);
+            if pk.is_zero() {
+                return Zero::zero();
+            }
+            let expires_at = self.session_tx_pk_expires_at.read(player);
+            if starknet::get_block_timestamp() >= expires_at {
+                return Zero::zero();
+            }
+            pk
         }
 
         fn lock_ttl(self: @ContractState) -> u64 {
@@ -801,6 +921,76 @@ mod in_hand_lock_tests {
     fn set_lock_ttl_takes_effect() {
         let (_, _, _, vault_d) = setup(800);
         vault_d.set_lock_ttl(600);
-        assert!(vault_d.lock_ttl() == 600_u64);
+        assert!(vault_d.lock_ttl() == 600_u64, "ttl");
+    }
+
+    // ===== P1-2 会话委托登记（set_session_tx_pk / _for / views / clear）=====
+
+    /// 测试块内 block timestamp 固定：登记窗口用"当前 + 大值"保证未过期。
+    fn far_future_expiry() -> u64 {
+        starknet::get_block_timestamp() + 86_400 * 30
+    }
+
+    #[test]
+    fn session_tx_pk_register_view_clear_roundtrip() {
+        let (_, _, player, vault_d) = setup(0);
+        let expiry = far_future_expiry();
+        vault_d.set_session_tx_pk(0xC0DE, expiry);
+        let (pk, exp) = vault_d.session_tx_pk(player);
+        assert!(pk == 0xC0DE_felt252, "raw view pk");
+        assert!(exp == expiry, "raw view expiry");
+        assert!(vault_d.active_session_tx_pk(player) == 0xC0DE_felt252, "active view");
+        vault_d.clear_session_tx_pk();
+        assert!(vault_d.active_session_tx_pk(player) == 0_felt252, "cleared");
+    }
+
+    #[test]
+    fn session_tx_pk_latest_wins_on_reregistration() {
+        let (_, _, player, vault_d) = setup(0);
+        vault_d.set_session_tx_pk(0x1111, far_future_expiry());
+        vault_d.set_session_tx_pk(0x2222, far_future_expiry());
+        assert!(vault_d.active_session_tx_pk(player) == 0x2222_felt252, "latest wins");
+    }
+
+    #[test]
+    #[should_panic(expected: "Session tx pk must be non-zero")]
+    fn session_tx_pk_rejects_zero_pk() {
+        let (_, _, _, vault_d) = setup(0);
+        vault_d.set_session_tx_pk(0, far_future_expiry());
+    }
+
+    #[test]
+    #[should_panic(expected: "Session tx pk expiry must be in the future")]
+    fn session_tx_pk_rejects_past_expiry() {
+        let (_, _, _, vault_d) = setup(0);
+        // expires_at == now 不满足 "> now"，被拒。
+        vault_d.set_session_tx_pk(0xC0DE, starknet::get_block_timestamp());
+    }
+
+    #[test]
+    #[should_panic(expected: "No session tx pk registered")]
+    fn session_tx_pk_clear_empty_reverted() {
+        let (_, _, _, vault_d) = setup(0);
+        vault_d.clear_session_tx_pk();
+    }
+
+    #[test]
+    fn session_tx_pk_for_via_authorized_helper_privacy_path() {
+        let (_, _, _, mut vault_d) = setup(0);
+        let player: ContractAddress = 0x1234.try_into().unwrap();
+        // 测试合约自任 authorized helper（owner 门）——模拟 anonymizer 在
+        // 私密买入 private tx 里 [deposit_for + set_session_tx_pk_for]。
+        vault_d.set_authorized_helper(get_contract_address());
+        let expiry = far_future_expiry();
+        vault_d.set_session_tx_pk_for(player, 0xBEEF, expiry);
+        assert!(vault_d.active_session_tx_pk(player) == 0xBEEF_felt252, "helper path");
+    }
+
+    #[test]
+    #[should_panic(expected: "Only the authorized helper")]
+    fn session_tx_pk_for_rejects_unauthorized_caller() {
+        let (_, _, player, vault_d) = setup(0);
+        // 未设置 authorized helper（零地址）→ 任何调用者被拒。
+        vault_d.set_session_tx_pk_for(player, 0xBEEF, far_future_expiry());
     }
 }

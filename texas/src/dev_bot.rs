@@ -117,16 +117,12 @@ pub async fn start_bot(
     eprintln!("[bot] deposit verified OK");
     let player = ClientPlayer::new();
 
-    let _my_addr = match crate::starknet::mirror::TableMirror::addr_from_starknet(&wallet) {
-        Some(a) => a,
-        None => return Err("bad wallet for mirror".into()),
-    };
-    let _my_seat_u8 = 0u8; // placeholder：真实座位由 mirror 座位表查得
-    // Starknet 镜像：预缓冲 join（真实 pk 所有权证明），下一手 start_preflop_shuffle 应用
+    // 预缓冲 join（真实 pk 所有权证明），下一手 record_hand_start 消费；
+    // bot 进程内路径未声明会话钥（未走 vault 登记）——None = 未登记。
     let pk_proof_obj = player.generate_pk_proof();
     let proof_bytes = crate::relayer::proof_bytes::serialize_pk_ownership_proof(&pk_proof_obj);
     let pk_hex = poker_protocol::z_poker::convert::ecpoint_to_hex(&player.pk);
-    crate::starknet::hooks::mirror_buffer_join_raw(1, &wallet, &pk_hex, proof_bytes);
+    crate::starknet::prove_log::record_join(1, &wallet, &pk_hex, proof_bytes, None);
 
     // 真实链上买入交易已发生（verify_deposit 通过）；
     // SIT_DOWN_V2 路径的入座（与 WS handler 相同的 state 方法）。

@@ -273,12 +273,17 @@ impl Table {
         if eligible_ids.len() == 1 {
             let winner_id = eligible_ids[0];
             let win_amount = amount;
+            let wallet = self.local_seats.get(&winner_id)
+                .and_then(|s| s.player.as_ref().map(|p| p.wallet_address.0.clone()));
             if let Some(seat) = self.local_seats.get_mut(&winner_id) {
                 let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                 seat.win_hand(win_amount);
                 if win_amount > 0 {
                     self.summary.win_messages.push(format!("{} wins ${:.2}", player_name, win_amount));
                 }
+            }
+            if let Some(w) = wallet {
+                crate::starknet::prove_log::record_payout(self, &w, win_amount);
             }
             self.update_history();
             return;
@@ -293,8 +298,11 @@ impl Table {
             // instead of silently dropping the pot.
             let win_amount = amount / eligible_ids.len() as u64;
             let remainder = amount % eligible_ids.len() as u64;
+            let mut payouts: Vec<(String, u64)> = Vec::new();
             for (idx, winner_id) in eligible_ids.iter().enumerate() {
                 let extra = if idx < remainder as usize { 1 } else { 0 };
+                let wallet = self.local_seats.get(winner_id)
+                    .and_then(|s| s.player.as_ref().map(|p| p.wallet_address.0.clone()));
                 if let Some(seat) = self.local_seats.get_mut(winner_id) {
                     let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                     seat.win_hand(win_amount + extra);
@@ -302,6 +310,12 @@ impl Table {
                         self.summary.win_messages.push(format!("{} wins ${:.2}", player_name, win_amount + extra));
                     }
                 }
+                if let Some(w) = wallet {
+                    payouts.push((w, win_amount + extra));
+                }
+            }
+            for (w, amt) in payouts {
+                crate::starknet::prove_log::record_payout(self, &w, amt);
             }
             self.update_history();
             return;
@@ -314,8 +328,11 @@ impl Table {
             .collect();
         let win_amount = amount / winners.len() as u64;
         let remainder = amount % winners.len() as u64;
+        let mut payouts: Vec<(String, u64)> = Vec::new();
         for (idx, winner_id) in winners.iter().enumerate() {
             let extra = if idx < remainder as usize { 1 } else { 0 };
+            let wallet = self.local_seats.get(winner_id)
+                .and_then(|s| s.player.as_ref().map(|p| p.wallet_address.0.clone()));
             if let Some(seat) = self.local_seats.get_mut(winner_id) {
                 let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                 seat.win_hand(win_amount + extra);
@@ -323,7 +340,110 @@ impl Table {
                     self.summary.win_messages.push(format!("{} wins ${:.2} with {}", player_name, win_amount + extra, best_rank.name()));
                 }
             }
+            if let Some(w) = wallet {
+                payouts.push((w, win_amount + extra));
+            }
+        }
+        for (w, amt) in payouts {
+            crate::starknet::prove_log::record_payout(self, &w, amt);
         }
         self.update_history();
+    }
+}
+
+#[cfg(test)]
+mod side_pot_tests {
+    use super::*;
+
+    /// 直接构造纯记账状态（total_bet/stack/folded）——calculate_side_pots
+    /// 只读这三项，无需真实玩家/牌局。
+    fn seat_with(id: u32, total_bet: u64, stack_after: u64, folded: bool) -> crate::pokergame::seat::Seat {
+        let mut s = crate::pokergame::seat::Seat::new(id, None, total_bet + stack_after, 0);
+        s.total_bet = total_bet;
+        s.stack = stack_after;
+        s.folded = folded;
+        s
+    }
+
+    fn table_with(seats: Vec<crate::pokergame::seat::Seat>) -> Table {
+        let mut t = Table::new(1, "side-pots".to_string(), 10_000, 9, String::new());
+        for s in seats {
+            t.local_seats.insert(s.id, s);
+        }
+        // pot 置为全部投入之和（calculate_side_pots 不改 pot；main_pot = pot − Σside）。
+        let total: u64 = t.local_seats.values().map(|s| s.total_bet).sum();
+        t.set_pot(total);
+        t
+    }
+
+    /// 三人双层 all-in：A(100) < B(300) < C(500，且有剩余筹码)。
+    /// 边池 = [B/C 争夺 400, C 独占 200]；主池 300 三人争夺。
+    #[test]
+    fn two_level_all_in_side_pots() {
+        let mut t = table_with(vec![
+            seat_with(1, 100, 0, false),  // A all-in 100
+            seat_with(2, 300, 0, false),  // B all-in 300
+            seat_with(3, 500, 200, false), // C 投入 500 仍有筹码
+        ]);
+        t.calculate_side_pots();
+        let sp = &t.summary.side_pots;
+        assert_eq!(sp.len(), 2, "两层边池：{sp:?}");
+        // eligible 顺序来自 HashMap 迭代，按集合比较。
+        let mut l0 = sp[0].players.clone();
+        l0.sort_unstable();
+        assert_eq!((sp[0].amount, l0), (400, vec![2, 3]));
+        assert_eq!((sp[1].amount, sp[1].players.clone()), (200, vec![3]));
+        // 主池 = 900 − 600 = 300（A/B/C 争夺）。
+        assert_eq!(t.main_pot(), 300);
+        assert_eq!(t.pot(), 900);
+    }
+
+    /// 无 all-in（所有人都有剩余筹码）→ 无边池，全部主池。
+    #[test]
+    fn no_all_in_no_side_pots() {
+        let mut t = table_with(vec![
+            seat_with(1, 50, 950, false),
+            seat_with(2, 120, 880, false),
+        ]);
+        t.calculate_side_pots();
+        assert!(t.summary.side_pots.is_empty());
+        assert_eq!(t.main_pot(), 170);
+    }
+
+    /// 弃牌玩家投入计入层级但不在 eligible（他不能赢该层）。
+    #[test]
+    fn folded_player_contributes_but_not_eligible() {
+        let mut t = table_with(vec![
+            seat_with(1, 50, 300, true),   // A 投 50 后弃牌（仍有筹码，非 all-in）
+            seat_with(2, 100, 0, false),  // B all-in 100
+            seat_with(3, 100, 400, false), // C 跟注 100 仍有筹码
+        ]);
+        t.calculate_side_pots();
+        // 唯一 all-in 层 = [B,C 争夺 250]；单层 → 不进 side_pots，全是主池。
+        assert!(t.summary.side_pots.is_empty(), "{:?}", t.summary.side_pots);
+        assert_eq!(t.main_pot(), 250);
+    }
+
+    /// M-A3：最高层 eligible 为空（唯一贡献者已弃牌）→ 金额上并到
+    /// 最后一个有 eligible 的层级，最终只剩单一主池。
+    #[test]
+    fn ma3_empty_eligible_top_layer_merges_down() {
+        let mut t = table_with(vec![
+            seat_with(1, 100, 0, false), // A all-in 100（活跃）
+            seat_with(2, 300, 0, true),  // B 投满 300 后已死（stack=0 且弃牌）
+        ]);
+        t.calculate_side_pots();
+        // 无第二个有 eligible 的层可挂 → 全部 400 归主池，A 独赢。
+        assert!(t.summary.side_pots.is_empty(), "{:?}", t.summary.side_pots);
+        assert_eq!(t.main_pot(), 400);
+    }
+
+    /// 空投入（没人下注）→ 直接返回，不产生任何池。
+    #[test]
+    fn no_bets_is_noop() {
+        let mut t = table_with(vec![seat_with(1, 0, 1000, false)]);
+        t.calculate_side_pots();
+        assert!(t.summary.side_pots.is_empty());
+        assert_eq!(t.pot(), 0);
     }
 }

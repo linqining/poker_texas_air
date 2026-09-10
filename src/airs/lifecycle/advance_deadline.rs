@@ -20,12 +20,12 @@ use crate::precompile_binding::{DIGEST_LIMBS, digest_to_m31_limbs};
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::{state_root_to_air_limbs, table_from_state_preimage};
 
-use poker_l1::vm::contracts::texas_poker::constants::{
+use poker_l1::contracts::texas_poker::constants::{
     ROUND_SHOWDOWN, SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_RECONSTRUCT,
 };
-use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
-use poker_l1::vm::contracts::texas_poker::state_machine;
-use poker_l1::vm::contracts::texas_poker::types::{HandPhase, NO_SEAT, TexasPokerTable};
+use poker_l1::contracts::texas_poker::events::TexasPokerEvent;
+use poker_l1::contracts::texas_poker::state_machine;
+use poker_l1::contracts::texas_poker::types::{HandPhase, NO_SEAT, TexasPokerTable};
 
 /// `timeout_kind` values used in the advance-deadline statement. The value denotes the
 /// highest-priority timer family visible in the pre-state; `5` is a non-timer
@@ -366,7 +366,7 @@ fn issue_lifecycle_binding(
     current_time: u64,
     events: &[TexasPokerEvent],
 ) -> TexasAirResult<AdvanceDeadlineLifecycleAirBinding> {
-    use poker_l1::vm::contracts::texas_poker::constants::{
+    use poker_l1::contracts::texas_poker::constants::{
         FOLD_REASON_AUTO_TIMEOUT, RESET_REASON_STATE_INCONSISTENT,
     };
 
@@ -1151,7 +1151,7 @@ mod tests {
     };
     use crate::test_support as seat_fixture;
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::{
+    use poker_l1::contracts::texas_poker::{
         betting::BettingRound,
         constants::{FOLD_REASON_AUTO_TIMEOUT, RAKE_MODE_PERCENTAGE, ROUND_PREFLOP},
         events::TexasPokerEvent,
@@ -1266,7 +1266,7 @@ mod tests {
         let mut pre = betting_table(0);
         // Model an already-collected 100-chip wager from each player.  The
         // table vault is therefore stacks (1,800) + pot (200) = 2,000.
-        pre.seats.truncate(2);
+        pre.seats[2] = poker_l1::contracts::texas_poker::types::Seat::empty();
         pre.max_players = 2;
         seat_fixture::set_stack(&mut pre.seats[0], 900);
         seat_fixture::set_stack(&mut pre.seats[1], 900);

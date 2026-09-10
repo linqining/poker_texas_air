@@ -33,9 +33,26 @@
 use num_bigint::BigUint;
 use stwo::core::fields::m31::{BaseField, M31};
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, ORIGINAL_TRACE_IDX};
+use starknet_crypto::Felt;
 
-use crate::curve::{felt_to_biguint, biguint_to_felt};
-use starknet_crypto::FieldElement as Felt;
+/// Felt ↔ BigUint — the claim's hand binding is a wire word; limb splitting
+/// is integer work on BigUint.
+fn felt_to_biguint(f: Felt) -> BigUint {
+    BigUint::from_bytes_be(&f.to_bytes_be())
+}
+
+fn biguint_to_felt(v: &BigUint) -> Option<Felt> {
+    let bytes = v.to_bytes_be();
+    if bytes.len() > 32 {
+        return None;
+    }
+    let mut buf = [0u8; 32];
+    buf[32 - bytes.len()..].copy_from_slice(&bytes);
+    // types-core from_bytes_be 无失败路径，canonical 用字节往返判定
+    // （语义同旧 ff 库的 Result 路径）。
+    let felt = Felt::from_bytes_be(&buf);
+    (felt.to_bytes_be() == buf).then_some(felt)
+}
 
 /// Number of 28-bit limbs representing a felt252 in the trace.
 pub const N_LIMBS: usize = 9;
@@ -318,7 +335,7 @@ mod tests {
 
     #[test]
     fn limbs_roundtrip() {
-        let f = Felt::from_hex_be("0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+        let f = Felt::from_hex("0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
         assert_eq!(limbs_to_felt(&felt_limbs(f)), f);
         let zero = Felt::from(0u32);
         assert_eq!(limbs_to_felt(&felt_limbs(zero)), zero);

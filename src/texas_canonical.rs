@@ -2923,15 +2923,16 @@ fn digest<T: BorshSerialize>(domain: &[u8], value: &T) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::well_formed_tx_pk_fixture;
     use super::*;
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::constants::ROUND_FLOP;
-    use poker_l1::vm::contracts::texas_poker::state_machine;
-    use poker_l1::vm::contracts::texas_poker::types::{
+    use poker_l1::contracts::texas_poker::constants::ROUND_FLOP;
+    use poker_l1::contracts::texas_poker::state_machine;
+    use poker_l1::contracts::texas_poker::types::{
         ReconstructState, RevealAssignment, RevealPurpose, RevealTarget, RevealTokenState, Seat,
         SeatStatus, TexasPokerTable,
     };
-    use poker_l1::vm::contracts::texas_poker::utils::{g1_generator, scalar_from_u64};
+    use poker_l1::contracts::texas_poker::utils::{g1_generator, scalar_from_u64};
     use poker_protocol::crypto::types::ECPoint;
 
     fn image() -> CanonicalStateImage {
@@ -3240,6 +3241,7 @@ mod tests {
             [1; 20],
             100,
             ECPoint(generator * scalar_from_u64(1)),
+            well_formed_tx_pk_fixture().to_tagged(),
             SeatStatus::Active,
         )
         .expect("active timed-out fixture seat");
@@ -3247,6 +3249,7 @@ mod tests {
             [2; 20],
             200,
             ECPoint(generator * scalar_from_u64(2)),
+            well_formed_tx_pk_fixture().to_tagged(),
             SeatStatus::Active,
         )
         .expect("active retained fixture seat");
@@ -3259,7 +3262,6 @@ mod tests {
                 ROUND_FLOP,
                 ReconstructState {
                     pending_mask: 0b01,
-                    accumulated_deck: None,
                 },
                 RevealTokenState {
                     purpose: RevealPurpose::Board,
@@ -3300,6 +3302,7 @@ mod tests {
             [1; 20],
             100,
             ECPoint(generator * scalar_from_u64(1)),
+            well_formed_tx_pk_fixture().to_tagged(),
             SeatStatus::Active,
         )
         .expect("active timed-out reveal fixture seat");
@@ -3307,6 +3310,7 @@ mod tests {
             [2; 20],
             200,
             ECPoint(generator * scalar_from_u64(2)),
+            well_formed_tx_pk_fixture().to_tagged(),
             SeatStatus::Active,
         )
         .expect("active retained reveal fixture seat");
@@ -3315,7 +3319,7 @@ mod tests {
         table.deck_state.contributor_mask = 0b11;
         table
             .enter_revealing(
-                poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP,
+                poker_l1::contracts::texas_poker::constants::ROUND_PREFLOP,
                 RevealTokenState {
                     purpose: RevealPurpose::DealHole,
                     assignments: vec![

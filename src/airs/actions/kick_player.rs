@@ -37,7 +37,7 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING;
+use poker_l1::contracts::texas_poker::constants::ROUND_WAITING;
 
 use crate::airs::common::{
     COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, compute_add_carries, u8_to_m31,

@@ -1,65 +1,47 @@
 //! Borsh encodings for the facade-local wrapper types (`ECPoint`/`ECScalar`).
 //!
-//! 编码：点 = `CurvePoint::compress()`（Stark 曲线 32 字节压缩）；标量 =
+//! 编码核心收敛到 poker-protocol-core（2026-09-10，单一权威）：
+//! 点 = `CurvePoint::compress()`（Stark 曲线 32 字节压缩）；标量 =
 //! 32 字节大端（`CurveScalar::as_bytes`/`from_canonical_bytes`）。
 //! 旧 48 字节 BLS G1 压缩编码已随 blst 移除（2026-09-05，不考虑兼容）。
+//! 此前反序列化以"压缩一次 base_g"动态求点长度——恒为 32，现直接使用
+//! core 的定长读取（行为等价：32B 压缩点）。
 
 #![cfg(feature = "borsh")]
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use poker_protocol_core::{read_stark_point, read_stark_scalar, write_stark_point, write_stark_scalar};
 
-use crate::crypto::curve::{Curve, CurvePoint, CurveScalar};
-use crate::crypto::types::{DefaultCurve, ECPoint, ECScalar};
-
-type Point = <DefaultCurve as Curve>::Point;
-type Scalar = <DefaultCurve as Curve>::Scalar;
+use crate::crypto::types::{ECPoint, ECScalar};
 
 impl BorshSerialize for ECPoint {
     fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
-        let bytes = self.0.compress();
-        writer.write_all(bytes.as_ref())
+        write_stark_point(&self.0, writer)
     }
 }
 
 impl BorshDeserialize for ECPoint {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        // 压缩点定长：以生成元压缩长度为准（32）。
-        let len = {
-            let g = <DefaultCurve as Curve>::base_g();
-            g.compress().as_ref().len()
-        };
-        let mut bytes = vec![0u8; len];
-        reader.read_exact(&mut bytes)?;
-        let point = Point::from_compressed(&bytes).ok_or_else(|| {
-            borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, "invalid compressed point")
-        })?;
-        Ok(Self(point))
+        Ok(Self(read_stark_point(reader)?))
     }
 }
 
 impl BorshSerialize for ECScalar {
     fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
-        writer.write_all(&CurveScalar::as_bytes(&self.0))
+        write_stark_scalar(&self.0, writer)
     }
 }
 
 impl BorshDeserialize for ECScalar {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let mut bytes = [0u8; 32];
-        reader.read_exact(&mut bytes)?;
-        let scalar = <Scalar as CurveScalar>::from_canonical_bytes(&bytes).ok_or_else(|| {
-            borsh::io::Error::new(
-                borsh::io::ErrorKind::InvalidData,
-                "non-canonical curve scalar",
-            )
-        })?;
-        Ok(Self(scalar))
+        Ok(Self(read_stark_scalar(reader)?))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::curve::{Curve, CurveScalar};
     use crate::crypto::types::DefaultCurve as CurveT;
 
     #[test]

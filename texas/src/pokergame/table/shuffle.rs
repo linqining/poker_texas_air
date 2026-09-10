@@ -1,7 +1,7 @@
 use super::*;
 use crate::pokergame::game_state::ShufflePhase;
 use crate::pokergame::player::truncate_name;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript;
 
 impl Table {
     pub fn is_all_players_shuffled(&self) -> bool {
@@ -189,9 +189,10 @@ impl Table {
                 .expect("checked above")
                 .to_mask_and_shuffle_round()
                 .map_err(|e| JoinError::Crypto(e))?;
-            // 兼容 Move 合约 remask_proof::verify 与 poker_protocol 生产代码：
-            // V2 outer transcript; the old Move V1 path is disabled.
-            let mut transcript = FiatShamirTranscript::new(b"zk_mask_shuffle_proof_v2");
+            // 2026-09 Poseidon epoch：remask + shuffle 共享生产域 transcript。
+            let mut transcript = PoseidonFeltTranscript::new_domain(
+                poker_protocol::transcript_domains::MASK_SHUFFLE_V2_POSEIDON,
+            );
             let input_cards = self.mental_poker_game.deck_encrypted.iter().map(|c| c.clone()).collect::<Vec<_>>();
             if !round.remask_proof.verify( &input_cards,
             &round.mask_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
@@ -258,9 +259,10 @@ impl Table {
         let proof = shuffle_proof.to_proof()?;
         let current_agg_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
         let input_cards = self.mental_poker_game.deck_encrypted.clone();
-        // 兼容 Move 合约 shuffle_proof::verify 与 poker_protocol 生产代码：
-        // Bayer--Groth V2 outer transcript.
-        let mut transcript = FiatShamirTranscript::new(b"zk_shuffle_proof_v2");
+        // 2026-09 Poseidon epoch：Bayer--Groth V2 生产域 transcript。
+        let mut transcript = PoseidonFeltTranscript::new_domain(
+            poker_protocol::transcript_domains::SHUFFLE_V2_POSEIDON,
+        );
         if proof.verify(
             &input_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
             &output_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
@@ -382,8 +384,9 @@ impl Table {
                 self.transition_to(RoundState::PreFlop);
                 self.start_preflop_reveal_phase();
                 // #20 Phase 2：deck 已终局（全部客户端洗牌已验证），此刻采集
-                // HandStart 快照（参与者/盲注前 stack/button/deck）——结算时
-                // 一次性重放为 ProveTask 链，无常驻镜像。
+                // HandStart 快照（参与者/盲注前 stack/button/deck）——实时镜像
+                // （shadow.rs）据此 bootstrap 本手唯一 VM 状态；prove_log 本身
+                // 只作结算对账基准，不再重放。
                 crate::starknet::prove_log::record_hand_start(self);
             } else {
                 // Reconstruct 完成 → 清空 reconstruct_state + reveal_token_state

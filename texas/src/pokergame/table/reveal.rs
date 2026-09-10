@@ -329,6 +329,22 @@ impl Table {
         if !self.reveal_token_state.pending_players.iter().any(|p| p == player_pk) {
             return Err(Self::ERR_ALREADY_SUBMITTED.to_string());
         }
+        // reveal 域权威路径（Phase 2b 第二刀）：先经实时 VM 镜像做 canonical
+        // 重排 + 证明验证 + 窗口推进——VM 拒绝 = 动作非法，直接拒绝客户端。
+        // 无实时镜像的手（不可证明）走下方本地规则兜底。
+        match self.mirror_try_reveal(player_pk.0.as_str(), &tokens) {
+            Some(Err(e)) => {
+                tracing::debug!("[reveal-authority] table {} reveal rejected by VM: {e}", self.summary.id);
+                return Err(format!("reveal rejected by VM: {e}"));
+            }
+            Some(Ok(view)) => {
+                tracing::debug!(
+                    "[reveal-authority] table {} window_open={} board={} pending={}",
+                    self.summary.id, view.window_open, view.revealed_board, view.pending_pks.len()
+                );
+            }
+            None => {}
+        }
 
         let assign = match self.reveal_token_state.player_assignments.get(player_pk) {
             Some(a) => a,
