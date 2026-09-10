@@ -869,7 +869,7 @@ mod recursion_e2e {
         );
 
         // 组批（v3 header 6 词 + 每语句 10 词）。
-        let hb = starknet_crypto::FieldElement::from(0xABCDu64);
+        let hb = starknet_crypto::Felt::from(0xABCDu64);
         let statements: Vec<hand_verify_native::recurse::ActionSigStatement> = materials
             .iter()
             .map(|m| hand_verify_native::recurse::ActionSigStatement {
@@ -902,24 +902,24 @@ mod recursion_e2e {
         // digest 也应是 payload 的确定性函数（重算一次比对）。
         let claim2 = poseidon_reclaim(hb, &payload, &report);
         assert_eq!(claim, claim2, "claim must be deterministic");
-        assert!(acc != starknet_crypto::FieldElement::ZERO);
+        assert!(acc != starknet_crypto::Felt::ZERO);
     }
 
     fn poseidon_reclaim(
-        hb: starknet_crypto::FieldElement,
-        payload: &[starknet_crypto::FieldElement],
+        hb: starknet_crypto::Felt,
+        payload: &[starknet_crypto::Felt],
         report: &hand_verify_native::handbatch::VerifyReport,
-    ) -> starknet_crypto::FieldElement {
-        use starknet_crypto::{poseidon_hash_many, FieldElement};
+    ) -> starknet_crypto::Felt {
+        use starknet_crypto::{poseidon_hash_many, Felt};
         let digest = payload_digest(payload);
         poseidon_hash_many(&[
             hb,
             digest,
-            FieldElement::from(report.n_own),
-            FieldElement::from(report.n_reveal),
-            FieldElement::from(report.n_leave),
-            FieldElement::from(report.n_recon),
-            FieldElement::from(report.n_action),
+            Felt::from(report.n_own),
+            Felt::from(report.n_reveal),
+            Felt::from(report.n_leave),
+            Felt::from(report.n_recon),
+            Felt::from(report.n_action),
         ])
     }
 
@@ -1162,18 +1162,18 @@ mod shadow_e2e {
             .expect("snapshot parity");
 
         // 生产结算构建：分池 + 真实证明 + calldata（含 treasury 台费项）。
-        let wallet_map: Vec<(poker_l1::Address, starknet_ff::FieldElement)> = input
+        let wallet_map: Vec<(poker_l1::Address, starknet_crypto::Felt)> = input
             .start
             .participants
             .iter()
             .filter_map(|p| {
                 let addr = crate::starknet::mirror::TableMirror::addr_from_starknet(&p.wallet)?;
                 let felt = crate::starknet::chain::parse_felt(&p.wallet)?;
-                Some((addr, crate::starknet::submit::felt_to_ff(&felt)))
+                Some((addr, felt))
             })
             .collect();
         let treasury: poker_l1::Address = [0x77u8; 20];
-        let action_log_digest = starknet_ff::FieldElement::from(0xBEEF_u64);
+        let action_log_digest = starknet_crypto::Felt::from(0xBEEF_u64);
         let settlement = crate::starknet::submit::settle_hand(
             &mirror,
             Some(treasury),

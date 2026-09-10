@@ -14,14 +14,14 @@
 
 use std::time::Instant;
 
-// Wire felt (payload/hand-binding words) is starknet-ff FieldElement; the
-// challenge layer speaks the crypto felt (starknet-crypto 0.8 = types-core).
-use starknet_ff::FieldElement as Felt;
+// 2026-09-10 全仓统一：wire 与 crypto 层共用 starknet-crypto 0.8 的 Felt
+// （= starknet-types-core Felt），无跨 Felt 桥。
+use starknet_crypto::Felt;
 
 use hand_verify_native::air::{HandBatchClaim, KindCounts};
 use hand_verify_native::curve::Point;
 use hand_verify_native::handbatch::{
-    endorsement_challenge, ff_to_felt, hand_rho, leave_challenge, payload_digest,
+    endorsement_challenge, hand_rho, leave_challenge, payload_digest,
     reconstruct_challenge, reveal_challenge, verify_hand, FoldEquation, LeaveCard,
     KIND_OWNERSHIP, KIND_RECONSTRUCT, KIND_REVEAL,
 };
@@ -246,12 +246,10 @@ fn bench() {
 /// `poker-protocol-core::stark_curve::handbatch_*_challenge` (whose
 /// host↔Cairo parity is pinned in the main project) is the production gate.
 fn vectors() {
-    use starknet_crypto::Felt as CFelt;
-    let hb_wire = Felt::from(0xB16Du64);
-    let hb = ff_to_felt(hb_wire);
+    let hb = Felt::from(0xB16Du64);
     let g = Point::generator();
     // Deterministic statement points: small multiples of G.
-    let m = |k: u32| g.mul(CFelt::from(k));
+    let m = |k: u32| g.mul(Felt::from(k));
     let p2 = m(2);
     let p3 = m(3);
     let p4 = m(4);
@@ -260,35 +258,35 @@ fn vectors() {
     let p7 = m(7);
 
     let c_own = endorsement_challenge(hb, g, p2, p3);
-    let c_rev = reveal_challenge(hb, p2, p3, p4, p5, p6, p7, CFelt::from(8u32));
+    let c_rev = reveal_challenge(hb, p2, p3, p4, p5, p6, p7, Felt::from(8u32));
     let card = LeaveCard { in_c1: p2, in_c2: p3, out_c1: p4, out_c2: p5, a: p6 };
-    let c_leave = leave_challenge(hb, p2, p3, CFelt::from(8u32), &[card]);
+    let c_leave = leave_challenge(hb, p2, p3, Felt::from(8u32), &[card]);
     let c_recon = reconstruct_challenge(hb, g, p2, p3, p4, p5, p6);
     let eqs = [
         FoldEquation {
             kind: KIND_OWNERSHIP,
-            s: CFelt::from(11u32),
+            s: Felt::from(11u32),
             c: c_own,
             residual: curve::Point::identity(),
         },
         FoldEquation {
             kind: KIND_REVEAL,
-            s: CFelt::from(12u32),
+            s: Felt::from(12u32),
             c: c_rev,
             residual: curve::Point::identity(),
         },
         FoldEquation {
             kind: KIND_RECONSTRUCT,
-            s: CFelt::from(13u32),
+            s: Felt::from(13u32),
             c: c_recon,
             residual: curve::Point::identity(),
         },
     ];
     let rho = hand_rho(hb, &eqs);
-    let digest = handbatch::payload_digest(&[hb_wire, Felt::from(1u32), Felt::from(2u32)]);
+    let digest = handbatch::payload_digest(&[hb, Felt::from(1u32), Felt::from(2u32)]);
 
     for (name, bytes) in [
-        ("hand_binding", hb_wire.to_bytes_be()),
+        ("hand_binding", hb.to_bytes_be()),
         ("endorsement_challenge", c_own.to_bytes_be()),
         ("reveal_challenge", c_rev.to_bytes_be()),
         ("leave_challenge", c_leave.to_bytes_be()),
@@ -505,10 +503,9 @@ mod tests {
     /// `poker-protocol-core::stark_curve` (host↔Cairo parity lives there).
     #[test]
     fn golden_vectors_pinned() {
-        use starknet_crypto::Felt as CFelt;
-        let hb = ff_to_felt(Felt::from(0xB16Du64));
+        let hb = Felt::from(0xB16Du64);
         let g = Point::generator();
-        let m = |k: u32| g.mul(CFelt::from(k));
+        let m = |k: u32| g.mul(Felt::from(k));
         let p2 = m(2);
         let p3 = m(3);
         let p4 = m(4);
@@ -526,7 +523,7 @@ mod tests {
             crate_golden::ENDORSEMENT,
         );
         assert_eq!(
-            hex(&reveal_challenge(hb, p2, p3, p4, p5, p6, p7, CFelt::from(8u32)).to_bytes_be()),
+            hex(&reveal_challenge(hb, p2, p3, p4, p5, p6, p7, Felt::from(8u32)).to_bytes_be()),
             crate_golden::REVEAL,
         );
         assert_eq!(hex(&hand_binding(1).to_bytes_be()), crate_golden::HAND_BINDING_SEED_1);

@@ -113,8 +113,8 @@ pub fn prove_batch_blocking(
         build_action_batch_payload, prove_payload_layer, write_prod_params, GENESIS_ACC,
     };
 
-    let hb = starknet_crypto::FieldElement::from_bytes_be(&hand_binding)
-        .map_err(|e| format!("hand binding: {e:?}"))?;
+    // hand_binding 是 Poseidon 输出（< P），types-core from_bytes_be 恒 canonical。
+    let hb = starknet_crypto::Felt::from_bytes_be(&hand_binding);
     let statements: Vec<hand_verify_native::recurse::ActionSigStatement> = materials
         .iter()
         .map(|m| hand_verify_native::recurse::ActionSigStatement {

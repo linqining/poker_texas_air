@@ -22,13 +22,22 @@
 //! Aggregator AIR 的核心约束为 `left.post_state_root == right.pre_state_root`。
 
 use borsh::BorshDeserialize;
-use starknet_ff::FieldElement;
+use starknet_crypto::Felt;
 use stwo::core::fields::m31::M31;
 
 use crate::error::{TexasAirError, TexasAirResult};
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+
+/// Canonical felt decode: accepts only 32-byte encodings below the Stark
+/// prime. types-core 的 `Felt::from_bytes_be` 无失败路径（≥ P 输入会被
+/// 静默归约），这里用字节往返判定 canonical——语义与旧 0.6 ff 库
+/// `from_bytes_be` 的 `Result` 完全一致。
+pub(crate) fn felt_from_canonical_bytes(bytes: &[u8; 32]) -> Option<Felt> {
+    let felt = Felt::from_bytes_be(bytes);
+    (felt.to_bytes_be() == *bytes).then_some(felt)
+}
 
 // Historical sub-structure encoding regression fixtures.
 #[cfg(test)]
@@ -62,7 +71,7 @@ impl StateRoot {
     /// root (wire/legacy fixtures).  The 32-byte big-endian encoding is the
     /// canonical in-memory form.
     #[must_use]
-    pub fn from_field(f: FieldElement) -> Self {
+    pub fn from_field(f: Felt) -> Self {
         Self(f.to_bytes_be())
     }
 
@@ -132,14 +141,14 @@ pub fn state_root_to_air_limbs(root: StateRoot) -> [M31; 4] {
 /// The full-width value is included in the canonical table-state preimage
 /// and consumed directly by lifecycle AIR trace construction.
 #[must_use]
-pub fn table_name_commitment(name: &str) -> FieldElement {
+pub fn table_name_commitment(name: &str) -> Felt {
     poseidon_string(name)
 }
 
-/// 把 u64 编码为 Starknet `FieldElement`。
+/// 把 u64 编码为 Starknet `Felt`。
 #[must_use]
-pub fn u64_to_field(v: u64) -> FieldElement {
-    FieldElement::from(v)
+pub fn u64_to_field(v: u64) -> Felt {
+    Felt::from(v)
 }
 
 /// Canonical, complete resolved `TexasPokerTable` transcript image.
@@ -152,7 +161,7 @@ pub fn u64_to_field(v: u64) -> FieldElement {
 /// verifier replay input without requiring a second manual field list to be kept in sync.
 pub fn table_state_preimage(
     table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
-) -> TexasAirResult<Vec<FieldElement>> {
+) -> TexasAirResult<Vec<Felt>> {
     canonical_borsh_preimage("zchain.texas_poker.table.v11", table)
 }
 
@@ -163,7 +172,7 @@ pub fn table_state_preimage(
 /// 这不是从 proof-carried witness 取值；输入必须满足 [`table_state_preimage`] 的
 /// version/tag/length/chunk 编码契约，任何非 canonical 编码都会被拒绝。
 pub fn table_from_state_preimage(
-    image: &[FieldElement],
+    image: &[Felt],
 ) -> TexasAirResult<poker_l1::vm::contracts::texas_poker::types::TexasPokerTable> {
     const TAG: &str = "zchain.texas_poker.table.v11";
     let payload = decode_canonical_borsh_preimage(image, TAG)?;
@@ -249,7 +258,7 @@ fn blake2b_256(input: &[u8]) -> [u8; 32] {
 }
 
 /// Encode at most 31 bytes injectively into a Starknet field element.
-fn byte_chunk_to_field(chunk: &[u8]) -> TexasAirResult<FieldElement> {
+fn byte_chunk_to_field(chunk: &[u8]) -> TexasAirResult<Felt> {
     if chunk.len() > 31 {
         return Err(TexasAirError::StateRootError(format!(
             "canonical chunk length {} exceeds 31 bytes",
@@ -259,34 +268,33 @@ fn byte_chunk_to_field(chunk: &[u8]) -> TexasAirResult<FieldElement> {
     let mut buf = [0u8; 32];
     let start = 32 - chunk.len();
     buf[start..].copy_from_slice(chunk);
-    FieldElement::from_bytes_be(&buf).map_err(|_| {
-        TexasAirError::StateRootError("canonical byte chunk is not a field element".into())
-    })
+    // ≤31 字节恒 < 2^248 < P，from_bytes_be 无失败路径（canonical 恒成立）。
+    Ok(Felt::from_bytes_be(&buf))
 }
 
 /// Build a domain-separated, injective field preimage for a Borsh value.
 pub(crate) fn canonical_borsh_preimage<T: borsh::BorshSerialize>(
     tag: &str,
     value: &T,
-) -> TexasAirResult<Vec<FieldElement>> {
+) -> TexasAirResult<Vec<Felt>> {
     let bytes = borsh::to_vec(value)
         .map_err(|e| TexasAirError::StateRootError(format!("borsh serialization: {e}")))?;
     canonical_bytes_preimage(tag, &bytes)
 }
 
 /// Build a domain-separated, injective field preimage for already-canonical bytes.
-fn canonical_bytes_preimage(tag: &str, bytes: &[u8]) -> TexasAirResult<Vec<FieldElement>> {
+fn canonical_bytes_preimage(tag: &str, bytes: &[u8]) -> TexasAirResult<Vec<Felt>> {
     let tag_bytes = tag.as_bytes();
     let mut fields =
         Vec::with_capacity(3 + tag_bytes.len().div_ceil(31) + bytes.len().div_ceil(31));
-    fields.push(FieldElement::from(2u64)); // encoding version
-    fields.push(FieldElement::from(u64::try_from(tag_bytes.len()).map_err(
+    fields.push(Felt::from(2u64)); // encoding version
+    fields.push(Felt::from(u64::try_from(tag_bytes.len()).map_err(
         |_| TexasAirError::StateRootError("domain tag too long".into()),
     )?));
     for chunk in tag_bytes.chunks(31) {
         fields.push(byte_chunk_to_field(chunk)?);
     }
-    fields.push(FieldElement::from(u64::try_from(bytes.len()).map_err(
+    fields.push(Felt::from(u64::try_from(bytes.len()).map_err(
         |_| TexasAirError::StateRootError("borsh payload too long".into()),
     )?));
     for chunk in bytes.chunks(31) {
@@ -297,7 +305,7 @@ fn canonical_bytes_preimage(tag: &str, bytes: &[u8]) -> TexasAirResult<Vec<Field
 
 /// Decode the injective canonical Borsh field encoding used above.
 fn decode_canonical_borsh_preimage(
-    fields: &[FieldElement],
+    fields: &[Felt],
     expected_tag: &str,
 ) -> TexasAirResult<Vec<u8>> {
     if fields.len() < 4 {
@@ -305,7 +313,7 @@ fn decode_canonical_borsh_preimage(
             "canonical preimage too short".into(),
         ));
     }
-    if fields[0] != FieldElement::from(2u64) {
+    if fields[0] != Felt::from(2u64) {
         return Err(TexasAirError::SerializationError(
             "unsupported canonical preimage version".into(),
         ));
@@ -344,7 +352,7 @@ fn decode_canonical_borsh_preimage(
     decode_field_chunks(&fields[payload_start..], payload_len, "payload")
 }
 
-fn field_to_usize(field: FieldElement, label: &str) -> TexasAirResult<usize> {
+fn field_to_usize(field: Felt, label: &str) -> TexasAirResult<usize> {
     let bytes = field.to_bytes_be();
     if bytes[..24].iter().any(|&b| b != 0) {
         return Err(TexasAirError::SerializationError(format!(
@@ -358,7 +366,7 @@ fn field_to_usize(field: FieldElement, label: &str) -> TexasAirResult<usize> {
 }
 
 fn decode_field_chunks(
-    fields: &[FieldElement],
+    fields: &[Felt],
     byte_len: usize,
     label: &str,
 ) -> TexasAirResult<Vec<u8>> {
@@ -387,24 +395,24 @@ fn decode_field_chunks(
 /// Interpret a canonical 32-byte big-endian integer as a field element.
 /// Out-of-field values are rejected; bytes are never masked or truncated.
 #[cfg(test)]
-fn bytes_to_field(bytes: &[u8; 32]) -> Option<FieldElement> {
-    FieldElement::from_bytes_be(bytes).ok()
+fn bytes_to_field(bytes: &[u8; 32]) -> Option<Felt> {
+    felt_from_canonical_bytes(bytes)
 }
 
-/// 把 Starknet `FieldElement` (~251 bit) 分解为 8 个 **大端** u32 字。
+/// 把 Starknet `Felt` (~251 bit) 分解为 8 个 **大端** u32 字。
 ///
 /// 这是 state_root 绑定的编码契约：把公开输入的 251-bit Fr 元素的 32 字节大端
 /// 表示拆为 8 个完整 32-bit 字，供 Fiat-Shamir channel 的 `mix_u32s` mix。
 ///
 /// 编码规则（prover 与 verifier 必须完全一致）：
-/// - 取 `FieldElement` 的 32 字节 **大端** 表示（`to_bytes_be`）。
+/// - 取 `Felt` 的 32 字节 **大端** 表示（`to_bytes_be`）。
 /// - 按字节顺序每 4 字节一个 u32（大端读取），共 8 个，保持大端顺序。
 /// - **不做截断**：`mix_u32s` 将 u32 视为原始 transcript 字节（不解释为域元素），
-///   因此完整 32-bit 无损。往返可精确还原原 FieldElement。
+///   因此完整 32-bit 无损。往返可精确还原原 Felt。
 ///
 /// 返回固定长度 `[u32; 8]`，words[0] 对应最高 4 字节。
 #[must_use]
-pub fn field_element_to_u32_words(f: FieldElement) -> [u32; 8] {
+pub fn field_element_to_u32_words(f: Felt) -> [u32; 8] {
     let bytes_be = f.to_bytes_be();
     let mut words = [0u32; 8];
     for (i, word) in words.iter_mut().enumerate() {
@@ -419,69 +427,69 @@ pub fn field_element_to_u32_words(f: FieldElement) -> [u32; 8] {
     words
 }
 
-fn poseidon_hash_many(inputs: &[FieldElement]) -> FieldElement {
+fn poseidon_hash_many(inputs: &[Felt]) -> Felt {
     starknet_crypto::poseidon_hash_many(inputs)
 }
 
-fn poseidon_string(s: &str) -> FieldElement {
+fn poseidon_string(s: &str) -> Felt {
     poseidon_borsh("zchain.string.v2", &s.as_bytes().to_vec())
 }
 
 /// 通用「borsh 序列化 → Poseidon」编码契约（带域分隔标签）。
 ///
-/// 把任意 `BorshSerialize` 类型序列化为字节，按 31 字节右对齐分块转 FieldElement，
-/// 最后追加一个记录原始字节长度的 FieldElement，再做 Poseidon252。
+/// 把任意 `BorshSerialize` 类型序列化为字节，按 31 字节右对齐分块转 Felt，
+/// 最后追加一个记录原始字节长度的 Felt，再做 Poseidon252。
 ///
 /// 这是 state_root 各嵌套子结构（betting_round / deck_state / ... / side_pots）
 /// 的统一编码契约。关键性质（soundness 契约）：
 /// - **确定性**：borsh 序列化确定，同输入必同输出。
-/// - **跨类型抗碰撞（域分隔）**：`tag` 作为哈希输入的**第一个** FieldElement，
+/// - **跨类型抗碰撞（域分隔）**：`tag` 作为哈希输入的**第一个** Felt，
 ///   确保不同类型即使 borsh 字节完全相同（如默认状态下的全零字节）也产生不同哈希。
 ///   这是必须的：例如 `ShuffleState::default()` 与 `ReconstructState::default()` 的
 ///   borsh 序列化恰好都是 10 个零字节，不加域分隔会导致跨字段碰撞。
-/// - **同类型抗碰撞**：末尾长度 FieldElement 防止不同长度字节流产生相同分块序列
+/// - **同类型抗碰撞**：末尾长度 Felt 防止不同长度字节流产生相同分块序列
 ///   （例如 `[0x01,0x02]` 与 `[0x01,0x02,0x00]` 在分块后会相同，但长度后缀不同）。
-/// - **空输入非零**：空字节也走完整哈希（返回一个固定非零 FieldElement），
-///   以便区分「该子结构为空」与「该字段未编码」（未编码字段仍用 `FieldElement::ZERO`）。
+/// - **空输入非零**：空字节也走完整哈希（返回一个固定非零 Felt），
+///   以便区分「该子结构为空」与「该字段未编码」（未编码字段仍用 `Felt::ZERO`）。
 ///
 /// `tag` 必须是稳定的、与类型一一对应的 ASCII 字符串（编码契约的一部分，
 /// prover 与 L1 两侧必须使用完全相同的 tag）。
-pub(crate) fn poseidon_borsh<T: borsh::BorshSerialize>(tag: &str, value: &T) -> FieldElement {
+pub(crate) fn poseidon_borsh<T: borsh::BorshSerialize>(tag: &str, value: &T) -> Felt {
     let fields = canonical_borsh_preimage(tag, value)
         .expect("Borsh serialization into an in-memory Vec must succeed");
     poseidon_hash_many(&fields)
 }
 
 #[cfg(test)]
-fn poseidon_betting_round(br: &BettingRound) -> FieldElement {
+fn poseidon_betting_round(br: &BettingRound) -> Felt {
     // current_bet (u64) || min_raise (u64)，borsh 编码后哈希。
     // 注：BettingRound 仅含两个 u64，borsh 序列化为 16 字节定长。
     poseidon_borsh("betting_round", br)
 }
 
 #[cfg(test)]
-fn poseidon_deck_state(ds: &DeckState) -> FieldElement {
+fn poseidon_deck_state(ds: &DeckState) -> Felt {
     // 含加密牌组（ElGamalCiphertext 向量）、EC 点等，统一走 borsh 编码契约。
     poseidon_borsh("deck_state", ds)
 }
 
 #[cfg(test)]
-fn poseidon_shuffle_state(ss: &ShuffleState) -> FieldElement {
+fn poseidon_shuffle_state(ss: &ShuffleState) -> Felt {
     poseidon_borsh("shuffle_state", ss)
 }
 
 #[cfg(test)]
-fn poseidon_reveal_token_state(rs: &RevealTokenState) -> FieldElement {
+fn poseidon_reveal_token_state(rs: &RevealTokenState) -> Felt {
     poseidon_borsh("reveal_token_state", rs)
 }
 
 #[cfg(test)]
-fn poseidon_reconstruct_state(rs: &ReconstructState) -> FieldElement {
+fn poseidon_reconstruct_state(rs: &ReconstructState) -> Felt {
     poseidon_borsh("reconstruct_state", rs)
 }
 
 #[cfg(test)]
-fn poseidon_timeout_config(tc: &TimeoutConfig) -> FieldElement {
+fn poseidon_timeout_config(tc: &TimeoutConfig) -> Felt {
     poseidon_borsh("timeout_config", tc)
 }
 
@@ -492,8 +500,8 @@ mod tests {
 
     #[test]
     fn test_field_encoding_basic() {
-        assert_eq!(u64_to_field(0), FieldElement::ZERO);
-        assert_eq!(u64_to_field(u64::MAX), FieldElement::from(u64::MAX));
+        assert_eq!(u64_to_field(0), Felt::ZERO);
+        assert_eq!(u64_to_field(u64::MAX), Felt::from(u64::MAX));
     }
 
     #[test]
@@ -544,7 +552,7 @@ mod tests {
         assert!(TAG.len() < 31);
         let mut bytes = image[2].to_bytes_be();
         bytes[32 - TAG.len() - 1] = 1;
-        image[2] = FieldElement::from_bytes_be(&bytes).expect("value remains inside field");
+        image[2] = Felt::from_bytes_be(&bytes);
 
         assert!(
             table_from_state_preimage(&image).is_err(),
@@ -585,7 +593,7 @@ mod tests {
         // 区分性：current_bet 不同 → 哈希不同
         assert_ne!(poseidon_betting_round(&br1), poseidon_betting_round(&br3));
         // 非零（区分「已编码」与「未编码 ZERO」）
-        assert_ne!(poseidon_betting_round(&br1), FieldElement::ZERO);
+        assert_ne!(poseidon_betting_round(&br1), Felt::ZERO);
     }
 
     #[test]
@@ -597,7 +605,7 @@ mod tests {
         let h_a = poseidon_borsh("shuffle_state", &z);
         let h_b = poseidon_borsh("reconstruct_state", &z);
         assert_ne!(h_a, h_b, "不同 tag 必须产生不同哈希（域分隔）");
-        assert_ne!(h_a, FieldElement::ZERO);
+        assert_ne!(h_a, Felt::ZERO);
         // 同 tag 同内容 → 确定性
         assert_eq!(h_a, poseidon_borsh("shuffle_state", &z));
     }
@@ -625,7 +633,7 @@ mod tests {
         let reconstruct = poseidon_reconstruct_state(&ReconstructState::default());
         let timeout = poseidon_timeout_config(&TimeoutConfig::default());
         for h in [deck, shuffle, reveal, reconstruct, timeout] {
-            assert_ne!(h, FieldElement::ZERO, "默认子结构哈希应非零");
+            assert_ne!(h, Felt::ZERO, "默认子结构哈希应非零");
         }
         // 默认值两两不同（它们 borsh 序列化不同）
         let all = [deck, shuffle, reveal, reconstruct, timeout];
@@ -638,12 +646,12 @@ mod tests {
 
     #[test]
     fn test_field_element_to_u32_words_roundtrip() {
-        // 编码契约：8-word 分解必须无损往返还原原 FieldElement。
+        // 编码契约：8-word 分解必须无损往返还原原 Felt。
         // mix_u32s 把 u32 当原始 transcript 字节，不做域解释，故完整 32-bit 无损。
         let cases = [
-            FieldElement::ZERO,
-            FieldElement::ONE,
-            FieldElement::from(u64::MAX),
+            Felt::ZERO,
+            Felt::ONE,
+            Felt::from(u64::MAX),
             {
                 let mut buf = [0u8; 32];
                 buf[0] = 0x07;
@@ -651,7 +659,8 @@ mod tests {
                 for b in &mut buf[2..] {
                     *b = 0xAB;
                 }
-                FieldElement::from_bytes_be(&buf).unwrap_or(FieldElement::ZERO)
+                // 0x07FF… < 0x0800…0001 = P，canonical。
+                Felt::from_bytes_be(&buf)
             },
         ];
         for f in cases {
@@ -663,13 +672,13 @@ mod tests {
                 let chunk = word.to_be_bytes();
                 bytes_be[lo..lo + 4].copy_from_slice(&chunk);
             }
-            let restored = FieldElement::from_bytes_be(&bytes_be).expect("往返重建应成功");
+            let restored = Felt::from_bytes_be(&bytes_be);
             assert_eq!(f, restored, "field_element_to_u32_words 往返失败");
         }
-        // 区分性：不同 FieldElement → 不同 word 序列
+        // 区分性：不同 Felt → 不同 word 序列
         assert_ne!(
-            field_element_to_u32_words(FieldElement::ONE),
-            field_element_to_u32_words(FieldElement::from(2u64)),
+            field_element_to_u32_words(Felt::ONE),
+            field_element_to_u32_words(Felt::from(2u64)),
         );
     }
 
@@ -679,12 +688,12 @@ mod tests {
         // 两个 side_pot 列表，内容不同 → 哈希不同
         let sp1 = vec![SidePot::new(100, 0b0011)];
         let sp2 = vec![SidePot::new(100, 0b0101)];
-        let f = |pots: &[SidePot]| -> FieldElement {
-            let mut fields: Vec<FieldElement> = Vec::new();
+        let f = |pots: &[SidePot]| -> Felt {
+            let mut fields: Vec<Felt> = Vec::new();
             let tag_bytes = b"side_pots";
             let mut tag_buf = [0u8; 32];
             tag_buf[..tag_bytes.len()].copy_from_slice(tag_bytes);
-            fields.push(bytes_to_field(&tag_buf).unwrap_or(FieldElement::ZERO));
+            fields.push(bytes_to_field(&tag_buf).unwrap_or(Felt::ZERO));
             fields.push(u64_to_field(pots.len() as u64));
             fields.extend(pots.iter().flat_map(|sp| {
                 [
@@ -699,7 +708,7 @@ mod tests {
             f(&sp2),
             "不同 eligible_seats 应产生不同 side_pots_root"
         );
-        assert_ne!(f(&sp1), FieldElement::ZERO);
+        assert_ne!(f(&sp1), Felt::ZERO);
         // 确定性
         assert_eq!(f(&sp1), f(&sp1));
     }

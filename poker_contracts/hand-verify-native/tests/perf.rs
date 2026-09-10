@@ -11,19 +11,17 @@
 
 use std::time::{Duration, Instant};
 
-use starknet_ff::FieldElement as Felt;
+use starknet_crypto::Felt;
 
 use hand_verify_native::air::{HandBatchClaim, KindCounts};
 use hand_verify_native::handbatch::{payload_digest, verify_hand};
 use hand_verify_native::{mint, prove};
 
 fn hand_binding(seed: u64) -> Felt {
-    // Wire felt boundary; poseidon runs on the 0.8 crypto felt.
-    let core = starknet_crypto::poseidon_hash_many(&[
-        starknet_crypto::Felt::from(seed),
-        starknet_crypto::Felt::from(0xB16Du64),
-    ]);
-    Felt::from_bytes_be(&core.to_bytes_be()).expect("binding < P")
+    starknet_crypto::poseidon_hash_many(&[
+        Felt::from(seed),
+        Felt::from(0xB16Du64),
+    ])
 }
 
 struct Measurement {

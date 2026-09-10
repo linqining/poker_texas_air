@@ -258,12 +258,8 @@ async fn verify_execute_signature(body: &Value) -> Result<String, String> {
     // signer pk：链上 account.get_public_key()（TTL 缓存）
     let pk = get_public_key_cached(user_felt).await?;
 
-    // starknet_crypto::verify 使用 starknet-ff 的 FieldElement（与 core Felt 字节兼容）
-    let to_ff = |f: starknet::core::types::Felt| {
-        starknet_ff::FieldElement::from_bytes_be(&f.to_bytes_be())
-            .expect("any 32-byte value is a canonical felt252")
-    };
-    let ok = starknet_crypto::verify(&to_ff(pk), &to_ff(hash), &to_ff(r), &to_ff(s))
+    // starknet-crypto 0.8 的 verify 直接吃 types-core Felt（链上 Felt 同型）。
+    let ok = starknet_crypto::verify(&pk, &hash, &r, &s)
         .map_err(|e| format!("verify: {e}"))?;
     if !ok {
         return Err("signature does not match user public key".into());

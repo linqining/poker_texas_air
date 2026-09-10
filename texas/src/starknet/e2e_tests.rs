@@ -244,7 +244,7 @@ fn play_full_hand_artifacts(
 
     // ---- 结算：分池 + 证明 + calldata ----
     // #18 Phase B：动作日志哈希取一个确定样例（e2e 无 game 层动作日志）。
-    let action_log_digest = starknet_ff::FieldElement::from(0xA11CE_u64);
+    let action_log_digest = starknet_crypto::Felt::from(0xA11CE_u64);
     let settlement =
         super::submit::settle_hand(&mirror, Some(creator), &[], action_log_digest, &[])
             .map_err(|e| format!("settlement: {e}"))?;
@@ -274,13 +274,13 @@ fn play_full_hand_artifacts(
         &|_hb, _players| Ok(endorsements.clone()),
     )
     .map_err(|e| format!("dapv build: {e}"))?;
-    assert_ne!(dual.hand_binding, starknet_ff::FieldElement::ZERO);
+    assert_ne!(dual.hand_binding, starknet_crypto::Felt::ZERO);
     assert_eq!(dual.batch_words.len(), 5 + 5 * settlement.players_remapped.len());
     // #18 Phase B：register 7 felt（+动作日志承诺）、settle 前缀 +1 标量。
     assert_eq!(dual.register_calldata.len(), 7);
     assert_eq!(
         dual.register_calldata[3],
-        super::submit::ff_to_felt(action_log_digest),
+        action_log_digest,
         "register pins the action log commitment"
     );
     let expect_len = 1 + 1 + 32 + 1 + 1
@@ -288,7 +288,7 @@ fn play_full_hand_artifacts(
         + 1 + settlement.deltas.len()
         + 1 + dual.batch_words.len();
     assert_eq!(dual.settle_calldata.len(), expect_len);
-    assert_ne!(dual.proved.p_batch_commitment, starknet_ff::FieldElement::ZERO);
+    assert_ne!(dual.proved.p_batch_commitment, starknet_crypto::Felt::ZERO);
     assert_eq!(dual.proved.register_calldata.len(), 9);
     assert_eq!(
         dual.proved.settle_calldata.len(),
@@ -840,7 +840,6 @@ async fn sepolia_settle_smoke() {
     use starknet::core::types::{Call, Felt};
     use starknet::core::utils::starknet_keccak;
     use starknet::providers::Provider;
-        use starknet_ff::FieldElement as Ff;
 
     if std::env::var("STARKNET_SEPOLIA_SMOKE").as_deref() != Ok("1") {
         eprintln!("STARKNET_SEPOLIA_SMOKE != 1 — skipped (no on-chain txs)");
@@ -880,12 +879,12 @@ async fn sepolia_settle_smoke() {
 
     // 2. 全部参与者重映射到 operator：链上筹码净零变动，零余额账户可结算。
     let op_felt = Felt::from_hex(&op_addr).expect("operator felt");
-    let op_ff = super::submit::felt_to_ff(&op_felt);
+    let op_ff = op_felt;
     let creator: poker_l1::Address = [0xC0; 20];
     let p1: poker_l1::Address = [0x11; 20];
     let p2: poker_l1::Address = [0x22; 20];
     let wallet_map = vec![(p1, op_ff), (p2, op_ff), (creator, op_ff)];
-    let action_log_digest = Ff::from(0xA11C3Du64);
+    let action_log_digest = starknet_crypto::Felt::from(0xA11C3Du64);
     let settlement =
         super::submit::settle_hand(&mirror, Some(creator), &wallet_map, action_log_digest, &[])
             .expect("settlement rebuild with operator remap");

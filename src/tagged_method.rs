@@ -7,6 +7,7 @@
 
 use bincode::Options;
 use blake2::Blake2bVar;
+use starknet_crypto::Felt;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
 use poker_protocol::precompile::{
@@ -284,7 +285,7 @@ impl ArchivedTaggedMethodProofBundle {
     /// serializes struct fields in declaration order. Receipt issuance runs
     /// only after the full proof was already decoded and verified, so the
     /// trailing bytes are known to be well formed.
-    fn decode_commitments(&self) -> TexasAirResult<Vec<starknet_ff::FieldElement>> {
+    fn decode_commitments(&self) -> TexasAirResult<Vec<starknet_crypto::Felt>> {
         self.validate()?;
         // Stream the prefix so the reader stops right after `commitments`;
         // full-buffer `deserialize` would reject the (well-formed) trailing
@@ -303,11 +304,65 @@ impl ArchivedTaggedMethodProofBundle {
 
 /// Bincode prefix of `CommitmentSchemeProof` stopping right after the
 /// `commitments` field (see [`ArchivedTaggedMethodProofBundle::decode_commitments`]).
+///
+/// 字节兼容性注记：stwo 2.3 的 `Poseidon252MerkleHasher::Hash` 是旧 ff
+/// 库（0.3）的 FieldElement，其 serde 形态是 **Display 十进制字符串**
+/// （bincode 二进制下也是长度前缀字符串）。本仓的 Felt 载体已统一为
+/// types-core，其默认 serde 形态（定长剥离前导零的 bytes）与之不同——
+/// 因此这里手写字符串访问器按原 wire 格式解码，归档字节布局保持逐位不变。
 #[derive(serde::Deserialize)]
 struct StarkProofCommitmentsPrefix {
     #[allow(dead_code)]
     config: stwo::core::pcs::PcsConfig,
-    commitments: Vec<starknet_ff::FieldElement>,
+    #[serde(deserialize_with = "decode_wire_felt_vec")]
+    commitments: Vec<Felt>,
+}
+
+/// Decode one felt in the legacy ff wire form: its `Serialize` emits
+/// `serialize_str(Display)`, i.e. a **decimal** string (`"0"` for zero,
+/// decimal digits otherwise), length-prefixed under bincode.
+fn decode_wire_felt_vec<'de, D>(deserializer: D) -> Result<Vec<Felt>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct WireFeltVisitor;
+    impl serde::de::Visitor<'_> for WireFeltVisitor {
+        type Value = Felt;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "a decimal felt252 string (legacy ff wire form)")
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Felt, E> {
+            Felt::from_dec_str(value).map_err(serde::de::Error::custom)
+        }
+    }
+
+    struct WireFeltSeed;
+    impl<'de> serde::de::DeserializeSeed<'de> for WireFeltSeed {
+        type Value = Felt;
+        fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Felt, D::Error> {
+            deserializer.deserialize_str(WireFeltVisitor)
+        }
+    }
+
+    struct WireFeltVecVisitor;
+    impl<'de> serde::de::Visitor<'de> for WireFeltVecVisitor {
+        type Value = Vec<Felt>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "a sequence of decimal felt252 strings")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Vec<Felt>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(felt) = seq.next_element_seed(WireFeltSeed)? {
+                out.push(felt);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(WireFeltVecVisitor)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

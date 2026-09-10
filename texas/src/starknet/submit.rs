@@ -20,15 +20,8 @@ use poker_texas_air::starknet_settlement::{
 use starknet::accounts::Account;
 use starknet::core::types::{Call, Felt};
 use starknet::core::utils::starknet_keccak;
-use starknet_ff::FieldElement as Ff;
 
 use super::mirror::TableMirror;
-
-/// starknet-ff (0.3) FieldElement → starknet (0.13) Felt 的别名。
-/// 两者均为 32 字节大端模元素，逐字节拷贝即可。
-fn scale_felt(f: Ff) -> Felt {
-    ff_to_felt(f)
-}
 
 /// 一手牌的完整结算产物。
 pub struct HandSettlement {
@@ -41,17 +34,17 @@ pub struct HandSettlement {
     /// 聚合摘要（32 字节大端）。
     pub aggregate_digest: [u8; 32],
     /// 重映射后的参与者（真实钱包 felt，settle 顺序）——Hand-batch 路径复用。
-    pub players_remapped: Vec<Ff>,
+    pub players_remapped: Vec<Felt>,
     /// 与 players 对应的净输赢（零和）。
     pub deltas: Vec<i128>,
     /// 重映射后的 Poseidon 结算摘要（register root / Hand-batch 路径共用）。
-    pub settlement_digest: Ff,
+    pub settlement_digest: Felt,
     /// 本手动作日志哈希（#18 Phase C 切片 1 = Poseidon 吸收链根）：
     /// settlement digest 吸收链尾词，dapv register 承诺与 v2 公开段尾词共用。
-    pub action_log_digest: Ff,
+    pub action_log_digest: Felt,
     /// 本手动作日志词条对（每条 2 felt：[日志打包词, 合法性词]，切片 2）——
     /// 电路 30 槽重放 + "合法默认"校验的见证。
-    pub action_entries: Vec<[Ff; 2]>,
+    pub action_entries: Vec<[Felt; 2]>,
     /// G 链首 receipt 的 pre state root（hand_binding 输入）。
     pub pre_state_root: [u8; 32],
     /// G 链末 receipt 的 post state root（hand_binding 输入）。
@@ -64,8 +57,8 @@ pub struct HandSettlement {
 pub fn settle_hand(
     mirror: &TableMirror,
     rake_recipient: Option<poker_l1::Address>,
-    wallet_map: &[(poker_l1::Address, Ff)],
-    action_log_digest: Ff,
+    wallet_map: &[(poker_l1::Address, Felt)],
+    action_log_digest: Felt,
     action_log: &[crate::pokergame::actions::ActionLogEntry],
 ) -> Result<HandSettlement, String> {
     // #18 Phase C 切片 1：词条 → 电路见证词组；未知动作名/超上限在构建期拒绝。
@@ -82,7 +75,7 @@ pub fn settle_hand(
             .ok_or_else(|| format!("unknown action name {:?} in action log", entry.action))?;
         let legality = legality_word(entry)
             .ok_or_else(|| format!("unknown action name {:?} in action log", entry.action))?;
-        action_entries.push([felt_to_ff(&word), felt_to_ff(&legality)]);
+        action_entries.push([word, legality]);
     }
     if mirror.tasks.is_empty() {
         return Err("mirror has no prove tasks for this hand".into());
@@ -186,11 +179,10 @@ pub fn settle_hand(
     //     截断公式（felt 低 20 字节）唯一权威在 poker_l1
     //     caller_id::wallet_to_address（与 mirror addr_from_starknet 同源，
     //     e2e 对拍断言）；这里 felt → hex 后交由权威实现截断。
-    let remap_player = |p: Ff| -> Ff {
-        let p_felt = ff_to_felt(p);
+    let remap_player = |p: Felt| -> Felt {
         let truncated: [u8; 20] =
             poker_l1::vm::contracts::texas_poker::runtime::caller_id::wallet_to_address(
-                &format!("{p_felt:#x}"),
+                &format!("{p:#x}"),
             )
             .expect("canonical felt hex always truncates to 20 bytes");
         wallet_map
@@ -199,7 +191,7 @@ pub fn settle_hand(
             .map(|(_, wallet)| *wallet)
             .unwrap_or(p)
     };
-    let players_remapped: Vec<Ff> = settle.players().iter().map(|p| remap_player(*p)).collect();
+    let players_remapped: Vec<Felt> = settle.players().iter().map(|p| remap_player(*p)).collect();
 
     // 派彩单位换算：vault 的 chip_balance 以 STRK wei 记账（deposit 1:1 wei），
     // SettlementPlan 的 deltas 以服务端 chips（1 chip = WEI_PER_CHIP wei）计。
@@ -216,16 +208,16 @@ pub fn settle_hand(
         .collect::<Option<Vec<_>>>()
         .ok_or("delta wei overflow")?;
 
-    let mut digest_fields: Vec<Ff> = vec![Ff::from(u64::from(settle.hand_id()))];
+    let mut digest_fields: Vec<Felt> = vec![Felt::from(u64::from(settle.hand_id()))];
     for (p, d) in players_remapped.iter().zip(deltas_wei.iter()) {
         digest_fields.push(*p);
         let magnitude = u64::try_from(d.unsigned_abs()).map_err(|_| "delta magnitude overflow")?;
         if *d >= 0 {
-            digest_fields.push(Ff::from(1u64));
+            digest_fields.push(Felt::from(1u64));
         } else {
-            digest_fields.push(Ff::from(0u64));
+            digest_fields.push(Felt::from(0u64));
         }
-        digest_fields.push(Ff::from(magnitude));
+        digest_fields.push(Felt::from(magnitude));
     }
     // #18 Phase B：动作日志哈希为吸收链尾词（与合约 compute_settlement_digest
     // 及 settlement_private 电路同公式）。
@@ -241,7 +233,7 @@ pub fn settle_hand(
     )
     .map_err(|e| format!("RegisterAggregateCalldata::new failed: {e}"))?;
 
-    let register_calldata = register.to_felts().iter().map(|f| ff_to_felt(*f)).collect();
+    let register_calldata = register.to_felts();
     let settle_calldata = build_settle_calldata(digest, &settle, &players_remapped, &deltas_wei);
 
     // G 链首尾 state root（hand_binding 的输入）：首 receipt 的 pre、
@@ -282,20 +274,20 @@ pub fn settle_hand(
 fn build_settle_calldata(
     digest: [u8; 32],
     settle: &SettleHandCalldata,
-    players: &[Ff],
+    players: &[Felt],
     deltas_wei: &[i128],
 ) -> Vec<Felt> {
     let felts = AggregateDigestFelts::split(&digest).expect("32-byte digest always splits");
     let mut out = Vec::with_capacity(5 + players.len() * 2);
-    out.push(scale_felt(felts.hi));
-    out.push(scale_felt(felts.lo));
+    out.push(felts.hi);
+    out.push(felts.lo);
     out.push(Felt::from(settle.hand_id()));
     // #18 Phase B：legacy settle_hand 的动作日志哈希标量（hand_id 之后）。
-    out.push(ff_to_felt(settle.action_log_digest()));
+    out.push(settle.action_log_digest());
     out.push(Felt::from(players.len() as u64));
-    out.extend(players.iter().map(|p| scale_felt(*p)));
+    out.extend(players.iter().copied());
     out.push(Felt::from(deltas_wei.len() as u64));
-    out.extend(deltas_wei.iter().map(|d| scale_felt(i128_to_ff(*d))));
+    out.extend(deltas_wei.iter().map(|d| i128_to_felt(*d)));
     out
 }
 
@@ -385,23 +377,13 @@ pub async fn submit_settlement(
     Ok((register_hash, settle_hash))
 }
 
-/// starknet-ff (0.3) FieldElement → starknet (0.13) Felt。两者均为 32 字节大端。
-pub fn ff_to_felt(f: Ff) -> Felt {
-    Felt::from_bytes_be(&f.to_bytes_be())
-}
-
-/// starknet (0.13) Felt → starknet-ff (0.3) FieldElement。
-pub fn felt_to_ff(f: &Felt) -> Ff {
-    Ff::from_bytes_be(&f.to_bytes_be()).expect("any 32-byte value is a canonical felt252")
-}
-
-/// i128 → starknet-ff（负数取模补，与合约 `from_felt_signed_i128` 对齐；
+/// i128 → felt（负数取模补，与合约 `from_felt_signed_i128` 对齐；
 /// poker_texas_air::starknet_settlement::i128_to_felt 为私有，这里按同一语义实现）。
-pub fn i128_to_ff(value: i128) -> Ff {
+pub fn i128_to_felt(value: i128) -> Felt {
     if value >= 0 {
-        Ff::from(value.unsigned_abs())
+        Felt::from(value.unsigned_abs())
     } else {
-        -Ff::from(value.unsigned_abs())
+        -Felt::from(value.unsigned_abs())
     }
 }
 
@@ -528,11 +510,11 @@ mod tests {
 
     #[test]
     fn i128_felt_roundtrip_semantics() {
-        let pos = i128_to_ff(42);
-        assert_eq!(pos, Ff::from(42_u64));
-        let neg = i128_to_ff(-42);
+        let pos = i128_to_felt(42);
+        assert_eq!(pos, Felt::from(42_u64));
+        let neg = i128_to_felt(-42);
         // -42 mod P ≈ P - 42，非零且与 +42 不同。
-        assert_ne!(neg, Ff::from(42_u64));
-        assert_ne!(neg, Ff::ZERO);
+        assert_ne!(neg, Felt::from(42_u64));
+        assert_ne!(neg, Felt::ZERO);
     }
 }

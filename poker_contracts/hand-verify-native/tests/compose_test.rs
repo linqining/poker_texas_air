@@ -51,13 +51,12 @@ fn form2_composed_roundtrip() {
 fn form2_rejects_unverifiable_payload() {
     // 2 ownership statements whose scalars are inconsistent (minted honest
     // payload with a tampered response word) — mint manually.
-    use starknet_ff::FieldElement as Felt;
+    use starknet_crypto::Felt;
 
-    let hb_core = starknet_crypto::poseidon_hash_many(&[
-        starknet_crypto::Felt::from(702u64),
-        starknet_crypto::Felt::from(0xB16Du64),
+    let hb = starknet_crypto::poseidon_hash_many(&[
+        Felt::from(702u64),
+        Felt::from(0xB16Du64),
     ]);
-    let hb = Felt::from_bytes_be(&hb_core.to_bytes_be()).expect("binding < P");
     let mut payload =
         hand_verify_native::mint::mint_hand(hb, 2, 0, 0, 0, 0, 702);
     // v3 头 6 词（n_own..n_action），首条 ownership = [pkx, pky, rx, ry, s]，

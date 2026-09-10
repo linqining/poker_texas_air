@@ -343,7 +343,7 @@ impl CreateTableRow {
 /// domain-separated and collision resistant rather than a truncation. The full value must also
 /// be bound through canonical public inputs.
 #[must_use]
-pub fn field_to_m31_limbs(f: starknet_ff::FieldElement) -> [M31; 4] {
+pub fn field_to_m31_limbs(f: starknet_crypto::Felt) -> [M31; 4] {
     crate::state_root::state_root_to_air_limbs(crate::state_root::StateRoot::from_field(f))
 }
 

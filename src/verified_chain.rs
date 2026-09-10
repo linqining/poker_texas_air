@@ -10,7 +10,7 @@
 //! process.  It is not transferable evidence that an Aggregator STARK verified
 //! its children; the current recursive backend does not provide that circuit.
 
-use starknet_ff::FieldElement;
+use starknet_crypto::Felt;
 
 use crate::airs::TexasAir;
 use crate::error::{TexasAirError, TexasAirResult};
@@ -159,7 +159,7 @@ pub struct VerificationReceipt {
     pre_version: u64,
     post_version: u64,
     dispatch_call_digest: [u8; 32],
-    proof_commitments: Vec<FieldElement>,
+    proof_commitments: Vec<Felt>,
     log_size: u32,
     num_columns: usize,
 }
@@ -222,7 +222,7 @@ impl VerificationReceipt {
 
     /// Commitment roots of the method proof accepted by the native verifier.
     #[must_use]
-    pub fn proof_commitments(&self) -> &[FieldElement] {
+    pub fn proof_commitments(&self) -> &[Felt] {
         &self.proof_commitments
     }
 
@@ -258,7 +258,15 @@ pub(crate) fn verify_method_against_and_issue_receipt<A>(
 where
     A: TexasAir,
 {
-    let proof_commitments = proof.stark_proof.commitments.to_vec();
+    // stwo 的 Poseidon252MerkleHasher 哈希类型仍是旧 ff 库的 FieldElement
+    // （stwo 2.3 内部类型，见根 Cargo.toml 注释）；逐字节拷贝为本仓统一的
+    // starknet_crypto::Felt（同一 felt252 值，无语义变化）。
+    let proof_commitments = proof
+        .stark_proof
+        .commitments
+        .iter()
+        .map(|f| Felt::from_bytes_be(&f.to_bytes_be()))
+        .collect();
     let log_size = expected_air.log_size();
     let num_columns = expected_air.trace_num_columns();
 
@@ -286,7 +294,7 @@ where
 /// issuance must remain one operation at the public API boundary.
 pub(crate) fn issue_tagged_batch_receipt(
     task: &crate::prove_task::ProveTask,
-    proof_commitments: Vec<FieldElement>,
+    proof_commitments: Vec<Felt>,
     log_size: u32,
     num_columns: usize,
 ) -> TexasAirResult<VerificationReceipt> {
@@ -527,7 +535,7 @@ impl VerificationReceipt {
             pre_version: u64::from(call_seq),
             post_version: u64::from(call_seq) + 1,
             dispatch_call_digest: [call_seq as u8; 32],
-            proof_commitments: vec![FieldElement::from(u64::from(call_seq) + 1)],
+            proof_commitments: vec![Felt::from(u64::from(call_seq) + 1)],
             log_size: 10,
             num_columns: 1,
         }
@@ -607,15 +615,15 @@ mod tests {
     ) -> VerificationReceipt {
         VerificationReceipt {
             kind: MethodKind::Check,
-            pre_state_root: StateRoot::from_field(FieldElement::from(pre)),
-            post_state_root: StateRoot::from_field(FieldElement::from(post)),
+            pre_state_root: StateRoot::from_field(Felt::from(pre)),
+            post_state_root: StateRoot::from_field(Felt::from(post)),
             table_id,
             hand_id,
             call_seq,
             pre_version: u64::from(call_seq),
             post_version: u64::from(call_seq) + 1,
             dispatch_call_digest: [call_seq as u8; 32],
-            proof_commitments: vec![FieldElement::from(call_seq as u64 + 1)],
+            proof_commitments: vec![Felt::from(call_seq as u64 + 1)],
             log_size: 10,
             num_columns: 1,
         }
@@ -644,8 +652,8 @@ mod tests {
             7,
             3,
             10,
-            StateRoot::from_field(FieldElement::from(100u64)),
-            StateRoot::from_field(FieldElement::from(102u64)),
+            StateRoot::from_field(Felt::from(100u64)),
+            StateRoot::from_field(Felt::from(102u64)),
             10,
             12,
             vec![[10; 32], [11; 32]],
@@ -665,8 +673,8 @@ mod tests {
             7,
             3,
             10,
-            StateRoot::from_field(FieldElement::from(100u64)),
-            StateRoot::from_field(FieldElement::from(101u64)),
+            StateRoot::from_field(Felt::from(100u64)),
+            StateRoot::from_field(Felt::from(101u64)),
             10,
             11,
             vec![[10; 32]],
@@ -678,8 +686,8 @@ mod tests {
             7,
             3,
             10,
-            StateRoot::from_field(FieldElement::from(100u64)),
-            StateRoot::from_field(FieldElement::from(102u64)),
+            StateRoot::from_field(Felt::from(100u64)),
+            StateRoot::from_field(Felt::from(102u64)),
             10,
             12,
             vec![[10; 32], [99; 32]],
@@ -690,7 +698,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_or_overflowing_anchor_ranges() {
-        let root = StateRoot::from_field(FieldElement::ONE);
+        let root = StateRoot::from_field(Felt::ONE);
         assert!(ExpectedChainAnchor::new(7, 3, 0, root, root, 0, 0, vec![]).is_err());
         assert!(
             ExpectedChainAnchor::new(7, 3, u32::MAX, root, root, 0, 0, vec![[1; 32], [2; 32]],)

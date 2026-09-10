@@ -39,14 +39,15 @@ starknet = "0.17"
 url = "2"
 clap = { version = "4", features = ["derive"] }
 borsh = "1.5"
-starknet-ff = "0.3"
 # Poseidon（Plan D v2 reveal_commitment + settlement digest 重算）。
-# 保持 0.6（Felt = starknet-ff FieldElement，与既有 calldata 类型一致）；
-# Poseidon 规格跨版本一致，与 poker-protocol-core 的 0.8.1 结果相同。
-starknet-crypto = "0.6"
-# STARK 曲线参数（BETA）与 types-core Felt：P 层认可点解析/校验
+# 全仓统一 0.8：Felt = starknet-types-core Felt，与 starknet 0.17 的
+# types::Felt、poker_texas_air / hand-verify-native 的公开类型同一实例，
+# 无跨 Felt 桥。Poseidon 规格跨版本一致（golden vectors 自证）。
+starknet-crypto = { workspace = true }
+# STARK 曲线参数（BETA）：0.6 的 API 即 types-core Felt（纯常量表，与
+# Felt 迁移无关）；types-core 按需直接引用（dual_settle 的点解析）。
 starknet-curve = "0.6"
-starknet-types-core = "0.2"
+starknet-types-core = { workspace = true }
 rand_core = "0.6"
 
 [features]

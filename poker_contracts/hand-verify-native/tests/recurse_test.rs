@@ -87,18 +87,13 @@ fn recursion_rejects_forged_prev_acc() {
 /// mirror itself, cheap — no proving involved).
 #[test]
 fn recursion_fold_accumulator_sensitivity() {
-    // Wire felt（starknet-ff）边界；poseidon 内核是 starknet-crypto 0.8 的
-    // types-core Felt——经字节桥后同一值（golden vectors 钉死跨版本一致）。
-    use starknet_ff::FieldElement as Felt;
-    let a = Felt::from(11u32);
-    let b = Felt::from(22u32);
+    let a = starknet_crypto::Felt::from(11u32);
+    let b = starknet_crypto::Felt::from(22u32);
     assert_ne!(fold_accumulator(GENESIS_ACC, &[a, b]), fold_accumulator(GENESIS_ACC, &[b, a]));
     assert_ne!(fold_accumulator(GENESIS_ACC, &[a]), fold_accumulator(a, &[GENESIS_ACC]));
     // The empty batch folds to poseidon([prev_acc]) on both sides — the host
     // mirror matches the Cairo formula even at degenerate inputs.
-    let genesis_core =
-        starknet_crypto::Felt::from_bytes_be(&GENESIS_ACC.to_bytes_be());
-    let empty = starknet_crypto::poseidon_hash_many(&[genesis_core]);
+    let empty = starknet_crypto::poseidon_hash_many(&[GENESIS_ACC]);
     assert_eq!(
         fold_accumulator(GENESIS_ACC, &[]).to_bytes_be(),
         empty.to_bytes_be()

@@ -259,7 +259,7 @@ fn normalize_wallet(w: &str) -> String {
 }
 
 /// 钱包 felt → `0x` 前缀全 64 位 hex（hooks / dual_settle 的结算参与者键）。
-pub(crate) fn wallet_of_felt(p: &starknet_ff::FieldElement) -> String {
+pub(crate) fn wallet_of_felt(p: &starknet_crypto::Felt) -> String {
     format!("0x{}", super::chain::hex_encode(&p.to_bytes_be()))
 }
 

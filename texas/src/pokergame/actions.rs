@@ -199,17 +199,9 @@ pub fn action_log_digest_felt(log: &[ActionLogEntry]) -> starknet::core::types::
         // 游戏层接受路径只记录四个规范动作名；未知名 = 内部不变量破坏，fail-loud。
         fields.push(action_entry_word(e).expect("known action name"));
     }
-    // starknet（types::Felt）与 starknet-crypto（FieldElement）的类型桥：
-    // 同为 32 字节大端模元素，逐字节拷贝即同值（submit.rs 同款换算）。
-    let crypto_fields: Vec<starknet_crypto::FieldElement> = fields
-        .iter()
-        .map(|f| {
-            starknet_crypto::FieldElement::from_bytes_be(&f.to_bytes_be())
-                .expect("canonical felt")
-        })
-        .collect();
-    let digest = starknet_crypto::poseidon_hash_many(&crypto_fields);
-    starknet::core::types::Felt::from_bytes_be(&digest.to_bytes_be())
+    // starknet（types::Felt）与 starknet-crypto 0.8 的 Felt 同为 types-core
+    // Felt——类型同一，直接吸收。
+    starknet_crypto::poseidon_hash_many(&fields)
 }
 
 /// [`action_log_digest_felt`] 的 hex 形态（日志/看板展示用）。
@@ -285,11 +277,7 @@ mod auto_action_tests {
         for e in &log {
             fields.push(action_entry_word(e).expect("known action"));
         }
-        let crypto: Vec<starknet_crypto::FieldElement> = fields.iter()
-            .map(|f| starknet_crypto::FieldElement::from_bytes_be(&f.to_bytes_be()).expect("canonical"))
-            .collect();
-        let expected = starknet_crypto::poseidon_hash_many(&crypto);
-        let expected = starknet::core::types::Felt::from_bytes_be(&expected.to_bytes_be());
+        let expected = starknet_crypto::poseidon_hash_many(&fields);
         assert_eq!(action_log_digest_felt(&log), expected);
         // 域标签单独成链（空日志确定值）。
         assert_ne!(action_log_digest_felt(&log), action_log_digest_felt(&[]));

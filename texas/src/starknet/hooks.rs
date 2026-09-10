@@ -189,8 +189,7 @@ async fn settle_from_live_mirror(
 
     // #18 Phase B/C：game 层产出的本手动作日志（词条 + Poseidon 链根）——
     // 根词进 settlement digest 尾词，词条进电路见证。
-    let action_log_digest = starknet_ff::FieldElement::from_bytes_be(&input.action_log_digest)
-        .expect("action log digest is a canonical felt");
+    let action_log_digest = starknet_crypto::Felt::from_bytes_be(&input.action_log_digest);
     // settle_hand 为同步 CPU 重活（prove 约 2s/手），按其调用方约定放
     // spawn_blocking，避免占死一个 tokio worker。mirror 移入闭包借用后
     // 原样带回（后续还要进 PENDING_SETTLE）。action_log 只克隆不 take：
@@ -398,7 +397,7 @@ async fn submit_dual_fallback(
     }
     // P-batch 词条：每参与者一条操作员自铸 endorsement（与 e2e 冒烟一致；
     // 认可退役后合约只折叠方程形状，不再约束签名主体）。
-    let produce = |hb: &[u8; 32], _players: &[starknet_ff::FieldElement]| {
+    let produce = |hb: &[u8; 32], _players: &[starknet_crypto::Felt]| {
         let mut out = Vec::new();
         for _ in 0.._players.len() {
             let sk = <super::dual_settle::Sc as poker_protocol::crypto::curve::CurveScalar>::random(
@@ -512,16 +511,16 @@ pub(crate) fn cross_check_snapshot(
 /// 此前只查 board/total_bet/rake 的缺口：双 evaluator 的 tie-break 分歧
 /// 在此显式暴露，不再静默上链）。
 pub(crate) fn cross_check_deltas(
-    players: &[starknet_ff::FieldElement],
+    players: &[starknet_crypto::Felt],
     deltas: &[i128],
     input: &super::prove_log::HandSettleInput,
 ) -> Result<(), String> {
     use std::collections::HashMap;
-    let felt_of = |wallet: &str| -> Option<starknet_ff::FieldElement> {
-        super::chain::parse_felt(wallet).map(|f| super::submit::felt_to_ff(&f))
+    let felt_of = |wallet: &str| -> Option<starknet_crypto::Felt> {
+        super::chain::parse_felt(wallet)
     };
     let rake = input.rake_collected as i128;
-    let mut expected: HashMap<starknet_ff::FieldElement, i128> = HashMap::new();
+    let mut expected: HashMap<starknet_crypto::Felt, i128> = HashMap::new();
     for (wallet, bet) in &input.total_bets {
         if let Some(f) = felt_of(wallet) {
             *expected.entry(f).or_insert(0) -= *bet as i128;
@@ -590,14 +589,14 @@ fn refuse_settlement(table_id: u32, hand_id: u32, reason: &str) {
 
 /// 本手完整钱包映射：参与者（来自 HandStart 记录）+ treasury，
 /// 供 settle_hand 把 20 字节座位地址重映射回全精度 felt 记账。
-fn hand_wallet_map(start: &super::prove_log::HandStartData) -> Vec<(poker_l1::Address, starknet_ff::FieldElement)> {
-    let mut out: Vec<(poker_l1::Address, starknet_ff::FieldElement)> = start
+fn hand_wallet_map(start: &super::prove_log::HandStartData) -> Vec<(poker_l1::Address, starknet_crypto::Felt)> {
+    let mut out: Vec<(poker_l1::Address, starknet_crypto::Felt)> = start
         .participants
         .iter()
         .filter_map(|p| {
             let addr = TableMirror::addr_from_starknet(&p.wallet)?;
             let felt = super::chain::parse_felt(&p.wallet)?;
-            Some((addr, super::submit::felt_to_ff(&felt)))
+            Some((addr, felt))
         })
         .collect();
     if let Ok(set) = TREASURY_WALLETS.lock() {
@@ -606,7 +605,7 @@ fn hand_wallet_map(start: &super::prove_log::HandStartData) -> Vec<(poker_l1::Ad
                 TableMirror::addr_from_starknet(w),
                 super::chain::parse_felt(w),
             ) {
-                out.push((a, super::submit::felt_to_ff(&f)));
+                out.push((a, f));
             }
         }
     }
@@ -699,7 +698,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// 结算成功后续各参与者的 #33 session 时钟（owner=operator，逐人独立
 /// 交易，失败仅告警）。必须每手刷新：TTL（12h）从最后一次活动计时，
 /// 停刷即触发玩家无许可自助解锁。
-async fn refresh_settlement_sessions(players_remapped: &[starknet_ff::FieldElement]) {
+async fn refresh_settlement_sessions(players_remapped: &[starknet_crypto::Felt]) {
     for p in players_remapped {
         let wallet = format!("0x{}", hex_encode(&p.to_bytes_be()));
         super::lock::refresh_player_session(&wallet).await;
@@ -730,9 +729,8 @@ mod delta_parity_tests {
     const P2: &str = "0x0a22";
     const TREASURY: &str = "0x0bee";
 
-    fn ff(hex: &str) -> starknet_ff::FieldElement {
-        let f = crate::starknet::chain::parse_felt(hex).expect("test wallet parses");
-        crate::starknet::submit::felt_to_ff(&f)
+    fn ff(hex: &str) -> starknet_crypto::Felt {
+        crate::starknet::chain::parse_felt(hex).expect("test wallet parses")
     }
 
     fn input_with(
@@ -797,7 +795,7 @@ mod delta_parity_tests {
     #[test]
     fn parity_ok_when_zero_delta_player_omitted() {
         let input = input_with(vec![(P1, 100)], vec![(P1, 100)], 0);
-        let players: Vec<starknet_ff::FieldElement> = Vec::new();
+        let players: Vec<starknet_crypto::Felt> = Vec::new();
         let deltas: Vec<i128> = Vec::new();
         assert!(cross_check_deltas(&players, &deltas, &input).is_ok());
     }
@@ -826,7 +824,7 @@ mod delta_parity_tests {
     #[test]
     fn parity_rejects_missing_player() {
         let input = input_with(vec![(P1, 100)], vec![(P1, 240)], 10);
-        let players: Vec<starknet_ff::FieldElement> = Vec::new();
+        let players: Vec<starknet_crypto::Felt> = Vec::new();
         let deltas: Vec<i128> = Vec::new();
         let err = cross_check_deltas(&players, &deltas, &input).unwrap_err();
         assert!(err.contains("not settled on-chain"), "{err}");

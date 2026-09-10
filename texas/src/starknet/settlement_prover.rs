@@ -16,14 +16,12 @@
 //! 推导，任何不匹配/失败都只告警（结算路径不由本模块决定）。
 
 use starknet::core::utils::starknet_keccak;
-use starknet_ff::FieldElement as Ff;
-
-use super::submit::ff_to_felt;
+use starknet_crypto::Felt;
 
 /// 参与者上限（与根 crate / Cairo 电路一致）。
 pub const MAX_PARTICIPANTS: usize = 8;
 /// Cairo 电路的 Magic 标记（'SP2M_OK' = 0x5350324d5f4f4b）。
-pub fn prove_magic() -> Ff {
+pub fn prove_magic() -> Felt {
     const BYTES: [u8; 32] = {
         let mut b = [0u8; 32];
         // 'SP2M_OK' = 0x5350324d5f4f4b（大端尾对齐）
@@ -36,7 +34,17 @@ pub fn prove_magic() -> Ff {
         b[31] = 0x4b;
         b
     };
-    Ff::from_bytes_be(&BYTES).expect("canonical magic")
+    Felt::from_bytes_be(&BYTES)
+}
+
+/// 32 字节 wire 词 → felt。types-core 的 `from_bytes_be` 无失败路径
+/// （≥ P 输入静默归约），沿用原 Result 语义：非 canonical 输入拒绝。
+fn wire_felt(bytes: &[u8; 32]) -> Result<Felt, String> {
+    let felt = Felt::from_bytes_be(bytes);
+    if felt.to_bytes_be() != *bytes {
+        return Err("felt not in felt252 range".to_string());
+    }
+    Ok(felt)
 }
 
 /// 证明请求（明文只在 operator 主机内存在）。
@@ -66,12 +74,12 @@ pub struct SettlementPrivateRequest {
 /// settlement_digest 逐字节一致）。
 pub fn build_request(
     hand_id: u32,
-    hand_binding: Ff,
-    players: &[Ff],
+    hand_binding: Felt,
+    players: &[Felt],
     deltas_wei: &[i128],
     commitments: &[[u8; 32]; MAX_PARTICIPANTS],
-    action_log_digest: Ff,
-    action_entries: &[[Ff; 2]],
+    action_log_digest: Felt,
+    action_entries: &[[Felt; 2]],
 ) -> Result<SettlementPrivateRequest, String> {
     use crate::pokergame::actions::ACTION_LOG_MAX_ENTRIES;
     if action_entries.len() > ACTION_LOG_MAX_ENTRIES {
@@ -120,11 +128,11 @@ pub fn build_request(
     // 2026-09-06 修复：按**实际参与人数**折叠（此前补零到 8 槽，n<8 时
     // segment 摘要与链上注册值必然不匹配 → 零明文结算 revert）。
     let mut fields = Vec::with_capacity(2 + 3 * players.len());
-    fields.push(Ff::from(hand_id));
+    fields.push(Felt::from(hand_id));
     for i in 0..players.len() {
-        fields.push(Ff::from_bytes_be(&padded_players[i]).map_err(|e| e.to_string())?);
-        fields.push(Ff::from(u64::from(signs[i])));
-        fields.push(Ff::from(magnitudes[i]));
+        fields.push(wire_felt(&padded_players[i])?);
+        fields.push(Felt::from(u64::from(signs[i])));
+        fields.push(Felt::from(magnitudes[i]));
     }
     fields.push(action_log_digest);
     let registered_digest = starknet_crypto::poseidon_hash_many(&fields).to_bytes_be();
@@ -149,7 +157,7 @@ pub fn build_request(
 /// async 读取赢家 payout commitment（vault.payout_commitment）。
 /// 非赢家槽返回零；链不可用/查询失败/赢家未注册 → Err（best-effort 调用方忽略）。
 pub async fn fetch_payout_commitments(
-    players: &[Ff],
+    players: &[Felt],
     deltas_wei: &[i128],
 ) -> Result<[[u8; 32]; MAX_PARTICIPANTS], String> {
     let chain = super::chain().ok_or("starknet chain not initialized")?;
@@ -163,14 +171,14 @@ pub async fn fetch_payout_commitments(
             continue;
         }
         let felts = chain
-            .call_contract(vault_addr, selector, vec![ff_to_felt(player)])
+            .call_contract(vault_addr, selector, vec![player])
             .await
             .map_err(|e| format!("payout_commitment query failed for {player:#x}: {e}"))?;
         let value = felts.first().copied().ok_or("empty payout_commitment result")?;
         if value == starknet::core::types::Felt::ZERO {
             return Err(format!("winner {player:#x} has no payout commitment"));
         }
-        commitments[i] = super::submit::felt_to_ff(&value).to_bytes_be();
+        commitments[i] = value.to_bytes_be();
     }
     Ok(commitments)
 }
@@ -178,39 +186,39 @@ pub async fn fetch_payout_commitments(
 impl SettlementPrivateRequest {
     /// Cairo `main` 的 37 个入参（顺序与 settlement_private.cairo 签名一致；
     /// 第 37 = 动作日志哈希，#18 Phase B）。
-    pub fn inputs_felts(&self) -> Vec<Ff> {
+    pub fn inputs_felts(&self) -> Vec<Felt> {
         let mut felts = Vec::with_capacity(5 + 4 * MAX_PARTICIPANTS);
-        felts.push(Ff::from(self.hand_id));
-        felts.push(Ff::from_bytes_be(&self.registered_digest).expect("canonical digest"));
-        felts.push(Ff::from(self.n_participants));
-        felts.push(Ff::from_bytes_be(&self.hand_binding).expect("canonical binding"));
+        felts.push(Felt::from(self.hand_id));
+        felts.push(wire_felt(&self.registered_digest).expect("canonical digest"));
+        felts.push(Felt::from(self.n_participants));
+        felts.push(wire_felt(&self.hand_binding).expect("canonical binding"));
         for player in &self.players {
-            felts.push(Ff::from_bytes_be(player).expect("canonical player"));
+            felts.push(wire_felt(player).expect("canonical player"));
         }
         for sign in &self.signs {
-            felts.push(Ff::from(u64::from(*sign)));
+            felts.push(Felt::from(u64::from(*sign)));
         }
         for magnitude in &self.magnitudes {
-            felts.push(Ff::from(*magnitude));
+            felts.push(Felt::from(*magnitude));
         }
         for commitment in &self.commitments {
-            felts.push(Ff::from_bytes_be(commitment).expect("canonical commitment"));
+            felts.push(wire_felt(commitment).expect("canonical commitment"));
         }
         felts.push(
-            Ff::from_bytes_be(&self.action_log_digest).expect("canonical action log digest"),
+            wire_felt(&self.action_log_digest).expect("canonical action log digest"),
         );
         // #18 Phase C 切片 2：词条区 = [count] ++ 30×[日志词, 合法性词]
         // （不足补零）——与 Cairo 电路 main 签名逐位对齐（参数上限 100 实测）。
         use crate::pokergame::actions::ACTION_LOG_MAX_ENTRIES;
         let count = self.action_entries.len() / 2; // 扁平存储：2 词/词条
-        felts.push(Ff::from(count as u64));
+        felts.push(Felt::from(count as u64));
         for slot in 0..ACTION_LOG_MAX_ENTRIES {
             let pair = match self.action_entries.get(slot * 2..slot * 2 + 2) {
                 Some(pair) => [pair[0], pair[1]],
                 None => [[0u8; 32]; 2],
             };
             for word in pair {
-                felts.push(Ff::from_bytes_be(&word).expect("canonical action word"));
+                felts.push(wire_felt(&word).expect("canonical action word"));
             }
         }
         felts
@@ -229,17 +237,17 @@ impl SettlementPrivateRequest {
     /// 本地推导赢家认领承诺（与合约公式一致：
     /// `cm = poseidon([commitment, hand_binding, amount_lo, amount_hi])`）。
     pub fn derive_claim_cms(&self) -> Vec<[u8; 32]> {
-        let binding = Ff::from_bytes_be(&self.hand_binding).expect("canonical binding");
+        let binding = wire_felt(&self.hand_binding).expect("canonical binding");
         (0..MAX_PARTICIPANTS)
             .map(|i| {
                 if self.signs[i] == 1 && self.magnitudes[i] != 0 {
                     let commitment =
-                        Ff::from_bytes_be(&self.commitments[i]).expect("canonical commitment");
+                        wire_felt(&self.commitments[i]).expect("canonical commitment");
                     starknet_crypto::poseidon_hash_many(&[
                         commitment,
                         binding,
-                        Ff::from(self.magnitudes[i]),
-                        Ff::ZERO,
+                        Felt::from(self.magnitudes[i]),
+                        Felt::ZERO,
                     ])
                     .to_bytes_be()
                 } else {
@@ -253,24 +261,24 @@ impl SettlementPrivateRequest {
     /// cm_0..cm_7, total_winnings, action_log_digest]`（15 felt）——v2 合约
     /// 托管金额 = total_winnings（电路内累加），尾词对注册的动作日志承诺
     /// 逐 felt 比对（#18 Phase B）。
-    pub fn public_segment_felts(&self) -> Vec<Ff> {
+    pub fn public_segment_felts(&self) -> Vec<Felt> {
         let mut segment = vec![
             prove_magic(),
-            Ff::from(self.hand_id),
-            Ff::from_bytes_be(&self.registered_digest).expect("canonical digest"),
-            Ff::from(self.n_participants),
-            Ff::from_bytes_be(&self.hand_binding).expect("canonical binding"),
+            Felt::from(self.hand_id),
+            wire_felt(&self.registered_digest).expect("canonical digest"),
+            Felt::from(self.n_participants),
+            wire_felt(&self.hand_binding).expect("canonical binding"),
         ];
         let mut total_winnings: u64 = 0;
         for (index, cm) in self.derive_claim_cms().iter().enumerate() {
-            segment.push(Ff::from_bytes_be(cm).expect("canonical cm"));
+            segment.push(wire_felt(cm).expect("canonical cm"));
             if self.signs[index] == 1 && self.magnitudes[index] != 0 {
                 total_winnings = total_winnings.saturating_add(self.magnitudes[index]);
             }
         }
-        segment.push(Ff::from(total_winnings));
+        segment.push(Felt::from(total_winnings));
         segment.push(
-            Ff::from_bytes_be(&self.action_log_digest).expect("canonical action log digest"),
+            wire_felt(&self.action_log_digest).expect("canonical action log digest"),
         );
         segment
     }
@@ -288,7 +296,7 @@ impl SettlementPrivateRequest {
     /// `register_settlement_fact` 登记，`..._v2` 结算入口校验。
     #[cfg(test)]
     pub fn settlement_fact(&self, circuit_program_hash: [u8; 32]) -> Result<[u8; 32], String> {
-        let ph = Ff::from_bytes_be(&circuit_program_hash).map_err(|e| e.to_string())?;
+        let ph = wire_felt(&circuit_program_hash)?;
         let mut fields = vec![ph];
         fields.extend(self.public_segment_felts());
         Ok(starknet_crypto::poseidon_hash_many(&fields).to_bytes_be())
@@ -304,7 +312,7 @@ pub fn export_settlement_private_inputs(
     let path = dir.join(format!(
         "settlement-private-{}-{:x}.inputs.json",
         req.hand_id,
-        Ff::from_bytes_be(&req.hand_binding).ok()?
+        wire_felt(&req.hand_binding).ok()?
     ));
     let result = std::fs::create_dir_all(dir)
         .and_then(|_| std::fs::write(&path, req.inputs_json()));
@@ -323,11 +331,11 @@ pub fn export_settlement_private_inputs(
 /// 从链上结算明文一步构建请求（ commitments 由 vault async 读取）。
 pub async fn prepare_request(
     hand_id: u32,
-    hand_binding: Ff,
-    players: &[Ff],
+    hand_binding: Felt,
+    players: &[Felt],
     deltas_wei: &[i128],
-    action_log_digest: Ff,
-    action_entries: &[[Ff; 2]],
+    action_log_digest: Felt,
+    action_entries: &[[Felt; 2]],
 ) -> Result<SettlementPrivateRequest, String> {
     let commitments = fetch_payout_commitments(players, deltas_wei).await?;
     build_request(
@@ -435,18 +443,18 @@ impl HttpSettlementProver {
 mod tests {
     use super::*;
 
-    fn sample_felt(seed: u8) -> Ff {
+    fn sample_felt(seed: u8) -> Felt {
         let mut bytes = [0u8; 32];
         bytes[31] = seed;
-        Ff::from_bytes_be(&bytes).expect("canonical")
+        Felt::from_bytes_be(&bytes)
     }
 
     fn sample_felt_bytes(seed: u8) -> [u8; 32] {
         sample_felt(seed).to_bytes_be()
     }
 
-    fn sample_entries() -> Vec<[Ff; 2]> {
-        vec![[sample_felt(0xB1), Ff::ZERO], [sample_felt(0xB2), sample_felt(0xB3)]]
+    fn sample_entries() -> Vec<[Felt; 2]> {
+        vec![[sample_felt(0xB1), Felt::ZERO], [sample_felt(0xB2), sample_felt(0xB3)]]
     }
 
     fn sample_request() -> SettlementPrivateRequest {
@@ -472,28 +480,28 @@ mod tests {
         let felts = req.inputs_felts();
         // 37 标量 + 1 计数 + 30×2 词条槽（#18 Phase C 切片 2）。
         assert_eq!(felts.len(), 38 + 60);
-        assert_eq!(felts[0], Ff::from(42u32), "hand_id first");
-        assert_eq!(felts[1], Ff::from_bytes_be(&req.registered_digest).expect("canonical"));
-        assert_eq!(felts[2], Ff::from(3u32), "n_participants");
-        assert_eq!(felts[3], Ff::from_bytes_be(&req.hand_binding).expect("canonical"));
+        assert_eq!(felts[0], Felt::from(42u32), "hand_id first");
+        assert_eq!(felts[1], Felt::from_bytes_be(&req.registered_digest));
+        assert_eq!(felts[2], Felt::from(3u32), "n_participants");
+        assert_eq!(felts[3], Felt::from_bytes_be(&req.hand_binding));
         assert_eq!(felts[4], sample_felt(1), "p0");
         // signs 组在 players 组（8 个）之后
-        assert_eq!(felts[12], Ff::from(1u64), "s0");
-        assert_eq!(felts[13], Ff::from(0u64), "s1（负数 → 0）");
+        assert_eq!(felts[12], Felt::from(1u64), "s0");
+        assert_eq!(felts[13], Felt::from(0u64), "s1（负数 → 0）");
         // mags 组
-        assert_eq!(felts[20], Ff::from(3_000u64), "m0");
+        assert_eq!(felts[20], Felt::from(3_000u64), "m0");
         // commitments 组
         assert_eq!(felts[28], sample_felt(0x21), "c0");
         // 第 37 入参 = 动作日志哈希（#18 Phase B）
         assert_eq!(felts[36], sample_felt(0xA7), "action log digest last");
         // 词条区：count=2 + 槽 0 = [日志, 0]（非 auto）+ 槽 1 = [日志, 合法性]。
-        assert_eq!(felts[37], Ff::from(2u64), "action count");
+        assert_eq!(felts[37], Felt::from(2u64), "action count");
         assert_eq!(felts[38], sample_felt(0xB1), "entry0 log");
-        assert_eq!(felts[39], Ff::ZERO, "entry0 legality (non-auto)");
+        assert_eq!(felts[39], Felt::ZERO, "entry0 legality (non-auto)");
         assert_eq!(felts[40], sample_felt(0xB2), "entry1 log");
         assert_eq!(felts[41], sample_felt(0xB3), "entry1 legality");
-        assert_eq!(felts[42], Ff::ZERO, "padding slot starts");
-        assert_eq!(felts[37 + 60], Ff::ZERO, "last padding slot");
+        assert_eq!(felts[42], Felt::ZERO, "padding slot starts");
+        assert_eq!(felts[37 + 60], Felt::ZERO, "last padding slot");
     }
 
     #[test]
@@ -565,12 +573,12 @@ mod tests {
         let expected_cm = starknet_crypto::poseidon_hash_many(&[
             commitment,
             binding,
-            Ff::from(3_000u64),
-            Ff::ZERO,
+            Felt::from(3_000u64),
+            Felt::ZERO,
         ]);
         assert_eq!(segment[5], format!("0x{expected_cm:x}"));
         // total_winnings = Σ 赢家 |delta|（chips 口径样例 = 3000）
-        assert_eq!(segment[13], format!("0x{:x}", Ff::from(3_000u64)));
+        assert_eq!(segment[13], format!("0x{:x}", Felt::from(3_000u64)));
         // #18 Phase B：尾词 = 动作日志哈希
         assert_eq!(segment[14], format!("0x{:x}", sample_felt(0xA7)));
     }

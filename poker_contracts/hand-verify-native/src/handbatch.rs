@@ -38,32 +38,15 @@
 //! separate argument system (see the `poker-protocol-bg` port in the main
 //! project) and explicitly out of this spike's scope.
 //!
-//! Felt discipline (starknet-crypto 0.8 world): the crypto layer speaks
-//! `starknet_crypto::Felt` (= `starknet_types_core` Felt, the same instance
-//! `poker-protocol-core` uses), while the wire layer — payload words,
-//! hand bindings and digests crossing the crate boundary to texas — speaks
-//! `starknet_ff::FieldElement`, the Felt type of texas's pinned
-//! starknet-crypto 0.6. [`ff_to_felt`] / [`felt_to_ff`] bridge the two
-//! (byte-identical values; both moduli are the felt252 prime).
+//! Felt discipline (2026-09-10 全仓统一): 本模块内外只讲一种 Felt ——
+//! `starknet_crypto::Felt`（= `starknet_types_core` Felt，与
+//! poker-protocol-core、根 crate、texas starknet 0.17 的 `types::Felt`
+//! 同一类型实例）。旧 0.3 ff wire 层与 `ff_to_felt` / `felt_to_ff`
+//! 字节桥已随 texas 的 0.6→0.8 迁移一并删除。
 
 use starknet_crypto::{poseidon_hash_many, Felt};
-use starknet_ff::FieldElement as WireFelt;
 
 use crate::curve::Point;
-
-/// Wire felt (starknet-ff) → crypto felt (types-core). Infallible: every
-/// representable starknet-ff value is < P, and types-core accepts all
-/// values < P. Public for the CLI binary (a separate crate).
-pub fn ff_to_felt(w: WireFelt) -> Felt {
-    Felt::from_bytes_be(&w.to_bytes_be())
-}
-
-/// Crypto felt (types-core) → wire felt (starknet-ff). Panics only if the
-/// value were ≥ P, which Felt arithmetic makes impossible (all Felts are
-/// canonical residues mod P).
-pub fn felt_to_ff(f: Felt) -> WireFelt {
-    WireFelt::from_bytes_be(&f.to_bytes_be()).expect("felt < P by construction")
-}
 
 pub const REVEAL_LABEL: &str = "poker/reveal-token/fold-v1";
 pub const LEAVE_LABEL: &str = "poker/leave-fold/v1";
@@ -194,7 +177,6 @@ pub struct LeaveCard {
 #[cfg(test)]
 mod challenge_parity {
     use super::*;
-    use crate::mint::mint_hand;
     use num_bigint::BigUint;
     use poker_protocol_core::curve::CurveScalar;
     use poker_protocol_core::stark_curve::{
@@ -422,21 +404,21 @@ mod challenge_parity {
 
         let (pkx, pky) = pk.to_affine_parts().expect("affine pk");
         let payload = vec![
-            WireFelt::ZERO, WireFelt::ZERO, WireFelt::ZERO, WireFelt::ZERO, WireFelt::ZERO,
-            WireFelt::ONE, // n_action = 1
-            felt_to_ff(pkx),
-            felt_to_ff(pky),
-            felt_to_ff(rx),
-            felt_to_ff(ry),
-            felt_to_ff(Felt::from_bytes_be(&s.to_bytes_be())),
-            WireFelt::from(7u64), // table_id
-            WireFelt::from(42u64), // hand_id
-            WireFelt::from(1u64), // seq
-            felt_to_ff(ascii_felt("call")),
-            WireFelt::from(50u64), // amount
+            Felt::ZERO, Felt::ZERO, Felt::ZERO, Felt::ZERO, Felt::ZERO,
+            Felt::ONE, // n_action = 1
+            pkx,
+            pky,
+            rx,
+            ry,
+            Felt::from_bytes_be(&s.to_bytes_be()),
+            Felt::from(7u64), // table_id
+            Felt::from(42u64), // hand_id
+            Felt::from(1u64), // seq
+            ascii_felt("call"),
+            Felt::from(50u64), // amount
         ];
         // hand_binding 词表外（action 挑战不含 hb）——任取
-        let hb = WireFelt::from(0xABCDEFu64);
+        let hb = Felt::from(0xABCDEFu64);
         let report = verify_hand(hb, &payload).expect("parse");
         assert!(report.accepted(), "protocol-signed action must verify host-side");
         assert_eq!(report.n_action, 1);
@@ -447,31 +429,17 @@ mod challenge_parity {
         assert_raw_matches_core(c_raw, c_core);
     }
 
-    /// Wire 桥不变性：starknet-ff ↔ types-core 的字节往返必须无损（payload
-    /// 边界转换的正确性前提）。
-    #[test]
-    fn wire_felt_bridge_roundtrip() {
-        let hb = mint_hand(WireFelt::from(0xabcdefu64), 1, 0, 1, 0, 0, 11);
-        for w in hb {
-            assert_eq!(felt_to_ff(ff_to_felt(w)), w);
-        }
-    }
 }
 
 /// Payload statement order matches `hand_verify.cairo`:
 /// header `[n_own, n_shuffle, n_reveal, n_leave, n_recon, n_action]`, then ownership
 /// block, (shuffle block — fail-closed), reveal, leave, recon blocks.
 ///
-/// Wire boundary: the payload crosses the crate boundary as starknet-ff
-/// `FieldElement` felts (texas's starknet-crypto 0.6 Felt); they are bridged
-/// to the crypto felt (types-core) once, up front.
 pub fn verify_hand(
-    hand_binding: WireFelt,
-    payload: &[WireFelt],
+    hand_binding: Felt,
+    payload: &[Felt],
 ) -> Result<VerifyReport, VerifyError> {
-    let hand_binding = ff_to_felt(hand_binding);
-    let payload: Vec<Felt> = payload.iter().map(|w| ff_to_felt(*w)).collect();
-    let payload = &payload[..];
+    let payload = payload;
     if payload.len() < 6 {
         return Err(VerifyError::Truncated);
     }
@@ -770,14 +738,11 @@ pub fn hand_rho(hb: Felt, equations: &[FoldEquation]) -> Felt {
 
 /// Commitment over the full payload (header + statement words), bound into
 /// the STARK claim. `poseidon_hash_many` over `payload.len()` + all words.
-/// Wire boundary: starknet-ff in/out, bridged to the crypto felt inside.
-pub fn payload_digest(payload: &[WireFelt]) -> WireFelt {
+pub fn payload_digest(payload: &[Felt]) -> Felt {
     let mut felts = Vec::with_capacity(payload.len() + 1);
     felts.push(Felt::from(payload.len() as u64));
-    for w in payload {
-        felts.push(ff_to_felt(*w));
-    }
-    felt_to_ff(poseidon_hash_many(&felts))
+    felts.extend_from_slice(payload);
+    poseidon_hash_many(&felts)
 }
 
 #[cfg(test)]
@@ -787,7 +752,7 @@ mod tests {
 
     #[test]
     fn honest_two_player_hand_accepts() {
-        let hb = WireFelt::from(0xabcdefu64);
+        let hb = Felt::from(0xabcdefu64);
         let payload = mint_hand(hb, 2, 0, 18, 1, 1, 1);
         let report = verify_hand(hb, &payload).expect("parse");
         assert!(report.accepted());
@@ -801,10 +766,10 @@ mod tests {
 
     #[test]
     fn tampered_s_rejects() {
-        let hb = WireFelt::from(0xabcdefu64);
+        let hb = Felt::from(0xabcdefu64);
         let mut payload = mint_hand(hb, 2, 0, 4, 0, 0, 2);
         // bump the first ownership response word (header 6 + word 4)
-        payload[6 + 4] = payload[6 + 4] + WireFelt::from(1u32);
+        payload[6 + 4] = payload[6 + 4] + Felt::from(1u32);
         let report = verify_hand(hb, &payload).unwrap();
         assert!(!report.accepted());
         assert!(!report.all_residuals_identity);
@@ -812,14 +777,14 @@ mod tests {
 
     #[test]
     fn tampered_leave_card_rejects() {
-        let hb = WireFelt::from(0xabcdefu64);
+        let hb = Felt::from(0xabcdefu64);
         // layout: 5 header + own + reveal; first leave word block follows
         let mut payload = mint_hand(hb, 1, 0, 2, 1, 1, 3);
         let leave_at = 5 + 1 * WORDS_PER_OWNERSHIP + 2 * WORDS_PER_REVEAL;
         // bump the first card's `a` x-coordinate: header 7 + four 2n-word
         // sections (in_c1, in_c2, out_c1, out_c2) precede `a`
         let a_x = leave_at + WORDS_PER_LEAVE_HEADER + 8 * 2;
-        payload[a_x] = payload[a_x] + WireFelt::from(1u32);
+        payload[a_x] = payload[a_x] + Felt::from(1u32);
         // Both outcomes reject: a bumped coordinate is either off-curve
         // (parse error) or on-curve but violating the equation.
         match verify_hand(hb, &payload) {
@@ -830,36 +795,36 @@ mod tests {
 
     #[test]
     fn tampered_recon_rejects() {
-        let hb = WireFelt::from(0xabcdefu64);
+        let hb = Felt::from(0xabcdefu64);
         let mut payload = mint_hand(hb, 1, 0, 1, 0, 1, 4);
         // last word of the payload is the recon response s
         let last = payload.len() - 1;
-        payload[last] = payload[last] + WireFelt::from(1u32);
+        payload[last] = payload[last] + Felt::from(1u32);
         let report = verify_hand(hb, &payload).unwrap();
         assert!(!report.accepted());
     }
 
     #[test]
     fn cross_hand_replay_rejects() {
-        let hb = WireFelt::from(0xabcdefu64);
+        let hb = Felt::from(0xabcdefu64);
         let payload = mint_hand(hb, 2, 0, 4, 0, 0, 3);
         // same payload verified under a different hand binding must fail
-        let report = verify_hand(hb + WireFelt::from(1u32), &payload).unwrap();
+        let report = verify_hand(hb + Felt::from(1u32), &payload).unwrap();
         assert!(!report.accepted());
     }
 
     #[test]
     fn truncated_payload_rejects() {
-        let hb = WireFelt::from(0xabcdefu64);
+        let hb = Felt::from(0xabcdefu64);
         let payload = mint_hand(hb, 2, 0, 4, 0, 0, 4);
         assert_eq!(verify_hand(hb, &payload[..8]), Err(VerifyError::Truncated));
     }
 
     #[test]
     fn shuffle_section_fail_closed() {
-        let hb = WireFelt::from(0xabcdefu64);
+        let hb = Felt::from(0xabcdefu64);
         let mut payload = mint_hand(hb, 1, 0, 2, 0, 0, 5);
-        payload[1] = WireFelt::from(1u32); // n_shuffle = 1
+        payload[1] = Felt::from(1u32); // n_shuffle = 1
         assert_eq!(
             verify_hand(hb, &payload),
             Err(VerifyError::UnsupportedSection("shuffle"))
@@ -868,9 +833,9 @@ mod tests {
 
     #[test]
     fn off_curve_pk_rejects() {
-        let hb = WireFelt::from(0xabcdefu64);
+        let hb = Felt::from(0xabcdefu64);
         let mut payload = mint_hand(hb, 1, 0, 0, 0, 0, 6);
-        payload[6] = payload[6] + WireFelt::from(1u32); // pk_x + 1 → off curve
+        payload[6] = payload[6] + Felt::from(1u32); // pk_x + 1 → off curve
         assert!(matches!(verify_hand(hb, &payload), Err(VerifyError::OffCurve("pk"))));
     }
 }

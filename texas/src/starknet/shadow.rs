@@ -301,7 +301,7 @@ impl ShadowHand {
                         plan.rake, input.rake_collected
                     ));
                 }
-                let mut players: Vec<starknet_ff::FieldElement> = Vec::new();
+                let mut players: Vec<starknet_crypto::Felt> = Vec::new();
                 let mut deltas: Vec<i128> = Vec::new();
                 for (i, seat) in settle_table.seats.iter().enumerate() {
                     let Some(addr) = seat_player_addr(seat) else { continue };
@@ -315,8 +315,7 @@ impl ShadowHand {
                         issues.push(format!("seat {i} address not in participants"));
                         continue;
                     };
-                    let Some(felt) =
-                        super::chain::parse_felt(wallet_hex).map(|f| super::submit::felt_to_ff(&f))
+                    let Some(felt) = super::chain::parse_felt(wallet_hex)
                     else {
                         issues.push(format!("seat {i} wallet unparsable: {wallet_hex}"));
                         continue;

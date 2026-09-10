@@ -1411,7 +1411,6 @@ dependencies = [
  "serde_json",
  "starknet-crypto 0.8.1",
  "starknet-curve 0.6.0",
- "starknet-ff",
  "stwo",
  "stwo-constraint-framework",
 ]
@@ -2317,7 +2316,7 @@ dependencies = [
  "poker_texas_air",
  "rand 0.8.7",
  "rayon",
- "starknet-crypto 0.6.2",
+ "starknet-crypto 0.8.1",
 ]
 
 [[package]]
@@ -2430,8 +2429,8 @@ dependencies = [
  "secp256k1",
  "serde",
  "serde_json",
- "starknet-crypto 0.6.2",
- "starknet-ff",
+ "starknet-crypto 0.8.1",
+ "starknet-types-core",
  "stwo",
  "stwo-constraint-framework",
  "thiserror 1.0.69",
@@ -3753,9 +3752,8 @@ dependencies = [
  "serde_json",
  "socketioxide",
  "starknet",
- "starknet-crypto 0.6.2",
+ "starknet-crypto 0.8.1",
  "starknet-curve 0.6.0",
- "starknet-ff",
  "starknet-types-core",
  "tokio",
  "tower 0.4.13",

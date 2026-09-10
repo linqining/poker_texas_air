@@ -67,7 +67,7 @@ pub struct ArchivedStateRootBindingProof {
 /// Both the synthetic-root helper and `verify_roots` derive it identically,
 /// so the binding statement is never ambiguous.
 #[must_use]
-pub fn synthetic_image_message(image: &[starknet_ff::FieldElement]) -> Vec<u8> {
+pub fn synthetic_image_message(image: &[starknet_crypto::Felt]) -> Vec<u8> {
     let mut message = Vec::with_capacity(image.len() * 32);
     for field in image {
         message.extend_from_slice(&field.to_bytes_be());

@@ -47,14 +47,13 @@ use poker_protocol_core::{Curve, CurvePoint, CurveScalar, StarkCurve};
 use starknet::accounts::Account;
 use starknet::core::types::{Call, Felt};
 use starknet::core::utils::starknet_keccak;
-use starknet_ff::FieldElement as Ff;
 
 use poker_texas_air::hand_binding::{compute_hand_binding, HandBindingInput};
 use poker_texas_air::starknet_settlement::AggregateDigestFelts;
 
 use super::config::SettleMode;
 use super::mirror::TableMirror;
-use super::submit::{ff_to_felt, i128_to_ff, HandSettlement};
+use super::submit::{i128_to_felt, HandSettlement};
 
 pub type Sc = <StarkCurve as Curve>::Scalar;
 pub type Pt = <StarkCurve as Curve>::Point;
@@ -128,17 +127,17 @@ fn scalar_be(s: &Sc) -> [u8; 32] {
 
 /// Hand-batch 一次结算的全部工件。
 pub struct DualSettlement {
-    pub hand_binding: Ff,
+    pub hand_binding: Felt,
     /// G（外部聚合）+ 状态根的 Poseidon 承诺——已逐字嵌入
     /// register_calldata（合约 register_hand 第 3 参）；字段本体仅测试
     /// 对拍断言读（生产走 calldata），保留为对拍锚。
     #[allow(dead_code)]
-    pub g_attestation: Ff,
+    pub g_attestation: Felt,
     pub hand_id: u32,
     /// 本手动作日志哈希（#18 Phase B）——v2 电路第 37 入参 / 公开段尾词。
-    pub action_log_digest: Ff,
+    pub action_log_digest: Felt,
     /// 本手动作日志词条对（每条 2 felt：[日志词, 合法性词]，切片 2）。
-    pub action_entries: Vec<[Ff; 2]>,
+    pub action_entries: Vec<[Felt; 2]>,
     /// hand_batch 载荷（u256 字，大端 32 字节表示）。
     pub batch_words: Vec<[u8; 32]>,
     /// Linear（默认）路径 calldata：`register_hand`（含 3 个零的期望
@@ -156,7 +155,7 @@ pub struct DualSettlement {
 pub struct ProvedSettlement {
     /// `poseidon(hand_binding, poseidon(p_batch words))`——注册与结算
     /// 两侧都必须精确等于该值，把 attested batch 绑定到注册的那一个。
-    pub p_batch_commitment: Ff,
+    pub p_batch_commitment: Felt,
     /// p_batch 词数（与承诺一起注册/比对）。
     pub p_batch_len: usize,
     /// `register_hand_proved` calldata：
@@ -180,10 +179,10 @@ pub struct ProvedSettlement {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ProverWorkload {
-    pub hand_binding: Ff,
+    pub hand_binding: Felt,
     pub hand_id: u32,
     pub batch_words: Vec<[u8; 32]>,
-    pub p_batch_commitment: Ff,
+    pub p_batch_commitment: Felt,
 }
 
 /// 外部 prover 对 workload 的 attestation。
@@ -191,7 +190,7 @@ pub struct ProverWorkload {
 pub struct ProverAttestation {
     /// prover 实际验证过的承诺——必须与 workload 的承诺逐字节相等
     /// 才接受（否则视为 prover 故障，回退 linear）。
-    pub p_batch_commitment: Ff,
+    pub p_batch_commitment: Felt,
 }
 
 /// `p_batch_commitment = poseidon(hand_binding, poseidon(p_batch words))`。
@@ -200,15 +199,18 @@ pub struct ProverAttestation {
 /// felt 进 Poseidon；任何超域词直接报错（这类批次本就无法以 felt 形态
 /// 上链，线性路径同样会拒）。
 pub fn compute_p_batch_commitment(
-    hand_binding: Ff,
+    hand_binding: Felt,
     batch_words: &[[u8; 32]],
-) -> Result<Ff, String> {
-    let mut inner: Vec<Ff> = Vec::with_capacity(batch_words.len());
+) -> Result<Felt, String> {
+    let mut inner: Vec<Felt> = Vec::with_capacity(batch_words.len());
     for w in batch_words {
-        inner.push(
-            Ff::from_bytes_be(w)
-                .map_err(|_| "dapv: batch word not in felt252 range".to_string())?,
-        );
+        // types-core from_bytes_be 无失败路径（≥ P 静默归约），沿用原
+        // Result 语义：非 canonical 载荷词 fail-loud。
+        let felt = Felt::from_bytes_be(w);
+        if felt.to_bytes_be() != *w {
+            return Err("dapv: batch word not in felt252 range".to_string());
+        }
+        inner.push(felt);
     }
     Ok(starknet_crypto::poseidon_hash_many(&[
         hand_binding,
@@ -337,30 +339,31 @@ pub async fn resolve_settle_mode_with_prover(
 }
 
 /// reveal 承诺的域分隔标签：keccak256("zgame.dapv.reveal_commit.v2")。
-fn handbatch_reveal_commit_label() -> Ff {
-    // starknet_keccak 返回 starknet 的 Felt 类型；转字节后经 Ff 重建
-    //（keccak 输出 < 2^250 < Fp 模，expect 无风险）。
-    let felt = starknet_keccak("zgame.dapv.reveal_commit.v2".as_bytes());
-    Ff::from_bytes_be(&felt.to_bytes_be()).expect("keccak output is a valid felt")
+fn handbatch_reveal_commit_label() -> Felt {
+    // starknet_keccak 返回的 Felt 与本仓统一载体（types-core）同型，
+    // keccak 输出 < 2^250 < P，直接使用。
+    starknet_keccak("zgame.dapv.reveal_commit.v2".as_bytes())
 }
 
 /// 任意字节串 → 31 字节大端块逐 felt（每块 < 2^248 < 域模，无截断风险）。
-fn bytes_as_felts(bytes: &[u8]) -> Vec<Ff> {
+fn bytes_as_felts(bytes: &[u8]) -> Vec<Felt> {
     bytes
         .chunks(31)
         .map(|chunk| {
             let mut buf = [0u8; 32];
             buf[32 - chunk.len()..].copy_from_slice(chunk);
-            Ff::from_bytes_be(&buf).expect("31-byte chunk is below the field modulus")
+            // 31 字节 < 2^248 < P，canonical 恒成立。
+            Felt::from_bytes_be(&buf)
         })
         .collect()
 }
 
 /// 32 字节 → felt（清高 5 位保证 < 域模；仅用于承诺类字段，非安全性输入）。
-fn bytes_to_field(b: &[u8; 32]) -> Ff {
+fn bytes_to_field(b: &[u8; 32]) -> Felt {
     let mut out = *b;
     out[0] &= 0x07;
-    Ff::from_bytes_be(&out).expect("top-3-bits-cleared 32 bytes always fit felt252")
+    // 高 3 位清零 ⇒ < 2^253 的最高位被砍到 < 2^251 + …< P，canonical 恒成立。
+    Felt::from_bytes_be(&out)
 }
 
 /// 构造 Hand-batch 结算：hand_binding + g_attestation + 认可批次 + calldata。
@@ -374,7 +377,7 @@ fn bytes_to_field(b: &[u8; 32]) -> Ff {
 /// 认可铸造以此为挑战域，客户端 mint 前必须拿到它。
 #[derive(Debug, Clone)]
 pub struct HandBatchBinding {
-    pub hand_binding: Ff,
+    pub hand_binding: Felt,
     pub hand_id_bytes: [u8; 32],
 }
 
@@ -394,10 +397,10 @@ pub fn prepare_handbatch_binding(
         let deck_bytes = borsh::to_vec(&pre_table.deck_state.encrypted)
             .map_err(|e| format!("dapv: deck encode: {e}"))?;
         let mut input = vec![handbatch_reveal_commit_label()];
-        input.push(Ff::from(deck_bytes.len() as u64));
+        input.push(Felt::from(deck_bytes.len() as u64));
         input.extend(bytes_as_felts(&deck_bytes));
         let digest_bytes = settlement.aggregate_digest.to_vec();
-        input.push(Ff::from(digest_bytes.len() as u64));
+        input.push(Felt::from(digest_bytes.len() as u64));
         input.extend(bytes_as_felts(&digest_bytes));
         starknet_crypto::poseidon_hash_many(&input)
     };
@@ -421,7 +424,7 @@ pub fn prepare_handbatch_binding(
 pub fn build_dual_settlement_with(
     mirror: &TableMirror,
     settlement: &HandSettlement,
-    produce: &dyn Fn(&[u8; 32], &[Ff]) -> Result<Vec<Endorsement>, String>,
+    produce: &dyn Fn(&[u8; 32], &[Felt]) -> Result<Vec<Endorsement>, String>,
 ) -> Result<DualSettlement, String> {
     let _pre_table = mirror
         .pre_settlement
@@ -463,7 +466,7 @@ pub fn build_dual_settlement_with(
     ]);
 
     // ---- 5. calldata（linear + proved 两套都构建；提交时按模式选用）----
-    let hb_felt = ff_to_felt(hand_binding);
+    let hb_felt = hand_binding;
     // register_hand(hand_binding, settlement_digest, g_attestation,
     // exp_reveal, exp_leave, exp_recon)：期望桶计数暂全零（= 链上不约束；
     // 与合约侧"零 = 无约束"的兼容语义一致）。
@@ -472,9 +475,9 @@ pub fn build_dual_settlement_with(
     // 全零（= 链上不约束）；动作日志哈希为 #18 Phase B 的注册承诺。
     let register_calldata = vec![
         hb_felt,
-        ff_to_felt(settlement.settlement_digest),
-        ff_to_felt(g_attestation),
-        ff_to_felt(settlement.action_log_digest),
+        settlement.settlement_digest,
+        g_attestation,
+        settlement.action_log_digest,
         Felt::ZERO,
         Felt::ZERO,
         Felt::ZERO,
@@ -490,11 +493,11 @@ pub fn build_dual_settlement_with(
     settle_calldata.push(Felt::from(u64::from(settlement.hand_id)));
     // #18 Phase B：verify_and_settle_dapv_stark[_private] 的动作日志哈希
     // 标量（hand_id 之后，与合约签名一致）。
-    settle_calldata.push(ff_to_felt(settlement.action_log_digest));
+    settle_calldata.push(settlement.action_log_digest);
     // players: Span<ContractAddress>
     settle_calldata.push(Felt::from(settlement.players_remapped.len() as u64));
     for p in &settlement.players_remapped {
-        settle_calldata.push(ff_to_felt(*p));
+        settle_calldata.push(*p);
     }
     // deltas: Span<i128>（负数取模补，与合约 from_felt_signed_i128 对齐）。
     // 单位与 legacy 路径一致：vault 以 wei 记账，这里放大为 wei，
@@ -507,7 +510,7 @@ pub fn build_dual_settlement_with(
         let wei = d
             .checked_mul(DAPV_WEI_PER_CHIP)
             .ok_or("delta wei overflow")?;
-        settle_calldata.push(ff_to_felt(i128_to_ff(wei)));
+        settle_calldata.push(i128_to_felt(wei));
     }
     // p_batch: Span<felt252> —— 每字单 felt（STARK 曲线基域 == felt252，
     // 点坐标/标量词天然在域内；越界词在此报错不上链）。提交入口为
@@ -515,10 +518,12 @@ pub fn build_dual_settlement_with(
     // Span<u256> 并走 secp 变体 verify_hand_batch，与 STARK 背书不匹配。
     settle_calldata.push(Felt::from(batch_words.len() as u64));
     for w in &batch_words {
-        settle_calldata.push(ff_to_felt(
-            Ff::from_bytes_be(w)
-                .map_err(|_| "dapv: batch word not in felt252 range".to_string())?,
-        ));
+        // 与 compute_p_batch_commitment 同门槛：非 canonical 词拒绝上链。
+        let felt = Felt::from_bytes_be(w);
+        if felt.to_bytes_be() != *w {
+            return Err("dapv: batch word not in felt252 range".to_string());
+        }
+        settle_calldata.push(felt);
     }
 
     // ---- 6. proved 工件：p_batch 承诺 + 无 p_batch 的 register/settle ----
@@ -526,10 +531,10 @@ pub fn build_dual_settlement_with(
     let p_batch_len_felt = Felt::from(batch_words.len() as u64);
     let proved_register_calldata = vec![
         hb_felt,
-        ff_to_felt(settlement.settlement_digest),
-        ff_to_felt(g_attestation),
-        ff_to_felt(settlement.action_log_digest),
-        ff_to_felt(p_batch_commitment),
+        settlement.settlement_digest,
+        g_attestation,
+        settlement.action_log_digest,
+        p_batch_commitment,
         p_batch_len_felt,
         // 期望桶计数（reveal/leave/recon）：链上不校验 proved 载荷（词都
         // 不上链），注册值供外部 prover 线下比对——暂全零（无约束）。
@@ -990,7 +995,6 @@ fn point_from_words(x: &[u8; 32], y: &[u8; 32]) -> Option<Pt> {
     // types-core Felt 与 Pt（StarkPoint）内部域一致；BETA 来自
     // starknet-curve 0.6（同 types-core 0.2 类型实例）。
     use starknet_curve::curve_params::BETA;
-    use starknet_types_core::felt::Felt;
     let px = Felt::from_bytes_be(x);
     let py = Felt::from_bytes_be(y);
     // 恶意载荷可能给出不在曲线上的 (x, y)：折叠数学只在真曲线上成立，
@@ -1024,7 +1028,7 @@ fn u256_word(v: u64) -> [u8; 32] {
 /// 返回 (register_tx, settle_tx)。
 /// Part A Phase 1：检查所有赢家是否已在 vault 注册 payout commitment。
 /// 任一未注册 → 私有结算入口缺前置，回退 legacy（不卡结算）。
-async fn winners_registered(players_remapped: &[Ff], deltas: &[i128]) -> bool {
+async fn winners_registered(players_remapped: &[Felt], deltas: &[i128]) -> bool {
     let Some(chain) = super::chain() else {
         return false;
     };
@@ -1039,7 +1043,7 @@ async fn winners_registered(players_remapped: &[Ff], deltas: &[i128]) -> bool {
             continue;
         }
         match chain
-            .call_contract(vault_addr, selector, vec![ff_to_felt(*p)])
+            .call_contract(vault_addr, selector, vec![*p])
             .await
         {
             Ok(felts) => {
@@ -1077,21 +1081,21 @@ async fn winners_registered(players_remapped: &[Ff], deltas: &[i128]) -> bool {
 /// 同一公开段；差异只在 fact 消费方式与 calldata 尾部。
 pub fn settle_entry_calldata(
     entry: &str,
-    hand_binding: Ff,
+    hand_binding: Felt,
     hand_id: u32,
-    segment: &[Ff],
-    p_batch_commitment: Ff,
+    segment: &[Felt],
+    p_batch_commitment: Felt,
     p_batch_len: usize,
 ) -> (&'static str, Vec<Felt>) {
     let mut calldata = Vec::with_capacity(2 + segment.len() + 2);
-    calldata.push(ff_to_felt(hand_binding));
+    calldata.push(hand_binding);
     calldata.push(Felt::from(u64::from(hand_id)));
     for f in segment {
-        calldata.push(ff_to_felt(*f));
+        calldata.push(*f);
     }
     match entry {
         "proved_private" => {
-            calldata.push(ff_to_felt(p_batch_commitment));
+            calldata.push(p_batch_commitment);
             calldata.push(Felt::from(p_batch_len as u64));
             ("verify_and_settle_dapv_proved_private", calldata)
         }
@@ -1104,7 +1108,7 @@ pub fn settle_entry_calldata(
 pub async fn submit_dual_settlement(
     dual: &DualSettlement,
     dual_address: &str,
-    players_remapped: &[Ff],
+    players_remapped: &[Felt],
     deltas: &[i128],
     departed: &[String],
 ) -> Result<(String, String), String> {
@@ -1289,7 +1293,7 @@ pub async fn submit_dual_settlement(
             calls.push(Call {
                 to: vault,
                 selector: starknet_keccak(b"lock"),
-                calldata: vec![ff_to_felt(*p), lo, hi],
+                calldata: vec![*p, lo, hi],
             });
             notes.push("win-relock");
         }
@@ -2641,14 +2645,14 @@ mod settle_mode_tests {
 
     #[test]
     fn p_batch_commitment_is_deterministic_and_binding() {
-        let hb = Ff::from(0x5Bu64);
+        let hb = Felt::from(0x5Bu64);
         let words = words_fixture();
         let c1 = compute_p_batch_commitment(hb, &words).expect("commitment");
         let c2 = compute_p_batch_commitment(hb, &words).expect("commitment");
         assert_eq!(c1, c2, "deterministic");
-        assert_ne!(c1, Ff::ZERO, "non-trivial");
+        assert_ne!(c1, Felt::ZERO, "non-trivial");
         // 绑定 hand_binding
-        let other_hb = compute_p_batch_commitment(hb + Ff::ONE, &words).expect("commitment");
+        let other_hb = compute_p_batch_commitment(hb + Felt::ONE, &words).expect("commitment");
         assert_ne!(c1, other_hb, "binding must change with hand_binding");
         // 绑定 batch 词
         let mut tampered = words.clone();
@@ -2684,10 +2688,10 @@ mod settle_mode_tests {
             register_calldata: vec![],
             settle_calldata: vec![],
             aggregate_digest: [7u8; 32],
-            players_remapped: vec![Ff::from(0x1111u64), Ff::from(0x2222u64)],
+            players_remapped: vec![Felt::from(0x1111u64), Felt::from(0x2222u64)],
             deltas: vec![100, -100],
-            settlement_digest: Ff::from(123456789u64),
-            action_log_digest: Ff::from(0xA11CEu64),
+            settlement_digest: Felt::from(123456789u64),
+            action_log_digest: Felt::from(0xA11CEu64),
             action_entries: Vec::new(),
             pre_state_root: [1u8; 32],
             post_state_root: [2u8; 32],
@@ -2762,14 +2766,14 @@ mod settle_mode_tests {
     #[test]
     fn settle_entry_defaults_to_v2() {
         // v2：calldata = [hand_binding, hand_id, segment(15)]，无承诺尾部。
-        let hb = Ff::from(0xBBBBu64);
-        let segment: Vec<Ff> = (0..15).map(|i| Ff::from(i as u64)).collect();
+        let hb = Felt::from(0xBBBBu64);
+        let segment: Vec<Felt> = (0..15).map(|i| Felt::from(i as u64)).collect();
         for entry in ["", "v2", "garbage"] {
             let (selector, calldata) =
-                settle_entry_calldata(entry, hb, 42, &segment, Ff::from(0xC0BAu64), 37);
+                settle_entry_calldata(entry, hb, 42, &segment, Felt::from(0xC0BAu64), 37);
             assert_eq!(selector, "verify_and_settle_dapv_stark_private_v2", "entry={entry}");
             assert_eq!(calldata.len(), 2 + 15);
-            assert_eq!(calldata[0], ff_to_felt(hb));
+            assert_eq!(calldata[0], hb);
             assert_eq!(calldata[1], Felt::from(42u64));
             assert_eq!(calldata[2], Felt::ZERO, "segment[0]");
         }
@@ -2778,17 +2782,17 @@ mod settle_mode_tests {
     #[test]
     fn settle_entry_proved_private_appends_commitment() {
         // proved_private：v2 形态 + [p_batch_commitment, p_batch_len] 尾部。
-        let hb = Ff::from(0xCCCCu64);
-        let segment: Vec<Ff> = (0..15).map(|i| Ff::from(100 + i as u64)).collect();
+        let hb = Felt::from(0xCCCCu64);
+        let segment: Vec<Felt> = (0..15).map(|i| Felt::from(100 + i as u64)).collect();
         let (selector, calldata) =
-            settle_entry_calldata("proved_private", hb, 43, &segment, Ff::from(0xC0BAu64), 37);
+            settle_entry_calldata("proved_private", hb, 43, &segment, Felt::from(0xC0BAu64), 37);
         assert_eq!(selector, "verify_and_settle_dapv_proved_private");
         assert_eq!(calldata.len(), 2 + 15 + 2);
         assert_eq!(calldata[2], Felt::from(100u64), "segment[0]");
-        assert_eq!(calldata[17], ff_to_felt(Ff::from(0xC0BAu64)), "commitment");
+        assert_eq!(calldata[17], Felt::from(0xC0BAu64), "commitment");
         assert_eq!(calldata[18], Felt::from(37u64), "batch len");
         // 公开段前缀与 v2 完全一致（同一 segment 语义）
-        let (_, v2) = settle_entry_calldata("v2", hb, 43, &segment, Ff::ZERO, 0);
+        let (_, v2) = settle_entry_calldata("v2", hb, 43, &segment, Felt::ZERO, 0);
         assert_eq!(calldata[..17], v2[..], "shared segment prefix");
     }
 
@@ -2796,13 +2800,13 @@ mod settle_mode_tests {
     fn settle_entry_snip36_uses_v2_shape() {
         // snip36：选择器为 v3 双门入口，calldata 与 v2 同形（无承诺尾部）
         // ——合约侧随 cairo ≥2.12 迁移上链后生效（SNIP36_INTEGRATION §4）。
-        let hb = Ff::from(0xDDDDu64);
-        let segment: Vec<Ff> = (0..15).map(|i| Ff::from(200 + i as u64)).collect();
+        let hb = Felt::from(0xDDDDu64);
+        let segment: Vec<Felt> = (0..15).map(|i| Felt::from(200 + i as u64)).collect();
         let (selector, calldata) =
-            settle_entry_calldata("snip36", hb, 44, &segment, Ff::from(0xC0BAu64), 37);
+            settle_entry_calldata("snip36", hb, 44, &segment, Felt::from(0xC0BAu64), 37);
         assert_eq!(selector, "verify_and_settle_dapv_stark_private_v3");
         assert_eq!(calldata.len(), 2 + 15);
-        let (_, v2) = settle_entry_calldata("v2", hb, 44, &segment, Ff::ZERO, 0);
+        let (_, v2) = settle_entry_calldata("v2", hb, 44, &segment, Felt::ZERO, 0);
         assert_eq!(calldata, v2, "snip36 shares the v2 calldata shape");
     }
 
@@ -2844,15 +2848,15 @@ mod settle_mode_tests {
     fn linear_calldata_matches_golden_layout() {
         let dual = build_test_dual();
         let settlement = synthetic_settlement();
-        let hb_felt = ff_to_felt(dual.hand_binding);
+        let hb_felt = dual.hand_binding;
 
         // register：[binding, digest, g_attestation, action_log, 0, 0, 0]
         // （#18 Phase B：动作日志承诺 + 期望桶计数尾全零）。
         assert_eq!(dual.register_calldata.len(), 7);
         assert_eq!(dual.register_calldata[0], hb_felt);
-        assert_eq!(dual.register_calldata[1], ff_to_felt(settlement.settlement_digest));
-        assert_eq!(dual.register_calldata[2], ff_to_felt(dual.g_attestation));
-        assert_eq!(dual.register_calldata[3], ff_to_felt(settlement.action_log_digest));
+        assert_eq!(dual.register_calldata[1], settlement.settlement_digest);
+        assert_eq!(dual.register_calldata[2], dual.g_attestation);
+        assert_eq!(dual.register_calldata[3], settlement.action_log_digest);
         for tail in &dual.register_calldata[4..7] {
             assert_eq!(*tail, Felt::ZERO, "expected-count tail must default to zero");
         }
@@ -2869,7 +2873,7 @@ mod settle_mode_tests {
         assert_eq!(dual.settle_calldata[0], hb_felt);
         assert_eq!(dual.settle_calldata[1], Felt::from(32u64));
         assert_eq!(dual.settle_calldata[34], Felt::from(u64::from(settlement.hand_id)));
-        assert_eq!(dual.settle_calldata[35], ff_to_felt(settlement.action_log_digest));
+        assert_eq!(dual.settle_calldata[35], settlement.action_log_digest);
         assert_eq!(
             dual.settle_calldata[36],
             Felt::from(settlement.players_remapped.len() as u64)
@@ -2899,7 +2903,7 @@ mod settle_mode_tests {
     fn proved_calldata_carries_commitment_and_no_batch() {
         let dual = build_test_dual();
         let settlement = synthetic_settlement();
-        let hb_felt = ff_to_felt(dual.hand_binding);
+        let hb_felt = dual.hand_binding;
         let commitment =
             compute_p_batch_commitment(dual.hand_binding, &dual.batch_words).expect("commitment");
 
@@ -2908,10 +2912,10 @@ mod settle_mode_tests {
         let pr = &dual.proved.register_calldata;
         assert_eq!(pr.len(), 9);
         assert_eq!(pr[0], hb_felt);
-        assert_eq!(pr[1], ff_to_felt(settlement.settlement_digest));
-        assert_eq!(pr[2], ff_to_felt(dual.g_attestation));
-        assert_eq!(pr[3], ff_to_felt(settlement.action_log_digest), "action log commitment");
-        assert_eq!(pr[4], ff_to_felt(commitment), "registered commitment");
+        assert_eq!(pr[1], settlement.settlement_digest);
+        assert_eq!(pr[2], dual.g_attestation);
+        assert_eq!(pr[3], settlement.action_log_digest, "action log commitment");
+        assert_eq!(pr[4], commitment, "registered commitment");
         assert_eq!(pr[5], Felt::from(dual.batch_words.len() as u64));
         assert_eq!(pr[6], Felt::ZERO);
         assert_eq!(pr[7], Felt::ZERO);
@@ -2930,7 +2934,7 @@ mod settle_mode_tests {
     // ---- 4. prover 存根与回退 ----
 
     struct OkProver {
-        commitment: Ff,
+        commitment: Felt,
     }
     impl BatchProver for OkProver {
         fn request_attestation<'a>(
@@ -2946,10 +2950,10 @@ mod settle_mode_tests {
 
     fn test_workload() -> ProverWorkload {
         ProverWorkload {
-            hand_binding: Ff::from(0x5Bu64),
+            hand_binding: Felt::from(0x5Bu64),
             hand_id: 1,
             batch_words: words_fixture(),
-            p_batch_commitment: Ff::from(0xC0FFEEu64),
+            p_batch_commitment: Felt::from(0xC0FFEEu64),
         }
     }
 
@@ -2977,7 +2981,7 @@ mod settle_mode_tests {
             SettleMode::Proved
         );
         // 承诺不匹配 → linear（prover 故障视同失败）。
-        let bad = OkProver { commitment: workload.p_batch_commitment + Ff::ONE };
+        let bad = OkProver { commitment: workload.p_batch_commitment + Felt::ONE };
         assert_eq!(
             resolve_settle_mode_with_prover(&bad, &workload).await,
             SettleMode::Linear

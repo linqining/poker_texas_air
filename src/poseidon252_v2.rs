@@ -47,7 +47,7 @@
 
 #![allow(missing_docs)]
 
-use starknet_ff::FieldElement;
+use starknet_crypto::Felt;
 use stwo::core::channel::{Channel, Poseidon252Channel};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
@@ -1357,10 +1357,13 @@ fn claimed_anchor_limbs(
 ) -> TexasAirResult<[[M31; native::L]; 3]> {
     let mut out = [[M31::from(0u32); native::L]; 3];
     for (lane, bytes) in claimed.iter().enumerate() {
-        let felt = FieldElement::from_bytes_be(bytes)
-            .map_err(|_| TexasAirError::ConstraintUnsatisfied(
+        // types-core from_bytes_be 无失败路径，canonical 用字节往返判定
+        // （语义同旧 0.6 ff Result 路径：≥ P 拒绝）。
+        let felt = crate::state_root::felt_from_canonical_bytes(bytes).ok_or(
+            TexasAirError::ConstraintUnsatisfied(
                 "v2 claimed anchor carries a non-canonical felt".into(),
-            ))?;
+            ),
+        )?;
         let limbs = native::felt_to_limbs(&felt);
         for (i, &limb) in limbs.iter().enumerate() {
             out[lane][i] = M31::from(limb as u32);
@@ -1517,8 +1520,7 @@ pub fn prove_poseidon252_chain_v2(
         .try_into()
         .expect("3 felts");
     let anchor: [[M31; native::L]; 3] = std::array::from_fn(|lane| {
-        let felt = FieldElement::from_bytes_be(&claimed_anchor[lane])
-            .expect("anchor state is canonical");
+        let felt = Felt::from_bytes_be(&claimed_anchor[lane]);
         let limbs = native::felt_to_limbs(&felt);
         std::array::from_fn(|i| M31::from(limbs[i] as u32))
     });
@@ -1712,7 +1714,7 @@ pub fn verify_poseidon252_chain_v2(
         ));
     }
     for lane in archive.claimed_anchor.iter() {
-        if FieldElement::from_bytes_be(lane).is_err() {
+        if crate::state_root::felt_from_canonical_bytes(lane).is_none() {
             return Err(TexasAirError::ConstraintUnsatisfied(
                 "v2 claimed anchor carries a non-canonical felt".into(),
             ));
@@ -1899,7 +1901,7 @@ mod tests {
     use super::*;
 
     fn small_spec() -> native::Poseidon252ChainSpec {
-        let message = [FieldElement::from(7u64), FieldElement::from(9u64)];
+        let message = [Felt::from(7u64), Felt::from(9u64)];
         native::Poseidon252ChainSpec::hash_many(&message)
     }
 
@@ -2143,8 +2145,7 @@ mod tests {
         // host commitment for the same public bytes.
         for name in ["test", "alpha", "a much longer table name"] {
             let archive = prove_name_commitment_v2(name).expect("prove");
-            let anchor = FieldElement::from_bytes_be(&archive.claimed_anchor[0])
-                .expect("canonical anchor");
+            let anchor = Felt::from_bytes_be(&archive.claimed_anchor[0]);
             assert_eq!(
                 anchor,
                 crate::state_root::table_name_commitment(name),
@@ -2167,12 +2168,12 @@ mod tests {
 #[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn v2_rejects_swapped_order() {
         let a = native::Poseidon252ChainSpec::hash_many(&[
-            FieldElement::from(7u64),
-            FieldElement::from(9u64),
+            Felt::from(7u64),
+            Felt::from(9u64),
         ]);
         let b = native::Poseidon252ChainSpec::hash_many(&[
-            FieldElement::from(9u64),
-            FieldElement::from(7u64),
+            Felt::from(9u64),
+            Felt::from(7u64),
         ]);
         let archive = prove_poseidon252_chain_v2(&a).expect("prove");
         let mut forged = archive;

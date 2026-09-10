@@ -4165,15 +4165,15 @@ mod tests {
         // 包含 roots/seq，也不会产生 VerificationReceipt。
         orch.proven.push(ProvenTask {
             method_kind: MethodKind::CreateTable,
-            pre_state_root: StateRoot::from_field(FieldElement::from(1u64)),
-            post_state_root: StateRoot::from_field(FieldElement::from(2u64)),
+            pre_state_root: StateRoot::from_field(Felt::from(1u64)),
+            post_state_root: StateRoot::from_field(Felt::from(2u64)),
             call_seq: 0,
         });
         orch.proven.push(ProvenTask {
             method_kind: MethodKind::Fold,
             // pre != 上一个的 post(2)
-            pre_state_root: StateRoot::from_field(FieldElement::from(3u64)),
-            post_state_root: StateRoot::from_field(FieldElement::from(4u64)),
+            pre_state_root: StateRoot::from_field(Felt::from(3u64)),
+            post_state_root: StateRoot::from_field(Felt::from(4u64)),
             call_seq: 1,
         });
         assert!(
@@ -4183,6 +4183,6 @@ mod tests {
     }
 }
 
-// 避免未使用 import 警告（FieldElement 在下方测试模块用）。
+// 避免未使用 import 警告（Felt 在下方测试模块用）。
 #[cfg(test)]
-use starknet_ff::FieldElement;
+use starknet_crypto::Felt;
