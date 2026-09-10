@@ -13,14 +13,22 @@
 //!   `s = w + c·sk mod n`;
 //! - reconstruct: CP-DLEQ — `P_i = sk·G_i`, `(A, B) = (w·G1, w·G2)`,
 //!   `s = w + c·sk mod n`.
+//!
+//! Felt discipline: the wire surface is starknet-ff `FieldElement` (payload
+//! words crossing to texas/consumers); internally the mint runs on the
+//! crypto felt (types-core) and reduces mod n via core's `StarkScalar`
+//! instead of a local num-bigint mirror.
 
-use starknet_crypto::poseidon_hash_many;
-use starknet_crypto::FieldElement as Felt;
+use starknet_crypto::{poseidon_hash_many, Felt};
+use starknet_ff::FieldElement as WireFelt;
 
-use crate::curve::{biguint_to_felt, felt_to_biguint, reduce_mod_n, Point};
+use poker_protocol_core::curve::CurveScalar;
+use poker_protocol_core::stark_curve::StarkScalar;
+
+use crate::curve::Point;
 use crate::handbatch::{
-    endorsement_challenge, leave_challenge, reconstruct_challenge, reveal_challenge,
-    LeaveCard, WORDS_PER_LEAVE_HEADER,
+    endorsement_challenge, ff_to_felt, felt_to_ff, leave_challenge, reconstruct_challenge,
+    reveal_challenge, LeaveCard, WORDS_PER_LEAVE_HEADER,
 };
 
 /// Deterministic pseudo-random felt chain.
@@ -39,27 +47,35 @@ impl RandChain {
     }
 }
 
+/// `a + b·c mod n` on raw felts — core's `StarkScalar` Montgomery arithmetic
+/// (the old num-bigint mirror is gone with the 0.8 alignment).
 fn scalar_add_mod_n(a: Felt, b: Felt, c: Felt) -> Felt {
-    let sum = felt_to_biguint(a) + felt_to_biguint(b) * felt_to_biguint(c);
-    biguint_to_felt(&reduce_mod_n(&sum)).expect("value < n < P")
+    let s = to_scalar(a) + to_scalar(b) * to_scalar(c);
+    Felt::from_bytes_be(&s.to_bytes_be())
+}
+
+/// Raw felt → canonical scalar (`< n` after reduction).
+fn to_scalar(f: Felt) -> StarkScalar {
+    <StarkScalar as CurveScalar>::from_bytes_mod_order(&f.to_bytes_be())
 }
 
 fn scalar_from_felt(f: Felt) -> Felt {
-    let reduced = reduce_mod_n(&felt_to_biguint(f));
-    biguint_to_felt(&reduced).expect("value < n < P")
+    let reduced = to_scalar(f);
+    Felt::from_bytes_be(&reduced.to_bytes_be())
 }
 
 /// Mint an honest full-hand payload bound to `hand_binding`. Statement order
 /// matches the wire layout: ownership, reveal, leave, recon blocks.
 pub fn mint_hand(
-    hand_binding: Felt,
+    hand_binding: WireFelt,
     n_own: u32,
     n_action: u32,
     n_reveal: u32,
     n_leave: u32,
     n_recon: u32,
     seed: u64,
-) -> Vec<Felt> {
+) -> Vec<WireFelt> {
+    let hand_binding = ff_to_felt(hand_binding);
     let mut rand = RandChain::new(seed);
     let g = Point::generator();
 
@@ -79,13 +95,13 @@ pub fn mint_hand(
         action_blocks.push(mint_action(g, &mut rand, "call"));
     }
 
-    let mut payload = Vec::new();
-    payload.push(Felt::from(n_own as u64)); // n_own
-    payload.push(Felt::from(0u64)); // n_shuffle (unsupported → must stay 0)
-    payload.push(Felt::from(n_reveal as u64)); // n_reveal
-    payload.push(Felt::from(n_leave as u64)); // n_leave
-    payload.push(Felt::from(n_recon as u64)); // n_recon
-    payload.push(Felt::from(n_action as u64)); // n_action (v3 header tail)
+    let mut payload: Vec<WireFelt> = Vec::new();
+    payload.push(WireFelt::from(n_own as u64)); // n_own
+    payload.push(WireFelt::from(0u64)); // n_shuffle (unsupported → must stay 0)
+    payload.push(WireFelt::from(n_reveal as u64)); // n_reveal
+    payload.push(WireFelt::from(n_leave as u64)); // n_leave
+    payload.push(WireFelt::from(n_recon as u64)); // n_recon
+    payload.push(WireFelt::from(n_action as u64)); // n_action (v3 header tail)
 
     // Ownership: pk = sk·G, R = w·G, s = (w + c·sk) mod n.
     for _ in 0..n_own {
@@ -97,7 +113,7 @@ pub fn mint_hand(
         let s = scalar_add_mod_n(w, c, sk);
         let (pkx, pky) = pk.to_affine().unwrap();
         let (rx, ry) = r.to_affine().unwrap();
-        payload.extend_from_slice(&[pkx, pky, rx, ry, s]);
+        payload.extend([pkx, pky, rx, ry, s].map(felt_to_ff));
     }
 
     // Reveal: c1 = nonce·G, token = sk·c1, (t1, t2) = (w·G, w·c1),
@@ -120,9 +136,10 @@ pub fn mint_hand(
         let (tokx, toky) = token.to_affine().unwrap();
         let (t1x, t1y) = t1.to_affine().unwrap();
         let (t2x, t2y) = t2.to_affine().unwrap();
-        payload.extend_from_slice(&[
-            pkx, pky, c1x, c1y, c2x, c2y, tokx, toky, t1x, t1y, t2x, t2y, nonce, s,
-        ]);
+        payload.extend(
+            [pkx, pky, c1x, c1y, c2x, c2y, tokx, toky, t1x, t1y, t2x, t2y, nonce, s]
+                .map(felt_to_ff),
+        );
     }
 
     payload.extend(leave_blocks.into_iter().flatten());
@@ -134,7 +151,7 @@ pub fn mint_hand(
 /// Mint one action-signature entry (v3 felt-domain challenge): the player
 /// signs `(table_id, hand_id, seq, action, amount)`; the entry rides the
 /// challenge words alongside (pk, R, s).
-fn mint_action(g: Point, rand: &mut RandChain, action: &str) -> Vec<Felt> {
+fn mint_action(g: Point, rand: &mut RandChain, action: &str) -> Vec<WireFelt> {
     let sk = scalar_from_felt(rand.next());
     let w = rand.next();
     let pk = g.mul(sk);
@@ -150,7 +167,7 @@ fn mint_action(g: Point, rand: &mut RandChain, action: &str) -> Vec<Felt> {
     let s = scalar_add_mod_n(w, c, sk);
     let (pkx, pky) = pk.to_affine().unwrap();
     let (rx, ry) = r.to_affine().unwrap();
-    vec![
+    [
         pkx, pky, rx, ry, s,
         Felt::from(table_id),
         Felt::from(hand_id),
@@ -158,6 +175,8 @@ fn mint_action(g: Point, rand: &mut RandChain, action: &str) -> Vec<Felt> {
         action_felt,
         Felt::from(amount),
     ]
+    .map(felt_to_ff)
+    .into()
 }
 
 fn rand_u64(rand: &mut RandChain) -> u64 {
@@ -167,14 +186,19 @@ fn rand_u64(rand: &mut RandChain) -> u64 {
 }
 
 /// Mint one leave block peeling a random layer, with `n_cards` cards.
-fn mint_leave(hand_binding: Felt, g: Point, rand: &mut RandChain, n_cards: usize) -> Vec<Felt> {
+fn mint_leave(
+    hand_binding: Felt,
+    g: Point,
+    rand: &mut RandChain,
+    n_cards: usize,
+) -> Vec<WireFelt> {
     let sk = scalar_from_felt(rand.next());
     let w = rand.next();
     let nonce = scalar_from_felt(rand.next());
     let pk = g.mul(sk);
     let cpk = g.mul(w);
 
-    let mut words: [Vec<Felt>; 5] = Default::default(); // in_c1, in_c2, out_c1, out_c2, a
+    let mut words: [Vec<WireFelt>; 5] = Default::default(); // in_c1, in_c2, out_c1, out_c2, a
     let mut cards = Vec::with_capacity(n_cards);
     for _ in 0..n_cards {
         let r = scalar_from_felt(rand.next());
@@ -189,7 +213,7 @@ fn mint_leave(hand_binding: Felt, g: Point, rand: &mut RandChain, n_cards: usize
         cards.push(LeaveCard { in_c1, in_c2, out_c1, out_c2, a });
         for (section, p) in [in_c1, in_c2, out_c1, out_c2, a].into_iter().enumerate() {
             let (x, y) = p.to_affine().unwrap();
-            words[section].extend_from_slice(&[x, y]);
+            words[section].extend([felt_to_ff(x), felt_to_ff(y)]);
         }
     }
 
@@ -199,21 +223,21 @@ fn mint_leave(hand_binding: Felt, g: Point, rand: &mut RandChain, n_cards: usize
     let mut block = Vec::with_capacity(WORDS_PER_LEAVE_HEADER + 10 * n_cards);
     let (pkx, pky) = pk.to_affine().unwrap();
     let (cpkx, cpky) = cpk.to_affine().unwrap();
-    block.push(Felt::from(n_cards as u64));
-    block.push(pkx);
-    block.push(pky);
-    block.push(cpkx);
-    block.push(cpky);
-    block.push(nonce);
-    block.push(s);
+    block.push(WireFelt::from(n_cards as u64));
+    block.push(felt_to_ff(pkx));
+    block.push(felt_to_ff(pky));
+    block.push(felt_to_ff(cpkx));
+    block.push(felt_to_ff(cpky));
+    block.push(felt_to_ff(nonce));
+    block.push(felt_to_ff(s));
     for section in words {
-        block.extend_from_slice(&section);
+        block.extend(section);
     }
     block
 }
 
 /// Mint one reconstruct (CP-DLEQ) block: `P_i = sk·G_i`, `(A, B) = (w·G1, w·G2)`.
-fn mint_reconstruct(hand_binding: Felt, g: Point, rand: &mut RandChain) -> Vec<Felt> {
+fn mint_reconstruct(hand_binding: Felt, g: Point, rand: &mut RandChain) -> Vec<WireFelt> {
     let sk = scalar_from_felt(rand.next());
     let w = scalar_from_felt(rand.next());
     let g2_rand = rand.next();
@@ -231,5 +255,7 @@ fn mint_reconstruct(hand_binding: Felt, g: Point, rand: &mut RandChain) -> Vec<F
     let (p2x, p2y) = p2.to_affine().unwrap();
     let (ax, ay) = a.to_affine().unwrap();
     let (bx, by) = b.to_affine().unwrap();
-    vec![g1x, g1y, g2x, g2y, p1x, p1y, p2x, p2y, ax, ay, bx, by, s]
+    [g1x, g1y, g2x, g2y, p1x, p1y, p2x, p2y, ax, ay, bx, by, s]
+        .map(felt_to_ff)
+        .into()
 }

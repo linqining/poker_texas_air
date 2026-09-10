@@ -6,8 +6,19 @@
 //! statement table and binds this layer's digests (form-① architecture — see
 //! README).
 //!
-//! Transcript formulas mirror `poker-protocol-core::stark_curve` (Plan D
-//! felt-native gas-compressed epoch) so the spike stays protocol-shaped:
+//! Transcript formulas are felt-domain-mirrors of
+//! `poker-protocol-core::stark_curve` (Plan D felt-native gas-compressed
+//! epoch), pinned cross-crate by the parity tests below (spike RAW ≡ core
+//! reduced mod n). Domain labels come from core where it exports them
+//! (`handbatch_proto_label` / `handbatch_v1_label` / `action_sig_label`);
+//! the reveal/leave/recon labels are core-inline strings that core does not
+//! export — they stay local and the parity tests pin them byte-for-byte.
+//! The challenges deliberately stay RAW (< P, no mod-n reduction): the Cairo
+//! side (`cairo/src/dual/hand_verify.cairo`, `hand_batch_stark.cairo`)
+//! replays the same poseidon output as a raw felt EC scalar and feeds the
+//! raw c into the rho transcript, so core's reduced-scalar entries cannot be
+//! substituted here without breaking Cairo replay — the parity tests are the
+//! drift gate instead.
 //! - endorsement: `c = poseidon([proto_label, hand_binding, Gx, Gy, pkx, pky, Rx, Ry])`
 //! - reveal:      `c = poseidon([reveal_label, hand_binding, pk, c1, c2, token,
 //!                  t1, t2, nonce])` (affine coordinates as individual felts)
@@ -26,19 +37,38 @@
 //! implemented. Shuffle (Bayer–Groth) remains fail-closed rejected — it is a
 //! separate argument system (see the `poker-protocol-bg` port in the main
 //! project) and explicitly out of this spike's scope.
+//!
+//! Felt discipline (starknet-crypto 0.8 world): the crypto layer speaks
+//! `starknet_crypto::Felt` (= `starknet_types_core` Felt, the same instance
+//! `poker-protocol-core` uses), while the wire layer — payload words,
+//! hand bindings and digests crossing the crate boundary to texas — speaks
+//! `starknet_ff::FieldElement`, the Felt type of texas's pinned
+//! starknet-crypto 0.6. [`ff_to_felt`] / [`felt_to_ff`] bridge the two
+//! (byte-identical values; both moduli are the felt252 prime).
 
-use starknet_crypto::poseidon_hash_many;
-use starknet_crypto::FieldElement as Felt;
+use starknet_crypto::{poseidon_hash_many, Felt};
+use starknet_ff::FieldElement as WireFelt;
 
 use crate::curve::Point;
 
-pub const PROTO_LABEL: &str = "poker/hand-batch/proto";
+/// Wire felt (starknet-ff) → crypto felt (types-core). Infallible: every
+/// representable starknet-ff value is < P, and types-core accepts all
+/// values < P. Public for the CLI binary (a separate crate).
+pub fn ff_to_felt(w: WireFelt) -> Felt {
+    Felt::from_bytes_be(&w.to_bytes_be())
+}
+
+/// Crypto felt (types-core) → wire felt (starknet-ff). Panics only if the
+/// value were ≥ P, which Felt arithmetic makes impossible (all Felts are
+/// canonical residues mod P).
+pub fn felt_to_ff(f: Felt) -> WireFelt {
+    WireFelt::from_bytes_be(&f.to_bytes_be()).expect("felt < P by construction")
+}
+
 pub const REVEAL_LABEL: &str = "poker/reveal-token/fold-v1";
 pub const LEAVE_LABEL: &str = "poker/leave-fold/v1";
 pub const RECON_LABEL: &str = "poker/reconstruct-fold/v1";
-/// Action-sig challenge label (short-string felt; `zgame.action-sig.v3`).
-pub const ACTION_SIG_LABEL: &str = "zgame.action-sig.v3";
-pub const V1_LABEL: &str = "poker/hand-batch/v1";
+
 
 /// Statement kind tags for the ρ transcript — matches the foldable epoch's
 /// numbering (`hand_verify.cairo` pins recon as kind 4).
@@ -64,7 +94,8 @@ pub const WORDS_PER_LEAVE_CARD: usize = 2; // per-word-pair section; 5 sections 
 pub const WORDS_PER_RECONSTRUCT: usize = 13;
 
 /// ASCII label → single felt (big-endian, ≤31 bytes) — same encoding as the
-/// protocol's `ascii_felt`.
+/// protocol's `ascii_felt`. Used for the three labels core does not export
+/// (reveal/leave/recon) and for action-name short-strings.
 /// Public re-export for `mint` (action-name short-string felt encoding).
 pub fn ascii_felt_pub(s: &str) -> Felt {
     ascii_felt(s)
@@ -75,7 +106,7 @@ fn ascii_felt(s: &str) -> Felt {
     assert!(bytes.len() <= 31, "label must fit one felt");
     let mut buf = [0u8; 32];
     buf[32 - bytes.len()..].copy_from_slice(bytes);
-    Felt::from_bytes_be(&buf).expect("padded label < P")
+    Felt::from_bytes_be(&buf) // types-core: infallible for 32-byte input < P
 }
 
 /// One parsed EC equation entering the fold.
@@ -161,67 +192,190 @@ pub struct LeaveCard {
 
 
 #[cfg(test)]
-mod action_sig_parity {
+mod challenge_parity {
     use super::*;
+    use crate::mint::mint_hand;
     use num_bigint::BigUint;
+    use poker_protocol_core::curve::CurveScalar;
+    use poker_protocol_core::stark_curve::{
+        action_sig_challenge, handbatch_endorsement_challenge, handbatch_leave_challenge,
+        handbatch_reconstruct_challenge, handbatch_reveal_challenge, handbatch_rho,
+        ec_order_bytes_be, HandBatchEquationWords, HandLeaveCardWords, StarkPoint, StarkScalar,
+    };
 
-    /// v3 挑战跨 crate 对拍：host RAW poseidon ≡ protocol core 的归约标量
-    /// （mod 群阶 n）。endorsement 退役后动作签名是唯一参与背书来源，挑战
-    /// 公式漂移会让递归信封验证的批次与协议侧签名脱钩。
-    /// 端到端复现：协议 core 签名公式（归约挑战）产的语句喂 spike
-    /// verify_hand——真客户端签名路径与 host 验证路径的等价性。
-    #[test]
-    fn protocol_signed_action_verifies_in_spike() {
-        use poker_protocol_core::curve::{Curve, CurveScalar};
-        use poker_protocol_core::stark_curve::action_sig_challenge;
-        type SC = poker_protocol_core::StarkCurve;
-
-        let sk = <SC as Curve>::Scalar::from_u64(424242);
-        let pk = <SC as Curve>::base_g() * sk;
-        let w = <SC as Curve>::Scalar::from_u64(999);
-        let r = <SC as Curve>::base_g() * w;
-        let (rx, ry) = r.to_affine_parts().expect("affine R");
-        let c_core = action_sig_challenge(7, 42, 1, "call", 50, rx, ry).expect("encode");
-        let s = w + c_core * sk;
-
-        let (pkx, pky) = pk.to_affine_parts().expect("affine pk");
-        let payload = vec![
-            Felt::ZERO, Felt::ZERO, Felt::ZERO, Felt::ZERO, Felt::ZERO,
-            Felt::ONE, // n_action = 1
-            Felt::from_bytes_be(&pkx.to_bytes_be()).unwrap(),
-            Felt::from_bytes_be(&pky.to_bytes_be()).unwrap(),
-            Felt::from_bytes_be(&rx.to_bytes_be()).unwrap(),
-            Felt::from_bytes_be(&ry.to_bytes_be()).unwrap(),
-            Felt::from_bytes_be(&s.to_bytes_be()).unwrap(),
-            Felt::from(7u64), // table_id
-            Felt::from(42u64), // hand_id
-            Felt::from(1u64), // seq
-            ascii_felt("call"),
-            Felt::from(50u64), // amount
-        ];
-        // hand_binding 词表外（action 挑战不含 hb）——任取
-        let hb = Felt::from(0xABCDEFu64);
-        let report = verify_hand(hb, &payload).expect("parse");
-        assert!(report.accepted(), "protocol-signed action must verify host-side");
-        assert_eq!(report.n_action, 1);
-
-        // 挑战对拍：spike RAW ≡ core 归约
-        let rr = Point::from_affine(
-            Felt::from_bytes_be(&rx.to_bytes_be()).unwrap(),
-            Felt::from_bytes_be(&ry.to_bytes_be()).unwrap(),
-        )
-        .expect("R");
-        let c_raw = action_sig_challenge_raw(7, 42, 1, ascii_felt("call"), 50, rr);
-        let n = BigUint::from_bytes_be(&poker_protocol_core::stark_curve::ec_order_bytes_be());
-        let raw_red = (BigUint::from_bytes_be(&c_raw.to_bytes_be()) % n).to_bytes_be();
+    /// raw ≡ core (mod n)：spike 的 RAW felt 挑战在群阶意义下必须等于协议
+    /// core 的归约标量。core 端公式若漂移（域标签、词序、编码），此断言即红。
+    fn assert_raw_matches_core(raw: Felt, core: StarkScalar) {
+        let n = BigUint::from_bytes_be(&ec_order_bytes_be());
+        let reduced = (BigUint::from_bytes_be(&raw.to_bytes_be()) % n).to_bytes_be();
         let mut padded = [0u8; 32];
-        padded[32 - raw_red.len()..].copy_from_slice(&raw_red);
-        assert_eq!(padded, c_core.to_bytes_be());
+        padded[32 - reduced.len()..].copy_from_slice(&reduced);
+        assert_eq!(padded, core.to_bytes_be(), "spike RAW ≡ core reduced (mod n)");
     }
+
+    /// 固定语料：hand_binding 与确定性语句点（小倍数 G，同 vectors() 语料）。
+    struct Fixture {
+        hb: Felt,
+        g: Point,
+        p2: Point,
+        p3: Point,
+        p4: Point,
+        p5: Point,
+        p6: Point,
+        p7: Point,
+    }
+
+    fn fixture() -> Fixture {
+        let g = Point::generator();
+        let m = |k: u32| g.mul(Felt::from(k));
+        Fixture {
+            hb: Felt::from(0xB16Du64),
+            g,
+            p2: m(2),
+            p3: m(3),
+            p4: m(4),
+            p5: m(5),
+            p6: m(6),
+            p7: m(7),
+        }
+    }
+
+    fn core_point(p: &Point) -> StarkPoint {
+        let (x, y) = p.to_affine().expect("non-identity fixture point");
+        StarkPoint::from_affine_parts(x, y)
+    }
+
+    fn small_scalar(v: u64) -> StarkScalar {
+        <StarkScalar as CurveScalar>::from_bytes_mod_order(&Felt::from(v).to_bytes_be())
+    }
+
+    // ---- 1/6 endorsement（PROTO 域，label 来自 core）----
+
+    #[test]
+    fn endorsement_challenge_matches_protocol_core() {
+        let f = fixture();
+        let raw = endorsement_challenge(f.hb, f.g, f.p2, f.p3);
+        let core = handbatch_endorsement_challenge(
+            &f.hb.to_bytes_be(),
+            &core_point(&f.g),
+            &core_point(&f.p2),
+            &core_point(&f.p3),
+        );
+        assert_raw_matches_core(raw, core);
+    }
+
+    // ---- 2/6 reveal（REVEAL 域，label 本地、对拍钉死）----
+
+    #[test]
+    fn reveal_challenge_matches_protocol_core() {
+        let f = fixture();
+        let nonce = Felt::from(8u32);
+        let raw = reveal_challenge(f.hb, f.p2, f.p3, f.p4, f.p5, f.p6, f.p7, nonce);
+        let core = handbatch_reveal_challenge(
+            &f.hb.to_bytes_be(),
+            &core_point(&f.p2),
+            &core_point(&f.p3),
+            &core_point(&f.p4),
+            &core_point(&f.p5),
+            &core_point(&f.p6),
+            &core_point(&f.p7),
+            &small_scalar(8),
+        );
+        assert_raw_matches_core(raw, core);
+    }
+
+    // ---- 3/6 leave（LEAVE 域，d2 重算路径）----
+
+    #[test]
+    fn leave_challenge_matches_protocol_core() {
+        let f = fixture();
+        let nonce = Felt::from(9u32);
+        let cards = [LeaveCard {
+            in_c1: f.p2,
+            in_c2: f.p3,
+            out_c1: f.p4,
+            out_c2: f.p5,
+            a: f.p6,
+        }];
+        let raw = leave_challenge(f.hb, f.p2, f.p3, nonce, &cards);
+        let core_cards = [HandLeaveCardWords {
+            in_c1: core_point(&f.p2),
+            in_c2: core_point(&f.p3),
+            out_c1: core_point(&f.p4),
+            out_c2: core_point(&f.p5),
+            a: core_point(&f.p6),
+        }];
+        let core = handbatch_leave_challenge(
+            &f.hb.to_bytes_be(),
+            &core_point(&f.p2),
+            &core_point(&f.p3),
+            &small_scalar(9),
+            &core_cards,
+        );
+        assert_raw_matches_core(raw, core);
+    }
+
+    // ---- 4/6 reconstruct（RECON 域）----
+
+    #[test]
+    fn reconstruct_challenge_matches_protocol_core() {
+        let f = fixture();
+        let raw = reconstruct_challenge(f.hb, f.g, f.p2, f.p3, f.p4, f.p5, f.p6);
+        let core = handbatch_reconstruct_challenge(
+            &f.hb.to_bytes_be(),
+            &core_point(&f.g),
+            &core_point(&f.p2),
+            &core_point(&f.p3),
+            &core_point(&f.p4),
+            &core_point(&f.p5),
+            &core_point(&f.p6),
+        );
+        assert_raw_matches_core(raw, core);
+    }
+
+    // ---- 5/6 rho（V1 域，(kind, s, c) 词表）----
+
+    #[test]
+    fn hand_rho_matches_protocol_core() {
+        let f = fixture();
+        let c_own = endorsement_challenge(f.hb, f.g, f.p2, f.p3);
+        let c_rev =
+            reveal_challenge(f.hb, f.p2, f.p3, f.p4, f.p5, f.p6, f.p7, Felt::from(8u32));
+        let eqs = [
+            FoldEquation {
+                kind: KIND_OWNERSHIP,
+                s: Felt::from(11u32),
+                c: c_own,
+                residual: Point::identity(),
+            },
+            FoldEquation {
+                kind: KIND_REVEAL,
+                s: Felt::from(12u32),
+                c: c_rev,
+                residual: Point::identity(),
+            },
+        ];
+        let raw = hand_rho(f.hb, &eqs);
+        let core_eqs = [
+            HandBatchEquationWords {
+                kind: KIND_OWNERSHIP as u8,
+                s: Felt::from(11u32).to_bytes_be(),
+                c: c_own.to_bytes_be(),
+            },
+            HandBatchEquationWords {
+                kind: KIND_REVEAL as u8,
+                s: Felt::from(12u32).to_bytes_be(),
+                c: c_rev.to_bytes_be(),
+            },
+        ];
+        let core = handbatch_rho(&f.hb.to_bytes_be(), &core_eqs);
+        assert_raw_matches_core(raw, core);
+    }
+
+    // ---- 6/6 action-sig（v3 域，label 来自 core）----
 
     #[test]
     fn action_sig_challenge_matches_protocol_core() {
-        use starknet_types_core::felt::Felt as CoreFelt;
         let g = Point::generator();
         let r = g.mul(Felt::from(777u64));
         let (rx, ry) = r.to_affine().expect("non-identity R");
@@ -234,36 +388,90 @@ mod action_sig_parity {
         let raw = action_sig_challenge_raw(
             table_id, hand_id, seq, ascii_felt(action), amount, r,
         );
-        let core = poker_protocol_core::stark_curve::action_sig_challenge(
+        let core = action_sig_challenge(
             table_id as u32,
             hand_id as u32,
             seq,
             action,
             amount,
-            CoreFelt::from_bytes_be(&rx.to_bytes_be()),
-            CoreFelt::from_bytes_be(&ry.to_bytes_be()),
+            rx,
+            ry,
         )
-        .expect("action name must encode")
-        .to_bytes_be();
+        .expect("action name must encode");
 
         // raw (mod n) == core 标量字节（n = Stark 曲线群阶）
-        let n = BigUint::from_bytes_be(&core_order_bytes());
-        let raw_int = BigUint::from_bytes_be(&raw.to_bytes_be());
-        let reduced = (raw_int % n).to_bytes_be();
-        let mut padded = [0u8; 32];
-        padded[32 - reduced.len()..].copy_from_slice(&reduced);
-        assert_eq!(padded, core, "challenge must match protocol core");
+        assert_raw_matches_core(raw, core);
     }
 
-    fn core_order_bytes() -> [u8; 32] {
-        poker_protocol_core::stark_curve::ec_order_bytes_be()
+    /// v3 挑战跨 crate 对拍：host RAW poseidon ≡ protocol core 的归约标量
+    /// （mod 群阶 n）。endorsement 退役后动作签名是唯一参与背书来源，挑战
+    /// 公式漂移会让递归信封验证的批次与协议侧签名脱钩。
+    /// 端到端复现：协议 core 签名公式（归约挑战）产的语句喂 spike
+    /// verify_hand——真客户端签名路径与 host 验证路径的等价性。
+    #[test]
+    fn protocol_signed_action_verifies_in_spike() {
+        use poker_protocol_core::curve::Curve;
+
+        let sk = <StarkScalar as CurveScalar>::from_u64(424242);
+        let pk = <poker_protocol_core::stark_curve::StarkCurve as Curve>::base_g() * sk;
+        let w = <StarkScalar as CurveScalar>::from_u64(999);
+        let r = <poker_protocol_core::stark_curve::StarkCurve as Curve>::base_g() * w;
+        let (rx, ry) = r.to_affine_parts().expect("affine R");
+        let c_core = action_sig_challenge(7, 42, 1, "call", 50, rx, ry).expect("encode");
+        let s = w + c_core * sk;
+
+        let (pkx, pky) = pk.to_affine_parts().expect("affine pk");
+        let payload = vec![
+            WireFelt::ZERO, WireFelt::ZERO, WireFelt::ZERO, WireFelt::ZERO, WireFelt::ZERO,
+            WireFelt::ONE, // n_action = 1
+            felt_to_ff(pkx),
+            felt_to_ff(pky),
+            felt_to_ff(rx),
+            felt_to_ff(ry),
+            felt_to_ff(Felt::from_bytes_be(&s.to_bytes_be())),
+            WireFelt::from(7u64), // table_id
+            WireFelt::from(42u64), // hand_id
+            WireFelt::from(1u64), // seq
+            felt_to_ff(ascii_felt("call")),
+            WireFelt::from(50u64), // amount
+        ];
+        // hand_binding 词表外（action 挑战不含 hb）——任取
+        let hb = WireFelt::from(0xABCDEFu64);
+        let report = verify_hand(hb, &payload).expect("parse");
+        assert!(report.accepted(), "protocol-signed action must verify host-side");
+        assert_eq!(report.n_action, 1);
+
+        // 挑战对拍：spike RAW ≡ core 归约
+        let rr = Point::from_affine(rx, ry).expect("R");
+        let c_raw = action_sig_challenge_raw(7, 42, 1, ascii_felt("call"), 50, rr);
+        assert_raw_matches_core(c_raw, c_core);
+    }
+
+    /// Wire 桥不变性：starknet-ff ↔ types-core 的字节往返必须无损（payload
+    /// 边界转换的正确性前提）。
+    #[test]
+    fn wire_felt_bridge_roundtrip() {
+        let hb = mint_hand(WireFelt::from(0xabcdefu64), 1, 0, 1, 0, 0, 11);
+        for w in hb {
+            assert_eq!(felt_to_ff(ff_to_felt(w)), w);
+        }
     }
 }
 
 /// Payload statement order matches `hand_verify.cairo`:
 /// header `[n_own, n_shuffle, n_reveal, n_leave, n_recon, n_action]`, then ownership
 /// block, (shuffle block — fail-closed), reveal, leave, recon blocks.
-pub fn verify_hand(hand_binding: Felt, payload: &[Felt]) -> Result<VerifyReport, VerifyError> {
+///
+/// Wire boundary: the payload crosses the crate boundary as starknet-ff
+/// `FieldElement` felts (texas's starknet-crypto 0.6 Felt); they are bridged
+/// to the crypto felt (types-core) once, up front.
+pub fn verify_hand(
+    hand_binding: WireFelt,
+    payload: &[WireFelt],
+) -> Result<VerifyReport, VerifyError> {
+    let hand_binding = ff_to_felt(hand_binding);
+    let payload: Vec<Felt> = payload.iter().map(|w| ff_to_felt(*w)).collect();
+    let payload = &payload[..];
     if payload.len() < 6 {
         return Err(VerifyError::Truncated);
     }
@@ -438,10 +646,10 @@ pub fn verify_hand(hand_binding: Felt, payload: &[Felt]) -> Result<VerifyReport,
 
 /// Action-sig challenge v3 (RAW felt, no mod-n — same discipline as
 /// endorsement): `c = poseidon([label, table_id, hand_id, seq, action_felt,
-/// amount, Rx, Ry])`. Byte-identical to
-/// `poker-protocol-core::stark_curve::ACTION_SIG_LABEL` short-string felt;
-/// the parity test (`action_sig_challenge_matches_protocol_core`) pins the
-/// cross-crate equivalence (raw ≡ core's reduced scalar mod n).
+/// amount, Rx, Ry])`. The label felt comes from core's `action_sig_label`
+/// (`zgame.action-sig.v3` short-string); the parity test
+/// (`action_sig_challenge_matches_protocol_core`) pins the cross-crate
+/// equivalence (raw ≡ core's reduced scalar mod n).
 pub fn action_sig_challenge_raw(
     table_id: u64,
     hand_id: u64,
@@ -452,7 +660,7 @@ pub fn action_sig_challenge_raw(
 ) -> Felt {
     let (rx, ry) = r.to_affine().expect("non-identity R");
     poseidon_hash_many(&[
-        ascii_felt(ACTION_SIG_LABEL),
+        poker_protocol_core::stark_curve::action_sig_label(),
         Felt::from(table_id),
         Felt::from(hand_id),
         Felt::from(seq),
@@ -465,12 +673,13 @@ pub fn action_sig_challenge_raw(
 
 /// `c = poseidon([proto_label, hb, Gx, Gy, pkx, pky, Rx, Ry])` — raw felt
 /// (used directly as an EC scalar; group order makes the reduction a no-op).
+/// Label felt: core's `handbatch_proto_label`.
 pub fn endorsement_challenge(hb: Felt, g: Point, pk: Point, r: Point) -> Felt {
     let (gx, gy) = g.to_affine().expect("non-identity G");
     let (pkx, pky) = pk.to_affine().expect("non-identity pk");
     let (rx, ry) = r.to_affine().expect("non-identity R");
     poseidon_hash_many(&[
-        ascii_felt(PROTO_LABEL), hb, gx, gy, pkx, pky, rx, ry,
+        poker_protocol_core::stark_curve::handbatch_proto_label(), hb, gx, gy, pkx, pky, rx, ry,
     ])
 }
 
@@ -545,9 +754,10 @@ pub fn reconstruct_challenge(hb: Felt, g1: Point, g2: Point, p1: Point, p2: Poin
 
 /// `rho = poseidon([v1_label, hb, n_eq, (kind, s, c)*])` — one transcript
 /// entry per EC equation (multi-equation statements repeat their (kind, s, c)).
+/// Label felt: core's `handbatch_v1_label`.
 pub fn hand_rho(hb: Felt, equations: &[FoldEquation]) -> Felt {
     let mut felts = Vec::with_capacity(3 + 3 * equations.len());
-    felts.push(ascii_felt(V1_LABEL));
+    felts.push(poker_protocol_core::stark_curve::handbatch_v1_label());
     felts.push(hb);
     felts.push(Felt::from(equations.len() as u64));
     for eq in equations {
@@ -560,11 +770,14 @@ pub fn hand_rho(hb: Felt, equations: &[FoldEquation]) -> Felt {
 
 /// Commitment over the full payload (header + statement words), bound into
 /// the STARK claim. `poseidon_hash_many` over `payload.len()` + all words.
-pub fn payload_digest(payload: &[Felt]) -> Felt {
+/// Wire boundary: starknet-ff in/out, bridged to the crypto felt inside.
+pub fn payload_digest(payload: &[WireFelt]) -> WireFelt {
     let mut felts = Vec::with_capacity(payload.len() + 1);
     felts.push(Felt::from(payload.len() as u64));
-    felts.extend_from_slice(payload);
-    poseidon_hash_many(&felts)
+    for w in payload {
+        felts.push(ff_to_felt(*w));
+    }
+    felt_to_ff(poseidon_hash_many(&felts))
 }
 
 #[cfg(test)]
@@ -574,7 +787,7 @@ mod tests {
 
     #[test]
     fn honest_two_player_hand_accepts() {
-        let hb = Felt::from(0xabcdefu64);
+        let hb = WireFelt::from(0xabcdefu64);
         let payload = mint_hand(hb, 2, 0, 18, 1, 1, 1);
         let report = verify_hand(hb, &payload).expect("parse");
         assert!(report.accepted());
@@ -588,10 +801,10 @@ mod tests {
 
     #[test]
     fn tampered_s_rejects() {
-        let hb = Felt::from(0xabcdefu64);
+        let hb = WireFelt::from(0xabcdefu64);
         let mut payload = mint_hand(hb, 2, 0, 4, 0, 0, 2);
         // bump the first ownership response word (header 6 + word 4)
-        payload[6 + 4] = payload[6 + 4] + Felt::from(1u32);
+        payload[6 + 4] = payload[6 + 4] + WireFelt::from(1u32);
         let report = verify_hand(hb, &payload).unwrap();
         assert!(!report.accepted());
         assert!(!report.all_residuals_identity);
@@ -599,14 +812,14 @@ mod tests {
 
     #[test]
     fn tampered_leave_card_rejects() {
-        let hb = Felt::from(0xabcdefu64);
+        let hb = WireFelt::from(0xabcdefu64);
         // layout: 5 header + own + reveal; first leave word block follows
         let mut payload = mint_hand(hb, 1, 0, 2, 1, 1, 3);
         let leave_at = 5 + 1 * WORDS_PER_OWNERSHIP + 2 * WORDS_PER_REVEAL;
         // bump the first card's `a` x-coordinate: header 7 + four 2n-word
         // sections (in_c1, in_c2, out_c1, out_c2) precede `a`
         let a_x = leave_at + WORDS_PER_LEAVE_HEADER + 8 * 2;
-        payload[a_x] = payload[a_x] + Felt::from(1u32);
+        payload[a_x] = payload[a_x] + WireFelt::from(1u32);
         // Both outcomes reject: a bumped coordinate is either off-curve
         // (parse error) or on-curve but violating the equation.
         match verify_hand(hb, &payload) {
@@ -617,36 +830,36 @@ mod tests {
 
     #[test]
     fn tampered_recon_rejects() {
-        let hb = Felt::from(0xabcdefu64);
+        let hb = WireFelt::from(0xabcdefu64);
         let mut payload = mint_hand(hb, 1, 0, 1, 0, 1, 4);
         // last word of the payload is the recon response s
         let last = payload.len() - 1;
-        payload[last] = payload[last] + Felt::from(1u32);
+        payload[last] = payload[last] + WireFelt::from(1u32);
         let report = verify_hand(hb, &payload).unwrap();
         assert!(!report.accepted());
     }
 
     #[test]
     fn cross_hand_replay_rejects() {
-        let hb = Felt::from(0xabcdefu64);
+        let hb = WireFelt::from(0xabcdefu64);
         let payload = mint_hand(hb, 2, 0, 4, 0, 0, 3);
         // same payload verified under a different hand binding must fail
-        let report = verify_hand(hb + Felt::from(1u32), &payload).unwrap();
+        let report = verify_hand(hb + WireFelt::from(1u32), &payload).unwrap();
         assert!(!report.accepted());
     }
 
     #[test]
     fn truncated_payload_rejects() {
-        let hb = Felt::from(0xabcdefu64);
+        let hb = WireFelt::from(0xabcdefu64);
         let payload = mint_hand(hb, 2, 0, 4, 0, 0, 4);
         assert_eq!(verify_hand(hb, &payload[..8]), Err(VerifyError::Truncated));
     }
 
     #[test]
     fn shuffle_section_fail_closed() {
-        let hb = Felt::from(0xabcdefu64);
+        let hb = WireFelt::from(0xabcdefu64);
         let mut payload = mint_hand(hb, 1, 0, 2, 0, 0, 5);
-        payload[1] = Felt::from(1u32); // n_shuffle = 1
+        payload[1] = WireFelt::from(1u32); // n_shuffle = 1
         assert_eq!(
             verify_hand(hb, &payload),
             Err(VerifyError::UnsupportedSection("shuffle"))
@@ -655,9 +868,9 @@ mod tests {
 
     #[test]
     fn off_curve_pk_rejects() {
-        let hb = Felt::from(0xabcdefu64);
+        let hb = WireFelt::from(0xabcdefu64);
         let mut payload = mint_hand(hb, 1, 0, 0, 0, 0, 6);
-        payload[6] = payload[6] + Felt::from(1u32); // pk_x + 1 → off curve
+        payload[6] = payload[6] + WireFelt::from(1u32); // pk_x + 1 → off curve
         assert!(matches!(verify_hand(hb, &payload), Err(VerifyError::OffCurve("pk"))));
     }
 }

@@ -11,11 +11,21 @@ mod backend;
 pub mod curve;
 #[cfg(feature = "stark-backend")]
 pub mod stark_curve;
+#[cfg(feature = "stark-backend")]
+pub mod tx_schnorr;
 pub mod error;
 pub mod transcript;
 
 #[cfg(feature = "borsh")]
 mod borsh_impl;
+
+/// Stark 点/标量 borsh 编解码单一权威（proofs/bg/poker_protocol 复用；
+/// 字节布局见 `borsh_impl` 模块文档——32B 压缩点 + 32B 大端标量）。
+#[cfg(feature = "borsh")]
+pub use borsh_impl::{
+    read_stark_point, read_stark_scalar, write_stark_point, write_stark_scalar,
+    STARK_POINT_COMPRESSED_LEN, STARK_SCALAR_LEN,
+};
 
 pub use backend::{
     ec_encrypt_batch_generic, Bn254Curve, Bn254ElGamalCiphertext, BnCompressedPoint,

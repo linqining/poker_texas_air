@@ -1,38 +1,16 @@
 use crate::{BayerGrothShuffleProof, MultiExponentiationArgument, ProductArgument};
 use borsh::{BorshDeserialize, BorshSerialize};
 use poker_protocol_core::{
-    StarkCurve, Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric,
+    read_stark_point, read_stark_scalar, write_stark_point, write_stark_scalar, StarkCurve, Curve,
+    ElGamalCiphertextGeneric,
 };
 
-const POINT_LEN: usize = 32;
-const SCALAR_LEN: usize = 32;
+// 2026-09-10：write/read point/scalar 编码核心收敛到 poker-protocol-core
+// （单一权威：32B 压缩点 + 32B 大端标量，字节布局不变）；此处仅保留
+// bg 份特有的向量长度纪律（u32 LE 前缀 + 2..=1024 牌组上限）。
 const MAX_SHUFFLE_DECK_SIZE: usize = 1024;
 
-type Point = <StarkCurve as Curve>::Point;
 type Scalar = <StarkCurve as Curve>::Scalar;
-
-fn write_point<W: borsh::io::Write>(point: &Point, writer: &mut W) -> borsh::io::Result<()> {
-    writer.write_all(point.compress().as_ref())
-}
-
-fn read_point<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Point> {
-    let mut encoded = [0u8; POINT_LEN];
-    reader.read_exact(&mut encoded)?;
-    <Point as CurvePoint>::from_compressed(&encoded)
-        .ok_or_else(|| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, "invalid G1 point"))
-}
-
-fn write_scalar<W: borsh::io::Write>(scalar: &Scalar, writer: &mut W) -> borsh::io::Result<()> {
-    writer.write_all(&scalar.as_bytes())
-}
-
-fn read_scalar<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Scalar> {
-    let mut encoded = [0u8; SCALAR_LEN];
-    reader.read_exact(&mut encoded)?;
-    Scalar::from_canonical_bytes(&encoded).ok_or_else(|| {
-        borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, "non-canonical scalar")
-    })
-}
 
 fn write_scalar_vec<W: borsh::io::Write>(
     values: &[Scalar],
@@ -46,7 +24,7 @@ fn write_scalar_vec<W: borsh::io::Write>(
     })?;
     writer.write_all(&len.to_le_bytes())?;
     for value in values {
-        write_scalar(value, writer)?;
+        write_stark_scalar(value, writer)?;
     }
     Ok(())
 }
@@ -61,56 +39,56 @@ fn read_scalar_vec<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Vec<
             "invalid Bayer-Groth response vector length",
         ));
     }
-    (0..len).map(|_| read_scalar(reader)).collect()
+    (0..len).map(|_| read_stark_scalar(reader)).collect()
 }
 
 impl BorshSerialize for MultiExponentiationArgument<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
-        write_point(&self.c_alpha, writer)?;
-        write_point(&self.c_beta, writer)?;
+        write_stark_point(&self.c_alpha, writer)?;
+        write_stark_point(&self.c_beta, writer)?;
         BorshSerialize::serialize(&self.ciphertext_0, writer)?;
         BorshSerialize::serialize(&self.ciphertext_1, writer)?;
         write_scalar_vec(&self.alpha_response, writer)?;
-        write_scalar(&self.commitment_response, writer)?;
-        write_scalar(&self.beta, writer)?;
-        write_scalar(&self.beta_blinding_response, writer)?;
-        write_scalar(&self.rerandomization_response, writer)
+        write_stark_scalar(&self.commitment_response, writer)?;
+        write_stark_scalar(&self.beta, writer)?;
+        write_stark_scalar(&self.beta_blinding_response, writer)?;
+        write_stark_scalar(&self.rerandomization_response, writer)
     }
 }
 
 impl BorshDeserialize for MultiExponentiationArgument<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
         Ok(Self {
-            c_alpha: read_point(reader)?,
-            c_beta: read_point(reader)?,
+            c_alpha: read_stark_point(reader)?,
+            c_beta: read_stark_point(reader)?,
             ciphertext_0: ElGamalCiphertextGeneric::deserialize_reader(reader)?,
             ciphertext_1: ElGamalCiphertextGeneric::deserialize_reader(reader)?,
             alpha_response: read_scalar_vec(reader)?,
-            commitment_response: read_scalar(reader)?,
-            beta: read_scalar(reader)?,
-            beta_blinding_response: read_scalar(reader)?,
-            rerandomization_response: read_scalar(reader)?,
+            commitment_response: read_stark_scalar(reader)?,
+            beta: read_stark_scalar(reader)?,
+            beta_blinding_response: read_stark_scalar(reader)?,
+            rerandomization_response: read_stark_scalar(reader)?,
         })
     }
 }
 
 impl BorshSerialize for ProductArgument<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
-        write_point(&self.c_d, writer)?;
-        write_point(&self.c_delta, writer)?;
-        write_point(&self.c_capital_delta, writer)?;
+        write_stark_point(&self.c_d, writer)?;
+        write_stark_point(&self.c_delta, writer)?;
+        write_stark_point(&self.c_capital_delta, writer)?;
         write_scalar_vec(&self.a_response, writer)?;
         write_scalar_vec(&self.b_response, writer)?;
-        write_scalar(&self.r_response, writer)?;
-        write_scalar(&self.s_response, writer)
+        write_stark_scalar(&self.r_response, writer)?;
+        write_stark_scalar(&self.s_response, writer)
     }
 }
 
 impl BorshDeserialize for ProductArgument<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let c_d = read_point(reader)?;
-        let c_delta = read_point(reader)?;
-        let c_capital_delta = read_point(reader)?;
+        let c_d = read_stark_point(reader)?;
+        let c_delta = read_stark_point(reader)?;
+        let c_capital_delta = read_stark_point(reader)?;
         let a_response = read_scalar_vec(reader)?;
         let b_response = read_scalar_vec(reader)?;
         if a_response.len() != b_response.len() {
@@ -125,16 +103,16 @@ impl BorshDeserialize for ProductArgument<StarkCurve> {
             c_capital_delta,
             a_response,
             b_response,
-            r_response: read_scalar(reader)?,
-            s_response: read_scalar(reader)?,
+            r_response: read_stark_scalar(reader)?,
+            s_response: read_stark_scalar(reader)?,
         })
     }
 }
 
 impl BorshSerialize for BayerGrothShuffleProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
-        write_point(&self.c_permutation, writer)?;
-        write_point(&self.c_permuted_powers, writer)?;
+        write_stark_point(&self.c_permutation, writer)?;
+        write_stark_point(&self.c_permuted_powers, writer)?;
         BorshSerialize::serialize(&self.multi_exponentiation, writer)?;
         BorshSerialize::serialize(&self.product, writer)
     }
@@ -142,8 +120,8 @@ impl BorshSerialize for BayerGrothShuffleProof<StarkCurve> {
 
 impl BorshDeserialize for BayerGrothShuffleProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let c_permutation = read_point(reader)?;
-        let c_permuted_powers = read_point(reader)?;
+        let c_permutation = read_stark_point(reader)?;
+        let c_permuted_powers = read_stark_point(reader)?;
         let multi_exponentiation = MultiExponentiationArgument::deserialize_reader(reader)?;
         let product = ProductArgument::deserialize_reader(reader)?;
         let n = multi_exponentiation.alpha_response.len();

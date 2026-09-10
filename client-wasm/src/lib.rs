@@ -1,5 +1,6 @@
 use wasm_bindgen::prelude::*;
 use serde::{Serialize, Deserialize};
+use poker_protocol::z_poker::convert;
 use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext, DefaultCurve, CurveScalar, CurvePoint};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
@@ -17,38 +18,29 @@ fn console_log(msg: &str) {
     let _ = log(&format!("[client-wasm] {}", msg));
 }
 
+// hex 编码薄弱化（2026-09-10 收敛）：单一权威在
+// poker_protocol::z_poker::convert（此前的逐行重写拷贝删除）。
+// wasm_bindgen 边界的 String/&str 转换留在本包装层。
+//
+// 2026-09-07 回归注记：hex_to_ecpoint 曾按 BLS12-381 时代断言 48 字节，
+// Stark 压缩点 32 字节 → 浏览器洗牌全挂（2026-09-06 重建 pkg 首次把
+// 遗留代码编进产物后爆发）。长度校验现为 convert/from_compressed 的
+// 单一实现（≠32B 一律拒绝），回归测试 ecpoint_hex_rejects_wrong_length
+// 继续守护。
 pub fn scalar_to_hex(s: &Scalar) -> String {
-    hex::encode(s.as_bytes())
+    convert::scalar_to_hex(s)
 }
 
 fn hex_to_scalar(hex_str: &str) -> Result<Scalar, String> {
-    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    if bytes.len() != 32 {
-        return Err("Scalar must be 32 bytes".to_string());
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Scalar::from_canonical_bytes(&arr)
-        .ok_or_else(|| "non-canonical scalar encoding".to_string())
+    convert::hex_to_scalar(hex_str)
 }
 
 pub fn ecpoint_to_hex(p: &EcPoint) -> String {
-    hex::encode(p.compress().as_ref())
+    convert::ecpoint_to_hex(p)
 }
 
 fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
-    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    // DefaultCurve = StarkCurve：压缩点为 32 字节（x 大端 + 首字节 0x80 位
-    // 记 y 奇偶——StarkCompressedPoint 编码，见 stark_curve::compress）。
-    // 此前按 48 字节（BLS12-381 时代）断言——Stark 迁移时漏改；2026-09-06
-    // 重建 pkg 后首次进入产物，浏览器洗牌路径全部失败（hex 往返 c1/c2/pk）。
-    if bytes.len() != 32 {
-        return Err(format!(
-            "EC point must be 32 bytes (Stark compressed x||parity), got {}",
-            bytes.len()
-        ));
-    }
-    EcPoint::from_compressed(&bytes).ok_or_else(|| "Invalid EC point".to_string())
+    convert::hex_to_ecpoint(hex_str)
 }
 
 fn ct_to_json(ct: &ElGamalCiphertext) -> String {
@@ -777,13 +769,11 @@ pub fn sign_action(
 // 服务端 view 对拍核验。重连只需 localStorage 恢复（get_sk_hex/from_sk），
 // 零钱包交互。
 //
-// 签名格式与 poker_l1 `signature::stark_scheme` 完全一致（Stark Schnorr，
-// 确定性 nonce）：sig = R_compressed(32B) ‖ s(32B)。以下两个域分隔常量
-// 必须与 poker_l1/src/signature/stark_scheme.rs 保持逐字节同步。
+// 签名核心单一源：poker-protocol-core::tx_schnorr（与 poker_l1
+// `signature::stark_scheme` 同一实现）。sig = R_compressed(32B) ‖ s(32B)；
+// 域常量 zchain.schnorr.v1 / zchain.schnorr.nonce.v1 见 core——此前
+// "必须与 poker_l1 逐字节同步"的本地重声明已删除（漂移面收敛为零）。
 // =============================================================================
-
-const TX_SCHNORR_CHALLENGE_DOMAIN: &[u8] = b"zchain.schnorr.v1";
-const TX_SCHNORR_NONCE_DOMAIN: &[u8] = b"zchain.schnorr.nonce.v1";
 
 /// VM 交易会话密钥（随机新鲜钥，与钱包地址零派生关系）。
 #[wasm_bindgen]
@@ -822,7 +812,8 @@ impl WasmTxSession {
 
     /// Stark Schnorr 签名（msg_hash = 32B hex；返回 64B 签名的 hex）——
     /// 消息哈希公式见 poker_l1 `dispatch::tx_message_hash`（客户端须用
-    /// 同一公式构造待签哈希）。
+    /// 同一公式构造待签哈希）。核心在 poker-protocol-core::tx_schnorr
+    /// （与 poker_l1 stark_scheme 同一实现，确定性 nonce + 域分离挑战）。
     pub fn sign(&self, msg_hash_hex: &str) -> Result<String, JsValue> {
         let hash_bytes = hex::decode(msg_hash_hex.trim_start_matches("0x"))
             .map_err(|e| JsValue::from_str(&format!("Invalid msg hash hex: {e}")))?;
@@ -832,31 +823,9 @@ impl WasmTxSession {
         let mut msg = [0u8; 32];
         msg.copy_from_slice(&hash_bytes);
 
-        // 与 stark_scheme::sign 同构：确定性 nonce + 域分离挑战。
-        let mut nonce_input = Vec::with_capacity(TX_SCHNORR_NONCE_DOMAIN.len() + 64);
-        nonce_input.extend_from_slice(TX_SCHNORR_NONCE_DOMAIN);
-        nonce_input.extend_from_slice(&self.sk.as_bytes());
-        nonce_input.extend_from_slice(&msg);
-        let r = poker_protocol::crypto::hash_to_scalar(&nonce_input);
-        let big_r = base_g() * &r;
-        let e = schnorr_challenge(&big_r, &self.pk, &msg);
-        let s = r + e * self.sk;
-
-        let mut sig = [0u8; 64];
-        sig[..32].copy_from_slice(big_r.compress().as_ref());
-        sig[32..].copy_from_slice(&s.to_bytes_be());
+        let sig = poker_protocol_core::tx_schnorr::sign(&self.sk, &msg);
         Ok(hex::encode(sig))
     }
-}
-
-/// Schnorr 挑战标量（与 stark_scheme::schnorr_challenge 同构）。
-fn schnorr_challenge(big_r: &EcPoint, pk: &EcPoint, msg_hash: &[u8; 32]) -> Scalar {
-    let mut buf = Vec::with_capacity(TX_SCHNORR_CHALLENGE_DOMAIN.len() + 96);
-    buf.extend_from_slice(TX_SCHNORR_CHALLENGE_DOMAIN);
-    buf.extend_from_slice(big_r.compress().as_ref());
-    buf.extend_from_slice(pk.compress().as_ref());
-    buf.extend_from_slice(msg_hash);
-    poker_protocol::crypto::hash_to_scalar(&buf)
 }
 
 #[cfg(test)]
@@ -868,7 +837,7 @@ mod curve_hex_tests {
     /// 把遗留代码编进产物后爆发）。roundtrip 必须闭环。
     #[test]
     fn ecpoint_hex_roundtrip() {
-        use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar};
+        use poker_protocol::crypto::curve::{Curve, CurveScalar};
         let sk = Scalar::from_u64(12345);
         let p = <DefaultCurve as Curve>::base_g() * sk;
         let hex = ecpoint_to_hex(&p);
@@ -906,7 +875,9 @@ mod curve_hex_tests {
     }
 
 /// 跨 crate 已知答案向量（P2-2）：与 poker_l1 stark_scheme 测试同一
-    /// sk/msg/期望签名——两侧实现/域常量漂移时必有一侧失败。
+    /// sk/msg/期望签名——签名核心已收敛到 poker-protocol-core::tx_schnorr
+    /// （2026-09-10），本向量从"防对方漂移"升级为"同一实现的自证"：
+    /// wasm 侧接线（hex 边界/类型转发）漂移时在此失败。
     /// sk = hash_to_scalar(b"zgame.tx-vector.kat.v1")。
     #[test]
     fn tx_session_known_answer_vector_matches_poker_l1() {

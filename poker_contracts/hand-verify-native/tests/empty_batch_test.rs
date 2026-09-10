@@ -8,7 +8,9 @@ use hand_verify_native::recurse::build_action_batch_payload;
 
 #[test]
 fn empty_action_batch_rejected_as_truncated() {
-    let hb = starknet_crypto::FieldElement::from_byte_slice_be(&[0x01; 32]).unwrap();
+    // Wire felt（starknet-ff）：payload/hand_binding 跨 crate 边界的类型。
+    let hb = starknet_ff::FieldElement::from_byte_slice_be(&[0x01; 32])
+        .expect("small felt");
     let payload = build_action_batch_payload(hb, 1, 42, &[]).expect("payload build");
     assert_eq!(payload.len(), 6, "empty batch = header only");
     assert_eq!(

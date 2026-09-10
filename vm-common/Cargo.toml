@@ -3,7 +3,7 @@ name = "vm-common"
 version = "0.1.0"
 edition = "2024"
 license = "BUSL-1.1"
-description = "Shared cross-cutting concerns for poker_l1 vm and poker_zkvm (gas/syscall_id/precompile/crypto/gas_strategy)"
+description = "Shared proof-task input types for the poker proving stack (MethodInput)"
 
 [lib]
 path = "src/lib.rs"

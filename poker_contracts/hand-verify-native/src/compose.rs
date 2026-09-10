@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use starknet_crypto::FieldElement as Felt;
+use starknet_ff::FieldElement as Felt;
 
 use crate::air::{HandBatchClaim, KindCounts};
 use crate::handbatch::{payload_digest, verify_hand};
@@ -150,7 +150,9 @@ pub fn run_compose(
     }
     let cairo_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cairo/src/lib.cairo");
 
-    let hand_binding = starknet_crypto::poseidon_hash_many(&[Felt::from(seed), Felt::from(0xB16Du64)]);
+    // Same binding derivation as the recursion envelope (wire felt via the
+    // 0.8 poseidon bridge).
+    let hand_binding = crate::recurse::hand_binding(seed);
     let payload = mint::mint_hand(
         hand_binding,
         counts.n_own,

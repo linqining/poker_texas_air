@@ -33,9 +33,23 @@
 use num_bigint::BigUint;
 use stwo::core::fields::m31::{BaseField, M31};
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, ORIGINAL_TRACE_IDX};
+use starknet_ff::FieldElement as Felt;
 
-use crate::curve::{felt_to_biguint, biguint_to_felt};
-use starknet_crypto::FieldElement as Felt;
+/// Wire felt (starknet-ff) ↔ BigUint — the claim's hand binding is a wire
+/// word (texas-visible type); limb splitting is integer work on BigUint.
+fn felt_to_biguint(f: Felt) -> BigUint {
+    BigUint::from_bytes_be(&f.to_bytes_be())
+}
+
+fn biguint_to_felt(v: &BigUint) -> Option<Felt> {
+    let bytes = v.to_bytes_be();
+    if bytes.len() > 32 {
+        return None;
+    }
+    let mut buf = [0u8; 32];
+    buf[32 - bytes.len()..].copy_from_slice(&bytes);
+    Felt::from_bytes_be(&buf).ok()
+}
 
 /// Number of 28-bit limbs representing a felt252 in the trace.
 pub const N_LIMBS: usize = 9;

@@ -17,18 +17,26 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use starknet_crypto::poseidon_hash_many;
-use starknet_crypto::FieldElement as Felt;
+use starknet_crypto::{poseidon_hash_many, Felt as CryptoFelt};
+use starknet_ff::FieldElement as Felt;
 
 use crate::air::KindCounts;
-use crate::handbatch::{payload_digest, verify_hand, VerifyReport};
+use crate::handbatch::{ff_to_felt, felt_to_ff, payload_digest, verify_hand, VerifyReport};
 use crate::mint;
+
+/// Wire-felt poseidon：本模块的类型面对外是 starknet-ff Felt（texas 的
+/// 0.6 口径），哈希内核是 starknet-crypto 0.8（types-core Felt）——桥接
+/// 后逐字节同值（Poseidon 规格跨 0.6/0.8 一致，golden vectors 钉死）。
+fn poseidon_ff(words: &[Felt]) -> Felt {
+    let core_words: Vec<CryptoFelt> = words.iter().map(|w| ff_to_felt(*w)).collect();
+    felt_to_ff(poseidon_hash_many(&core_words))
+}
 
 /// Genesis 累计承诺（与 Cairo `GENESIS_ACC` 同值）。
 pub const GENESIS_ACC: Felt = Felt::ZERO;
 
 pub fn hand_binding(seed: u64) -> Felt {
-    poseidon_hash_many(&[Felt::from(seed), Felt::from(0xB16Du64)])
+    poseidon_ff(&[Felt::from(seed), Felt::from(0xB16Du64)])
 }
 
 /// 递归信封的一个任务：一手待验证的 hand_batch。
@@ -44,7 +52,7 @@ impl RecurseTask {
     ///             n_recon, n_action])`（v3：尾部追加 action 桶计数）。
     pub fn claim(&self, report: &VerifyReport) -> Felt {
         let digest = payload_digest(&self.payload);
-        poseidon_hash_many(&[
+        poseidon_ff(&[
             self.hand_binding,
             digest,
             Felt::from(report.n_own),
@@ -62,7 +70,7 @@ pub fn fold_accumulator(prev_acc: Felt, claims: &[Felt]) -> Felt {
     let mut words = Vec::with_capacity(claims.len() + 1);
     words.push(prev_acc);
     words.extend_from_slice(claims);
-    poseidon_hash_many(&words)
+    poseidon_ff(&words)
 }
 
 /// 铸造 `n_tasks` 手诚实任务（seed 连号，hand_binding 派生自 seed）。
@@ -417,7 +425,7 @@ pub fn build_action_batch_payload(
         let rx = felt_from_hex(&st.r_x_hex)?;
         let ry = felt_from_hex(&st.r_y_hex)?;
         let sv = felt_from_hex(&st.s_hex)?;
-        let action_felt = ascii_felt_pub(&st.action);
+        let action_felt = felt_to_ff(ascii_felt_pub(&st.action));
         payload.extend_from_slice(&[
             pkx, pky, rx, ry, sv,
             Felt::from(st.table_id),

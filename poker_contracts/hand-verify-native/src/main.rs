@@ -14,20 +14,21 @@
 
 use std::time::Instant;
 
-use starknet_crypto::poseidon_hash_many;
-use starknet_crypto::FieldElement as Felt;
+// Wire felt (payload/hand-binding words) is starknet-ff FieldElement; the
+// challenge layer speaks the crypto felt (starknet-crypto 0.8 = types-core).
+use starknet_ff::FieldElement as Felt;
 
 use hand_verify_native::air::{HandBatchClaim, KindCounts};
 use hand_verify_native::curve::Point;
 use hand_verify_native::handbatch::{
-    endorsement_challenge, hand_rho, leave_challenge, payload_digest,
+    endorsement_challenge, ff_to_felt, hand_rho, leave_challenge, payload_digest,
     reconstruct_challenge, reveal_challenge, verify_hand, FoldEquation, LeaveCard,
     KIND_OWNERSHIP, KIND_RECONSTRUCT, KIND_REVEAL,
 };
 use hand_verify_native::{compose, curve, handbatch, mint, prove, recurse};
 
 fn hand_binding(seed: u64) -> Felt {
-    poseidon_hash_many(&[Felt::from(seed), Felt::from(0xB16Du64)])
+    recurse::hand_binding(seed)
 }
 
 struct RoundTrip {
@@ -245,54 +246,57 @@ fn bench() {
 /// `poker-protocol-core::stark_curve::handbatch_*_challenge` (whose
 /// host↔Cairo parity is pinned in the main project) is the production gate.
 fn vectors() {
-    let hb = Felt::from(0xB16Du64);
+    use starknet_crypto::Felt as CFelt;
+    let hb_wire = Felt::from(0xB16Du64);
+    let hb = ff_to_felt(hb_wire);
     let g = Point::generator();
     // Deterministic statement points: small multiples of G.
-    let p2 = g.mul(Felt::from(2u32));
-    let p3 = g.mul(Felt::from(3u32));
-    let p4 = g.mul(Felt::from(4u32));
-    let p5 = g.mul(Felt::from(5u32));
-    let p6 = g.mul(Felt::from(6u32));
-    let p7 = g.mul(Felt::from(7u32));
+    let m = |k: u32| g.mul(CFelt::from(k));
+    let p2 = m(2);
+    let p3 = m(3);
+    let p4 = m(4);
+    let p5 = m(5);
+    let p6 = m(6);
+    let p7 = m(7);
 
     let c_own = endorsement_challenge(hb, g, p2, p3);
-    let c_rev = reveal_challenge(hb, p2, p3, p4, p5, p6, p7, Felt::from(8u32));
+    let c_rev = reveal_challenge(hb, p2, p3, p4, p5, p6, p7, CFelt::from(8u32));
     let card = LeaveCard { in_c1: p2, in_c2: p3, out_c1: p4, out_c2: p5, a: p6 };
-    let c_leave = leave_challenge(hb, p2, p3, Felt::from(8u32), &[card]);
+    let c_leave = leave_challenge(hb, p2, p3, CFelt::from(8u32), &[card]);
     let c_recon = reconstruct_challenge(hb, g, p2, p3, p4, p5, p6);
     let eqs = [
         FoldEquation {
             kind: KIND_OWNERSHIP,
-            s: Felt::from(11u32),
+            s: CFelt::from(11u32),
             c: c_own,
             residual: curve::Point::identity(),
         },
         FoldEquation {
             kind: KIND_REVEAL,
-            s: Felt::from(12u32),
+            s: CFelt::from(12u32),
             c: c_rev,
             residual: curve::Point::identity(),
         },
         FoldEquation {
             kind: KIND_RECONSTRUCT,
-            s: Felt::from(13u32),
+            s: CFelt::from(13u32),
             c: c_recon,
             residual: curve::Point::identity(),
         },
     ];
     let rho = hand_rho(hb, &eqs);
-    let digest = handbatch::payload_digest(&[hb, Felt::from(1u32), Felt::from(2u32)]);
+    let digest = handbatch::payload_digest(&[hb_wire, Felt::from(1u32), Felt::from(2u32)]);
 
-    for (name, value) in [
-        ("hand_binding", hb),
-        ("endorsement_challenge", c_own),
-        ("reveal_challenge", c_rev),
-        ("leave_challenge", c_leave),
-        ("reconstruct_challenge", c_recon),
-        ("hand_rho", rho),
-        ("payload_digest", digest),
+    for (name, bytes) in [
+        ("hand_binding", hb_wire.to_bytes_be()),
+        ("endorsement_challenge", c_own.to_bytes_be()),
+        ("reveal_challenge", c_rev.to_bytes_be()),
+        ("leave_challenge", c_leave.to_bytes_be()),
+        ("reconstruct_challenge", c_recon.to_bytes_be()),
+        ("hand_rho", rho.to_bytes_be()),
+        ("payload_digest", digest.to_bytes_be()),
     ] {
-        println!("{name}: 0x{}", hex(&value.to_bytes_be()));
+        println!("{name}: 0x{}", hex(&bytes));
     }
 }
 
@@ -501,23 +505,28 @@ mod tests {
     /// `poker-protocol-core::stark_curve` (host↔Cairo parity lives there).
     #[test]
     fn golden_vectors_pinned() {
-        let hb = Felt::from(0xB16Du64);
+        use starknet_crypto::Felt as CFelt;
+        let hb = ff_to_felt(Felt::from(0xB16Du64));
         let g = Point::generator();
-        let p2 = g.mul(Felt::from(2u32));
-        let p3 = g.mul(Felt::from(3u32));
-        let p4 = g.mul(Felt::from(4u32));
-        let p5 = g.mul(Felt::from(5u32));
-        let p6 = g.mul(Felt::from(6u32));
-        let p7 = g.mul(Felt::from(7u32));
+        let m = |k: u32| g.mul(CFelt::from(k));
+        let p2 = m(2);
+        let p3 = m(3);
+        let p4 = m(4);
+        let p5 = m(5);
+        let p6 = m(6);
+        let p7 = m(7);
 
         // Populated from `cargo run --release -- vectors` (see
-        // docs/golden-vectors.md); asserted here to pin formula drift.
+        // docs/golden-vectors.md); asserted here to pin formula drift — and,
+        // since the starknet-crypto 0.8 alignment, to pin that the 0.8
+        // poseidon output is byte-identical to the 0.6 vectors the corpus
+        // was generated with.
         assert_eq!(
             hex(&endorsement_challenge(hb, g, p2, p3).to_bytes_be()),
             crate_golden::ENDORSEMENT,
         );
         assert_eq!(
-            hex(&reveal_challenge(hb, p2, p3, p4, p5, p6, p7, Felt::from(8u32)).to_bytes_be()),
+            hex(&reveal_challenge(hb, p2, p3, p4, p5, p6, p7, CFelt::from(8u32)).to_bytes_be()),
             crate_golden::REVEAL,
         );
         assert_eq!(hex(&hand_binding(1).to_bytes_be()), crate_golden::HAND_BINDING_SEED_1);

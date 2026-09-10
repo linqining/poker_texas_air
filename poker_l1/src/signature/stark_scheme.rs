@@ -7,47 +7,32 @@
 //! 验签方程：`base_g() · s − pk · e == R`，其中
 //! `e = H("zchain.schnorr.v1" ‖ R ‖ pk ‖ msg_hash)`。
 //!
+//! 2026-09-10：签名核心（sign / schnorr_challenge / 域常量）下沉到
+//! `poker_protocol_core::tx_schnorr`（单一权威，client-wasm
+//! `WasmTxSession` 同源）；本文件保留路由/验签外壳与 poker_l1 错误类型。
+//!
 //! 注意：本方案配套的调用方身份是**公开可派生**的（见
 //! `vm::contracts::texas_poker::runtime::caller_id`）——签名是完整性
 //! 层（消息/nonce 承诺 + 重放锚），不是钱包持有证明。
 
 use poker_protocol::crypto::curve::{CurvePoint, CurveScalar};
-use poker_protocol::crypto::types::{EcPoint, Scalar, base_g, hash_to_scalar};
+use poker_protocol::crypto::types::{EcPoint, Scalar, base_g};
+use poker_protocol_core::tx_schnorr;
 
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme, TaggedPubkey, encode_tag};
 
-/// Schnorr 挑战域分隔（e = H(domain ‖ R ‖ pk ‖ msg)）。
-const SCHNORR_CHALLENGE_DOMAIN: &[u8] = b"zchain.schnorr.v1";
+/// 签名字节长度：R 压缩(32B) ‖ s 大端(32B)（core 单一源）。
+pub const SIGNATURE_LEN: usize = tx_schnorr::SIGNATURE_LEN;
 
-/// 确定性 nonce 域分隔（r = H(domain ‖ sk ‖ msg)，可复现、无 RNG 依赖）。
-const SCHNORR_NONCE_DOMAIN: &[u8] = b"zchain.schnorr.nonce.v1";
-
-/// 签名字节长度：R 压缩(32B) ‖ s 大端(32B)。
-pub const SIGNATURE_LEN: usize = 64;
-
-/// 签名（确定性 nonce）：
+/// 签名（确定性 nonce，core `tx_schnorr::sign` 薄包装）。
 ///
 /// - `r = H(nonce_domain ‖ sk ‖ msg_hash)`（可复现，测试与重放友好）
 /// - `R = base_g() · r`，`e = H(challenge_domain ‖ R ‖ pk ‖ msg_hash)`
 /// - `s = r + e · sk`
 #[must_use]
 pub fn sign(sk: &Scalar, msg_hash: &[u8; 32]) -> [u8; SIGNATURE_LEN] {
-    let pk = base_g() * *sk;
-    let mut nonce_input = Vec::with_capacity(SCHNORR_NONCE_DOMAIN.len() + 32 + 32);
-    nonce_input.extend_from_slice(SCHNORR_NONCE_DOMAIN);
-    nonce_input.extend_from_slice(&sk.as_bytes());
-    nonce_input.extend_from_slice(msg_hash);
-    let r = hash_to_scalar(&nonce_input);
-
-    let big_r = base_g() * r;
-    let e = schnorr_challenge(&big_r, &pk, msg_hash);
-    let s = r + e * *sk;
-
-    let mut out = [0u8; SIGNATURE_LEN];
-    out[..32].copy_from_slice(big_r.compress().as_ref());
-    out[32..].copy_from_slice(&s.to_bytes_be());
-    out
+    tx_schnorr::sign(sk, msg_hash)
 }
 
 /// 统一路由入口：scheme tag 校验后解析公钥做点级验签。
@@ -92,7 +77,7 @@ pub fn verify_point(pk: &EcPoint, msg_hash: &[u8; 32], sig: &[u8]) -> PokerL1Res
     }
     let s = Scalar::from_canonical_bytes(&sig[32..]).ok_or(PokerL1Error::InvalidSignature)?;
 
-    let e = schnorr_challenge(&big_r, pk, msg_hash);
+    let e = tx_schnorr::schnorr_challenge(&big_r, pk, msg_hash);
     let rhs = base_g() * s - *pk * e;
     if rhs == big_r {
         Ok(())
@@ -101,19 +86,10 @@ pub fn verify_point(pk: &EcPoint, msg_hash: &[u8; 32], sig: &[u8]) -> PokerL1Res
     }
 }
 
-/// Schnorr 挑战标量：`H(domain ‖ R ‖ pk ‖ msg_hash)`。
-fn schnorr_challenge(big_r: &EcPoint, pk: &EcPoint, msg_hash: &[u8; 32]) -> Scalar {
-    let mut buf = Vec::with_capacity(SCHNORR_CHALLENGE_DOMAIN.len() + 32 * 3);
-    buf.extend_from_slice(SCHNORR_CHALLENGE_DOMAIN);
-    buf.extend_from_slice(big_r.compress().as_ref());
-    buf.extend_from_slice(pk.compress().as_ref());
-    buf.extend_from_slice(msg_hash);
-    hash_to_scalar(&buf)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use poker_protocol::crypto::types::hash_to_scalar;
 
     fn sk_of(wallet: &str) -> Scalar {
         hash_to_scalar(wallet.as_bytes())
@@ -125,9 +101,11 @@ mod tests {
     }
 
 /// 跨 crate 已知答案向量（P2-2）：固定 sk 与消息的签名期望值。
-    /// **双写契约**：client-wasm `WasmTxSession` 测试携带同一向量——两侧
-    /// 域常量/签名实现漂移时，向量必有一侧失败（防静默分叉成两套不互通
-    /// 的签名空间）。sk = hash_to_scalar(b"zgame.tx-vector.kat.v1")。
+    /// **收敛后自证**（2026-09-10）：签名核心单一源于
+    /// poker-protocol-core::tx_schnorr，本向量与 client-wasm
+    /// `WasmTxSession` 测试携带同一向量——任何一侧对 core 的接线
+    /// 漂移（类型/编码/调用路径）都会在此失败。
+    /// sk = hash_to_scalar(b"zgame.tx-vector.kat.v1")。
     #[test]
     fn schnorr_known_answer_vector() {
         let sk = poker_protocol::crypto::hash_to_scalar(b"zgame.tx-vector.kat.v1");

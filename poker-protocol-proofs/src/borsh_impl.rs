@@ -5,7 +5,10 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use poker_protocol_bg::BayerGrothShuffleProof;
-use poker_protocol_core::{CurvePoint, CurveScalar, ElGamalCiphertextGeneric, StarkCurve, StarkPoint, StarkScalar};
+use poker_protocol_core::{
+    read_stark_point, read_stark_scalar, write_stark_point, write_stark_scalar,
+    ElGamalCiphertextGeneric, StarkCurve, StarkPoint, StarkScalar,
+};
 
 type G1Projective = StarkPoint;
 type BlsScalar = StarkScalar;
@@ -26,59 +29,21 @@ use crate::versioned::{
 
 // ============================================================
 // 内部辅助函数：定长字节读写
+//
+// 2026-09-10：write/read point/scalar 的编码核心收敛到
+// poker-protocol_core（单一权威，字节布局不变）；此处仅保留
+// proofs 份特有的向量长度纪律（u32 LE 长度前缀 + 逐元素）。
 // ============================================================
 
-/// Stark 压缩点字节数。
-const G1_COMPRESSED_LEN: usize = 32;
-/// BLS 标量字节数（大端序，Move 兼容）。
-const SCALAR_LEN: usize = 32;
+/// 重建证明向量长度上限（DoS 防护，proofs 份本地纪律）。
 const MAX_RECONSTRUCTION_DECK_SIZE: usize = 1024;
-
-#[inline]
-fn write_point<W: borsh::io::Write>(p: &G1Projective, w: &mut W) -> borsh::io::Result<()> {
-    let bytes = CurvePoint::compress(p);
-    w.write_all(bytes.as_ref())
-}
-
-#[inline]
-fn read_point<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<G1Projective> {
-    let mut bytes = [0u8; G1_COMPRESSED_LEN];
-    r.read_exact(&mut bytes)?;
-    CurvePoint::from_compressed(&bytes).ok_or_else(|| {
-        borsh::io::Error::new(
-            borsh::io::ErrorKind::InvalidData,
-            "invalid compressed curve point",
-        )
-    })
-}
-
-#[inline]
-fn write_scalar<W: borsh::io::Write>(s: &BlsScalar, w: &mut W) -> borsh::io::Result<()> {
-    // CurveScalar::as_bytes() → to_bytes_be() → 32 字节大端序（Move 兼容）
-    let bytes = <BlsScalar as CurveScalar>::as_bytes(s);
-    w.write_all(&bytes)
-}
-
-#[inline]
-fn read_scalar<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<BlsScalar> {
-    let mut bytes = [0u8; SCALAR_LEN];
-    r.read_exact(&mut bytes)?;
-    // Proof encodings must be canonical. Reducing an attacker-controlled
-    // non-canonical value modulo q would make the wire format malleable.
-    <BlsScalar as CurveScalar>::from_canonical_bytes(&bytes).ok_or_else(|| {
-        borsh::io::Error::new(
-            borsh::io::ErrorKind::InvalidData,
-            "non-canonical curve scalar",
-        )
-    })
-}
 
 #[inline]
 fn write_point_vec<W: borsh::io::Write>(v: &[G1Projective], w: &mut W) -> borsh::io::Result<()> {
     let len = v.len() as u32;
     w.write_all(&len.to_le_bytes())?;
     for p in v {
-        write_point(p, w)?;
+        write_stark_point(p, w)?;
     }
     Ok(())
 }
@@ -90,7 +55,7 @@ fn read_point_vec<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Vec<G1Proj
     let len = u32::from_le_bytes(len_bytes) as usize;
     let mut out = Vec::with_capacity(len);
     for _ in 0..len {
-        out.push(read_point(r)?);
+        out.push(read_stark_point(r)?);
     }
     Ok(out)
 }
@@ -100,7 +65,7 @@ fn write_scalar_vec<W: borsh::io::Write>(v: &[BlsScalar], w: &mut W) -> borsh::i
     let len = v.len() as u32;
     w.write_all(&len.to_le_bytes())?;
     for s in v {
-        write_scalar(s, w)?;
+        write_stark_scalar(s, w)?;
     }
     Ok(())
 }
@@ -112,7 +77,7 @@ fn read_scalar_vec<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Vec<BlsSc
     let len = u32::from_le_bytes(len_bytes) as usize;
     let mut out = Vec::with_capacity(len);
     for _ in 0..len {
-        out.push(read_scalar(r)?);
+        out.push(read_stark_scalar(r)?);
     }
     Ok(out)
 }
@@ -123,7 +88,7 @@ fn read_scalar_vec<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Vec<BlsSc
 
 impl BorshSerialize for GeneralizedSchnorrProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
-        write_point(&self.commitment, w)?;
+        write_stark_point(&self.commitment, w)?;
         write_scalar_vec(&self.responses, w)?;
         Ok(())
     }
@@ -131,7 +96,7 @@ impl BorshSerialize for GeneralizedSchnorrProof<StarkCurve> {
 
 impl BorshDeserialize for GeneralizedSchnorrProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
-        let commitment = read_point(r)?;
+        let commitment = read_stark_point(r)?;
         let responses = read_scalar_vec(r)?;
         Ok(Self {
             commitment,
@@ -146,24 +111,24 @@ impl BorshDeserialize for GeneralizedSchnorrProof<StarkCurve> {
 
 impl BorshSerialize for ZKShuffleProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
-        write_point(&self.sum_c1_commit, w)?;
-        write_point(&self.sum_c2_commit, w)?;
+        write_stark_point(&self.sum_c1_commit, w)?;
+        write_stark_point(&self.sum_c2_commit, w)?;
         BorshSerialize::serialize(&self.combined_schnorr_proof, w)?;
         BorshSerialize::serialize(&self.sum_c1_schnorr_proof, w)?;
         BorshSerialize::serialize(&self.sum_c2_schnorr_proof, w)?;
-        write_scalar(&self.nonce, w)?;
+        write_stark_scalar(&self.nonce, w)?;
         Ok(())
     }
 }
 
 impl BorshDeserialize for ZKShuffleProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
-        let sum_c1_commit = read_point(r)?;
-        let sum_c2_commit = read_point(r)?;
+        let sum_c1_commit = read_stark_point(r)?;
+        let sum_c2_commit = read_stark_point(r)?;
         let combined_schnorr_proof = BorshDeserialize::deserialize_reader(r)?;
         let sum_c1_schnorr_proof = BorshDeserialize::deserialize_reader(r)?;
         let sum_c2_schnorr_proof = BorshDeserialize::deserialize_reader(r)?;
-        let nonce = read_scalar(r)?;
+        let nonce = read_stark_scalar(r)?;
         Ok(Self {
             sum_c1_commit,
             sum_c2_commit,
@@ -222,9 +187,9 @@ impl BorshDeserialize for VersionedShuffleProof<StarkCurve> {
 impl BorshSerialize for DLEqProof<StarkCurve, RemaskKind> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         write_point_vec(&self.per_card_commitments, w)?;
-        write_point(&self.commitment_pk, w)?;
-        write_scalar(&self.response, w)?;
-        write_scalar(&self.nonce, w)?;
+        write_stark_point(&self.commitment_pk, w)?;
+        write_stark_scalar(&self.response, w)?;
+        write_stark_scalar(&self.nonce, w)?;
         Ok(())
     }
 }
@@ -232,9 +197,9 @@ impl BorshSerialize for DLEqProof<StarkCurve, RemaskKind> {
 impl BorshDeserialize for DLEqProof<StarkCurve, RemaskKind> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let per_card_commitments = read_point_vec(r)?;
-        let commitment_pk = read_point(r)?;
-        let response = read_scalar(r)?;
-        let nonce = read_scalar(r)?;
+        let commitment_pk = read_stark_point(r)?;
+        let response = read_stark_scalar(r)?;
+        let nonce = read_stark_scalar(r)?;
         Ok(DLEqProof::from_parts(
             per_card_commitments,
             commitment_pk,
@@ -247,9 +212,9 @@ impl BorshDeserialize for DLEqProof<StarkCurve, RemaskKind> {
 impl BorshSerialize for DLEqProof<StarkCurve, LeaveKind> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         write_point_vec(&self.per_card_commitments, w)?;
-        write_point(&self.commitment_pk, w)?;
-        write_scalar(&self.response, w)?;
-        write_scalar(&self.nonce, w)?;
+        write_stark_point(&self.commitment_pk, w)?;
+        write_stark_scalar(&self.response, w)?;
+        write_stark_scalar(&self.nonce, w)?;
         Ok(())
     }
 }
@@ -257,9 +222,9 @@ impl BorshSerialize for DLEqProof<StarkCurve, LeaveKind> {
 impl BorshDeserialize for DLEqProof<StarkCurve, LeaveKind> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let per_card_commitments = read_point_vec(r)?;
-        let commitment_pk = read_point(r)?;
-        let response = read_scalar(r)?;
-        let nonce = read_scalar(r)?;
+        let commitment_pk = read_stark_point(r)?;
+        let response = read_stark_scalar(r)?;
+        let nonce = read_stark_scalar(r)?;
         Ok(DLEqProof::from_parts(
             per_card_commitments,
             commitment_pk,
@@ -275,22 +240,22 @@ impl BorshDeserialize for DLEqProof<StarkCurve, LeaveKind> {
 
 impl BorshSerialize for RevealTokenProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
-        write_point(&self.user_public_key, w)?;
-        write_point(&self.commitment_t1, w)?;
-        write_point(&self.commitment_t2, w)?;
-        write_scalar(&self.response_s, w)?;
-        write_scalar(&self.nonce, w)?;
+        write_stark_point(&self.user_public_key, w)?;
+        write_stark_point(&self.commitment_t1, w)?;
+        write_stark_point(&self.commitment_t2, w)?;
+        write_stark_scalar(&self.response_s, w)?;
+        write_stark_scalar(&self.nonce, w)?;
         Ok(())
     }
 }
 
 impl BorshDeserialize for RevealTokenProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
-        let user_public_key = read_point(r)?;
-        let commitment_t1 = read_point(r)?;
-        let commitment_t2 = read_point(r)?;
-        let response_s = read_scalar(r)?;
-        let nonce = read_scalar(r)?;
+        let user_public_key = read_stark_point(r)?;
+        let commitment_t1 = read_stark_point(r)?;
+        let commitment_t2 = read_stark_point(r)?;
+        let response_s = read_stark_scalar(r)?;
+        let nonce = read_stark_scalar(r)?;
         Ok(Self {
             user_public_key,
             commitment_t1,
@@ -307,18 +272,18 @@ impl BorshDeserialize for RevealTokenProof<StarkCurve> {
 
 impl BorshSerialize for ChaumPedersenDLEQProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
-        write_point(&self.commitment_a, w)?;
-        write_point(&self.commitment_b, w)?;
-        write_scalar(&self.response, w)?;
+        write_stark_point(&self.commitment_a, w)?;
+        write_stark_point(&self.commitment_b, w)?;
+        write_stark_scalar(&self.response, w)?;
         Ok(())
     }
 }
 
 impl BorshDeserialize for ChaumPedersenDLEQProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
-        let commitment_a = read_point(r)?;
-        let commitment_b = read_point(r)?;
-        let response = read_scalar(r)?;
+        let commitment_a = read_stark_point(r)?;
+        let commitment_b = read_stark_point(r)?;
+        let response = read_stark_scalar(r)?;
         Ok(Self {
             commitment_a,
             commitment_b,
@@ -333,18 +298,18 @@ impl BorshDeserialize for ChaumPedersenDLEQProof<StarkCurve> {
 
 impl BorshSerialize for ReconstructionDLEQProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
-        write_point(&self.commitment, w)?;
-        write_scalar(&self.response, w)?;
-        write_scalar(&self.nonce, w)?;
+        write_stark_point(&self.commitment, w)?;
+        write_stark_scalar(&self.response, w)?;
+        write_stark_scalar(&self.nonce, w)?;
         Ok(())
     }
 }
 
 impl BorshDeserialize for ReconstructionDLEQProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
-        let commitment = read_point(r)?;
-        let response = read_scalar(r)?;
-        let nonce = read_scalar(r)?;
+        let commitment = read_stark_point(r)?;
+        let response = read_stark_scalar(r)?;
+        let nonce = read_stark_scalar(r)?;
         Ok(Self {
             commitment,
             response,
@@ -427,13 +392,13 @@ impl BorshSerialize for OrderedEncryptionProof<StarkCurve> {
         }
         write_reconstruction_len(n, 2, w)?;
         for point in &self.commitment_g {
-            write_point(point, w)?;
+            write_stark_point(point, w)?;
         }
         for point in &self.commitment_pk {
-            write_point(point, w)?;
+            write_stark_point(point, w)?;
         }
         for response in &self.responses {
-            write_scalar(response, w)?;
+            write_stark_scalar(response, w)?;
         }
         Ok(())
     }
@@ -442,9 +407,9 @@ impl BorshSerialize for OrderedEncryptionProof<StarkCurve> {
 impl BorshDeserialize for OrderedEncryptionProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         let n = read_reconstruction_len(r, 2)?;
-        let commitment_g = (0..n).map(|_| read_point(r)).collect::<Result<_, _>>()?;
-        let commitment_pk = (0..n).map(|_| read_point(r)).collect::<Result<_, _>>()?;
-        let responses = (0..n).map(|_| read_scalar(r)).collect::<Result<_, _>>()?;
+        let commitment_g = (0..n).map(|_| read_stark_point(r)).collect::<Result<_, _>>()?;
+        let commitment_pk = (0..n).map(|_| read_stark_point(r)).collect::<Result<_, _>>()?;
+        let responses = (0..n).map(|_| read_stark_scalar(r)).collect::<Result<_, _>>()?;
         Ok(Self {
             commitment_g,
             commitment_pk,
@@ -530,22 +495,22 @@ impl BorshDeserialize for ReconstructProof<StarkCurve> {
 
 impl BorshSerialize for CrossKeyNegationProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
-        write_point(&self.commitment_owner_key, w)?;
-        write_point(&self.commitment_contribution_c1, w)?;
-        write_point(&self.commitment_joint_c2, w)?;
-        write_scalar(&self.response_owner_sk, w)?;
-        write_scalar(&self.response_contribution_randomness, w)
+        write_stark_point(&self.commitment_owner_key, w)?;
+        write_stark_point(&self.commitment_contribution_c1, w)?;
+        write_stark_point(&self.commitment_joint_c2, w)?;
+        write_stark_scalar(&self.response_owner_sk, w)?;
+        write_stark_scalar(&self.response_contribution_randomness, w)
     }
 }
 
 impl BorshDeserialize for CrossKeyNegationProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         Ok(Self {
-            commitment_owner_key: read_point(r)?,
-            commitment_contribution_c1: read_point(r)?,
-            commitment_joint_c2: read_point(r)?,
-            response_owner_sk: read_scalar(r)?,
-            response_contribution_randomness: read_scalar(r)?,
+            commitment_owner_key: read_stark_point(r)?,
+            commitment_contribution_c1: read_stark_point(r)?,
+            commitment_joint_c2: read_stark_point(r)?,
+            response_owner_sk: read_stark_scalar(r)?,
+            response_contribution_randomness: read_stark_scalar(r)?,
         })
     }
 }
@@ -553,16 +518,16 @@ impl BorshDeserialize for CrossKeyNegationProof<StarkCurve> {
 impl BorshSerialize for SlotContributionOrProof<StarkCurve> {
     fn serialize<W: borsh::io::Write>(&self, w: &mut W) -> borsh::io::Result<()> {
         for point in &self.commitment_g {
-            write_point(point, w)?;
+            write_stark_point(point, w)?;
         }
         for point in &self.commitment_pk {
-            write_point(point, w)?;
+            write_stark_point(point, w)?;
         }
         for challenge in &self.challenges {
-            write_scalar(challenge, w)?;
+            write_stark_scalar(challenge, w)?;
         }
         for response in &self.responses {
-            write_scalar(response, w)?;
+            write_stark_scalar(response, w)?;
         }
         Ok(())
     }
@@ -571,10 +536,10 @@ impl BorshSerialize for SlotContributionOrProof<StarkCurve> {
 impl BorshDeserialize for SlotContributionOrProof<StarkCurve> {
     fn deserialize_reader<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Self> {
         Ok(Self {
-            commitment_g: [read_point(r)?, read_point(r)?],
-            commitment_pk: [read_point(r)?, read_point(r)?],
-            challenges: [read_scalar(r)?, read_scalar(r)?],
-            responses: [read_scalar(r)?, read_scalar(r)?],
+            commitment_g: [read_stark_point(r)?, read_stark_point(r)?],
+            commitment_pk: [read_stark_point(r)?, read_stark_point(r)?],
+            challenges: [read_stark_scalar(r)?, read_stark_scalar(r)?],
+            responses: [read_stark_scalar(r)?, read_stark_scalar(r)?],
         })
     }
 }
@@ -594,12 +559,12 @@ impl BorshSerialize for ReconstructionV3Statement<StarkCurve> {
         w.write_all(&self.context_digest)?;
         w.write_all(&self.reconstruction_epoch.to_le_bytes())?;
         w.write_all(&self.prior_state_digest)?;
-        write_point(&self.aggregate_pk, w)?;
-        write_point(&self.owner_pk, w)?;
+        write_stark_point(&self.aggregate_pk, w)?;
+        write_stark_point(&self.owner_pk, w)?;
 
         write_reconstruction_len(self.cards.len(), 2, w)?;
         for card in &self.cards {
-            write_point(card, w)?;
+            write_stark_point(card, w)?;
         }
         write_reconstruction_len(self.user_readable_cards.len(), 1, w)?;
         for ciphertext in &self.user_readable_cards {
@@ -631,11 +596,11 @@ impl BorshDeserialize for ReconstructionV3Statement<StarkCurve> {
         let reconstruction_epoch = u64::from_le_bytes(epoch_bytes);
         let mut prior_state_digest = [0u8; 32];
         r.read_exact(&mut prior_state_digest)?;
-        let aggregate_pk = read_point(r)?;
-        let owner_pk = read_point(r)?;
+        let aggregate_pk = read_stark_point(r)?;
+        let owner_pk = read_stark_point(r)?;
 
         let n = read_reconstruction_len(r, 2)?;
-        let cards = (0..n).map(|_| read_point(r)).collect::<Result<_, _>>()?;
+        let cards = (0..n).map(|_| read_stark_point(r)).collect::<Result<_, _>>()?;
         let k = read_reconstruction_len(r, 1)?;
         if k > n {
             return Err(borsh::io::Error::new(
@@ -752,7 +717,7 @@ mod tests {
     use super::*;
     use crate::reconstruction::reconstruct_deck;
     use crate::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
-    use poker_protocol_core::{Curve, CurvePoint, ElGamalCiphertextGeneric};
+    use poker_protocol_core::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric, STARK_POINT_COMPRESSED_LEN};
     use rand_core::OsRng;
 
     #[test]
@@ -764,7 +729,7 @@ mod tests {
         let ct = ElGamalCiphertextGeneric::<StarkCurve>::encrypt(&plaintext, &pk, &r);
 
         let bytes = borsh::to_vec(&ct).unwrap();
-        assert_eq!(bytes.len(), 2 * G1_COMPRESSED_LEN);
+        assert_eq!(bytes.len(), 2 * STARK_POINT_COMPRESSED_LEN);
         let recovered: ElGamalCiphertextGeneric<StarkCurve> = borsh::from_slice(&bytes).unwrap();
         assert_eq!(ct, recovered);
     }
@@ -997,6 +962,6 @@ mod tests {
             0x00, 0x00, 0x00, 0x01,
         ];
         let mut cursor = std::io::Cursor::new(MODULUS_BE);
-        assert!(read_scalar(&mut cursor).is_err());
+        assert!(read_stark_scalar(&mut cursor).is_err());
     }
 }

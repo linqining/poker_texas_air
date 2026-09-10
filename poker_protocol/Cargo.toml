@@ -19,7 +19,7 @@ stark-curve = [
 # deliberately excludes poker-protocol-proofs: Ristretto proof verification is
 # owned by poker_texas_air's AIR verifier, not a native host verifier.
 ristretto-air = []
-borsh = ["dep:borsh"]
+borsh = ["dep:borsh", "poker-protocol-core/borsh"]
 
 [dependencies]
 poker-protocol-core = { path = "../poker-protocol-core" }
