@@ -753,11 +753,13 @@ fn derive_bet_collection(
     let expected_seats = seat_bets
         .iter()
         .enumerate()
-        .filter_map(|(index, bet)| {
-            let seat_index = index as u8;
-            (*bet > 0 && !immediately_collected_kick_seats[index]).then_some(seat_index)
-        })
-        .collect::<Vec<_>>();
+        .fold(0u16, |mask, (index, bet)| {
+            if *bet > 0 && !immediately_collected_kick_seats[index] {
+                mask | (1u16 << index)
+            } else {
+                mask
+            }
+        });
     let event_collected_bets = seat_bets
         .iter()
         .enumerate()
@@ -1335,7 +1337,8 @@ mod tests {
             50,
             100,
         );
-        for (index, seat) in table.seats.iter_mut().enumerate() {
+        let seat_count = usize::from(table.max_players);
+        for (index, seat) in table.seats.iter_mut().take(seat_count).enumerate() {
             seat_fixture::set_player(seat, [index as u8 + 1; 20]);
             seat_fixture::set_stack(seat, 1_000);
             seat.set_status(SeatStatus::Active);

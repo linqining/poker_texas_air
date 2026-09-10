@@ -3241,7 +3241,7 @@ mod tests {
             [1; 20],
             100,
             ECPoint(generator * scalar_from_u64(1)),
-            well_formed_tx_pk_fixture(),
+            well_formed_tx_pk_fixture().to_tagged(),
             SeatStatus::Active,
         )
         .expect("active timed-out fixture seat");
@@ -3249,7 +3249,7 @@ mod tests {
             [2; 20],
             200,
             ECPoint(generator * scalar_from_u64(2)),
-            well_formed_tx_pk_fixture(),
+            well_formed_tx_pk_fixture().to_tagged(),
             SeatStatus::Active,
         )
         .expect("active retained fixture seat");
@@ -3262,7 +3262,6 @@ mod tests {
                 ROUND_FLOP,
                 ReconstructState {
                     pending_mask: 0b01,
-                    accumulated_deck: None,
                 },
                 RevealTokenState {
                     purpose: RevealPurpose::Board,
@@ -3303,7 +3302,7 @@ mod tests {
             [1; 20],
             100,
             ECPoint(generator * scalar_from_u64(1)),
-            well_formed_tx_pk_fixture(),
+            well_formed_tx_pk_fixture().to_tagged(),
             SeatStatus::Active,
         )
         .expect("active timed-out reveal fixture seat");
@@ -3311,7 +3310,7 @@ mod tests {
             [2; 20],
             200,
             ECPoint(generator * scalar_from_u64(2)),
-            well_formed_tx_pk_fixture(),
+            well_formed_tx_pk_fixture().to_tagged(),
             SeatStatus::Active,
         )
         .expect("active retained reveal fixture seat");

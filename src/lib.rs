@@ -108,6 +108,7 @@ pub mod canonical_rake_opening;
 pub mod canonical_reveal_opening;
 /// Lookup-backed authentication of canonical state-image byte preimages.
 pub mod canonical_state_hash;
+pub mod state_image_admission;
 /// Backend-agnostic hash-statement proving seam ([`hash_prover::HashStatement`])
 /// shared by the M31 lookup stack and the binary-field flock backend (the
 /// process-wide default backend is the BLAKE3 flock chain digest).

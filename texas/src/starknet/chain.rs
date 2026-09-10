@@ -82,6 +82,81 @@ impl StarknetChain {
         self.provider.call(request, BlockId::Tag(BlockTag::Latest)).await
             .map_err(|e| format!("call_contract failed: {e}"))
     }
+
+    /// finalized 高度公共 state root 取数通道（TODO #48①）。
+    ///
+    /// 读取承载 ObjectDb 根承诺的合约视图
+    /// `finalized_state_root(key_hi: felt252, key_lo: felt252) -> felt252`
+    /// （`state_object_key` = blake2b_256(ObjectID)，256 位无法进单个
+    /// felt252，故拆两个 128 位半字入 calldata）。返回首个返回值的
+    /// 32 字节大端根。地址与 selector 由调用方按 `DEPLOYMENTS.md`
+    /// 记账的根承诺合约提供；调用失败即 fail-closed（不回退 prover 根），
+    /// 结果专供 `state_image_admission` 接纳门使用。
+    pub async fn finalized_state_root(
+        &self,
+        state_root_contract: Felt,
+        entry_point: Felt,
+        state_object_key: &[u8; 32],
+    ) -> Result<[u8; 32], String> {
+        let calldata = state_object_key_calldata(state_object_key);
+        let felts = self
+            .call_contract(state_root_contract, entry_point, calldata)
+            .await?;
+        state_root_from_return_felts(&felts)
+    }
+}
+
+/// `state_object_key`（256 位）→ 两个 128 位大端半字 felt（hi, lo）。
+fn state_object_key_calldata(key: &[u8; 32]) -> Vec<Felt> {
+    let half = |bytes: &[u8]| {
+        let mut word = [0u8; 16];
+        word.copy_from_slice(bytes);
+        let mut padded = [0u8; 32];
+        padded[16..].copy_from_slice(&word);
+        Felt::from_bytes_be(&padded)
+    };
+    vec![half(&key[0..16]), half(&key[16..32])]
+}
+
+/// 视图返回 felts → 32 字节大端根（取首个返回值；空返回 fail-closed）。
+fn state_root_from_return_felts(felts: &[Felt]) -> Result<[u8; 32], String> {
+    let first = felts
+        .first()
+        .ok_or_else(|| "finalized_state_root view returned no value".to_string())?;
+    Ok(first.to_bytes_be())
+}
+
+#[cfg(test)]
+mod state_root_channel_tests {
+    use super::*;
+
+    #[test]
+    fn state_object_key_calldata_splits_key_into_two_halves() {
+        let key = core::array::from_fn(|i| i as u8);
+        let calldata = state_object_key_calldata(&key);
+        assert_eq!(calldata.len(), 2);
+        // hi = key[0..16] 右对齐进 felt。
+        let mut hi = [0u8; 32];
+        hi[16..].copy_from_slice(&key[0..16]);
+        assert_eq!(calldata[0], Felt::from_bytes_be(&hi));
+        let mut lo = [0u8; 32];
+        lo[16..].copy_from_slice(&key[16..32]);
+        assert_eq!(calldata[1], Felt::from_bytes_be(&lo));
+    }
+
+    #[test]
+    fn state_root_decode_takes_first_return_and_rejects_empty() {
+        // 合约返回的 felt 必为域内规范值（< P），故根首字节恒 0；
+        // 32B 大端解码即该规范编码。
+        let mut root = [0x7Au8; 32];
+        root[0] = 0;
+        let felt = Felt::from_bytes_be(&root);
+        assert_eq!(
+            state_root_from_return_felts(&[felt, Felt::ZERO]).unwrap(),
+            root
+        );
+        assert!(state_root_from_return_felts(&[]).is_err());
+    }
 }
 
 /// 解析 felt 字符串（0x hex 或十进制）。空串 / 非法输入返回 None。

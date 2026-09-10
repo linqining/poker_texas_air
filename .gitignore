@@ -26,3 +26,4 @@ src/airs_lean/.lake/
 poker_contracts/hand-verify-native/parity-checker/target/
 poker_contracts/hand-verify-native/output/
 deploy/
+.idea/

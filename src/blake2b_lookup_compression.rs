@@ -2031,4 +2031,58 @@ mod tests {
         witness.root[0] ^= 1;
         assert!(prove_blake2b_lookup_smt_fixed_value_paths(&[witness]).is_err());
     }
+
+    // =========================================================================
+    // 性能扫描(#42 裁决支撑,2026-09-10):Blake2b lookup STARK vs
+    // Poseidon252 v2 在同一 preimage 字节规模下的对比。用例与
+    // `poseidon252_v2::tests::v2_perf_sweep_scaling_curve` 的 felt 规模对齐
+    // (31 字节/felt):64B≈rules opening;1488B≈48 felts(轻热态真实桌);
+    // 5952B≈192 felts;13888B≈448 felts(≈生产热态满牌组)。运行:
+    //   cargo test -p poker_texas_air --release --lib blake2b_perf_sweep \
+    //     -- --include-ignored --nocapture
+    // =========================================================================
+
+    #[test]
+    #[ignore = "perf sweep (~2-4 min at --release); run with --include-ignored --nocapture"]
+    fn blake2b_perf_sweep_vs_poseidon_scale() {
+        use std::time::Instant;
+
+        let cases: Vec<(&str, usize)> = vec![
+            ("rules_64B", 64),
+            ("table48f_1488B", 1488),
+            ("table192f_5952B", 5952),
+            ("table448f_13888B", 13888),
+        ];
+        println!(
+            "{:<22} {:>8} {:>8} {:>10} {:>10} {:>10}",
+            "case", "bytes", "blocks", "prove_ms", "verify_ms", "proof_kb"
+        );
+        for (name, len) in cases {
+            let message: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+
+            let prove_start = Instant::now();
+            let archive = prove_blake2b_lookup_hash(&message)
+                .unwrap_or_else(|e| panic!("{name}: prove failed: {e}"));
+            let prove_ms = prove_start.elapsed().as_secs_f64() * 1e3;
+
+            let verify_start = Instant::now();
+            verify_blake2b_lookup_hash(&archive)
+                .unwrap_or_else(|e| panic!("{name}: verify failed: {e}"));
+            let verify_ms = verify_start.elapsed().as_secs_f64() * 1e3;
+
+            let blocks = archive.compression.messages.len();
+            let proof_kb = borsh::to_vec(&archive)
+                .map(|bytes| bytes.len() as f64 / 1024.0)
+                .unwrap_or(f64::NAN);
+            println!(
+                "{:<22} {:>8} {:>8} {:>10.1} {:>10.1} {:>10.1}",
+                name,
+                len,
+                blocks,
+                prove_ms,
+                verify_ms,
+                proof_kb
+            );
+        }
+    }
 }

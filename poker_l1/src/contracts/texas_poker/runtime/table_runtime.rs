@@ -302,7 +302,7 @@ fn verify_submission(
         ))
     })?;
     let msg_hash = tx_message_hash(chain_id, &table.id, &address, selector, args, nonce);
-    crate::signature::verify_signature(tx_pk, signature, &msg_hash)
+    crate::signature::verify_signature(&tx_pk.to_tagged(), signature, &msg_hash)
 }
 
 /// 单条提交的全量重验与应用（认证 → dispatch → 产出收集）。

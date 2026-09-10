@@ -51,7 +51,8 @@ use super::settlement::{self, SettlementPlan};
 use super::types::{
     CipherDeck, NO_SEAT, PartialHoleCard, PlayingSeatStatus, RevealAssignment, RevealPurpose,
     RevealTarget, RitStartStreet, RunItTwiceState, Seat, SeatMask, SeatStatus, TexasPokerTable,
-    seat_mask_contains, seat_mask_count, seat_mask_first, seat_mask_remove, seat_mask_to_indices,
+    seat_mask_contains, seat_mask_count, seat_mask_first, seat_mask_insert, seat_mask_remove,
+    seat_mask_to_indices,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
 // typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
@@ -318,9 +319,9 @@ pub fn get_pending_seat_mask(completed: SeatMask, seats: &[Seat]) -> SeatMask {
 /// 环形查找下一个可行动座位（occupied && !folded && !all_in && !waiting）。
 #[must_use]
 pub fn find_next_active_seat(seats: &[Seat], from: u8, max: u8) -> Option<u8> {
-    let n = seats.len() as u8;
+    let n = max;
     for offset in 1..=n {
-        let idx = (from + offset) % max.min(n);
+        let idx = (from + offset) % n;
         let s = &seats[idx as usize];
         if s.is_occupied() && !s.is_folded() && !s.is_all_in() && !s.is_waiting() {
             return Some(idx);
@@ -340,9 +341,9 @@ pub fn find_next_active_seat(seats: &[Seat], from: u8, max: u8) -> Option<u8> {
 /// 找下一个参与本局的玩家，不能简单 `(button+k) % n` 取模。
 #[must_use]
 pub fn find_next_participating_seat(seats: &[Seat], from: u8, max: u8) -> Option<u8> {
-    let n = seats.len() as u8;
+    let n = max;
     for offset in 1..=n {
-        let idx = (from + offset) % max.min(n);
+        let idx = (from + offset) % n;
         let s = &seats[idx as usize];
         if s.is_occupied() && !s.is_waiting() {
             return Some(idx);
@@ -439,8 +440,8 @@ pub fn set_initial_encrypted_deck(table: &mut TexasPokerTable) -> PokerL1Result<
 /// vector whose plaintexts are proven to be either zero or `-card[i]`.
 fn rebuild_deck_from_reconstruct_deck(table: &mut TexasPokerTable) -> PokerL1Result<()> {
     let new_cts = table
-        .reconstruct_state()
-        .accumulated_deck
+        .deck_state
+        .reconstruct_accumulated
         .clone()
         .ok_or_else(|| {
             PokerL1Error::Serialization(
@@ -737,22 +738,22 @@ fn collect_bets_to_pot(
         PokerL1Error::Serialization("collect_bets_to_pot: pot += bets overflow".into())
     })?;
 
-    let mut collected_seats = Vec::new();
+    let mut collected_mask: SeatMask = 0;
     for (i, s) in table.seats.iter_mut().enumerate() {
         if s.bet() > 0 {
             s.set_bet(0)?;
-            collected_seats.push(i as u8);
+            seat_mask_insert(&mut collected_mask, i as u8)?;
         }
     }
     table.pot = post_pot;
-    if !collected_seats.is_empty() {
+    if collected_mask != 0 {
         events::emit_event(
             events,
             TexasPokerEvent::PotCollected {
                 table_id: table.id,
                 round_state: table.round_state(),
                 pot_after: table.pot,
-                collected_from_seats: collected_seats,
+                collected_from_seats: collected_mask,
             },
         );
     }
@@ -1290,7 +1291,6 @@ fn start_reconstruct(
     now_ms
         .checked_add(u64::from(table.timeout_config.reconstruct_timeout_ms))
         .ok_or_else(|| PokerL1Error::Serialization("reconstruct deadline overflows u64".into()))?;
-    let active_seats = get_active_seat_indices(&table.seats);
     let active_mask = get_active_seat_mask(&table.seats);
     // Capture the outer street before `take_reveal_payload` temporarily puts
     // the hand phase into `Waiting`. Reading `table.round_state()` after the
@@ -1300,11 +1300,13 @@ fn start_reconstruct(
     // hash_to_scalar("reconstruct_coefficient/" || table_id_bytes || timestamp_ascii)。
     // reconstruction V3 不再持久化该系数，死计算已删除（其值从未被读取）。
     let suspended_reveal = table.take_reveal_payload()?;
+    // 新一轮重构从 canonical base deck 开始：清空上一轮残留累加器
+    // （累加器已迁 DeckState，TODO #41-③）。
+    table.deck_state.reconstruct_accumulated = None;
     table.enter_reconstructing(
         street,
         super::types::ReconstructState {
             pending_mask: active_mask,
-            accumulated_deck: None,
         },
         suspended_reveal,
         now_ms,
@@ -1314,7 +1316,7 @@ fn start_reconstruct(
         events,
         TexasPokerEvent::ReconstructInitiated {
             table_id: table.id,
-            expected_players: active_seats,
+            expected_players: active_mask,
             round_state: table.round_state(),
         },
     );
@@ -1365,12 +1367,13 @@ fn on_reconstruct_timeout(
     now_ms: u64,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    let pending = seat_mask_to_indices(table.reconstruct_state().pending_mask, table.max_players);
+    let pending_mask = table.reconstruct_state().pending_mask;
+    let pending = seat_mask_to_indices(pending_mask, table.max_players);
     events::emit_event(
         events,
         TexasPokerEvent::ReconstructTimeout {
             table_id: table.id,
-            pending_players: pending.clone(),
+            pending_players: pending_mask,
         },
     );
 
@@ -1388,7 +1391,7 @@ fn on_reconstruct_timeout(
         end_without_showdown(table, events)?;
         return Ok(());
     }
-    if table.reconstruct_state().accumulated_deck.is_some() {
+    if table.deck_state.reconstruct_accumulated.is_some() {
         on_complete_reconstruct(table, events)?;
     } else {
         refund_all_bets(table, events)?;
@@ -1824,9 +1827,10 @@ fn materialize_completed_community_assignments(
         materialized.push((assignment.encrypted_card_index, runout, card));
     }
 
-    let mut indices = Vec::with_capacity(materialized.len());
-    let mut ranks = Vec::with_capacity(materialized.len());
-    let mut suits = Vec::with_capacity(materialized.len());
+    let mut indices = [0u8; 6];
+    let mut ranks = [0u8; 6];
+    let mut suits = [0u8; 6];
+    let mut card_count = 0usize;
     for (encrypted_card_index, runout, card) in materialized {
         if runout == 0 {
             table.community_cards.try_push(card).map_err(|error| {
@@ -1843,9 +1847,10 @@ fn materialize_completed_community_assignments(
                     ))
                 })?;
         }
-        indices.push(encrypted_card_index);
-        ranks.push(card.rank());
-        suits.push(card.suit());
+        indices[card_count] = encrypted_card_index;
+        ranks[card_count] = card.rank();
+        suits[card_count] = card.suit();
+        card_count += 1;
     }
     events::emit_event(
         events,
@@ -1855,6 +1860,7 @@ fn materialize_completed_community_assignments(
             card_indices: indices,
             card_ranks: ranks,
             card_suits: suits,
+            card_count: card_count as u8,
         },
     );
     Ok(())
@@ -1932,9 +1938,9 @@ fn materialize_completed_showdown_assignments(
                     table_id: table.id,
                     seat_index,
                     player: seat.player(),
-                    card_indices: vec![encrypted_card_index],
-                    card_ranks: vec![card.rank()],
-                    card_suits: vec![card.suit()],
+                    card_indices: [encrypted_card_index, 0],
+                    card_ranks: [card.rank(), 0],
+                    card_suits: [card.suit(), 0],
                 },
             );
         }
@@ -2008,7 +2014,7 @@ pub fn apply_submit_reconstruct_deck(
         Ok(true)
     })?;
 
-    let prior_accumulator = if let Some(deck) = &table.reconstruct_state().accumulated_deck {
+    let prior_accumulator = if let Some(deck) = &table.deck_state.reconstruct_accumulated {
         deck.clone()
     } else {
         canonical_base_deck::<DefaultCurve>(&expected_cards, &aggregate_pk.0).map_err(|error| {
@@ -2024,7 +2030,7 @@ pub fn apply_submit_reconstruct_deck(
             })?;
     let reconstruct_state = table.active_reconstruct_state_mut()?;
     seat_mask_remove(&mut reconstruct_state.pending_mask, seat_index);
-    reconstruct_state.accumulated_deck = Some(accumulated_deck);
+    table.deck_state.reconstruct_accumulated = Some(accumulated_deck);
 
     events::emit_event(
         events,
@@ -2563,7 +2569,10 @@ pub fn start_hand(
         0,
     )?;
 
-    let active = get_active_seat_indices(&table.seats);
+    let mut active_mask: SeatMask = 0;
+    for seat in get_active_seat_indices(&table.seats) {
+        seat_mask_insert(&mut active_mask, seat)?;
+    }
     events::emit_event(
         events,
         TexasPokerEvent::HandStarted {
@@ -2571,7 +2580,7 @@ pub fn start_hand(
             button: table.button,
             small_blind: table.small_blind,
             big_blind: table.big_blind,
-            participants: active,
+            participants: active_mask,
         },
     );
 
@@ -2617,7 +2626,7 @@ fn normalize_until_blocked_in_place(
             if table.reconstruct_state().pending_mask != 0 {
                 None
             } else {
-                if table.reconstruct_state().accumulated_deck.is_none() {
+                if table.deck_state.reconstruct_accumulated.is_none() {
                     return Err(PokerL1Error::Serialization(
                         "normalize: completed reconstruct has no player contribution".into(),
                     ));
@@ -2839,7 +2848,7 @@ fn advance_deadline_in_place(
 
     if is_betting_round(table) {
         let subject = table.current_turn();
-        if subject == NO_SEAT || usize::from(subject) >= table.seats.len() {
+        if subject == NO_SEAT || usize::from(subject) >= usize::from(table.max_players) {
             return Err(PokerL1Error::Serialization(
                 "advance_deadline: betting phase has no canonical current seat".into(),
             ));
@@ -2999,7 +3008,7 @@ fn on_reveal_timeout(
         TexasPokerEvent::RevealTimeout {
             table_id: table.id,
             phase,
-            pending_players: pending.clone(),
+            pending_players: pending_mask,
         },
     );
 
@@ -3162,7 +3171,7 @@ fn apply_settlement_plan(
     plan: &SettlementPlan,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    plan.validate(table.seats.len())?;
+    plan.validate(usize::from(table.max_players))?;
     if table.pot != plan.gross_pot {
         return Err(PokerL1Error::Serialization(format!(
             "settlement: plan gross pot {} does not match table pot {}",
@@ -3173,7 +3182,7 @@ fn apply_settlement_plan(
         .chip_pool
         .checked_sub(plan.rake)
         .ok_or_else(|| PokerL1Error::Serialization("settlement: rake exceeds TableVault".into()))?;
-    let mut post_stacks = Vec::with_capacity(table.seats.len());
+    let mut post_stacks = Vec::with_capacity(usize::from(table.max_players));
     for (seat_index, seat) in table.seats.iter().enumerate() {
         post_stacks.push(
             seat.stack()
@@ -3223,7 +3232,7 @@ fn apply_settlement_plan(
             POT_TYPE_SIDE
         };
         for runout in pot.runouts.iter().take(usize::from(plan.schedule.count())) {
-            for seat_index in 0..table.seats.len() {
+            for seat_index in 0..usize::from(table.max_players) {
                 let amount = runout.awards[seat_index];
                 if amount == 0 {
                     continue;
@@ -3242,16 +3251,12 @@ fn apply_settlement_plan(
             }
         }
     }
-    let winners = (0..table.seats.len())
-        .filter(|seat| plan.winner_mask & (1u16 << seat) != 0)
-        .map(|seat| seat as u8)
-        .collect();
     events::emit_event(
         events,
         TexasPokerEvent::HandSettled {
             table_id: table.id,
             pot: plan.gross_pot,
-            winners,
+            winners: plan.winner_mask,
         },
     );
     Ok(())
@@ -4367,11 +4372,12 @@ mod tests {
         );
         assert!(matches!(
             events.as_slice(),
-            [TexasPokerEvent::CommunityCardRevealed { phase, card_indices, card_ranks, card_suits, .. }]
+            [TexasPokerEvent::CommunityCardRevealed { phase, card_indices, card_ranks, card_suits, card_count, .. }]
                 if *phase == REVEAL_PHASE_TURN
-                    && card_indices == &vec![encrypted_card_index]
-                    && card_ranks == &vec![Card::from_index(plaintext_id).rank()]
-                    && card_suits == &vec![Card::from_index(plaintext_id).suit()]
+                    && *card_count == 1
+                    && card_indices[..1] == [encrypted_card_index]
+                    && card_ranks[..1] == [Card::from_index(plaintext_id).rank()]
+                    && card_suits[..1] == [Card::from_index(plaintext_id).suit()]
         ));
     }
 
@@ -4485,8 +4491,7 @@ mod tests {
                 ROUND_FLOP,
                 super::super::types::ReconstructState {
                     pending_mask: 0b11,
-                    accumulated_deck: None,
-                },
+                        },
                 super::super::types::RevealTokenState {
                     purpose: RevealPurpose::Board,
                     assignments: vec![],

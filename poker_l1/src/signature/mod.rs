@@ -15,5 +15,5 @@ pub mod stark_scheme;
 pub mod tagged_pubkey;
 pub mod unified;
 
-pub use tagged_pubkey::{CURRENT_VERSION, SignatureScheme, TaggedPubkey, encode_tag};
+pub use tagged_pubkey::{CURRENT_VERSION, SignatureScheme, StarkTxPubkey, TaggedPubkey, encode_tag};
 pub use unified::verify_signature;

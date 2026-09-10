@@ -82,14 +82,18 @@ pub const TEXAS_POKER_GOVERNANCE_OBJECT_TYPE: &str = "TexasPokerGovernancePolicy
 /// Incompatible older layouts are deliberately unsupported.
 /// Version 30 adds the per-seat registered session tx public key
 /// (`OccupiedSeat.tx_pk`，P1-2 会话委托：座位级签名验证锚).
-pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 30;
+/// Version 32（2026-09-10，TODO #41）定宽化布局：座位槽位恒 9（`[Seat; 9]`，
+/// `max_players` 之外 Vacant 填充）、会话交易公钥为定宽 `StarkTxPubkey`
+/// （tag + `[u8; 32]`，去 Vec 长度前缀）。Incompatible older layouts are
+/// deliberately unsupported.
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 32;
 
 /// ObjectDb-only hot-state schema.
 ///
-/// Runtime/proof snapshots use resolved schema v30. The v31 ObjectDb encoding combines immutable
-/// context commitments with the same physical tagged-seat and typed-reveal representation,
-/// adding the per-seat session tx public key (`OccupiedSeat.tx_pk`).
-pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 31;
+/// Runtime/proof snapshots use resolved schema v32（座位定宽 + tx_pk 定宽，
+/// TODO #41）. The v33 ObjectDb encoding combines immutable
+/// context commitments with the same physical tagged-seat and typed-reveal representation.
+pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 33;
 
 // Phase 3.3: TexasPokerPrecompile impl（待 state_machine/dispatch 完成后补）
 // pub struct TexasPokerPrecompile { ... }

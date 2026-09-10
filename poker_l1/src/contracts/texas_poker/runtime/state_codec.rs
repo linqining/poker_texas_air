@@ -1,7 +1,7 @@
 //! Canonical persisted-state codec for Texas Poker tables.
 //!
 //! Production deliberately supports only the current resolved snapshot (v30，座位新增
-//! 会话交易公钥 `OccupiedSeat.tx_pk`) and the ObjectDb hot-table layout (v31-hot).
+//! 会话交易公钥 `OccupiedSeat.tx_pk`) and the ObjectDb hot-table layout (v33-hot).
 //! Historical schemas are not consensus inputs and fail closed instead of
 //! carrying an ever-growing migration surface in the execution path.
 
@@ -35,6 +35,8 @@ struct PersistedDeckStateV30 {
     contributor_mask: SeatMask,
     cards_dealt: u8,
     owner_readable_hole_cards: super::types::PartialHoleCardLedger,
+    // 重构累加器（TODO #41-③，自 HandPhase/ReconstructState 迁入 deck 载体）。
+    reconstruct_accumulated: Option<Vec<super::types::ElGamalCiphertext>>,
 }
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -77,18 +79,39 @@ struct PersistedTexasPokerHotTableV31 {
     call_seq: u32,
 }
 
-fn persisted_seats(seats: &[Seat]) -> PokerL1Result<Vec<Seat>> {
-    for seat in seats {
+fn persisted_seats(seats: &[Seat], max_players: u8) -> PokerL1Result<Vec<Seat>> {
+    // 持久化布局保持变长（仅存 `[0, max_players)` 活动槽位，外部存储
+    // 格式不变）；运行时形状为定宽 `[Seat; 9]`（TODO #41①）。
+    let active = &seats[..usize::from(max_players)];
+    for seat in active {
         seat.validate_canonical()?;
     }
-    Ok(seats.to_vec())
+    Ok(active.to_vec())
 }
 
-fn restore_seats(seats: Vec<Seat>) -> PokerL1Result<Vec<Seat>> {
+fn restore_seats(seats: Vec<Seat>, max_players: u8) -> PokerL1Result<[Seat; 9]> {
+    if seats.len() > 9 {
+        return Err(PokerL1Error::Serialization(format!(
+            "Texas persisted seat count {} exceeds MAX_PLAYERS",
+            seats.len()
+        )));
+    }
+    if seats.len() != usize::from(max_players) {
+        return Err(PokerL1Error::Serialization(format!(
+            "Texas persisted seat layout mismatch: max_players={max_players}, seats={}",
+            seats.len()
+        )));
+    }
     for seat in &seats {
         seat.validate_canonical()?;
     }
-    Ok(seats)
+    // 持久化布局保持变长（外部存储格式不变）；恢复为定宽运行时形状，
+    // `max_players` 之外的槽位以 Vacant 填充（TODO #41①）。
+    let mut out: [Seat; 9] = std::array::from_fn(|_| Seat::empty());
+    for (index, seat) in seats.into_iter().enumerate() {
+        out[index] = seat;
+    }
+    Ok(out)
 }
 
 fn persisted_deck(table: &TexasPokerTable) -> PersistedDeckStateV30 {
@@ -97,6 +120,7 @@ fn persisted_deck(table: &TexasPokerTable) -> PersistedDeckStateV30 {
         contributor_mask: table.deck_state.contributor_mask,
         cards_dealt: table.deck_state.cards_dealt,
         owner_readable_hole_cards: table.deck_state.owner_readable_hole_cards.clone(),
+        reconstruct_accumulated: table.deck_state.reconstruct_accumulated.clone(),
     }
 }
 
@@ -118,7 +142,7 @@ fn restore_table(
     hand_id: u32,
     call_seq: u32,
 ) -> PokerL1Result<TexasPokerTable> {
-    let seats = restore_seats(seats)?;
+    let seats = restore_seats(seats, rules.max_players)?;
     // 贡献者聚合公钥校验统一走 `TexasPokerTable::validate_state_schema`
     // （内部经 `derived_aggregated_pk` → `aggregated_pk_for_contributor_mask`），
     // 本文件不再保留平行的本地实现。
@@ -139,6 +163,7 @@ fn restore_table(
             contributor_mask: deck_state.contributor_mask,
             cards_dealt: deck_state.cards_dealt,
             owner_readable_hole_cards: deck_state.owner_readable_hole_cards,
+            reconstruct_accumulated: deck_state.reconstruct_accumulated,
         },
         chip_pool,
         run_it_twice_state,
@@ -160,7 +185,7 @@ impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV30 {
             name: value.name.clone(),
             creator: value.creator,
             rules: value.rules.clone(),
-            seats: persisted_seats(&value.seats)?,
+            seats: persisted_seats(&value.seats, value.max_players)?,
             acted_mask: value.acted_mask,
             leave_after_hand_mask: value.leave_after_hand_mask,
             button: value.button,
@@ -321,7 +346,7 @@ pub fn encode_hot_table_state(table: &TexasPokerTable) -> PokerL1Result<Vec<u8>>
         id: table.id,
         state_schema_version: TEXAS_POKER_HOT_STATE_SCHEMA_VERSION,
         context: table_context_bindings(table.id, &openings)?,
-        seats: persisted_seats(&table.seats)?,
+        seats: persisted_seats(&table.seats, table.max_players)?,
         acted_mask: table.acted_mask,
         leave_after_hand_mask: table.leave_after_hand_mask,
         button: table.button,

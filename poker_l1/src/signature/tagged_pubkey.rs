@@ -183,6 +183,79 @@ pub const fn encode_tag(scheme: SignatureScheme, version: u8) -> u8 {
     (scheme.scheme_id() << 4) | (version & 0x0F)
 }
 
+/// Stark 会话交易公钥（定宽形式，TODO #41④，2026-09-10）。
+///
+/// 会话交易签名当前唯一启用方案是 Stark Schnorr v1（32B 压缩点），
+/// 状态字段 `OccupiedSeat.tx_pk` 使用本定宽类型以消除 borsh `Vec`
+/// 长度前缀（AIR/trace 友好）；多方案的通用 [`TaggedPubkey`] 仍保留在
+/// 外部入参（join args）与验签分发边界。tag 恒为 Stark v1（0x21）。
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct StarkTxPubkey {
+    /// 1 字节 tag，恒为 `encode_tag(SignatureScheme::Stark, CURRENT_VERSION)`。
+    pub tag: u8,
+    /// 32B Stark 压缩点；全零 = 未登记哨兵。
+    pub raw: [u8; 32],
+}
+
+impl StarkTxPubkey {
+    /// 未登记哨兵：合法 tag + 全零压缩点。
+    pub const UNREGISTERED: Self = Self {
+        tag: encode_tag(SignatureScheme::Stark, CURRENT_VERSION),
+        raw: [0u8; 32],
+    };
+
+    /// 是否已登记（非全零哨兵）。
+    pub const fn is_registered(&self) -> bool {
+        let mut index = 0;
+        while index < 32 {
+            if self.raw[index] != 0 {
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+
+    /// 从通用 tagged pubkey 收敛：要求 Stark v1 + 32B，否则拒绝。
+    pub fn from_tagged(pk: &TaggedPubkey) -> PokerL1Result<Self> {
+        let (scheme, version) = TaggedPubkey::parse_tag(pk.tag)?;
+        if scheme != SignatureScheme::Stark || version != CURRENT_VERSION {
+            return Err(PokerL1Error::UnknownScheme { tag: pk.tag });
+        }
+        let raw: [u8; 32] = pk
+            .raw
+            .as_slice()
+            .try_into()
+            .map_err(|_| PokerL1Error::InvalidPubkeyLength {
+                tag: pk.tag,
+                actual: pk.raw.len(),
+                expected: SignatureScheme::Stark.raw_pubkey_len(),
+            })?;
+        Ok(Self { tag: pk.tag, raw })
+    }
+
+    /// 升格回通用形式，供验签分发（`verify_signature`）使用。
+    pub fn to_tagged(&self) -> TaggedPubkey {
+        TaggedPubkey {
+            tag: self.tag,
+            raw: self.raw.to_vec(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

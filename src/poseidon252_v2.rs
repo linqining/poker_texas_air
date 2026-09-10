@@ -2180,4 +2180,108 @@ mod tests {
         forged.spec = b;
         assert!(verify_poseidon252_chain_v2(&forged).is_err());
     }
+
+    // =========================================================================
+    // 性能扫描(#41/#42 决策支撑,2026-09-10)
+    //
+    // 度量 poseidon252_v2 在"整表 canonical preimage"规模下的 prove/verify
+    // 成本,并按 felt 数扫描伸缩曲线,用于裁决:
+    // - #42(状态根切 Poseidon252)在真实规模下的证明代价;
+    // - #41(preimage 定长化/材料出热态)每缩减一半 felts 能省多少。
+    // 运行:
+    //   cargo test -p poker_texas_air --release --lib v2_perf_sweep \
+    //     -- --include-ignored --nocapture
+    // =========================================================================
+
+    /// 9 人桌中局 fixture(空牌组):近似 #41 落地后"轻热态"的 preimage 规模。
+    fn realistic_table_fixture()
+    -> (poker_l1::contracts::texas_poker::types::TexasPokerTable, Vec<Felt>) {
+        use poker_l1::contracts::texas_poker::types::TexasPokerTable;
+        let mut table = TexasPokerTable::new(
+            poker_l1::object_model::ObjectID::new([0xAB; 20], 9),
+            "poseidon252-v2-perf".into(),
+            [0xCD; 20],
+            9,
+            50,
+            100,
+        );
+        table.hand_id = 42;
+        table.call_seq = 7;
+        table.pot = 123_456;
+        for seat_index in 0..9usize {
+            let seat = &mut table.seats[seat_index];
+            crate::test_support::set_player(seat, [0x20 + seat_index as u8; 20]);
+            crate::test_support::set_stack(seat, 100_000 + 1_000 * seat_index as u64);
+            crate::test_support::set_bet(seat, 100 + 50 * seat_index as u64);
+            crate::test_support::set_total_bet(seat, 300 + 50 * seat_index as u64);
+        }
+        let preimage =
+            crate::state_root::table_state_preimage(&table).expect("fixture table must encode");
+        (table, preimage)
+    }
+
+    #[test]
+#[ignore = "perf sweep (~1-3 min at --release); run with --include-ignored --nocapture"]
+    fn v2_perf_sweep_scaling_curve() {
+        use std::time::Instant;
+
+        // ---- 用例集:small 基线 → 448 felts(≈当前生产热态含满牌组规模)----
+        let (table, real_preimage) = realistic_table_fixture();
+        let mut cases: Vec<(String, Vec<Felt>)> = vec![(
+            "small".into(),
+            vec![Felt::from(7u64), Felt::from(9u64)],
+        )];
+        for &felt_count in &[16usize, 64, 192, 448] {
+            cases.push((
+                format!("synthetic_{felt_count}f"),
+                (0..felt_count)
+                    .map(|i| Felt::from(i as u64 * 0x9E37_79B9 + 1))
+                    .collect(),
+            ));
+        }
+        cases.push((format!("table9_real_{}f", real_preimage.len()), real_preimage));
+
+        // ---- host 对照:当前 BLAKE3 热根的宿主耗时(µs 级)----
+        let host_start = Instant::now();
+        let host_root = crate::state_root::compute_state_root(&table);
+        println!(
+            "[host] blake3 compute_state_root: {:8.1} µs ({})",
+            host_start.elapsed().as_secs_f64() * 1e6,
+            if host_root.is_ok() { "ok" } else { "err" },
+        );
+
+        println!(
+            "{:<20} {:>6} {:>6} {:>4} {:>6} {:>8} {:>8} {:>10} {:>10} {:>9}",
+            "case", "felts", "perms", "log", "rows", "mul_log", "red_log", "prove_ms",
+            "verify_ms", "proof_kb"
+        );
+        for (name, message) in &cases {
+            let spec = native::Poseidon252ChainSpec::hash_many(message);
+            let perms = spec.n_real_perms();
+
+            let prove_start = Instant::now();
+            let archive = prove_poseidon252_chain_v2(&spec)
+                .unwrap_or_else(|e| panic!("{name}: prove failed: {e}"));
+            let prove_ms = prove_start.elapsed().as_secs_f64() * 1e3;
+
+            let verify_start = Instant::now();
+            verify_poseidon252_chain_v2(&archive)
+                .unwrap_or_else(|e| panic!("{name}: verify failed: {e}"));
+            let verify_ms = verify_start.elapsed().as_secs_f64() * 1e3;
+
+            println!(
+                "{:<20} {:>6} {:>6} {:>5}({:>5}) {:>8} {:>8} {:>10.1} {:>10.1} {:>9.1}",
+                name,
+                message.len(),
+                perms,
+                archive.log_size,
+                1usize << archive.log_size,
+                archive.mul_log,
+                archive.reduce_log,
+                prove_ms,
+                verify_ms,
+                archive.stark_proof_bytes.len() as f64 / 1024.0,
+            );
+        }
+    }
 }

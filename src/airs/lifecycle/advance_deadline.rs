@@ -1266,7 +1266,7 @@ mod tests {
         let mut pre = betting_table(0);
         // Model an already-collected 100-chip wager from each player.  The
         // table vault is therefore stacks (1,800) + pot (200) = 2,000.
-        pre.seats.truncate(2);
+        pre.seats[2] = poker_l1::contracts::texas_poker::types::Seat::empty();
         pre.max_players = 2;
         seat_fixture::set_stack(&mut pre.seats[0], 900);
         seat_fixture::set_stack(&mut pre.seats[1], 900);

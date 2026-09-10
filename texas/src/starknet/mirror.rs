@@ -152,9 +152,15 @@ impl TableMirror {
             pk,
             // P1-2 会话委托：核验过的会话交易公钥（None = 未登记哨兵，
             // 签名路径 fail-closed；mirror 注入路径不需要 tx 签名）。
-            tx_pk: tx_pk.unwrap_or_else(
-                poker_l1::contracts::texas_poker::types::unregistered_tx_pk,
-            ),
+            tx_pk: tx_pk.unwrap_or_else(|| {
+                poker_l1::signature::TaggedPubkey {
+                    tag: poker_l1::signature::encode_tag(
+                        poker_l1::signature::SignatureScheme::Stark,
+                        poker_l1::signature::CURRENT_VERSION,
+                    ),
+                    raw: vec![0u8; 32],
+                }
+            }),
             pk_ownership_proof,
         })
         .map_err(|e| format!("encode join args: {e}"))?;
@@ -203,7 +209,7 @@ impl TableMirror {
 
         // button 对齐：游戏层按钮在参与座位中的 rank（VM post_blinds 据此
         // 计算盲注位置，与游戏层盲注玩家保持一致）。
-        self.table.button = button_rank.min(self.table.seats.len().saturating_sub(1) as u8);
+        self.table.button = button_rank.min(self.table.max_players.saturating_sub(1) as u8);
 
         // 抽水规则：到手牌进入翻后（flop 及以后，即出现公共牌的争夺底池）才抽，
         // 翻前结束（无人跟注的 uncontested 底池）不抽。VM 结算的硬性不变量
@@ -224,7 +230,7 @@ impl TableMirror {
         self.table.deck_state.cards_dealt = 0;
         self.table.deck_state.owner_readable_hole_cards.clear();
         let mut contributor_mask: SeatMask = 0;
-        for idx in 0..self.table.seats.len().min(16) {
+        for idx in 0..usize::from(self.table.max_players) {
             if seat_player_addr(&self.table.seats[idx]).is_some() {
                 contributor_mask |= 1u16 << idx;
             }

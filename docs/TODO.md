@@ -226,6 +226,26 @@ poseidon / snip36-execution / MIGRATION / deadlock-review / RFP 对齐等）
 - [ ] **24⑤. 错误分类**：error.rs 字符串→稳定类别（低优持续项，外部输入
   边界先行）。其余 ①-④⑥ 的处置结论落在 `docs/PERFORMANCE.md`「已裁决的
   非目标」节（2026-09-05）。
+- [ ] **40. 结算/摊牌 AIR 前置：trace 友好改造**（2026-09-10 审核，
+  写结算/摊牌 AIR **之前**做，消除数据依赖排列与变长输出）：
+  ① `side_pot::calculate_side_pots` 的 `levels.sort_unstable()`
+  （`core/side_pot.rs:137`）→ 固定 9 层无排序切片
+  `amount_j = Σ_i max(0, min(bet_i, level_j) − level_{j−1})`，level 取各
+  all-in 座位 bet，eligible 逐座位谓词化——sort 在 AIR 里需排序网络/lookup，
+  是结算 AIR 最大阻塞；顺带修 `side_pot.rs:196`
+  `last_mut().expect("pots 非空")` panic 路径（主池恒 `pots[0]`，直接索引），
+  与该文件"无 panic 路径"声明对齐。
+  ② `SettlementPlan.pots: Vec<SettlementPotPlan>`（`core/settlement.rs:365`）
+  → `[SettlementPotPlan; SETTLEMENT_SEATS]` + `pot_count` 字段——模块头
+  已承诺"投影进 AIR 列"，这是最后一处变长（`RunoutPotPlan`/`PotPlan`
+  内部已全定长）。
+  ③（可选）`evaluate_five` 的 `Vec<(u8,u8)>` groups + 两次 sort
+  （`core/hand_evaluator.rs:200-207`）→ 固定 13 槽直方图 + 固定比较交换
+  网络；AIR 端另有 lookup 直方图选项，实现摊牌 AIR 时二选一。
+  ④ 清理：`utils::u64_to_ascii` 仅测试引用（死代码）；`find_winners`
+  返回 Vec / settlement HashSet 查重为宿主侧无害（AIR 侧对应 52-bit
+  旗标），不强制改。
+  验收：side_pot 语义与现有 fixture 全量等价 + 输出定宽可直接排 AIR 列。
 
 ## 三、结算隐私（剩余——多为实机/外部依赖）
 
@@ -246,6 +266,118 @@ poseidon / snip36-execution / MIGRATION / deadlock-review / RFP 对齐等）
 - [ ] **23. Layer 3 递归协议**：长期演进；前置 = #22 缺口收口 + #21。
   范围/验收标准见 git 历史旧 TODO #23 与 `docs/archive/PO5_PO6_DESIGN_NOTES.md`。
 - [ ] **31. 债券/罚没合约**：主网化前提（Phase 3）。
+- [x] **46. 金额表示评估：u64 改 u31（M31 原生单列、免 limb）——否决**
+  （2026-09-10）。理由：`MAX_TOTAL_BET = 10^18`（≈2^60，与 Move 端逐字节
+  一致），u31 需下调协议上限 9 个数量级，属产品面额决策而非性能优化；
+  且破坏 borsh 布局 / canonical ABI 版本 / state-root / 链端类型。AIR 侧
+  单 M31 列表示需全部金额 < 2^30 才能排除域回绕（9 座位求和需 < 2^28），
+  同样被上限否定。实测画像（`docs/PERFORMANCE.md`）中下注 AIR 宽度非
+  瓶颈（瓶颈 = Cairo 编译 15–17s、Poseidon state-root 2.9s），limb 后端
+  维持 PERFORMANCE.md "deferred, no current pressure" 裁决。**条件触发
+  再评估**：若面额上限降至 < 2^28 且 limb 成本进入画像 → 优先
+  a) 16-bit range check 换 logUp lookup（省 16 bit 列 + booleanity）；
+  b) 金额单 M31 列。
+- [x] **41. 状态编码布局改造：定长化**（**完成 2026-09-10/09-11**，
+  ①②③④ 全部落地 + 版本戳迁移；②③ 详情见 #47 完成记录）：
+  ✅ ① `seats: Vec<Seat>` → **`[Seat; 9]`**（`core/types.rs`）——槽位数
+  恒 9，`max_players` 之外 Vacant 填充（`validate_state_schema` +
+  `padding_seats_are_vacant` 强制；不再新增 seat_count 字段，`max_players`
+  即权威）。`find_next_active_seat`/`find_next_participating_seat` 改用
+  max 参数、dispatch 双守卫改 padding 检查、state_codec 持久化保持变长
+  （外部存储格式不变）恢复时 Vacant 填充。整表 borsh preimage 长度不再
+  随桌型配置漂移。
+  ✅ ④ `OccupiedSeat.tx_pk` → 定宽 **`StarkTxPubkey { tag, raw: [u8;32] }`**
+  （新类型，`signature/tagged_pubkey.rs`；多方案 `TaggedPubkey` 保留在
+  join args 与验签分发边界，`from_tagged`/`to_tagged` 桥接）。
+  ✅ 版本戳迁移一次完成：preimage `v11→v12`（`state_root.rs`）、
+  resolved schema `30→32`、hot `31→33`（`texas_poker/mod.rs`）。
+  回归：poker_l1 338、根 crate 211、texas 108 全绿。
+  ⏸ ② `Seat`/`HandPhase` 枚举均匀定宽编码 与 ③ 重材料出热态 → **#47**
+  （②为跨加密类型的手写 Borsh 工程；③ canonical ABI 已承诺投影、
+  canonical trace 成本本为零，收益仅热 preimage 字节——按实测
+  （Blake2b 端点语句 3.7-6.4s）风险收益比不支持同窗实施）。
+- [x] **42. 状态根 Poseidon252 化（双编码合一）**（#22⑤ 的延伸；**条件：
+  root 域版本迁移窗口 + DEPLOYMENTS.md 链端协同**）：`compute_state_root`
+  从 BLAKE3（hot-v30 字节，`state_root.rs:228`）切到
+  **Poseidon252(canonical preimage felts)**（`poseidon_borsh` 已存在；
+  `poseidon252_v2` 已 host-hash-free 可证，2.91s e2e）。收益不在信任
+  （哈希都有 STARK 后端），而在：消灭 borsh preimage / hot-v30 字节两套
+  序列化的同步负担；状态根从 flock 配套证明升级为转换 AIR 的**内嵌组件**
+  （同 `prove_name_commitment_v2` 模式）。
+  **实测基线（2026-09-10，同机 release、两侧 PCS 配置逐字相同
+  pow10/30q；测试 `v2_perf_sweep_scaling_curve` /
+  `blake2b_perf_sweep_vs_poseidon_scale` 可复跑）**：48 felts 轻桌
+  preimage → Poseidon 5.2s/556KB；等价 1488B → Blake2b 3.7s/953KB；
+  13888B 满牌组规模 → Poseidon 30.8s/628KB vs Blake2b 6.4s/2.4MB。
+  **结论修正：纯证明速度 Blake2b lookup 后端反而快 3-5×（≥1.5KB 规模，
+  G+scheduler 并行、查找表摊销好），仅证明体积 Poseidon 占优（平坦
+  556-628KB vs 线性涨至 2.4MB）**。故 #42 的性能论据不成立，价值收敛为
+  编码统一 + 可内嵌主证明（组合性）；"Blake2b 换 Poseidon 提速"这条
+  路线**数据否决**。
+- [x] **43. 输入真实性锚定（no-replay 信任模型收尾，完成
+  2026-09-10/09-11）**：✅ 新增 `src/state_image_admission.rs` 接纳门——组合
+  「SMT inclusion STARK（257 compression，`verify_blake2b_lookup_smt_fixed_value_path`
+  零宿主哈希）+ 绑定等式（expected_root/object_key/image_commitment
+  三对）」，把 canonical 状态镜像从 host-attested 锚到共识根下的 SMT
+  叶子；字节→承诺段由既有 `canonical_state_hash`（Blake2b STARK）覆盖。
+  ✅ 原语盘点确认：flock SMT path statement、Blake2b 镜像/rules 语句、
+  `VerifiedChain::ExpectedChainAnchor`（自带 trust-anchor 警示注释）均已在位。
+  **残留（转 #48）**：① finalized 高度公共 root 的取数通道（RPC/合约
+  视图，纯运维接线，无代码缺口）；② canonical transition AIR 内部重算
+  Blake2b 的单一 statement 合成（`texas_canonical_air.rs:2733`）——AIR
+  工程量独立，维持 fail-closed 组合验证直到该项完成。
+- [x] **44. rake 除法语义重设计（完成 2026-09-10，产品已确认
+  "固定费率+上限"）**：✅ `allocate_rake` → `allocate_rake_fixed_rate`
+  （`core/settlement.rs`）：逐层独立 `floor(amount × bps / 10_000)`
+  常数除法 + 全局 cap 按 pot_index 升序消耗，未跟注层（eligible<2）恒
+  不抽；**witness 除数已从 rake 语义永久移除**，总抽水 ≤ cap 与
+  ≤ contested_gross 不变式保持。函数 doc 落了 AIR 纪律（常数除数
+  gadget、product < 2^74 = 5×16-bit limb、≤9 层前缀扫描）+ "未来
+  rake mode 禁止 witness 除数"红线。✅ 新增 4 个单元测试（层独立计提/
+  cap 层序消耗/未跟注跳过/边界）；settlement 30/30、全仓 338/338 通过。
+  odd-chip 分配复核：`split_among_winners` 本就是 button 起常数除数 +
+  位置余数的 AIR 友好形状，无需改。
+- [x] **45. events 定宽化（完成 2026-09-10）**：✅ 座位列表 → `SeatMask`
+  （u16）：HandStarted.participants / PotCollected.collected_from_seats /
+  HandSettled.winners / RevealTimeout.pending_players /
+  ReconstructInitiated.expected_players / ReconstructTimeout.pending_players；
+  ✅ 牌负载 → 定宽数组：CommunityCardRevealed `[u8;6]×3 + card_count`
+  （对齐 MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS）、ShowdownHoleCardsRevealed
+  `[u8;2]×3`；✅ TableCreated `name: String` → `name_commitment: [u8;32]`
+  （生产零 emit 点，展示名归 metadata 对象）。AIR 侧只 `matches!` 判别
+  变体不受影响；`plan.rs`/`settlement_binding.rs` 两处期望值构造同步
+  mask 化。回归：poker_l1 338、根 crate 211、texas 108 全绿。
+- [x] **47.（#41 延后子项→完成 2026-09-11）枚举定宽编码 + 材料出
+  HandPhase**：
+  ✅ ② `Seat`/`HandPhase` 手写固定宽度 Borsh（`core/types.rs`）：记录 =
+  `payload_len(u32) || tag || 派生载荷 || 零填充到定宽`（Seat=512B、
+  HandPhase=4096B，常量超宽即序列化失败）；单射性由「填充必须全零」
+  强制（非规范编码拒绝，含测试）。所有变体/所有阶段序列化恒等长，
+  native borsh preimage 长度完全由 schema 版本决定（与 canonical ABI
+  固定宽度语义合一）。
+  ✅ ③-slice `accumulated_deck`（52 密文 ≈3KB）迁出 `ReconstructState`
+  → `DeckState::reconstruct_accumulated`（deck 载体统一承载材料，
+  PersistedDeckStateV30 同步扩展；`start_reconstruct` 清空、
+  `submit_reconstruct` 写入、`rebuild_deck`/normalize 读取全链路适配）。
+  `HandPhase` 从此不内嵌变长大对象。
+  ✅ ③-slice `reveal_tokens`/`assignments`：由 HandPhase 定宽记录的
+  零填充承载（≤18 条揭示分配），序列化宽度恒定。
+  **裁定记录**：「材料出共识 + 冷对象持全量」的原方案**不采用**——
+  legacy replay 信任模型下验证器需从 preimage 解码材料做 reveal/reconstruct
+  重放，材料出共识即破坏健全性；该约束随 no-replay 模型收尾（#43 完成、
+  #48 接线）自然消解，届时材料可安全下沉冷对象。
+- [x] **48.（#43 残留→完成 2026-09-11）认证锚定收尾**：
+  ✅ ① finalized root 取数通道：`FinalizedRootSource` trait（
+  `src/state_image_admission.rs`）+ `StarknetChain::finalized_state_root`
+  （texas 合约视图读取，key 拆 hi/lo 双 felt calldata，空返回
+  fail-closed；含 calldata/解码单测）。`admit_state_image_from_source`
+  完成接入：取数失败即拒绝接纳（fail-closed，不回退 prover 根）。
+  ✅ ② `verify_canonical_batch_authenticated` 单一入口：转换批次 STARK
+  + 两端点镜像哈希语句 + pre/post SMT inclusion 接纳按序组合、一次
+  调用完成（任一步失败整体失败），调用方不再手工拼装有序语句表。
+  **前瞻记录**：转换 AIR 内部重算 Blake2b 的「单 STARK」内嵌形态属
+  独立 AIR 工程，不阻塞 no-replay 收尾——当前组合验证已 fail-closed
+  且每一语句均零宿主哈希。
 
 ## 五、主网相关（最后，需用户操作）
 

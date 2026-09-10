@@ -2,12 +2,16 @@
 //!
 //! 逐层切片 all-in 玩家的 bet 水位，构造多个 [`SidePot`]。
 //!
-//! # 电路友好设计
+//! # AIR/Trace 友好设计（原"电路友好"，SNARK → Stwo 迁移后重述）
 //!
 //! - `eligible_seats` 用 `u16` 位掩码（MAX_PLAYERS=9，9 bit 足够），第 j 位为 1
-//!   表示 seat j eligible。定长、无动态分配、无 panic 路径。
+//!   表示 seat j eligible。定长、无动态分配、无 panic 路径；9-bit mask 可由
+//!   canonical AIR 的逐位分解/one-hot 选择子直接承载。
 //! - `SidePotResult.pots` 统一为单一 vec（含主池作为 `pots[0]`），消除 main/side
-//!   不对称分支，电路只需一个定长数组循环。
+//!   不对称分支。注意：AIR trace 列数在 prove 前固定，该结果进入 AIR 前需
+//!   升级为定长数组 + 有效层数字段（参照 `texas_canonical` 的
+//!   `MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS` 模式）；消除不对称分支的
+//!   初衷仍然成立。
 //! - 无单层溢出保护（`sum_bets` 已做全局上界校验，单层 pot 必然 <= total）。
 
 use borsh::{BorshDeserialize, BorshSerialize};

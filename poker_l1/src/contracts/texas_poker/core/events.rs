@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use crate::Address;
 use crate::object_model::ObjectID;
 
+use super::types::SeatMask;
+
 // ========== 退款类型常量 ==========
 //
 // 退款/重置/弃牌原因常量的唯一定义在 `core/constants.rs`（Move 对齐视角）。
@@ -80,8 +82,9 @@ pub enum TexasPokerEvent {
     TableCreated {
         /// 牌桌对象 ID。
         table_id: ObjectID,
-        /// 牌桌展示名称。
-        name: String,
+        /// 牌桌展示名称的 blake2b-256 承诺（定宽化，TODO #45；展示名本体
+        /// 由非共识的 metadata 对象承载）。
+        name_commitment: [u8; 32],
     },
     /// 玩家入座（`join_table` 成功时发出；买入从 chip_pool 锁定到座位 stack）。
     PlayerJoined {
@@ -134,8 +137,8 @@ pub enum TexasPokerEvent {
         small_blind: u64,
         /// 大盲金额（chip）。
         big_blind: u64,
-        /// 参与本手的座位索引列表（按座位序）。
-        participants: Vec<u8>,
+        /// 参与本手的座位位掩码（bit i = 座位 i；TODO #45 定宽化）。
+        participants: SeatMask,
     },
     /// 盲注（含 ante）投注完成、即将进入 preflop 下注轮时发出。
     BlindsPosted {
@@ -188,8 +191,8 @@ pub enum TexasPokerEvent {
         round_state: u8,
         /// 收集后底池金额（chip）。
         pot_after: u64,
-        /// 本轮有下注被收集的座位索引列表。
-        collected_from_seats: Vec<u8>,
+        /// 本轮有下注被收集的座位位掩码（bit i = 座位 i）。
+        collected_from_seats: SeatMask,
     },
     /// 结算时向单一赢家/平分者 award（settle 按池层逐个发出）。
     WinnerAwarded {
@@ -212,8 +215,8 @@ pub enum TexasPokerEvent {
         table_id: ObjectID,
         /// 本手最终底池（chip，已含全部收集）。
         pot: u64,
-        /// 获奖座位索引列表（含平分者）。
-        winners: Vec<u8>,
+        /// 获奖座位位掩码（含平分者；bit i = 座位 i）。
+        winners: SeatMask,
     },
     /// 无摊牌结束（其余玩家全部弃牌，唯一剩余玩家直接赢得底池）。
     HandEndedWithoutShowdown {
@@ -373,8 +376,8 @@ pub enum TexasPokerEvent {
         table_id: ObjectID,
         /// 超时的揭示阶段。
         phase: u8,
-        /// 未按时提交令牌的座位索引列表。
-        pending_players: Vec<u8>,
+        /// 未按时提交令牌的座位位掩码（bit i = 座位 i）。
+        pending_players: SeatMask,
     },
     /// 公共牌揭示（flop/turn/river 阶段牌面解密完成时发出）。
     CommunityCardRevealed {
@@ -382,12 +385,16 @@ pub enum TexasPokerEvent {
         table_id: ObjectID,
         /// 揭示发生的阶段（flop/turn/river）。
         phase: u8,
-        /// 本次揭示的牌索引列表（按发牌顺序）。
-        card_indices: Vec<u8>,
-        /// 对应牌的点数列表（2-14，与 card_indices 同序）。
-        card_ranks: Vec<u8>,
-        /// 对应牌的花色列表（table.move 编码 0-3，与 card_indices 同序）。
-        card_suits: Vec<u8>,
+        /// 本次揭示的牌索引（按发牌顺序，`card_count` 之后补 0）。
+        /// 定宽 6 = RIT flop 双跑 3+3，对齐
+        /// `MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS`。
+        card_indices: [u8; 6],
+        /// 对应牌的点数（2-14，与 card_indices 同序）。
+        card_ranks: [u8; 6],
+        /// 对应牌的花色（table.move 编码 0-3，与 card_indices 同序）。
+        card_suits: [u8; 6],
+        /// 有效牌数（1..=6）。
+        card_count: u8,
     },
     /// 摊牌时某玩家亮出手牌（showdown 解密完成时逐座位发出）。
     ShowdownHoleCardsRevealed {
@@ -397,12 +404,12 @@ pub enum TexasPokerEvent {
         seat_index: u8,
         /// 亮牌玩家地址。
         player: Address,
-        /// 手牌的牌索引列表（2 张）。
-        card_indices: Vec<u8>,
-        /// 手牌点数列表（2-14，与 card_indices 同序）。
-        card_ranks: Vec<u8>,
-        /// 手牌花色列表（0-3，与 card_indices 同序）。
-        card_suits: Vec<u8>,
+        /// 手牌的牌索引（固定 2 张，发牌顺序）。
+        card_indices: [u8; 2],
+        /// 手牌点数（2-14，与 card_indices 同序）。
+        card_ranks: [u8; 2],
+        /// 手牌花色（0-3，与 card_indices 同序）。
+        card_suits: [u8; 2],
     },
 
     // ========== 6. 重构协议 ==========
@@ -410,8 +417,8 @@ pub enum TexasPokerEvent {
     ReconstructInitiated {
         /// 牌桌对象 ID。
         table_id: ObjectID,
-        /// 需提交重构份额的座位索引列表。
-        expected_players: Vec<u8>,
+        /// 需提交重构份额的座位位掩码（bit i = 座位 i）。
+        expected_players: SeatMask,
         /// 重构启动时的街道。
         round_state: u8,
     },
@@ -431,8 +438,8 @@ pub enum TexasPokerEvent {
     ReconstructTimeout {
         /// 牌桌对象 ID。
         table_id: ObjectID,
-        /// 未按时提交份额的座位索引列表。
-        pending_players: Vec<u8>,
+        /// 未按时提交份额的座位位掩码（bit i = 座位 i）。
+        pending_players: SeatMask,
     },
 
     // ========== 7. 玩家管理 ==========
@@ -645,7 +652,7 @@ mod tests {
     fn test_event_borsh_roundtrip_table_created() {
         let evt = TexasPokerEvent::TableCreated {
             table_id: dummy_table_id(),
-            name: "test-table".to_string(),
+            name_commitment: [7u8; 32],
         };
         let bytes = borsh::to_vec(&evt).unwrap();
         let recovered: TexasPokerEvent = borsh::from_slice(&bytes).unwrap();
@@ -674,7 +681,7 @@ mod tests {
             button: 0,
             small_blind: 50,
             big_blind: 100,
-            participants: vec![0, 1, 2, 3],
+            participants: 0b1111,
         };
         let bytes = borsh::to_vec(&evt).unwrap();
         let recovered: TexasPokerEvent = borsh::from_slice(&bytes).unwrap();
@@ -686,9 +693,10 @@ mod tests {
         let evt = TexasPokerEvent::CommunityCardRevealed {
             table_id: dummy_table_id(),
             phase: 3, // flop
-            card_indices: vec![0, 1, 2],
-            card_ranks: vec![14, 13, 7], // A, K, 7
-            card_suits: vec![0, 1, 2],   // spade, heart, diamond
+            card_indices: [0, 1, 2, 0, 0, 0],
+            card_ranks: [14, 13, 7, 0, 0, 0], // A, K, 7
+            card_suits: [0, 1, 2, 0, 0, 0],   // spade, heart, diamond
+            card_count: 3,
         };
         let bytes = borsh::to_vec(&evt).unwrap();
         let recovered: TexasPokerEvent = borsh::from_slice(&bytes).unwrap();
@@ -728,7 +736,7 @@ mod tests {
             &mut events,
             TexasPokerEvent::TableCreated {
                 table_id: dummy_table_id(),
-                name: "t1".to_string(),
+                name_commitment: [1u8; 32],
             },
         );
         emit_event(
@@ -785,7 +793,7 @@ mod tests {
         let samples: Vec<TexasPokerEvent> = vec![
             TexasPokerEvent::TableCreated {
                 table_id,
-                name: "x".into(),
+                name_commitment: [9u8; 32],
             },
             TexasPokerEvent::PlayerJoined {
                 table_id,
@@ -811,7 +819,7 @@ mod tests {
                 button: 0,
                 small_blind: 0,
                 big_blind: 0,
-                participants: vec![],
+                participants: 0,
             },
             TexasPokerEvent::BlindsPosted {
                 table_id,
@@ -840,7 +848,7 @@ mod tests {
                 table_id,
                 round_state: 0,
                 pot_after: 0,
-                collected_from_seats: vec![],
+                collected_from_seats: 0,
             },
             TexasPokerEvent::WinnerAwarded {
                 table_id,
@@ -853,7 +861,7 @@ mod tests {
             TexasPokerEvent::HandSettled {
                 table_id,
                 pot: 0,
-                winners: vec![],
+                winners: 0,
             },
             TexasPokerEvent::HandEndedWithoutShowdown {
                 table_id,
@@ -932,26 +940,27 @@ mod tests {
             TexasPokerEvent::RevealTimeout {
                 table_id,
                 phase: 0,
-                pending_players: vec![],
+                pending_players: 0,
             },
             TexasPokerEvent::CommunityCardRevealed {
                 table_id,
                 phase: 0,
-                card_indices: vec![],
-                card_ranks: vec![],
-                card_suits: vec![],
+                card_indices: [0; 6],
+                card_ranks: [0; 6],
+                card_suits: [0; 6],
+                card_count: 0,
             },
             TexasPokerEvent::ShowdownHoleCardsRevealed {
                 table_id,
                 seat_index: 0,
                 player: [0; 20],
-                card_indices: vec![],
-                card_ranks: vec![],
-                card_suits: vec![],
+                card_indices: [0; 2],
+                card_ranks: [0; 2],
+                card_suits: [0; 2],
             },
             TexasPokerEvent::ReconstructInitiated {
                 table_id,
-                expected_players: vec![],
+                expected_players: 0,
                 round_state: 0,
             },
             TexasPokerEvent::ReconstructDeckSubmitted {
@@ -961,7 +970,7 @@ mod tests {
             TexasPokerEvent::ReconstructComplete { table_id },
             TexasPokerEvent::ReconstructTimeout {
                 table_id,
-                pending_players: vec![],
+                pending_players: 0,
             },
             TexasPokerEvent::PlayerKicked {
                 table_id,

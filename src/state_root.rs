@@ -162,7 +162,7 @@ pub fn u64_to_field(v: u64) -> Felt {
 pub fn table_state_preimage(
     table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<Vec<Felt>> {
-    canonical_borsh_preimage("zchain.texas_poker.table.v11", table)
+    canonical_borsh_preimage("zchain.texas_poker.table.v12", table)
 }
 
 /// 从 canonical table preimage 反解完整 `TexasPokerTable`。
@@ -174,7 +174,7 @@ pub fn table_state_preimage(
 pub fn table_from_state_preimage(
     image: &[Felt],
 ) -> TexasAirResult<poker_l1::contracts::texas_poker::types::TexasPokerTable> {
-    const TAG: &str = "zchain.texas_poker.table.v11";
+    const TAG: &str = "zchain.texas_poker.table.v12";
     let payload = decode_canonical_borsh_preimage(image, TAG)?;
     let table =
         poker_l1::contracts::texas_poker::types::TexasPokerTable::try_from_slice(&payload)
@@ -535,7 +535,7 @@ mod tests {
 
     #[test]
     fn test_table_state_preimage_rejects_noncanonical_chunk_prefix() {
-        const TAG: &str = "zchain.texas_poker.table.v11";
+        const TAG: &str = "zchain.texas_poker.table.v12";
         let table = poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             poker_l1::object_model::ObjectID::new([0x11; 20], 3),
             "noncanonical-prefix".into(),

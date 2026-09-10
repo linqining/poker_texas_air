@@ -495,7 +495,13 @@ impl JoinTableArgs {
             player,
             buy_in,
             pk: ECPoint(pk),
-            tx_pk: super::types::unregistered_tx_pk(),
+            tx_pk: crate::signature::TaggedPubkey {
+                tag: crate::signature::encode_tag(
+                    crate::signature::SignatureScheme::Stark,
+                    crate::signature::CURRENT_VERSION,
+                ),
+                raw: vec![0u8; 32],
+            },
             pk_ownership_proof: super::utils::create_pk_ownership_proof(&secret_key, &nonce)?,
         })
     }
@@ -1542,11 +1548,10 @@ fn resolve_caller_seat(
             table.max_players
         )));
     }
-    if table.seats.len() != usize::from(table.max_players) {
+    if !table.padding_seats_are_vacant() {
         return Err(PokerL1Error::Serialization(format!(
-            "{method}: non-canonical seat layout: max_players={}, seats={}",
-            table.max_players,
-            table.seats.len()
+            "{method}: non-canonical seat layout: padding beyond max_players={} is occupied",
+            table.max_players
         )));
     }
 
@@ -1564,11 +1569,10 @@ fn authenticated_caller_seat(
     table: &TexasPokerTable,
     method: &str,
 ) -> PokerL1Result<u8> {
-    if table.seats.len() != usize::from(table.max_players) {
+    if !table.padding_seats_are_vacant() {
         return Err(PokerL1Error::Serialization(format!(
-            "{method}: non-canonical seat layout: max_players={}, seats={}",
-            table.max_players,
-            table.seats.len()
+            "{method}: non-canonical seat layout: padding beyond max_players={} is occupied",
+            table.max_players
         )));
     }
     let mut resolved = None;

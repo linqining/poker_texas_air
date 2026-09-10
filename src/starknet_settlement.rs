@@ -733,7 +733,7 @@ mod tests {
             name: "test".to_string(),
             creator: [0xAA; 20],
             rules: TableRules::new(9, 5, 10),
-            seats: vec![
+            seats: [
                 playing_seat([0x11; 20], 50),
                 playing_seat([0x22; 20], 50),
                 vacant_seat(),

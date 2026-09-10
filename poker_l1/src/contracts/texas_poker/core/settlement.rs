@@ -564,7 +564,7 @@ pub fn derive_settlement_plan(table: &TexasPokerTable) -> PokerL1Result<Settleme
 /// - 参与者不是恰好一名未弃牌玩家；
 /// - 下注总额与 `table.pot` 不符（对齐摊牌路径的同款守卫）。
 pub fn derive_fold_win_plan(table: &TexasPokerTable) -> PokerL1Result<SettlementPlan> {
-    if table.seats.len() > SETTLEMENT_SEATS {
+    if usize::from(table.max_players) > SETTLEMENT_SEATS {
         return Err(PokerL1Error::Serialization(
             "settlement: table exceeds MAX_PLAYERS".into(),
         ));
@@ -648,7 +648,7 @@ pub fn derive_fold_win_plan(table: &TexasPokerTable) -> PokerL1Result<Settlement
             ],
         }],
     };
-    plan.validate(table.seats.len())?;
+    plan.validate(usize::from(table.max_players))?;
     Ok(plan)
 }
 
@@ -658,7 +658,7 @@ pub fn derive_settlement_plan_for_boards(
     boards: &SettlementBoards,
 ) -> PokerL1Result<SettlementPlan> {
     boards.validate()?;
-    if table.seats.len() > SETTLEMENT_SEATS {
+    if usize::from(table.max_players) > SETTLEMENT_SEATS {
         return Err(PokerL1Error::Serialization(
             "settlement: table exceeds MAX_PLAYERS".into(),
         ));
@@ -696,8 +696,20 @@ pub fn derive_settlement_plan_for_boards(
             Ok(sum)
         }
     })?;
-    let rake = compute_rake(table, contested_gross)?;
-    let pot_rakes = allocate_rake(&result.pots, rake, contested_gross)?;
+    let pot_rakes = allocate_rake_fixed_rate(
+        &result.pots,
+        table.rake_mode,
+        table.rake_bps,
+        table.rake_cap,
+    )?;
+    let rake = pot_rakes
+        .iter()
+        .try_fold(0u64, |sum, amount| {
+            sum.checked_add(*amount).ok_or_else(|| {
+                PokerL1Error::Serialization("settlement: rake sum overflow".into())
+            })
+        })?;
+    debug_assert!(rake <= contested_gross);
 
     let mut plan = SettlementPlan {
         version: SETTLEMENT_PLAN_VERSION,
@@ -731,7 +743,7 @@ pub fn derive_settlement_plan_for_boards(
                     runout_amounts[runout_index],
                     winner_mask,
                     table.button,
-                    table.seats.len(),
+                    usize::from(table.max_players),
                 )?;
                 runouts[runout_index] = RunoutPotPlan {
                     amount: runout_amounts[runout_index],
@@ -752,7 +764,7 @@ pub fn derive_settlement_plan_for_boards(
         } else {
             let winner_mask = side_pot.eligible_seats;
             let awards =
-                split_among_winners(net_amount, winner_mask, table.button, table.seats.len())?;
+                split_among_winners(net_amount, winner_mask, table.button, usize::from(table.max_players))?;
             runouts[0] = RunoutPotPlan {
                 amount: net_amount,
                 winner_mask,
@@ -781,7 +793,7 @@ pub fn derive_settlement_plan_for_boards(
         sum.checked_add(*amount)
             .ok_or_else(|| PokerL1Error::Serialization("settlement: total award overflow".into()))
     })?;
-    plan.validate(table.seats.len())?;
+    plan.validate(usize::from(table.max_players))?;
     Ok(plan)
 }
 
@@ -852,51 +864,57 @@ fn compute_rake(table: &TexasPokerTable, gross_pot: u64) -> PokerL1Result<u64> {
     }
 }
 
-fn allocate_rake(pots: &[SidePot], rake: u64, gross_pot: u64) -> PokerL1Result<Vec<u64>> {
-    if rake == 0 {
-        return Ok(vec![0; pots.len()]);
-    }
-    if gross_pot == 0 || pots.is_empty() {
-        return Err(PokerL1Error::Serialization(
-            "settlement: cannot allocate rake over an empty pot set".into(),
-        ));
-    }
-    let mut allocations = Vec::with_capacity(pots.len());
-    let mut allocated = 0u64;
-    for pot in pots {
-        let share = if pot.eligible_seats.count_ones() >= 2 {
-            (u128::from(pot.amount) * u128::from(rake) / u128::from(gross_pot)) as u64
-        } else {
-            0
-        };
-        allocations.push(share);
-        allocated = allocated.checked_add(share).ok_or_else(|| {
-            PokerL1Error::Serialization("settlement: rake allocation overflow".into())
-        })?;
-    }
-    let mut remainder = rake.checked_sub(allocated).ok_or_else(|| {
-        PokerL1Error::Serialization("settlement: proportional rake exceeds total rake".into())
-    })?;
-    for (pot, allocation) in pots.iter().zip(&mut allocations) {
-        if remainder == 0 {
-            break;
+/// 按固定费率逐层计提抽水(TODO #44 重设计,2026-09-10)。
+///
+/// # 语义(产品已确认)
+/// - 只有 contested 层(`eligible ≥ 2`)参与抽水;未跟注返还层(单座
+///   eligible)是 uncalled return,永不抽水。
+/// - 每层独立计提 `floor(amount × rake_bps / 10_000)`,即固定费率,
+///   不再按 `amount × rake / gross_pot` 比例分摊(旧语义的除数是
+///   witness 值,是 AIR 中的语义级成本)。
+/// - 全局 `rake_cap` 按 `pot_index` 升序(规范层序)依次消耗:每层
+///   `take = min(raw, cap_remaining)`。总抽水因此 `≤ rake_cap` 且
+///   `≤ contested_gross`,与旧语义的全局上限强度一致;差异仅在多层
+///   时逐层 floor 求和与全局 floor 不必逐字节相等(已确认为可接受)。
+///
+/// # AIR 纪律(TODO #44 落地的核心目的)
+/// 本函数的每个算子都可被常数除数 gadget 直接承载:
+/// - 唯一除法是 **÷10_000 常数**(商/余 witness + `q·d + r = n` +
+///   `r < d` range check,无 witness 除数);
+/// - 乘积 `amount × rake_bps ≤ 10^18 × 10^4 < 2^74`,即 5×16-bit limb,
+///   无需 128-bit 全宽打开;
+/// - cap 消耗是 pot_index 升序的定界前缀扫描(≤ 9 层展开,每步
+///   min + 减法,无资格谓词贪婪链),AIR 侧按层序 unroll 即可证明;
+/// - 未跟注层由 `eligible_seats.count_ones() ≥ 2` 谓词门控,rake 恒 0。
+/// 未来新增 rake mode 必须继承同一纪律:禁止引入 witness 除数。
+fn allocate_rake_fixed_rate(
+    pots: &[SidePot],
+    rake_mode: u8,
+    rake_bps: u16,
+    rake_cap: u64,
+) -> PokerL1Result<Vec<u64>> {
+    match rake_mode {
+        RAKE_MODE_NONE => Ok(vec![0; pots.len()]),
+        RAKE_MODE_PERCENTAGE => {
+            let mut allocations = Vec::with_capacity(pots.len());
+            let mut cap_remaining = rake_cap;
+            for pot in pots {
+                if pot.eligible_seats.count_ones() < 2 {
+                    allocations.push(0);
+                    continue;
+                }
+                let raw =
+                    (u128::from(pot.amount) * u128::from(rake_bps) / 10_000) as u64;
+                let take = raw.min(cap_remaining);
+                allocations.push(take);
+                cap_remaining -= take;
+            }
+            Ok(allocations)
         }
-        if pot.eligible_seats.count_ones() < 2 {
-            continue;
-        }
-        let available = pot.amount.checked_sub(*allocation).ok_or_else(|| {
-            PokerL1Error::Serialization("settlement: pot rake allocation exceeds pot".into())
-        })?;
-        let take = remainder.min(available);
-        *allocation += take;
-        remainder -= take;
+        mode => Err(PokerL1Error::Serialization(format!(
+            "settlement: unsupported rake mode {mode}"
+        ))),
     }
-    if remainder != 0 {
-        return Err(PokerL1Error::Serialization(
-            "settlement: rake remainder exceeds available pots".into(),
-        ));
-    }
-    Ok(allocations)
 }
 
 fn split_across_runouts(amount: u64, runout_count: u8) -> [u64; MAX_RUNOUTS] {
@@ -916,7 +934,7 @@ fn find_winners(
     let mut ranks = [None; SETTLEMENT_SEATS];
     let mut best_rank = None;
     let mut winner_mask = 0u16;
-    for seat_index in 0..table.seats.len() {
+    for seat_index in 0..usize::from(table.max_players) {
         if !side_pot::is_eligible(eligible_mask, seat_index as u8) {
             continue;
         }
@@ -1145,11 +1163,11 @@ mod tests {
         assert_eq!(plan.pots.len(), 3);
         assert_eq!(plan.awards, [300, 200, 100, 0, 0, 0, 0, 0, 0]);
         assert_eq!(plan.digest().unwrap(), plan.clone().digest().unwrap());
-        plan.validate(table.seats.len()).unwrap();
+        plan.validate(usize::from(table.max_players)).unwrap();
 
         let mut retired = plan;
         retired.version = 1;
-        assert!(retired.validate(table.seats.len()).is_err());
+        assert!(retired.validate(usize::from(table.max_players)).is_err());
     }
 
     #[test]
@@ -1235,7 +1253,7 @@ mod tests {
         assert_eq!(plan.pots[1].runouts[1], RunoutPotPlan::inactive());
         assert_eq!(plan.rake, 10);
         assert_eq!(plan.total_awards, 140);
-        plan.validate(table.seats.len()).unwrap();
+        plan.validate(usize::from(table.max_players)).unwrap();
     }
 
     #[test]
@@ -1290,14 +1308,14 @@ mod tests {
         assert_eq!(plan.pots[1].runouts[0].winner_mask, 0b110);
         assert_eq!(plan.pots[1].runouts[1].winner_mask, 0b110);
         assert_eq!(plan.awards.iter().sum::<u64>(), 581);
-        plan.validate(table.seats.len()).unwrap();
+        plan.validate(usize::from(table.max_players)).unwrap();
     }
 
     #[test]
     fn validate_rejects_masks_outside_seat_bounds() {
         let table = table();
         let plan = derive_settlement_plan(&table).unwrap();
-        let seat_count = table.seats.len();
+        let seat_count = usize::from(table.max_players);
         plan.validate(seat_count).unwrap();
 
         // eligible mask 含越界座位 bit。
@@ -1315,7 +1333,7 @@ mod tests {
     fn validate_rejects_awards_paid_to_non_winner_seats() {
         let table = table();
         let plan = derive_settlement_plan(&table).unwrap();
-        let seat_count = table.seats.len();
+        let seat_count = usize::from(table.max_players);
 
         // 在保持所有金额守恒的前提下，把一个 winner 从 winner_mask 中移除
         // （包括每个 runout 的 winner_mask），但其 award 保留：
@@ -1358,5 +1376,64 @@ mod tests {
         table.rake_mode = RAKE_MODE_NONE;
 
         assert_eq!(compute_rake(&table, 1_000).unwrap(), 0);
+    }
+
+    // ========== allocate_rake_fixed_rate（TODO #44，2026-09-10） ==========
+
+    fn side_pot(amount: u64, eligible: u16) -> SidePot {
+        SidePot::new(amount, eligible)
+    }
+
+    #[test]
+    fn fixed_rate_rake_charges_each_contested_layer_independently() {
+        // 两层各 1_000、5%：每层独立 floor(50)，总计 100。
+        let pots = [side_pot(1_000, 0b11), side_pot(1_000, 0b111)];
+        let allocations =
+            allocate_rake_fixed_rate(&pots, RAKE_MODE_PERCENTAGE, 500, u64::MAX).unwrap();
+        assert_eq!(allocations, vec![50, 50]);
+    }
+
+    #[test]
+    fn fixed_rate_rake_consumes_global_cap_in_canonical_layer_order() {
+        // cap 60：layer 0 计提 50，剩余 cap 10 → layer 1 只能拿 min(50,10)=10，
+        // layer 2 拿 0。总抽水恰为 cap，且先到先得按 pot_index 升序。
+        let pots = [
+            side_pot(1_000, 0b11),
+            side_pot(1_000, 0b111),
+            side_pot(1_000, 0b1111),
+        ];
+        let allocations =
+            allocate_rake_fixed_rate(&pots, RAKE_MODE_PERCENTAGE, 500, 60).unwrap();
+        assert_eq!(allocations, vec![50, 10, 0]);
+    }
+
+    #[test]
+    fn fixed_rate_rake_skips_uncontested_layers_and_respects_none_mode() {
+        // 单座 eligible = uncalled return，永不抽水；NONE 模式全零。
+        let pots = [side_pot(1_000, 0b11), side_pot(9_999, 0b01), side_pot(500, 0b111)];
+        assert_eq!(
+            allocate_rake_fixed_rate(&pots, RAKE_MODE_NONE, 500, u64::MAX).unwrap(),
+            vec![0, 0, 0]
+        );
+        assert_eq!(
+            allocate_rake_fixed_rate(&pots, RAKE_MODE_PERCENTAGE, 500, u64::MAX)
+                .unwrap(),
+            vec![50, 0, 25]
+        );
+    }
+
+    #[test]
+    fn fixed_rate_rake_bounds_are_layer_wise() {
+        // bps = 10_000：每层抽满本层；cap = 0：全零。
+        let pots = [side_pot(700, 0b11), side_pot(300, 0b111)];
+        assert_eq!(
+            allocate_rake_fixed_rate(&pots, RAKE_MODE_PERCENTAGE, 10_000, u64::MAX)
+                .unwrap(),
+            vec![700, 300]
+        );
+        assert_eq!(
+            allocate_rake_fixed_rate(&pots, RAKE_MODE_PERCENTAGE, 500, 0).unwrap(),
+            vec![0, 0]
+        );
     }
 }

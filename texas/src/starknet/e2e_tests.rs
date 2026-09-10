@@ -1325,7 +1325,7 @@ mod runtime_authority_e2e {
             t.deck_state.cards_dealt = 0;
             t.deck_state.owner_readable_hole_cards.clear();
             let mut contributor_mask: SeatMask = 0;
-            for idx in 0..t.seats.len().min(16) {
+            for idx in 0..usize::from(t.max_players) {
                 if super::super::mirror::seat_player_addr(&t.seats[idx]).is_some() {
                     contributor_mask |= 1u16 << idx;
                 }

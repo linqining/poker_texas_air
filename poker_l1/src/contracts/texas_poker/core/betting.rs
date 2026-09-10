@@ -1,12 +1,22 @@
 //! Texas Poker 下注轮状态与规则。
 //!
-//! # 电路友好设计
+//! # AIR/Trace 友好设计（原"电路友好"，SNARK → Stwo 迁移后重述）
+//!
+//! 成本模型已从"R1CS 约束数"变为"trace 列宽 × 行数"，以下设计在两个模型
+//! 下均成立，理由标注了 AIR 侧依据：
 //!
 //! - `BettingRound` 仅保留两个状态字段：`current_bet`（当前轮最高下注）与
 //!   `min_raise`（最小加注增量）。删除了 `actions_taken`/`last_raiser_seat`/
-//!   `big_blind` 等死字段（生产代码从未读取）。
+//!   `big_blind` 等死字段（生产代码从未读取）。AIR 下每个固定宽度状态字段
+//!   都要逐行打开并计入 Poseidon state-root
+//!   （`state_root::poseidon_betting_round`），死字段是每行都付费的列，
+//!   故删字段在 Stwo 下收益反而更大。
 //! - 下注轮完成判定由 state_machine 的 `acted_this_round` + `bet == current_bet`
-//!   完成，BettingRound 只负责金额校验。
+//!   完成，BettingRound 只负责金额校验。AIR 侧由 `AdvanceRound` 选择子的
+//!   "全部剩余 Active 座位已 acted 且 bet == current_bet" 关系一一对应。
+//! - 金额校验全部 total（`saturating_sub`/`Result`，无 panic 路径）：trace
+//!   生成是宿主原生执行，panic 即 prover 崩溃；显式 Result 让 AIR 能把
+//!   合法性折叠成单个布尔约束（非法即不可满足，fail-closed）。
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};

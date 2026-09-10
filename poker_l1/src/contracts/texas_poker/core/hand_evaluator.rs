@@ -1,12 +1,14 @@
 //! Texas Poker 手牌评估（7 选 5 最佳手牌）。
 //!
-//! # 电路友好设计
+//! # AIR/Trace 友好设计（原"电路友好"，SNARK → Stwo 迁移后重述）
 //!
-//! - [`HandRank`] 用定长 `kickers: [u8; 5]`（非 Vec），电路里是固定 5 字节。
+//! - [`HandRank`] 用定长 `kickers: [u8; 5]`（非 Vec），trace 里是固定 5 列。
 //! - 直接实现 `Ord`（category 优先，kickers 字典序），删除 Move 风格的
-//!   `compare`/`compare_kickers` 三态转换。
+//!   `compare`/`compare_kickers` 三态转换；AIR 中比较即 limb 借位链，
+//!   少一层三态转换就少一组 gadget。
 //! - `evaluate_best` 统一处理 5..=7 张牌（C(n,5) 组合枚举），<5 张用 0 填充。
-//!   删除占位牌补齐路径（避免重复牌污染评估）。
+//!   删除占位牌补齐路径（避免重复牌污染评估）。定长组合枚举在 AIR 中仍是
+//!   合理基线；实现 hand-rank AIR 时可再评估 lookup（logUp）直方图方案。
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};

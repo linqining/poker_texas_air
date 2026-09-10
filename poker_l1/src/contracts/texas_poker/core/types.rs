@@ -193,44 +193,41 @@ pub struct OccupiedSeat {
     pub stack: u64,
     /// Mental Poker public key.
     pub pk: ECPoint,
-    /// 会话交易公钥（P1-2 修复，2026-09-10）：该座位 VM 层交易签名的
-    /// 验证锚——Stark Schnorr 32B 压缩点（tagged）。join 时经链上 vault
-    /// 登记（`set_session_tx_pk`，买入同笔 multicall）核验后写入；
-    /// 后续 `TableRuntime` 签名交易按此钥验证，替代可公开推导的确定性
-    /// 身份。全零压缩点 = 未登记（仅 fixture/旧路径；签名路径拒绝）。
-    pub tx_pk: crate::signature::TaggedPubkey,
+    /// 会话交易公钥（P1-2 修复，2026-09-09）：该座位 VM 层交易签名的
+    /// 验证锚——Stark Schnorr 32B 压缩点。join 时经链上 vault
+    /// `set_session_tx_pk`（买入同笔 multicall）核验后写入；后续
+    /// `TableRuntime` 签名交易按此钥验证。定宽形式（TODO #41④，2026-09-10）：
+    /// tag 恒 Stark v1、raw 恒 32B，全零压缩点 = 未登记（仅 fixture/旧路径；
+    /// 签名路径拒绝）。
+    pub tx_pk: crate::signature::StarkTxPubkey,
     /// Addon held until the next-hand reset boundary.
     pub pending_addon: u64,
     /// Remaining time-bank allowance in milliseconds.
     pub time_bank_ms: u32,
 }
 
-/// 未登记的会话交易公钥（Stark scheme tag + 全零 32B 压缩点 = 恒等元）。
+/// 未登记的会话交易公钥（Stark v1 tag + 全零 32B 压缩点 = 恒等元）。
 ///
 /// fixture 与不关心交易签名的构造路径使用；`TableRuntime::submit_signed`
 /// 遇到未登记座位显式拒绝（fail-closed）。
 #[must_use]
-pub fn unregistered_tx_pk() -> crate::signature::TaggedPubkey {
-    crate::signature::TaggedPubkey {
-        tag: crate::signature::encode_tag(
-            crate::signature::SignatureScheme::Stark,
-            crate::signature::CURRENT_VERSION,
-        ),
-        raw: vec![0u8; 32],
-    }
+pub fn unregistered_tx_pk() -> crate::signature::StarkTxPubkey {
+    crate::signature::StarkTxPubkey::UNREGISTERED
 }
 
-/// 会话交易公钥结构合法性：Stark scheme + 32B 压缩点（不校验恒等元）。
+/// 会话交易公钥结构合法性：tag 恒为 Stark v1（32B 不变量已由类型承载）。
 #[must_use]
-pub fn is_well_formed_tx_pk(pk: &crate::signature::TaggedPubkey) -> bool {
-    matches!(pk.scheme(), Ok(crate::signature::SignatureScheme::Stark))
-        && pk.raw.len() == crate::signature::SignatureScheme::Stark.raw_pubkey_len()
+pub fn is_well_formed_tx_pk(pk: &crate::signature::StarkTxPubkey) -> bool {
+    pk.tag == crate::signature::encode_tag(
+        crate::signature::SignatureScheme::Stark,
+        crate::signature::CURRENT_VERSION,
+    )
 }
 
 /// 会话交易公钥是否为**已登记**（结构合法且非恒等元/全零哨兵）。
 #[must_use]
-pub fn is_registered_tx_pk(pk: &crate::signature::TaggedPubkey) -> bool {
-    is_well_formed_tx_pk(pk) && pk.raw.iter().any(|&b| b != 0)
+pub fn is_registered_tx_pk(pk: &crate::signature::StarkTxPubkey) -> bool {
+    is_well_formed_tx_pk(pk) && pk.is_registered()
 }
 
 /// Mutually exclusive status of a player participating in the current hand.
@@ -259,12 +256,146 @@ pub struct PlayingSeat {
     pub status: PlayingSeatStatus,
 }
 
+/// 定宽记录公共写入（TODO #47-②）：`payload_len(u32 LE) || tag || 载荷 ||
+/// 零填充到 width`。载荷+头部超宽即失败。
+fn to_payload<T: BorshSerialize>(value: &T) -> borsh::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    value.serialize(&mut buf)?;
+    Ok(buf)
+}
+
+fn write_padded_record<W: borsh::io::Write>(
+    writer: &mut W,
+    tag: u8,
+    payload: &[u8],
+    width: usize,
+) -> borsh::io::Result<()> {
+    use borsh::io::Write as _;
+    // 记录体 = tag(1) + 载荷；len 字段覆盖 tag+载荷，与读取端一致。
+    let body_len = payload
+        .len()
+        .checked_add(1)
+        .and_then(|len| len.checked_add(4))
+        .filter(|len| *len <= width)
+        .ok_or_else(|| {
+            borsh::io::Error::new(
+                borsh::io::ErrorKind::InvalidData,
+                "fixed-width record payload exceeds record width",
+            )
+        })?;
+    let len = u32::try_from(payload.len() + 1)
+        .map_err(|_| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, "record too large"))?;
+    len.serialize(writer)?;
+    writer.write_all(&[tag])?;
+    writer.write_all(payload)?;
+    let pad = width - body_len;
+    writer.write_all(&vec![0u8; pad])
+}
+
+/// 定宽记录公共读取：校验长度上界与零填充规范形，返回 (tag, 载荷)。
+fn read_padded_record<R: borsh::io::Read>(
+    reader: &mut R,
+    width: usize,
+) -> borsh::io::Result<(u8, Vec<u8>)> {
+    use borsh::io::Read as _;
+    let len = u32::deserialize_reader(reader)? as usize;
+    // len 覆盖 tag+载荷；记录体 = len(u32) + len 字节 = len + 4。
+    let body_len = len.checked_add(4).filter(|len| *len <= width).ok_or_else(|| {
+        borsh::io::Error::new(
+            borsh::io::ErrorKind::InvalidData,
+            "fixed-width record length exceeds record width",
+        )
+    })?;
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf)?;
+    let pad = width - body_len;
+    let mut padding = vec![0u8; pad];
+    reader.read_exact(&mut padding)?;
+    if padding.iter().any(|&byte| byte != 0) {
+        return Err(borsh::io::Error::new(
+            borsh::io::ErrorKind::InvalidData,
+            "non-canonical fixed-width record: padding must be zero",
+        ));
+    }
+    let tag = buf[0];
+    Ok((tag, buf[1..].to_vec()))
+}
+
+/// TODO #47-②（2026-09-10）：`Seat` 的定宽记录宽度。载荷超宽即序列化
+/// 失败（fail-closed）；所有变体序列化结果恒等长，native borsh 与
+/// canonical ABI 的固定宽度语义合一。
+const SEAT_RECORD_WIDTH: usize = 512;
+
+/// 变体判别值（与历史 derive 枚举序一致：Vacant/Waiting/Playing/DepartedThisHand）。
+const SEAT_TAG_VACANT: u8 = 0;
+const SEAT_TAG_WAITING: u8 = 1;
+const SEAT_TAG_PLAYING: u8 = 2;
+const SEAT_TAG_DEPARTED: u8 = 3;
+
+/// TODO #47-②（2026-09-10）：`Seat` 手写固定宽度 Borsh。
+///
+/// 记录布局：`payload_len(u32 LE) || tag(u8) || 派生载荷 || 零填充到
+/// [`SEAT_RECORD_WIDTH`]。单射性 = len/tag/载荷一致 + 填充必须全零
+/// （非零填充拒绝，防同一变体多种字节形态）。
+impl BorshSerialize for Seat {
+    fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        let (tag, payload): (u8, Vec<u8>) = match self {
+            Seat::Vacant { time_bank_ms } => {
+                (SEAT_TAG_VACANT, to_payload(&time_bank_ms)?)
+            }
+            Seat::Waiting { occupied } => (SEAT_TAG_WAITING, to_payload(&occupied)?),
+            Seat::Playing { playing } => (SEAT_TAG_PLAYING, to_payload(&playing)?),
+            Seat::DepartedThisHand {
+                player,
+                total_bet,
+                time_bank_ms,
+            } => {
+                let mut payload = Vec::new();
+                player.serialize(&mut payload)?;
+                total_bet.serialize(&mut payload)?;
+                time_bank_ms.serialize(&mut payload)?;
+                (SEAT_TAG_DEPARTED, payload)
+            }
+        };
+        write_padded_record(writer, tag, &payload, SEAT_RECORD_WIDTH)
+    }
+}
+
+impl BorshDeserialize for Seat {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let (tag, payload) = read_padded_record(reader, SEAT_RECORD_WIDTH)?;
+        let mut slice = payload.as_slice();
+        Ok(match tag {
+            SEAT_TAG_VACANT => Seat::Vacant {
+                time_bank_ms: u32::deserialize_reader(&mut slice)?,
+            },
+            SEAT_TAG_WAITING => Seat::Waiting {
+                occupied: OccupiedSeat::deserialize_reader(&mut slice)?,
+            },
+            SEAT_TAG_PLAYING => Seat::Playing {
+                playing: PlayingSeat::deserialize_reader(&mut slice)?,
+            },
+            SEAT_TAG_DEPARTED => Seat::DepartedThisHand {
+                player: Address::deserialize_reader(&mut slice)?,
+                total_bet: u64::deserialize_reader(&mut slice)?,
+                time_bank_ms: u32::deserialize_reader(&mut slice)?,
+            },
+            other => {
+                return Err(borsh::io::Error::new(
+                    borsh::io::ErrorKind::InvalidData,
+                    format!("unknown Seat record tag {other}"),
+                ));
+            }
+        })
+    }
+}
+
 /// Canonical runtime seat representation.
 ///
 /// Each lifecycle variant carries only meaningful data. This is also the canonical Borsh/state-root
 /// representation; impossible flat combinations such as an empty seat with chips or a waiting seat
-/// with hole cards cannot be constructed.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+/// with hole cards cannot be constructed. Borsh 采用手写定宽记录（TODO #47-②）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seat {
     /// Unoccupied slot. Time-bank is retained as a slot policy counter.
     Vacant {
@@ -324,14 +455,15 @@ impl Seat {
                 "Texas newly occupied seat cannot use an identity public key".into(),
             ));
         }
-        // 结构校验（Stark scheme + 32B 压缩点）；"已登记"（非恒等元）与否
-        // 不在 core 强制——策略归 runtime：TableRuntime 的签名路径对未
-        // 登记座位 fail-closed（mirror 注入路径不需要 tx 签名，允许哨兵）。
-        if !is_well_formed_tx_pk(&tx_pk) {
-            return Err(PokerL1Error::Serialization(
+        // 结构校验（Stark v1 + 32B 压缩点，收敛为定宽 StarkTxPubkey）；
+        // "已登记"（非恒等元）与否不在 core 强制——策略归 runtime：
+        // TableRuntime 的签名路径对未登记座位 fail-closed（mirror 注入
+        // 路径不需要 tx 签名，允许哨兵）。
+        let tx_pk = crate::signature::StarkTxPubkey::from_tagged(&tx_pk).map_err(|_| {
+            PokerL1Error::Serialization(
                 "Texas join tx_pk must be a Stark-scheme 32-byte compressed point".into(),
-            ));
-        }
+            )
+        })?;
         let occupied = OccupiedSeat {
             player,
             stack,
@@ -598,7 +730,7 @@ impl Seat {
 
     /// 已登记的会话交易公钥（VM 层交易签名验证锚）；未登记/空座位返回 None。
     #[must_use]
-    pub fn registered_tx_pk(&self) -> Option<&crate::signature::TaggedPubkey> {
+    pub fn registered_tx_pk(&self) -> Option<&crate::signature::StarkTxPubkey> {
         match self {
             Self::Waiting { occupied }
             | Self::Playing {
@@ -1255,22 +1387,20 @@ impl RevealTokenState {
 // ========== Reconstruct 状态 ==========
 
 /// Canonical progress payload of an active reconstruction phase.
+///
+/// TODO #41-③（2026-09-10）：52 张聚合密文的累加器已迁至
+/// [`DeckState::reconstruct_accumulated`]（材料统一由 deck 载体承载，
+/// HandPhase 不再内嵌变长大对象）；本结构只保留进度掩码。
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ReconstructState {
     /// 待提交 reconstruct deck 的玩家列表。
     pub pending_mask: SeatMask,
-    /// 已验证 contribution 逐次合入 canonical aggregate-key base deck 后的结果。
-    ///
-    /// `None` 表示尚无玩家提交；`Some` 始终恰好包含 52 张密文。这样无论参与者数量
-    /// 是 2 还是 9，hot state 都只保存一副 deck，而不是每位玩家各保存一副 deck。
-    pub accumulated_deck: Option<Vec<ElGamalCiphertext>>,
 }
 
 impl Default for ReconstructState {
     fn default() -> Self {
         Self {
             pending_mask: 0,
-            accumulated_deck: None,
         }
     }
 }
@@ -1411,9 +1541,13 @@ impl ShufflingPhase {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 /// Single active hand phase. Shuffle uses a nested union so fresh and reconstruct payloads cannot
 /// encode each other's fields.
+///
+/// TODO #47-②（2026-09-10）：Borsh 采用手写定宽记录式实现——所有变体
+/// 序列化结果恒等长（[`HAND_PHASE_RECORD_WIDTH`]），native 编码长度不再
+/// 随阶段/揭示批大小漂移。变体判别值与历史 derive 枚举序一致。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandPhase {
     /// No hand transition is active.
     Waiting,
@@ -1460,6 +1594,106 @@ pub enum HandPhase {
         /// Non-zero absolute settlement deadline.
         deadline_ms: u64,
     },
+}
+
+/// `HandPhase` 定宽记录宽度（TODO #47-②）。最宽变体为 Reconstructing
+/// （含 ≤18 条揭示分配 + 悬挂揭示负载）；超宽即序列化失败（fail-closed）。
+const HAND_PHASE_RECORD_WIDTH: usize = 4096;
+
+/// 变体判别值（与历史 derive 枚举序一致）。
+const PHASE_TAG_WAITING: u8 = 0;
+const PHASE_TAG_SHUFFLING: u8 = 1;
+const PHASE_TAG_REVEALING: u8 = 2;
+const PHASE_TAG_RECONSTRUCTING: u8 = 3;
+const PHASE_TAG_BETTING: u8 = 4;
+const PHASE_TAG_SHOWDOWN_DISPLAY: u8 = 5;
+
+impl BorshSerialize for HandPhase {
+    fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        let (tag, payload): (u8, Vec<u8>) = match self {
+            HandPhase::Waiting => (PHASE_TAG_WAITING, Vec::new()),
+            HandPhase::Shuffling { phase } => (PHASE_TAG_SHUFFLING, to_payload(&phase)?),
+            HandPhase::Revealing { street, state, deadline_ms } => {
+                let mut payload = Vec::new();
+                street.serialize(&mut payload)?;
+                state.serialize(&mut payload)?;
+                deadline_ms.serialize(&mut payload)?;
+                (PHASE_TAG_REVEALING, payload)
+            }
+            HandPhase::Reconstructing {
+                street,
+                state,
+                suspended_reveal,
+                epoch_ms,
+                deadline_ms,
+            } => {
+                let mut payload = Vec::new();
+                street.serialize(&mut payload)?;
+                state.serialize(&mut payload)?;
+                suspended_reveal.serialize(&mut payload)?;
+                epoch_ms.serialize(&mut payload)?;
+                deadline_ms.serialize(&mut payload)?;
+                (PHASE_TAG_RECONSTRUCTING, payload)
+            }
+            HandPhase::Betting {
+                street,
+                round,
+                current_turn,
+                deadline_ms,
+            } => {
+                let mut payload = Vec::new();
+                street.serialize(&mut payload)?;
+                round.serialize(&mut payload)?;
+                current_turn.serialize(&mut payload)?;
+                deadline_ms.serialize(&mut payload)?;
+                (PHASE_TAG_BETTING, payload)
+            }
+            HandPhase::ShowdownDisplay { deadline_ms } => {
+                (PHASE_TAG_SHOWDOWN_DISPLAY, to_payload(&deadline_ms)?)
+            }
+        };
+        write_padded_record(writer, tag, &payload, HAND_PHASE_RECORD_WIDTH)
+    }
+}
+
+impl BorshDeserialize for HandPhase {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let (tag, payload) = read_padded_record(reader, HAND_PHASE_RECORD_WIDTH)?;
+        let mut slice = payload.as_slice();
+        Ok(match tag {
+            PHASE_TAG_WAITING => HandPhase::Waiting,
+            PHASE_TAG_SHUFFLING => HandPhase::Shuffling {
+                phase: ShufflingPhase::deserialize_reader(&mut slice)?,
+            },
+            PHASE_TAG_REVEALING => HandPhase::Revealing {
+                street: u8::deserialize_reader(&mut slice)?,
+                state: RevealTokenState::deserialize_reader(&mut slice)?,
+                deadline_ms: u64::deserialize_reader(&mut slice)?,
+            },
+            PHASE_TAG_RECONSTRUCTING => HandPhase::Reconstructing {
+                street: u8::deserialize_reader(&mut slice)?,
+                state: ReconstructState::deserialize_reader(&mut slice)?,
+                suspended_reveal: RevealTokenState::deserialize_reader(&mut slice)?,
+                epoch_ms: u64::deserialize_reader(&mut slice)?,
+                deadline_ms: u64::deserialize_reader(&mut slice)?,
+            },
+            PHASE_TAG_BETTING => HandPhase::Betting {
+                street: u8::deserialize_reader(&mut slice)?,
+                round: BettingRound::deserialize_reader(&mut slice)?,
+                current_turn: u8::deserialize_reader(&mut slice)?,
+                deadline_ms: u64::deserialize_reader(&mut slice)?,
+            },
+            PHASE_TAG_SHOWDOWN_DISPLAY => HandPhase::ShowdownDisplay {
+                deadline_ms: u64::deserialize_reader(&mut slice)?,
+            },
+            other => {
+                return Err(borsh::io::Error::new(
+                    borsh::io::ErrorKind::InvalidData,
+                    format!("unknown HandPhase record tag {other}"),
+                ));
+            }
+        })
+    }
 }
 
 impl HandPhase {
@@ -1814,6 +2048,11 @@ pub struct DeckState {
     pub cards_dealt: u8,
     /// Owner-private partial ciphertexts at canonical `(seat, hole_slot)` positions.
     pub owner_readable_hole_cards: PartialHoleCardLedger,
+    /// 重构累加器（TODO #41-③，自 `ReconstructState` 迁入）：已验证
+    /// contribution 逐次合入 canonical aggregate-key base deck 后的 52 张
+    /// 密文。`None` 表示尚无玩家提交。材料统一由 deck 载体承载，HandPhase
+    /// 不再内嵌变长大对象。
+    pub reconstruct_accumulated: Option<Vec<ElGamalCiphertext>>,
 }
 
 impl Default for DeckState {
@@ -1823,6 +2062,7 @@ impl Default for DeckState {
             contributor_mask: 0,
             cards_dealt: 0,
             owner_readable_hole_cards: PartialHoleCardLedger::default(),
+            reconstruct_accumulated: None,
         }
     }
 }
@@ -2042,7 +2282,12 @@ pub struct TexasPokerTable {
     pub rules: TableRules,
 
     /// 座位列表（长度 = max_players）。
-    pub seats: Vec<Seat>,
+    /// 座位槽位（定宽，TODO #41①，2026-09-10）：恒 9 槽，索引
+    /// `[0, max_players)` 之外的槽位必须保持 `Vacant` 填充
+    /// （`validate_state_schema` 强制）。此前为 `Vec<Seat>`，其长度恒等于
+    /// `max_players`（不变式由本函数历史强制）；定宽后整表 borsh 序列化
+    /// 长度不再随桌型配置漂移（AIR/trace 友好）。
+    pub seats: [Seat; 9],
     /// 本轮已经完成行动的座位集合。
     pub acted_mask: SeatMask,
     /// 请求在本手结束后离场的座位集合。
@@ -2099,6 +2344,14 @@ impl DerefMut for TexasPokerTable {
 }
 
 impl TexasPokerTable {
+    /// 座位填充不变式：`max_players` 之外的槽位必须为 `Vacant`。
+    #[must_use]
+    pub fn padding_seats_are_vacant(&self) -> bool {
+        self.seats[usize::from(self.max_players)..]
+            .iter()
+            .all(|seat| matches!(seat, Seat::Vacant { .. }))
+    }
+
     /// Canonical betting street/outer round projection.
     #[must_use]
     pub const fn round_state(&self) -> u8 {
@@ -2840,7 +3093,7 @@ impl TexasPokerTable {
         assert!(big_blind > 0, "big_blind 必须 > 0");
         assert!(small_blind <= big_blind, "small_blind 必须 <= big_blind");
 
-        let seats = (0..max_players).map(|_| Seat::empty()).collect();
+        let seats = std::array::from_fn(|_| Seat::empty());
 
         Self {
             id,
@@ -2891,7 +3144,7 @@ impl TexasPokerTable {
     /// 未入座或座位未登记（fixture/哨兵）返回 None——`TableRuntime` 的
     /// 签名路径对此 fail-closed 拒绝。
     #[must_use]
-    pub fn registered_tx_pk_of(&self, player: &Address) -> Option<&crate::signature::TaggedPubkey> {
+    pub fn registered_tx_pk_of(&self, player: &Address) -> Option<&crate::signature::StarkTxPubkey> {
         self.seats
             .iter()
             .find(|s| &s.player() == player)
@@ -3102,12 +3355,12 @@ impl TexasPokerTable {
     /// table cannot carry an independently mutable version fact.
     pub fn validate_state_schema(&self) -> PokerL1Result<()> {
         self.rules.validate_canonical()?;
-        if self.seats.len() != usize::from(self.max_players) {
-            return Err(PokerL1Error::Serialization(format!(
-                "Texas seat layout mismatch: max_players={}, seats={}",
-                self.max_players,
-                self.seats.len()
-            )));
+        for (index, seat) in self.seats.iter().enumerate().skip(usize::from(self.max_players)) {
+            if !matches!(seat, Seat::Vacant { .. }) {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas seat padding beyond max_players must be vacant: seat {index}"
+                )));
+            }
         }
         if !seat_mask_is_canonical(self.acted_mask, self.max_players)
             || !seat_mask_is_canonical(self.leave_after_hand_mask, self.max_players)
@@ -3226,7 +3479,7 @@ impl TexasPokerTable {
         }
         let reconstruct_state = self.reconstruct_state();
         validate_mask(reconstruct_state.pending_mask, "reconstruct pending mask")?;
-        match &reconstruct_state.accumulated_deck {
+        match &self.deck_state.reconstruct_accumulated {
             Some(deck) => {
                 if deck.len() != 52 {
                     return Err(PokerL1Error::Serialization(format!(
@@ -3357,7 +3610,8 @@ mod tests {
     fn test_table_new() {
         let table = TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
         assert_eq!(table.max_players, 6);
-        assert_eq!(table.seats.len(), 6);
+        assert_eq!(table.seats.len(), 9); // 定宽槽位（TODO #41①）
+        assert!(table.padding_seats_are_vacant());
         assert_eq!(table.small_blind, 50);
         assert_eq!(table.big_blind, 100);
         assert_eq!(table.round_state(), super::super::constants::ROUND_WAITING);
@@ -3780,7 +4034,8 @@ mod tests {
     fn test_reconstruct_state_default() {
         let state = ReconstructState::default();
         assert_eq!(state.pending_mask, 0);
-        assert!(state.accumulated_deck.is_none());
+        // 累加器已迁 DeckState（TODO #41-③）：DeckState::default 的累加器恒 None。
+        assert!(DeckState::default().reconstruct_accumulated.is_none());
     }
 
     #[test]
@@ -3809,5 +4064,98 @@ mod tests {
         let bytes = borsh::to_vec(&seat).unwrap();
         let recovered: Seat = borsh::from_slice(&bytes).unwrap();
         assert_eq!(seat, recovered);
+    }
+
+    // ========== 定宽记录 Borsh（TODO #47-②）==========
+
+    #[test]
+    fn seat_record_encoding_is_constant_width() {
+        use super::super::constants::DEFAULT_TIME_BANK_MS;
+        let seats = [
+            Seat::Vacant { time_bank_ms: DEFAULT_TIME_BANK_MS },
+            Seat::Waiting { occupied: test_occupied() },
+            Seat::Playing { playing: PlayingSeat {
+                occupied: test_occupied(),
+                hand: HoleCards::empty(),
+                bet: 100,
+                total_bet: 200,
+                status: PlayingSeatStatus::Active,
+            }},
+            Seat::DepartedThisHand { player: [9; 20], total_bet: 55, time_bank_ms: 1 },
+        ];
+        let encoded: Vec<Vec<u8>> = seats.iter().map(|s| borsh::to_vec(s).unwrap()).collect();
+        for bytes in &encoded {
+            // len(u32) 计入 width 预算：总长恒等于记录宽度。
+            assert_eq!(bytes.len(), SEAT_RECORD_WIDTH);
+        }
+        // 全部变体等长 → 跨变体替换不改变表长度。
+        for other in encoded.iter().skip(1) {
+            assert_eq!(other.len(), encoded[0].len());
+        }
+    }
+
+    #[test]
+    fn seat_record_rejects_noncanonical_padding() {
+        let seat = Seat::Vacant { time_bank_ms: 7 };
+        let clean = borsh::to_vec(&seat).unwrap();
+        let mut bytes = clean.clone();
+        *bytes.last_mut().unwrap() = 1; // 污染填充 → 非规范编码必须拒绝
+        assert!(borsh::from_slice::<Seat>(&bytes).is_err());
+        *bytes.last_mut().unwrap() = 0;
+        assert_eq!(borsh::from_slice::<Seat>(&bytes).unwrap(), seat);
+    }
+
+    fn test_occupied() -> OccupiedSeat {
+        OccupiedSeat {
+            player: [3; 20],
+            stack: 1_000,
+            pk: ECPoint(crate::contracts::texas_poker::utils::g1_generator()),
+            tx_pk: unregistered_tx_pk(),
+            pending_addon: 0,
+            time_bank_ms: 30_000,
+        }
+    }
+
+    #[test]
+    fn hand_phase_record_encoding_is_constant_width() {
+        let phases = [
+            HandPhase::Waiting,
+            HandPhase::Shuffling {
+                phase: ShufflingPhase::Initial {
+                    state: ShuffleState { pending_mask: 0b11, completed_mask: 0 },
+                    deadline_ms: 1_000,
+                },
+            },
+            HandPhase::Revealing {
+                street: ROUND_PREFLOP,
+                state: RevealTokenState { purpose: RevealPurpose::DealHole, assignments: Vec::new() },
+                deadline_ms: 2_000,
+            },
+            HandPhase::Reconstructing {
+                street: ROUND_FLOP,
+                state: ReconstructState::default(),
+                suspended_reveal: RevealTokenState {
+                    purpose: RevealPurpose::Board,
+                    assignments: Vec::new(),
+                },
+                epoch_ms: 3_000,
+                deadline_ms: 4_000,
+            },
+            HandPhase::Betting {
+                street: ROUND_PREFLOP,
+                round: BettingRound::new(100, 100),
+                current_turn: 0,
+                deadline_ms: 5_000,
+            },
+            HandPhase::ShowdownDisplay { deadline_ms: 6_000 },
+        ];
+        let encoded: Vec<Vec<u8>> = phases.iter().map(|p| borsh::to_vec(p).unwrap()).collect();
+        for bytes in &encoded {
+            assert_eq!(bytes.len(), HAND_PHASE_RECORD_WIDTH);
+        }
+        // 逐变体 roundtrip。
+        for (phase, bytes) in phases.iter().zip(&encoded) {
+            assert_eq!(phase, &borsh::from_slice::<HandPhase>(bytes).unwrap());
+        }
     }
 }
