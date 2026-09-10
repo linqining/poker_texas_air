@@ -887,9 +887,9 @@ fn verify_crypto_receipt(
                     )
                 })?;
             let request = build_bls12381_shuffle_request(
-                b"zk_shuffle_proof_v2",
+                poker_protocol::transcript_domains::SHUFFLE_V2_POSEIDON,
                 &call_context,
-                TranscriptId::FiatShamirSha3,
+                TranscriptId::Poseidon252,
                 &aggregate.0,
                 &task.pre_table.deck_state.encrypted,
                 &args.output_cards,
@@ -921,9 +921,9 @@ fn verify_crypto_receipt(
                     ))
                 })?;
             let request = build_bls12381_reconstruction_v3_request(
-                poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_V3_PROOF_LABEL,
+                poker_protocol::transcript_domains::RECONSTRUCT_V3_POSEIDON,
                 &call_context,
-                TranscriptId::FiatShamirSha3,
+                TranscriptId::Poseidon252,
                 &args.statement,
                 &args.proof,
             )

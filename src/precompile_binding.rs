@@ -20,8 +20,8 @@ use poker_protocol::precompile_abi::{
     SHUFFLE_ABI_VERSION, ShuffleVerifier, ShuffleVerifyRequest,
 };
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
-use poker_protocol::zk_shuffle::reveal_token_proof::{REVEAL_TOKEN_PROOF_LABEL, RevealTokenProof};
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript;
 use stwo::core::fields::m31::M31;
 
 use crate::error::{TexasAirError, TexasAirResult};
@@ -40,10 +40,11 @@ pub const REVEAL_TOKEN_ABI_VERSION: u8 = 1;
 
 /// Canonical request for verifying one player's encrypted-deck layer removal.
 ///
-/// The DLEq transcript remains the protocol-compatible `zk_leave_proof_v1`
-/// transcript used by the L1 state machine. `call_context` is committed by the
-/// request/receipt digests so an otherwise valid proof cannot reuse a verifier
-/// receipt at another table, hand, call sequence, state transition, or dispatch.
+/// The DLEq transcript is the 2026-09 Poseidon-epoch leave domain shared with
+/// the L1 state machine factory (`utils::new_leave_transcript`).
+/// `call_context` is committed by the request/receipt digests so an otherwise
+/// valid proof cannot reuse a verifier receipt at another table, hand, call
+/// sequence, state transition, or dispatch.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct LeaveDleqVerifyRequest {
     abi_version: u8,
@@ -437,7 +438,9 @@ impl PrecompileCallBinding {
                     &item.encrypted_card,
                     &item.reveal_token.0,
                     &request.player_pk.0,
-                    &mut FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL),
+                    &mut PoseidonFeltTranscript::new_domain(
+                    poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON,
+                ),
                 )
                 .map_err(|error| {
                     TexasAirError::SpecViolation(format!(

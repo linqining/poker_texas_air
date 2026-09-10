@@ -864,7 +864,7 @@ fn compute_rake(table: &TexasPokerTable, gross_pot: u64) -> PokerL1Result<u64> {
     }
 }
 
-/// 按固定费率逐层计提抽水(TODO #44 重设计,2026-09-10)。
+/// 按固定费率逐层计提抽水(2026-09-10 重设计)。
 ///
 /// # 语义(产品已确认)
 /// - 只有 contested 层(`eligible ≥ 2`)参与抽水;未跟注返还层(单座
@@ -877,7 +877,7 @@ fn compute_rake(table: &TexasPokerTable, gross_pot: u64) -> PokerL1Result<u64> {
 ///   `≤ contested_gross`,与旧语义的全局上限强度一致;差异仅在多层
 ///   时逐层 floor 求和与全局 floor 不必逐字节相等(已确认为可接受)。
 ///
-/// # AIR 纪律(TODO #44 落地的核心目的)
+/// # AIR 纪律
 /// 本函数的每个算子都可被常数除数 gadget 直接承载:
 /// - 唯一除法是 **÷10_000 常数**(商/余 witness + `q·d + r = n` +
 ///   `r < d` range check,无 witness 除数);
@@ -1378,7 +1378,7 @@ mod tests {
         assert_eq!(compute_rake(&table, 1_000).unwrap(), 0);
     }
 
-    // ========== allocate_rake_fixed_rate（TODO #44，2026-09-10） ==========
+    // ========== allocate_rake_fixed_rate ==========
 
     fn side_pot(amount: u64, eligible: u16) -> SidePot {
         SidePot::new(amount, eligible)

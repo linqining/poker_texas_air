@@ -2,11 +2,11 @@ use crate::crypto::{DefaultCurve, EcPoint, ElGamalCiphertext, Scalar, N_CARDS};
 use crate::zk_shuffle::leave_proof::{leave_ciphertext, LeaveProof};
 use crate::zk_shuffle::remask_proof::{remask_ciphertext, RemaskProof};
 use crate::zk_shuffle::ShuffleProof;
-// 兼容 Move 合约：生产代码使用 FiatShamirTranscript（SHA3-256），
-// 而非 FiatShamirTranscript（STROBE），因为 Move 合约使用 SHA3-256 状态机。
+// 2026-09 Poseidon epoch：生产证明统一 PoseidonFeltTranscript +
+// transcript_domains 生产域（旧 Move/SHA3 域停发）。
 use crate::crypto::curve::CurveScalar;
 use crate::z_poker::key_manager::PKOwnershipProof;
-use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use crate::zk_shuffle::transcript_ext::{CryptoTranscript, PoseidonFeltTranscript};
 use rand_core::{CryptoRng, OsRng, RngCore};
 
 #[derive(Debug)]
@@ -94,7 +94,7 @@ impl MaskAndShuffleRound {
         rng: &mut (impl RngCore + CryptoRng),
     ) -> Self {
         // 创建共享 transcript，绑定 remask_proof 和 shuffle_proof
-        let mut transcript = FiatShamirTranscript::new(b"zk_mask_shuffle_proof_v2");
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::MASK_SHUFFLE_V2_POSEIDON);
 
         let mut mask_cards: Vec<ElGamalCiphertext> = vec![];
         for i in 0..input_cards.len() {
@@ -139,7 +139,7 @@ impl LeaveGameRound {
             .map(|ct| leave_ciphertext(ct, player_sk, player_pk, &mut rng).unwrap())
             .collect();
 
-        let mut transcript = FiatShamirTranscript::new(b"zk_leave_proof_v1");
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::LEAVE_POSEIDON_V2);
         let leave_proof = LeaveProof::<DefaultCurve>::prove(
             input_cards,
             &output_cards,
@@ -200,7 +200,7 @@ impl LeaveGameRound {
             .map(|(_, ct)| ct.clone())
             .collect();
 
-        let mut transcript = FiatShamirTranscript::new(b"zk_leave_proof_v1");
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::LEAVE_POSEIDON_V2);
         let leave_proof = LeaveProof::<DefaultCurve>::prove(
             &sub_input,
             &sub_output,

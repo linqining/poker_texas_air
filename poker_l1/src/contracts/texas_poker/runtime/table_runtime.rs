@@ -33,18 +33,31 @@
 //!
 //! 服务器管理路径（`submit_unsigned`）仍由 host 背书 caller 身份。
 //!
+//! # 入口队列的乱序容忍边界（窄口径，2026-09-11）
+//!
+//! 队列只服务一件事：**reveal 令牌抢跑流水线**（收尾注 + 下一街份额
+//! 背靠背提交，省一个通知往返）。分类规则收敛在一个点
+//! （`classify_dispatch_error`）：只有 `PhaseWindowClosed` 变体 + 抢跑
+//! 白名单命令（`holdable_command`）才暂存（`Hold`）；其余一切失败——
+//! 认证、重放、畸形载荷、非白名单命令的一切业务错误——门口立即拒绝
+//! （`Reject`），与 live mirror 同步语义一致。队列本身是纯机械件
+//! （暂存/按序重放/有界死信），不做任何业务判断。
+//!
 //! 队列冲刷是**全量重验**：暂存条目连同完整签名材料保存，每次重试都重新
 //! 走签名验证 + nonce 水位检查 + 业务语义——不信任任何已入队状态。
+//!
+//! 生命周期：每手结束必须走 [`TableRuntime::reset_for_next_hand`]（先
+//! fail-closed 校验后清空）——未消化的上一手命令不允许泄漏进下一手窗口。
 //!
 //! 与 texas 侧 `TableMirror` 的关系：texas 经本门面在每个接受点同步
 //! dispatch（实时 VM 镜像 = 手牌唯一 VM 状态表示），结算直接取用其
 //! ProveTask 链与 pre-payout 快照。
 
 use super::caller_id;
-use super::dispatch::{dispatch, tx_message_hash};
+use super::dispatch::{dispatch, selectors, tx_message_hash};
 use super::events::TexasPokerEvent;
-use super::pending::PendingQueue;
-use super::prove_task::{L1DispatchOutput, L1ProveTask};
+use super::pending::{ApplyOutcome, PendingQueue};
+use super::prove_task::{DispatchOutput, ProveTask};
 use super::types::TexasPokerTable;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
@@ -127,7 +140,7 @@ pub struct TableRuntime {
     /// Ethereum 式语义：`nonce > last` 接受（允许跳号），`nonce <= last`
     /// 判重放拒绝。水位制同时消灭无界集合内存增长。
     account_nonces: std::collections::HashMap<Address, u64>,
-    tasks: Vec<L1ProveTask>,
+    tasks: Vec<ProveTask>,
     events: Vec<TexasPokerEvent>,
 }
 
@@ -151,7 +164,7 @@ impl TableRuntime {
     }
 
     /// 已收集的证明任务（交证明层消费）。
-    pub fn tasks(&self) -> &[L1ProveTask] {
+    pub fn tasks(&self) -> &[ProveTask] {
         &self.tasks
     }
 
@@ -182,11 +195,13 @@ impl TableRuntime {
     }
 
     /// 签名提交（玩家命令）：完整性校验（座位登记的会话公钥）+ 按账户
-    /// nonce 水位防重放 + 乱序容忍（暂不可应用的命令连信封入队等待，
-    /// 不算失败；队列满则原样返回错误）。
+    /// nonce 水位防重放 + 乱序容忍（**仅限抢跑白名单命令**（reveal 令牌）
+    /// 的窗口类失败——暂不可应用时连信封入队等待，不算失败；队列满则
+    /// 返回背压错误）。
     ///
-    /// 认证（签名/重放/钱包格式）在入队**之前**前置校验：失败立即返回
-    /// 错误、绝不入队——只有业务/相位类错误（典型：窗口未开）才延迟。
+    /// 其余一切失败（认证/重放/畸形载荷/非白名单命令的业务错误）都在
+    /// 门口立即拒绝、绝不入队——与 live mirror 同步语义一致，杜绝"陈旧
+    /// 命令在之后的窗口打开后被延迟应用"。
     pub fn submit_signed(&mut self, sub: Submission) -> PokerL1Result<()> {
         let address = caller_id::wallet_to_address(&sub.wallet)?;
         if let Some(last) = self.account_nonces.get(&address) {
@@ -262,6 +277,22 @@ impl TableRuntime {
         self.pending.deny_unmatched()
     }
 
+    /// 手间收尾：先 fail-closed 校验（未消化命令 = 显式错误清单），随后
+    /// 清空**本手**状态——入口队列（活条目 + 死信）、证明任务、事件。
+    ///
+    /// 块高与按账户 nonce 水位是表生命周期状态，跨手保留。
+    ///
+    /// 返回值仅用于告警上报（干净收手 = Ok）：手已结束，无论是否消化
+    /// 干净都必须重置——上一手未消化的命令绝不允许泄漏进下一手窗口
+    /// （跨手状态泄漏；不调用本方法而复用 runtime 跨手是使用违例）。
+    pub fn reset_for_next_hand(&mut self) -> PokerL1Result<()> {
+        let check = self.pending.deny_unmatched();
+        self.pending.clear();
+        self.tasks.clear();
+        self.events.clear();
+        check
+    }
+
     fn context(&mut self, caller: &CallerIdentity, block_timestamp: u64) -> DispatchContext {
         self.block_height += 1;
         DispatchContext {
@@ -305,31 +336,66 @@ fn verify_submission(
     crate::signature::verify_signature(&tx_pk.to_tagged(), signature, &msg_hash)
 }
 
-/// 单条提交的全量重验与应用（认证 → dispatch → 产出收集）。
-///
-/// 在队列冲刷路径上同样**全量重跑认证**——不信任任何已入队状态。
+/// 抢跑白名单：只有 reveal 令牌提交允许"提前入队等窗口"——这是客户端
+/// 流水线化（收尾注 + 下一街 reveal 份额背靠背提交）的唯一受益命令。
+/// 其余命令（下注/洗牌/重建/管理动作）即使命中窗口类错误也一律门口
+/// 拒绝：与 live mirror 同步语义一致，杜绝"陈旧下注在下一街窗口打开
+/// 后被延迟应用"的意外。新增可抢跑命令必须显式在此登记（有意的摩擦：
+/// 迫使决策点留在评审里，而不是静默放宽队列语义）。
+fn holdable_command(selector: &[u8; 32]) -> bool {
+    selector == &selectors::submit_player_reveal_tokens()
+}
+
+/// dispatch 错误 → 队列裁决的唯一分类点：
+/// - 窗口类变体（`PhaseWindowClosed`）+ 抢跑白名单命令 → `Hold`（入队等窗口）；
+/// - 其余一切（认证/重放/畸形/非白名单业务错误）→ `Reject`（门口拒绝/死信）。
+fn classify_dispatch_error(selector: &[u8; 32], error: PokerL1Error) -> ApplyOutcome {
+    let window_error = matches!(error, PokerL1Error::PhaseWindowClosed { .. });
+    if window_error && holdable_command(selector) {
+        ApplyOutcome::Hold
+    } else {
+        ApplyOutcome::Reject(error)
+    }
+}
+
+/// 单条提交的全量重验与应用（认证 → dispatch → 产出收集），返回队列
+/// 裁决。在队列冲刷路径上同样**全量重跑认证**——不信任任何已入队状态。
 #[allow(clippy::too_many_arguments)]
 fn apply_submission(
     table: &mut TexasPokerTable,
     chain_id: &ChainId,
     block_height: &mut u64,
     account_nonces: &mut std::collections::HashMap<Address, u64>,
-    tasks: &mut Vec<L1ProveTask>,
+    tasks: &mut Vec<ProveTask>,
     events: &mut Vec<TexasPokerEvent>,
     sub: &Submission,
     selector: &[u8; 32],
     args: &[u8],
-) -> PokerL1Result<()> {
-    let address = caller_id::wallet_to_address(&sub.wallet)?;
+) -> ApplyOutcome {
+    let reject = |e: PokerL1Error| ApplyOutcome::Reject(e);
+    let address = match caller_id::wallet_to_address(&sub.wallet) {
+        Ok(a) => a,
+        Err(e) => return reject(e),
+    };
     if let Some(last) = account_nonces.get(&address) {
         if sub.nonce <= *last {
             // 陈旧/重放：确定性失败，入口队列据此死信（不重试）。
-            return Err(PokerL1Error::StaleTxNonce { nonce: sub.nonce });
+            return reject(PokerL1Error::StaleTxNonce { nonce: sub.nonce });
         }
     }
-    verify_submission(*chain_id, table, &sub.wallet, selector, args, sub.nonce, &sub.signature)?;
+    if let Err(e) =
+        verify_submission(*chain_id, table, &sub.wallet, selector, args, sub.nonce, &sub.signature)
+    {
+        return reject(e);
+    }
 
-    let caller = CallerIdentity::from_wallet(&sub.wallet)?;
+    let Ok(caller) = CallerIdentity::from_wallet(&sub.wallet) else {
+        // 上面 wallet_to_address 已过，构造失败属不变量破坏——确定性拒绝。
+        return reject(PokerL1Error::Serialization(format!(
+            "caller identity derivation failed for {}",
+            sub.wallet
+        )));
+    };
     *block_height += 1;
     let ctx = DispatchContext {
         caller: caller.address,
@@ -340,21 +406,27 @@ fn apply_submission(
     };
     // 签名已在上方 verify_submission 按**座位登记的会话公钥**全量验证；
     // 不做二次验签（派生公钥不是锚，会话钥签名在那种锚下必然失败）。
-    let result = dispatch(&ctx, table, selector, args)?;
-    account_nonces
-        .entry(address)
-        .and_modify(|last| *last = (*last).max(sub.nonce))
-        .or_insert(sub.nonce);
-    collect_into(&result.return_value, tasks, events)?;
-    Ok(())
+    match dispatch(&ctx, table, selector, args) {
+        Err(e) => classify_dispatch_error(selector, e),
+        Ok(result) => {
+            account_nonces
+                .entry(address)
+                .and_modify(|last| *last = (*last).max(sub.nonce))
+                .or_insert(sub.nonce);
+            match collect_into(&result.return_value, tasks, events) {
+                Ok(()) => ApplyOutcome::Applied,
+                Err(e) => reject(e),
+            }
+        }
+    }
 }
 
 fn collect_into(
     return_value: &[u8],
-    tasks: &mut Vec<L1ProveTask>,
+    tasks: &mut Vec<ProveTask>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    let output: L1DispatchOutput = borsh::from_slice(return_value)
+    let output: DispatchOutput = borsh::from_slice(return_value)
         .map_err(|e| PokerL1Error::Serialization(format!("dispatch output decode: {e}")))?;
     if let Some(t) = output.prove_task {
         tasks.push(t);
@@ -433,6 +505,7 @@ mod tests {
                 max_players: 2,
                 small_blind: 10,
                 big_blind: 20,
+                rit_mode: crate::contracts::texas_poker::constants::RIT_MODE_DISABLED,
             })
             .unwrap(),
         )
@@ -482,7 +555,8 @@ mod tests {
         )
         .expect("join_table registers session key");
 
-        // 会话钥签名通过认证（selector 无效 → 业务失败 → 入队等待）。
+        // 会话钥签名通过认证，但 selector 无效 = 确定性失败 → 门口拒绝
+        //（不入队；队列只服务 reveal 抢跑，不收容畸形命令）。
         // 签名消息须与提交的 nonce（2）一致。
         let msg_n2 = tx_message_hash(
             377,
@@ -501,9 +575,17 @@ mod tests {
             signature: session_sig,
             nonce: 2,
         };
-        rt.submit_signed(sub_ok)
-            .expect("session-key signature authenticates");
-        assert_eq!(rt.pending().len(), 1);
+        let unknown_err = rt
+            .submit_signed(sub_ok)
+            .expect_err("authenticated but unknown selector — rejected at door");
+        assert!(
+            format!("{unknown_err}").contains("unknown contract method"),
+            "rejection reason, got: {unknown_err}"
+        );
+        assert!(
+            rt.pending().is_empty(),
+            "non-holdable business failure must not enqueue"
+        );
 
         // 他人的会话钥签名不能冒充 WALLET（跨座顶替；nonce=3 的消息）。
         let other_session_sk =
@@ -529,7 +611,7 @@ mod tests {
             rt.submit_signed(sub_forged).is_err(),
             "cross-session substitution must be rejected"
         );
-        assert_eq!(rt.pending().len(), 1, "queue unchanged on auth failure");
+        assert!(rt.pending().is_empty(), "queue unchanged on auth failure");
 
         // P1-2 回归：自洽的签名 join 也必须被拒（未入座无锚，无例外）——
         // 否则任何持钥者可为任意钱包构造冒名入座。用**未入座**的第三方
@@ -650,5 +732,82 @@ mod tests {
             matches!(stale_err, crate::error::PokerL1Error::StaleTxNonce { nonce: 1 }),
             "stale nonce error variant, got: {stale_err}"
         );
+    }
+
+    /// 分类策略单点：只有 `PhaseWindowClosed` + reveal 白名单 → Hold；
+    /// 其余组合（窗口错误 × 非白名单、白名单 × 其他错误）一律 Reject。
+    #[test]
+    fn hold_policy_is_narrowed_to_reveal_window_errors() {
+        let reveal = selectors::submit_player_reveal_tokens();
+        let bet = selectors::bet();
+
+        // 窗口错误 + 白名单 → Hold（唯一的暂存通道）。
+        assert!(matches!(
+            classify_dispatch_error(
+                &reveal,
+                PokerL1Error::PhaseWindowClosed { detail: "x".into() },
+            ),
+            ApplyOutcome::Hold
+        ));
+        // 窗口错误 × 非白名单（如陈旧 bet）→ Reject——不允许延迟应用。
+        assert!(matches!(
+            classify_dispatch_error(
+                &bet,
+                PokerL1Error::PhaseWindowClosed { detail: "x".into() },
+            ),
+            ApplyOutcome::Reject(_)
+        ));
+        // 白名单命令的其他错误（畸形载荷/验签失败）→ Reject。
+        assert!(matches!(
+            classify_dispatch_error(&reveal, PokerL1Error::InvalidSignature),
+            ApplyOutcome::Reject(_)
+        ));
+        assert!(matches!(
+            classify_dispatch_error(&bet, PokerL1Error::InvalidSignature),
+            ApplyOutcome::Reject(_)
+        ));
+    }
+
+    /// 手间收尾：干净手 Ok 且清空本手产物；防跨手状态泄漏的显式接口。
+    #[test]
+    fn reset_for_next_hand_clears_hand_scoped_state() {
+        use crate::contracts::texas_poker::runtime::dispatch::CreateTableArgs;
+        use crate::object_model::ObjectID;
+
+        let table = TexasPokerTable::new(
+            ObjectID::new([0x5A; 20], 1),
+            "t".into(),
+            [0xC0; 20],
+            2,
+            10,
+            20,
+        );
+        let mut rt = TableRuntime::new(table, 377);
+        rt.submit_unsigned(
+            CallerIdentity::from_wallet(OTHER).unwrap(),
+            1,
+            &selectors::create_table(),
+            &borsh::to_vec(&CreateTableArgs {
+                name: "t".into(),
+                max_players: 2,
+                small_blind: 10,
+                big_blind: 20,
+                rit_mode: crate::contracts::texas_poker::constants::RIT_MODE_DISABLED,
+            })
+            .unwrap(),
+        )
+        .expect("create_table");
+        assert!(!rt.tasks().is_empty(), "fixture: hand artifacts collected");
+
+        // 干净收手：Ok + 本手状态清空（块高/nonce 水位跨手保留）。
+        rt.reset_for_next_hand().expect("clean hand finish");
+        assert!(rt.tasks().is_empty() && rt.events().is_empty());
+        assert!(rt.pending().is_empty() && rt.pending().dead().is_empty());
+        assert!(rt.block_height() > 0, "table-scoped state survives the reset");
+
+        // 未消化命令的手：Err 上报（fail-closed），但仍清空——防泄漏优先。
+        // （活条目构造需要真实 reveal 窗口，由 e2e 的乱序场景覆盖；
+        // 这里直接验证 clear 语义在 Err 路径同样生效——队列层测试
+        // `clear_resets_live_and_dead_for_next_hand` 已覆盖条目级行为。）
     }
 }

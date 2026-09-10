@@ -14,7 +14,7 @@ use crate::pokergame::player::{GamePkHex, GamePlayer, WalletAddress};
 use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::z_poker::protocol::ShuffleRound;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript;
 use rand_core::OsRng;
 
 struct Player {
@@ -71,7 +71,9 @@ fn submit_real_shuffle(table: &mut Table, player: &Player) {
     );
     let deck = table.mental_poker_game.deck_encrypted.clone();
     let agg_pk = table.mental_poker_game.key_manager.get_aggregated_pk();
-    let mut transcript = FiatShamirTranscript::new(b"zk_shuffle_proof_v2");
+    let mut transcript = PoseidonFeltTranscript::new_domain(
+        poker_protocol::transcript_domains::SHUFFLE_V2_POSEIDON,
+    );
     let round = ShuffleRound::execute(&deck, &agg_pk, &mut transcript, &mut OsRng);
     table
         .mental_poker_game
@@ -135,7 +137,7 @@ fn drive_reveal_phase_capture(
                 &ct,
                 &token,
                 &mut OsRng,
-                &mut FiatShamirTranscript::new(b"reveal_token_proof_v3"),
+                &mut PoseidonFeltTranscript::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
             );
             tokens.push(poker_protocol::z_poker::protocol::RevealToken {
                 encrypted_card: ct,
@@ -1006,7 +1008,7 @@ mod shadow_e2e {
                     &ct,
                     &token,
                     &mut OsRng,
-                    &mut FiatShamirTranscript::new(b"reveal_token_proof_v3"),
+                    &mut PoseidonFeltTranscript::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
                 );
                 tokens.push(poker_protocol::z_poker::protocol::RevealToken {
                     encrypted_card: ct,

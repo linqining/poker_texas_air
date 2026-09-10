@@ -35,7 +35,7 @@ use poker_protocol::zk_shuffle::reconstruction::{
     canonical_base_deck,
 };
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript;
 
 use super::betting::BettingRound;
 #[cfg(test)]
@@ -64,9 +64,13 @@ use crate::Address;
 
 /// Maximum number of deterministic micro-transitions a single command may normalize.
 ///
-/// A normal hand needs far fewer steps. The bound exists so corrupt state can never turn a
-/// command into an unbounded host loop, and later becomes the fixed upper bound of the Stage
-/// transition plan consumed by the tagged-union AIR.
+/// This is a per-command bound, not a per-hand budget. One hand may run up to ~N-1 reconstruct
+/// cycles, but a cycle never advances inside one normalize call: pending contributions block
+/// immediately, and every timeout, contribution, and shuffler proof is its own signed command.
+/// Since normalize never invents external input, a single command's cascade stays in the
+/// single digits (e.g. final reconstruct contribution → reshuffle starts → blocked). The bound
+/// exists so corrupt state can never turn a command into an unbounded host loop, and later
+/// becomes the fixed upper bound of the Stage transition plan consumed by the tagged-union AIR.
 pub const MAX_NORMALIZATION_STEPS: usize = 32;
 
 /// One deterministic state-machine stage performed without new caller input.
@@ -1301,7 +1305,7 @@ fn start_reconstruct(
     // reconstruction V3 不再持久化该系数，死计算已删除（其值从未被读取）。
     let suspended_reveal = table.take_reveal_payload()?;
     // 新一轮重构从 canonical base deck 开始：清空上一轮残留累加器
-    // （累加器已迁 DeckState，TODO #41-③）。
+    // （累加器已迁 DeckState）。
     table.deck_state.reconstruct_accumulated = None;
     table.enter_reconstructing(
         street,
@@ -1499,7 +1503,11 @@ pub fn apply_submit_player_reveal_tokens(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if table.reveal_token_state().is_none() {
-        return Err(PokerL1Error::Serialization("reveal phase is NONE".into()));
+        // 专用变体（非 Serialization）：入口队列据此把"窗口未开的抢跑
+        // reveal"分类为可重试暂存，其余 Serialization 失败一律门口拒绝。
+        return Err(PokerL1Error::PhaseWindowClosed {
+            detail: "reveal phase is NONE".into(),
+        });
     }
     if reveal_tokens.len() != proofs.len() {
         return Err(PokerL1Error::Serialization(
@@ -1527,11 +1535,16 @@ pub fn apply_submit_player_reveal_tokens(
         })
         .collect::<Vec<_>>();
     if assignment_indices.len() != reveal_tokens.len() {
-        return Err(PokerL1Error::Serialization(format!(
-            "reveal submission must contain every pending assignment in canonical order: expected {} token/proof pairs, got {}",
-            assignment_indices.len(),
-            reveal_tokens.len()
-        )));
+        // 同上：canonical 数量不合是"抢跑下一街窗口"的典型形态（e2e 的
+        // 提前 turn reveal 正走此处）——专用变体供队列暂存，窗口轮转后
+        // 同一提交即对齐；真正的畸形载荷由队列 MAX_HOLDS 兜底死信。
+        return Err(PokerL1Error::PhaseWindowClosed {
+            detail: format!(
+                "reveal submission must contain every pending assignment in canonical order: expected {} token/proof pairs, got {}",
+                assignment_indices.len(),
+                reveal_tokens.len()
+            ),
+        });
     }
     // ECPoint → G1Projective（Seat.pk 字段为 ECPoint）
     let expected_pk: G1Projective = table.seats[seat_index as usize]
@@ -1624,7 +1637,9 @@ pub fn apply_submit_player_reveal_tokens(
                 &encrypted_card,
                 &token_pt,
                 &expected_pk,
-                &mut FiatShamirTranscript::new(b"reveal_token_proof_v3"),
+                &mut PoseidonFeltTranscript::new_domain(
+                    poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON,
+                ),
             )
             .map_err(|e| PokerL1Error::Serialization(format!("reveal token proof: {e:?}")))?;
             Ok(true)
@@ -2051,7 +2066,8 @@ pub fn apply_submit_reconstruct_deck(
 /// `fold_with_proof` 在下注轮完成局中弃牌与加密层移除。
 ///
 /// 业务语义（结合 fold 与 leave）：
-/// 1. 验证 DLEqProof<LeaveKind>（与 leave 同 transcript `b"zk_leave_proof_v1"`）：
+/// 1. 验证 DLEqProof<LeaveKind>（与 leave 同一 Poseidon epoch leave 生产域，
+///    见 `poker_protocol::transcript_domains::LEAVE_POSEIDON_V2`）：
 ///    证明玩家剥离了自己对整个牌组的加密层（`output.c2 = input.c2 - c1*sk`）。
 /// 2. 从 `aggregated_pk` 移除玩家 pk，把 `deck_state.encrypted` 替换为 output_cards。
 ///    c1 不变（DLEq verify 强制）→ 已收集的 reveal tokens 仍然有效。
@@ -4108,6 +4124,11 @@ pub fn trigger_run_it_twice(
 /// `create_table` 语义：参数校验 + 以调用方为 creator 重建全新桌台。
 ///
 /// 权限（caller 身份）由 runtime dispatch 层保证；本函数只管状态语义。
+///
+/// `rit_mode` 是 Run It Twice 桌面策略：仅接受 [`RIT_MODE_DISABLED`] /
+/// [`RIT_MODE_TWICE`]，其余值 fail-closed 拒绝（校验先于覆写，失败时桌台
+/// 原样保留）。不开启是唯一缺省——调用方必须显式传 [`RIT_MODE_TWICE`] 才会
+/// 在 contested all-in 时自动双跑（`MAX_RUNOUTS = 2`，协议不支持更多 runout）。
 pub fn apply_create_table(
     table: &mut TexasPokerTable,
     creator: Address,
@@ -4115,6 +4136,7 @@ pub fn apply_create_table(
     max_players: u8,
     small_blind: u64,
     big_blind: u64,
+    rit_mode: u8,
 ) -> PokerL1Result<()> {
     if !(2..=9).contains(&max_players) {
         return Err(PokerL1Error::Serialization(format!(
@@ -4129,9 +4151,15 @@ pub fn apply_create_table(
             "small_blind must <= big_blind".into(),
         ));
     }
+    if !matches!(rit_mode, RIT_MODE_DISABLED | RIT_MODE_TWICE) {
+        return Err(PokerL1Error::Serialization(format!(
+            "create_table: rit_mode {rit_mode} is not canonical"
+        )));
+    }
     let id = table.id;
     // P0-2：记录 creator 为调用方，作为后续管理类方法的权限基准。
     *table = TexasPokerTable::new(id, name, creator, max_players, small_blind, big_blind);
+    table.rules.rit_mode = rit_mode;
     Ok(())
 }
 
@@ -4285,6 +4313,44 @@ mod tests {
 
     fn make_table() -> TexasPokerTable {
         TexasPokerTable::new(dummy_id(), "test".into(), EMPTY_PLAYER, 4, 50, 100)
+    }
+
+    #[test]
+    fn apply_create_table_sets_rit_mode_and_rejects_unknown_values_atomically() {
+        // TWICE：显式开启必须落到桌面规则。
+        let mut table = make_table();
+        apply_create_table(
+            &mut table,
+            [0xAA; 20],
+            "rit".into(),
+            6,
+            25,
+            50,
+            RIT_MODE_TWICE,
+        )
+        .unwrap();
+        assert_eq!(table.rules.rit_mode, RIT_MODE_TWICE);
+
+        // DISABLED：默认不开启。
+        apply_create_table(
+            &mut table,
+            [0xAA; 20],
+            "plain".into(),
+            6,
+            25,
+            50,
+            RIT_MODE_DISABLED,
+        )
+        .unwrap();
+        assert_eq!(table.rules.rit_mode, RIT_MODE_DISABLED);
+
+        // 非协议值：fail-closed，且校验先于覆写——桌台原样保留。
+        let pre_name = table.name.clone();
+        let error =
+            apply_create_table(&mut table, [0xAA; 20], "bad".into(), 6, 25, 50, 3).unwrap_err();
+        assert!(error.to_string().contains("rit_mode"));
+        assert_eq!(table.name, pre_name);
+        assert_eq!(table.rules.rit_mode, RIT_MODE_DISABLED);
     }
 
     fn community_assignment(encrypted_card_index: u8, board_position: u8) -> RevealAssignment {

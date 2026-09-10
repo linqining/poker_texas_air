@@ -3,20 +3,17 @@ use crate::crypto::{
 };
 use crate::z_poker::convert::{ecpoint_to_hex, hex_to_scalar, scalar_to_hex};
 use crate::zk_shuffle::error::VerificationError;
-use crate::zk_shuffle::reconstruction::{
-    reconstruct_deck, ReconstructProof, ReconstructProofV3, RECONSTRUCTION_PROOF_LABEL,
-    RECONSTRUCTION_V3_PROOF_LABEL,
-};
-use crate::zk_shuffle::reveal_token_proof::{RevealTokenProof, REVEAL_TOKEN_PROOF_LABEL};
-// Native Texas verifies reveal-token proofs with Merlin under the fixed V3
-// domain label. Browser-produced proofs must use that exact transcript; the
-// retired Move/SHA3 path is not wire-compatible with the native VM.
+use crate::zk_shuffle::reconstruction::{reconstruct_deck, ReconstructProof, ReconstructProofV3};
+use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
+// 2026-09 Poseidon epoch：所有生产证明（reveal / shuffle / reconstruct）
+// 统一走 PoseidonFeltTranscript + transcript_domains 生产域标签；浏览器
+// 端经 wasm 共享同一 Rust 实现，逐字节一致。旧 Merlin/SHA3 域已停发。
 use super::rounds::{JoinGameAndShuffleRound, LeaveGameRound, MaskAndShuffleRound, ShuffleRound};
 use super::types::{ReconstructDeck, ReconstructDeckV3, RevealToken};
 use crate::crypto::curve::{CurvePoint, CurveScalar};
 use crate::z_poker::card::PlayingCard;
 use crate::z_poker::key_manager::PKOwnershipProof;
-use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use crate::zk_shuffle::transcript_ext::PoseidonFeltTranscript;
 use hex;
 use rand_core::OsRng;
 
@@ -127,7 +124,7 @@ impl ClientPlayer {
         plain_cards: &[Plaintext],
     ) -> Result<(Plaintext, ElGamalCiphertext), VerificationError> {
         for token in tokens {
-            let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+            let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
             token
                 .proof
                 .verify(
@@ -156,7 +153,7 @@ impl ClientPlayer {
     pub fn verify_and_reveal_from_token(
         token: &RevealToken,
     ) -> Result<Plaintext, VerificationError> {
-        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
         token
             .proof
             .verify(
@@ -171,7 +168,7 @@ impl ClientPlayer {
 
     pub fn generate_reveal_token(&self, ct: &ElGamalCiphertext) -> RevealToken {
         let reveal_token = ct.gen_reveal_token(&self.sk);
-        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
         let proof = RevealTokenProof::<DefaultCurve>::prove(
             &self.sk,
             &self.pk,
@@ -197,7 +194,7 @@ impl ClientPlayer {
     }
 
     pub fn shuffle(&self, deck_encrypted: &[ElGamalCiphertext], agg_pk: &EcPoint) -> ShuffleRound {
-        let mut transcript = FiatShamirTranscript::new(b"zk_shuffle_proof_v2");
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::SHUFFLE_V2_POSEIDON);
         ShuffleRound::execute(deck_encrypted, agg_pk, &mut transcript, &mut OsRng)
     }
 
@@ -250,7 +247,7 @@ impl ClientPlayer {
 
         let encrypted_card = hand_encrypted[hand_index].clone();
         let reveal_token = encrypted_card.gen_reveal_token(&self.sk);
-        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
         let proof = RevealTokenProof::<DefaultCurve>::prove(
             &self.sk,
             &self.pk,
@@ -272,7 +269,7 @@ impl ClientPlayer {
         let ct_for_self =
             ElGamalCiphertext::encrypt(&comm_plaintext, &self.pk, &Scalar::random(&mut OsRng));
         let reveal_token = ct_for_self.gen_reveal_token(&self.sk);
-        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
         let proof = RevealTokenProof::<DefaultCurve>::prove(
             &self.sk,
             &self.pk,
@@ -315,7 +312,7 @@ impl ClientPlayer {
         tokens: &[RevealToken],
     ) -> Result<Plaintext, VerificationError> {
         for token in tokens {
-            let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+            let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON);
             token
                 .proof
                 .verify(
@@ -349,7 +346,7 @@ impl ClientPlayer {
             &self.pk,
             coefficient,
         )?;
-        let mut transcript = FiatShamirTranscript::new(RECONSTRUCTION_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::RECONSTRUCT_V2_POSEIDON);
         let reconstruct_proof = ReconstructProof::<DefaultCurve>::prove(
             origin_cards.to_vec(),
             user_readable_cards.to_vec(),
@@ -384,7 +381,7 @@ impl ClientPlayer {
         user_readable_cards: &[ElGamalCiphertext],
         aggregate_pk: &EcPoint,
     ) -> Result<ReconstructDeckV3, VerificationError> {
-        let mut transcript = FiatShamirTranscript::new(RECONSTRUCTION_V3_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::RECONSTRUCT_V3_POSEIDON);
         let (statement, proof) = ReconstructProofV3::<DefaultCurve>::prove(
             context_digest,
             reconstruction_epoch,
@@ -422,7 +419,7 @@ mod reconstruction_v3_tests {
         let package = owner
             .reconstruct_v3([1; 32], 9, [2; 32], &cards, &readable, &aggregate_pk)
             .unwrap();
-        let mut transcript = FiatShamirTranscript::new(RECONSTRUCTION_V3_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::RECONSTRUCT_V3_POSEIDON);
         package
             .proof
             .verify(&package.statement, &mut transcript)

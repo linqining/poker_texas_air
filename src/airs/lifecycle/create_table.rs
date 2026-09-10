@@ -5,24 +5,27 @@
 //!
 //! ## 业务规约
 //!
-//! 输入 `CreateTableArgs { name, max_players, small_blind, big_blind }`：
+//! 输入 `CreateTableArgs { name, max_players, small_blind, big_blind, rit_mode }`：
 //! 1. `max_players ∈ [2, 9]`
 //! 2. `big_blind > 0`
 //! 3. `small_blind <= big_blind`
+//! 4. `rit_mode ∈ { RIT_MODE_DISABLED, RIT_MODE_TWICE }`（Run It Twice 桌面
+//!    策略，缺省 DISABLED；`MAX_RUNOUTS = 2`，TWICE 在 contested all-in 时双跑）
 //!
 //! 状态变更：
 //! - `table_id` 保持不变
-//! - `max_players/small_blind/big_blind` 写入 args 值
+//! - `max_players/small_blind/big_blind/rit_mode` 写入 args 值
 //! - `pot = 0, button = 0, round_state = ROUND_WAITING, version += 1`
 //! - `seats = vec![Seat::empty(); max_players]`
 //!
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个（见 [`crate::airs::common`]）
-//! - 业务列 16 个：
+//! - 业务列 20 个：
 //!   - `INPUT_MAX_PLAYERS` / `INPUT_SMALL_BLIND_BASE[4]` / `INPUT_BIG_BLIND_BASE[4]`
 //!   - `INPUT_NAME_HASH_BASE[4]`（Poseidon252 of name string）
 //!   - `OUTPUT_POT_BASE[4]` / `OUTPUT_BUTTON` / `OUTPUT_ROUND_STATE`
+//!   - `INPUT_RIT_MODE`
 //!
 //! ## 约束清单（degree ≤ 3）
 //!
@@ -35,6 +38,7 @@
 //! 7. `pot = 0`：post_pot == 0
 //! 8. `button = 0`：post_button == 0
 //! 9. `round_state = ROUND_WAITING`：post_round_state == 0
+//! 10. `rit_mode` 绑定公开输入值，且公开值只能是 DISABLED/TWICE
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
@@ -65,8 +69,10 @@ pub mod cols {
     pub const OUTPUT_BUTTON: usize = COMMON_NUM_COLUMNS + 17;
     /// `OUTPUT_ROUND_STATE` 列索引。
     pub const OUTPUT_ROUND_STATE: usize = COMMON_NUM_COLUMNS + 18;
+    /// `INPUT_RIT_MODE` 列索引。
+    pub const INPUT_RIT_MODE: usize = COMMON_NUM_COLUMNS + 19;
     /// `create_table` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 19;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 20;
 }
 
 /// `create_table` AIR 输入参数。
@@ -80,6 +86,8 @@ pub struct CreateTableInput {
     pub small_blind: u64,
     /// 大盲注。
     pub big_blind: u64,
+    /// Run It Twice 桌面策略（`RIT_MODE_DISABLED` / `RIT_MODE_TWICE`）。
+    pub rit_mode: u8,
 }
 
 /// `create_table` AIR 公开输入。
@@ -169,6 +177,7 @@ impl FrameworkEval for CreateTableAir {
         let output_pot_3 = eval.next_trace_mask();
         let output_button = eval.next_trace_mask();
         let output_round_state = eval.next_trace_mask();
+        let input_rit_mode = eval.next_trace_mask();
 
         // 3. 业务约束 1：max_players ∈ [2, 9]。
         // `CreateTableInput` 是 verifier 重建的公开 statement，因此无效公开值可直接
@@ -212,6 +221,19 @@ impl FrameworkEval for CreateTableAir {
 
         // 8. 业务约束 6：output_round_state == ROUND_WAITING (== 0)
         eval.add_constraint(is_active.clone() * output_round_state.clone());
+
+        // 8b. rit_mode 绑定公开输入值；非协议值（∉ {DISABLED, TWICE}）在 active
+        // 行上变成非零常量约束，直接不可满足——与 max_players 同一公开输入纪律。
+        let expected_rit_mode: E::F = M31::from(u32::from(self.input.rit_mode)).into();
+        eval.add_constraint(is_active.clone() * (input_rit_mode.clone() - expected_rit_mode));
+        let invalid_rit_mode: E::F =
+            M31::from(u32::from(!matches!(
+                self.input.rit_mode,
+                poker_l1::contracts::texas_poker::constants::RIT_MODE_DISABLED
+                    | poker_l1::contracts::texas_poker::constants::RIT_MODE_TWICE
+            )))
+            .into();
+        eval.add_constraint(is_active.clone() * invalid_rit_mode);
 
         // 9. post_version == pre_version + 1 已由 CommonConstraints 完整约束。
 
@@ -261,6 +283,8 @@ pub struct CreateTableRow {
     pub output_button: M31,
     /// `OUTPUT_ROUND_STATE` 业务列。
     pub output_round_state: M31,
+    /// `INPUT_RIT_MODE` 业务列。
+    pub input_rit_mode: M31,
 }
 
 impl CreateTableRow {
@@ -303,6 +327,7 @@ impl CreateTableRow {
             output_pot: [ZERO; 4],
             output_button: ZERO,
             output_round_state: ZERO, // ROUND_WAITING = 0
+            input_rit_mode: u8_to_m31(input.rit_mode),
         }
     }
 
@@ -318,10 +343,11 @@ impl CreateTableRow {
             output_pot: [ZERO; 4],
             output_button: ZERO,
             output_round_state: ZERO,
+            input_rit_mode: ZERO,
         }
     }
 
-    /// 转为完整列向量（37 通用 + 19 业务 = 56 列）。
+    /// 转为完整列向量（37 通用 + 20 业务 = 57 列）。
     #[must_use]
     pub fn to_vec(&self) -> Vec<M31> {
         let mut v = self.common.to_vec();
@@ -332,6 +358,7 @@ impl CreateTableRow {
         v.extend_from_slice(&self.output_pot);
         v.push(self.output_button);
         v.push(self.output_round_state);
+        v.push(self.input_rit_mode);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }
@@ -401,6 +428,15 @@ pub fn validate_public_inputs(
             "create_table: small_blind exceeds big_blind".into(),
         ));
     }
+    if !matches!(
+        air.input.rit_mode,
+        poker_l1::contracts::texas_poker::constants::RIT_MODE_DISABLED
+            | poker_l1::contracts::texas_poker::constants::RIT_MODE_TWICE
+    ) {
+        return Err(TexasAirError::SpecViolation(
+            "create_table: rit_mode must be RIT_MODE_DISABLED or RIT_MODE_TWICE".into(),
+        ));
+    }
 
     let mut expected_post = TexasPokerTable::new(
         pre.id,
@@ -410,6 +446,7 @@ pub fn validate_public_inputs(
         air.input.small_blind,
         air.input.big_blind,
     );
+    expected_post.rules.rit_mode = air.input.rit_mode;
     expected_post.call_seq = pre.call_seq.checked_add(1).ok_or_else(|| {
         TexasAirError::SpecViolation("create_table: call_seq overflow during replay".into())
     })?;
@@ -462,6 +499,7 @@ mod tests {
             max_players: 6,
             small_blind: 10,
             big_blind: 20,
+            rit_mode: poker_l1::contracts::texas_poker::constants::RIT_MODE_DISABLED,
         };
         let mut post = TexasPokerTable::new(
             id,
@@ -512,6 +550,65 @@ mod tests {
     fn canonical_public_inputs_reconstruct_first_create() {
         let (air, public_inputs, _, _) = canonical_transition();
         validate_public_inputs(&air, &public_inputs).unwrap();
+    }
+
+    #[test]
+    fn canonical_public_inputs_reconstruct_rit_enabled_create() {
+        use poker_l1::contracts::texas_poker::constants::RIT_MODE_TWICE;
+
+        // rit_mode=TWICE 的建桌必须被原生回放完整绑定：post 镜像
+        // rules.rit_mode=TWICE，AIR 列与公开输入同步携带该值。
+        let (mut air, public_inputs, pre, post) = canonical_transition();
+        air.input.rit_mode = RIT_MODE_TWICE;
+        // 故意不修改 post：validate 必须因 post.rules.rit_mode 与输入不一致而拒绝。
+        let mismatch = validate_public_inputs(&air, &public_inputs).unwrap_err();
+        assert!(mismatch.to_string().contains("native VM replay"));
+
+        // 用带 TWICE 规则的真实 post 重建公开输入，验证必须通过。
+        let mut rit_post = post.clone();
+        rit_post.rules.rit_mode = RIT_MODE_TWICE;
+        let mut rit_inputs = TexasPublicInputs::from_tables(
+            &pre,
+            &rit_post,
+            MethodKind::CreateTable,
+            pre.id.creation_nonce,
+            0,
+            1,
+        )
+        .unwrap();
+        let mut row = CreateTableRow::active(
+            &air.input,
+            state_root_to_air_limbs(rit_inputs.pre_state_root),
+            state_root_to_air_limbs(rit_inputs.post_state_root),
+            rit_inputs.table_id,
+            rit_inputs.hand_id,
+            rit_inputs.call_seq,
+            u64::from(rit_inputs.pre_version),
+            u64::from(rit_inputs.post_version),
+        );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(pre.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(rit_post.pot);
+        rit_inputs.bind_expected_trace_row(&row.to_vec()).unwrap();
+        let rit_air = CreateTableAir::new(
+            air.log_size,
+            air.input.clone(),
+            state_root_to_air_limbs(rit_inputs.pre_state_root),
+            state_root_to_air_limbs(rit_inputs.post_state_root),
+            rit_inputs.table_id,
+            rit_inputs.hand_id,
+            rit_inputs.call_seq,
+            u64::from(rit_inputs.pre_version),
+            u64::from(rit_inputs.post_version),
+        );
+        validate_public_inputs(&rit_air, &rit_inputs).unwrap();
+    }
+
+    #[test]
+    fn public_input_validation_rejects_unknown_rit_mode() {
+        let (mut air, public_inputs, _, _) = canonical_transition();
+        air.input.rit_mode = 7;
+        let error = validate_public_inputs(&air, &public_inputs).unwrap_err();
+        assert!(error.to_string().contains("rit_mode"));
     }
 
     #[test]
@@ -584,6 +681,7 @@ mod tests {
             max_players: 6,
             small_blind: 10,
             big_blind: 20,
+            rit_mode: poker_l1::contracts::texas_poker::constants::RIT_MODE_TWICE,
         };
         let row = CreateTableRow::active(
             &input,
@@ -610,6 +708,7 @@ mod tests {
         );
         assert_eq!(v[cols::OUTPUT_BUTTON], ZERO);
         assert_eq!(v[cols::OUTPUT_ROUND_STATE], ZERO);
+        assert_eq!(v[cols::INPUT_RIT_MODE], M31::from(1u32));
     }
 
     #[test]
@@ -633,8 +732,8 @@ mod tests {
 
     #[test]
     fn test_num_columns_consistency() {
-        // 通用 37 + 业务 19 = 56
-        assert_eq!(cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 19);
+        // 通用 37 + 业务 20 = 57
+        assert_eq!(cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 20);
         assert_eq!(CreateTableAir::num_columns(), cols::NUM_COLUMNS);
     }
 }

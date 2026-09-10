@@ -13,7 +13,6 @@ use crate::pokergame::table_summary::TableSummaryV2;
 use poker_protocol::z_poker::{MentalPokerGame, GameConfig};
 use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Plaintext, Scalar};
 use poker_protocol::z_poker::convert::{ecpoint_to_hex, scalar_to_hex};
-use poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript;
 use poker_protocol::crypto::CurvePoint;
 use poker_protocol::crypto::CurveScalar;
 /// 对齐 Move 合约 MIN_PLAYERS_TO_START = 2
@@ -144,6 +143,9 @@ pub struct ClientTable {
     pub reconstruct_state: Option<ReconstructPublicState>,
     /// 链上 Table 对象的 Object ID（hex 字符串）。
     pub chain_table_id: Option<String>,
+    /// 桌台已关闭（终态）：客户端据此禁用入座并提示。关桌后不再开局。
+    #[serde(default)]
+    pub closed: bool,
 }
 
 
@@ -199,6 +201,14 @@ pub struct Table {
     /// 结算时 take。挂在 Table 上而非全局表——无跨桌串流。
     #[serde(skip)]
     pub live_mirror: Option<crate::starknet::shadow::ShadowHand>,
+    /// 关桌标志（终态）：置位后不再开局（game_loop 跳过 auto-start）、
+    /// 不再接受入座（SIT_DOWN 拒绝）。"关桌后不开新手"的服务端权威执行点。
+    #[serde(skip)]
+    pub closed: bool,
+    /// 链上注册表（PokerTableRegistry）分配的 table_id；None = 无链上
+    /// 锚点（未配置注册表，或注册失败降级为纯链下）。
+    #[serde(skip)]
+    pub registry_table_id: Option<u64>,
 }
 
 impl Table {
@@ -422,6 +432,7 @@ impl Table {
             reveal_token_state: self.get_reveal_token_public_state(),
             reconstruct_state: self.get_reconstruct_public_state(),
             chain_table_id: self.chain_table_id.clone(),
+            closed: self.closed,
         }
     }
 
@@ -510,7 +521,23 @@ impl Table {
             live_mirror: None,
             hand_log_start: 0,
             current_hand_id: 0,
+            closed: false,
+            registry_table_id: None,
         }
+    }
+
+    /// 关桌（终态，幂等）：置位后 game_loop 不再开局、SIT_DOWN 被拒。
+    /// 返回 false 表示桌台此前已关闭。
+    pub fn close_table(&mut self) -> bool {
+        if self.closed {
+            return false;
+        }
+        self.closed = true;
+        true
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// 注入事件 sender，使 Table 内部方法能通过 `emit_event` 发送 socket 事件。

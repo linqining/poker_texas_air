@@ -887,6 +887,7 @@ mod tests {
     use crate::test_support as seat_fixture;
     use poker_l1::signature::TaggedPubkey;
     use poker_l1::contracts::dispatch::DispatchContext;
+    use poker_l1::contracts::texas_poker::constants::RIT_MODE_DISABLED;
     use poker_l1::contracts::texas_poker::dispatch::CreateTableArgs;
 
     fn dummy_table(name: &str) -> poker_l1::contracts::texas_poker::types::TexasPokerTable {
@@ -927,6 +928,7 @@ mod tests {
             max_players: 6,
             small_blind: 50,
             big_blind: 100,
+            rit_mode: RIT_MODE_DISABLED,
         })
         .unwrap();
         let result = dispatch(&context, &mut table, &selectors::create_table(), &args).unwrap();
@@ -1033,6 +1035,7 @@ mod tests {
                 max_players: 6,
                 small_blind: 50,
                 big_blind: 100,
+                rit_mode: RIT_MODE_DISABLED,
             })
             .unwrap(),
             dummy_table("pre"),

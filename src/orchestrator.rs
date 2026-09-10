@@ -658,6 +658,7 @@ impl Orchestrator {
             max_players,
             small_blind,
             big_blind,
+            rit_mode,
         } = &method_input
         else {
             return Err(TexasAirError::SpecViolation(format!(
@@ -671,6 +672,7 @@ impl Orchestrator {
             max_players: *max_players,
             small_blind: *small_blind,
             big_blind: *big_blind,
+            rit_mode: *rit_mode,
         };
         let pre_version = u64::from(task.pre_table.call_seq);
         let post_version = u64::from(task.post_table.call_seq);
@@ -2006,9 +2008,9 @@ impl Orchestrator {
             pi.dispatch_call_digest,
         );
         let request = build_bls12381_shuffle_request(
-            b"zk_shuffle_proof_v2",
+            poker_protocol::transcript_domains::SHUFFLE_V2_POSEIDON,
             &call_context,
-            TranscriptId::FiatShamirSha3,
+            TranscriptId::Poseidon252,
             &aggregated_pk.0,
             &task.pre_table.deck_state.encrypted,
             &args.output_cards,
@@ -2202,9 +2204,9 @@ impl Orchestrator {
             pi.dispatch_call_digest,
         );
         let request = build_bls12381_reconstruction_v3_request(
-            poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_V3_PROOF_LABEL,
+            poker_protocol::transcript_domains::RECONSTRUCT_V3_POSEIDON,
             &call_context,
-            TranscriptId::FiatShamirSha3,
+            TranscriptId::Poseidon252,
             &args.statement,
             &args.proof,
         )
@@ -2742,7 +2744,9 @@ mod tests {
     use poker_l1::signature::TaggedPubkey;
     use poker_l1::contracts::dispatch::DispatchContext;
     use poker_l1::contracts::texas_poker::betting::BettingRound;
-    use poker_l1::contracts::texas_poker::constants::{ROUND_FLOP, ROUND_PREFLOP};
+    use poker_l1::contracts::texas_poker::constants::{
+        ROUND_FLOP, ROUND_PREFLOP, RIT_MODE_DISABLED,
+    };
     use poker_l1::contracts::texas_poker::dispatch::{
         self as texas_dispatch, AddonArgs, BetArgs, CreateTableArgs, RaiseArgs, RebuyArgs,
         SeatIndexArgs, SetLeaveAfterHandArgs,
@@ -2892,6 +2896,7 @@ mod tests {
             max_players: 6,
             small_blind: 50,
             big_blind: 100,
+            rit_mode: RIT_MODE_DISABLED,
         };
         let (task, _) = dispatch_task(
             pre,
@@ -2928,6 +2933,7 @@ mod tests {
                 max_players: 6,
                 small_blind: 50,
                 big_blind: 100,
+                rit_mode: RIT_MODE_DISABLED,
             })
             .unwrap(),
         );
@@ -2944,6 +2950,7 @@ mod tests {
                 max_players: 6,
                 small_blind: 50,
                 big_blind: 100,
+                rit_mode: RIT_MODE_DISABLED,
             })
             .unwrap(),
         );
@@ -2982,6 +2989,7 @@ mod tests {
             max_players: 6,
             small_blind: 50,
             big_blind: 100,
+            rit_mode: RIT_MODE_DISABLED,
         })
         .expect("create_table args should serialize");
         let (task, post) = dispatch_task(

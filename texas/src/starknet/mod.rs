@@ -39,6 +39,8 @@ pub mod prove_log;
 pub mod settlement_prover;
 pub mod shadow;
 pub mod submit;
+/// 桌台注册表锚定（PokerTableRegistry：合约分配 id + Open→Closed 生命周期）。
+pub mod table_registry;
 
 pub use chain::StarknetChain;
 pub use config::StarknetConfig;

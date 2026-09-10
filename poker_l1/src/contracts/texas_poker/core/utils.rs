@@ -6,8 +6,12 @@
 //!   等（curve-generic 门面，`DefaultCurve` = StarkCurve——Plan D，blst 已移除）
 //! - **ElGamal 操作**：`encrypt`/`decrypt`/`gen_reveal_token`/`remask`/`add_pk_to_c2` 等
 //!   包装 `ElGamalCiphertextGeneric<DefaultCurve>` 方法
-//! - **Transcript 工厂**：shuffle V2、legacy reconstruction 与 production reconstruction V3
-//!   使用各自固定的 Move-compatible SHA3 transcript domain
+//! - **Transcript 工厂**：shuffle V2、leave 与 reconstruction V3 统一使用
+//!   2026-09 Poseidon epoch 域（`PoseidonFeltTranscript`，felt 直通，
+//!   域标签见 `poker_protocol::transcript_domains`；旧 SHA3/Merlin 域已停发）
+//! - **语句摘要**：reconstruction V3 context/prior-state 摘要用
+//!   `poseidon_bytes_digest`（`poseidon_hash_many`，Cairo 原生置换，
+//!   取代 blake2b——AIR 重放与 poseidon252 组件同构）
 //! - **ZK skip 回退**：`verify_or_skip` 保留 dev chain 友好的跳过逻辑
 //! - **PK 所有权证明**：`create_pk_ownership_proof` / `verify_pk_ownership` 保留 80 字节
 //!   Schnorr 自定义格式
@@ -19,8 +23,6 @@
 //! - Scalar：32 字节大端序（`CurveScalar::as_bytes`，仅接受 canonical 值）
 //! - `hash_to_scalar`/`hash_to_curve` 委托 core Stark 后端（Poseidon 域）
 
-use blake2::Blake2bVar;
-use blake2::digest::{Update, VariableOutput};
 use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar};
 
 use poker_protocol::crypto::types::{DefaultCurve, ElGamalCiphertext};
@@ -31,9 +33,7 @@ use poker_protocol::crypto::types::{DefaultCurve, ElGamalCiphertext};
 pub type G1Projective = <DefaultCurve as Curve>::Point;
 /// 历史别名：域标量（现为 Stark 曲线 `DefaultCurve` 的标量类型，非 BLS）。
 pub type BlsScalar = <DefaultCurve as Curve>::Scalar;
-use poker_protocol::zk_shuffle::transcript_ext::{
-    CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
-};
+use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript;
 
 use crate::error::{PokerL1Error, PokerL1Result};
 
@@ -60,23 +60,27 @@ pub const N_CARDS: usize = 52;
 
 // ========== Transcript 工厂 ==========
 
-/// 创建洗牌证明的 Transcript。
+/// 创建洗牌证明的 Transcript（2026-09 Poseidon epoch 生产域）。
 #[must_use]
-pub fn new_shuffle_transcript() -> FiatShamirTranscript {
-    FiatShamirTranscript::new(b"zk_shuffle_proof_v2")
+pub fn new_shuffle_transcript() -> PoseidonFeltTranscript {
+    PoseidonFeltTranscript::new_domain(poker_protocol::transcript_domains::SHUFFLE_V2_POSEIDON)
 }
 
-/// 创建离场证明的 Transcript。
+/// 创建离场 / fold 剥层证明的 Transcript（2026-09 Poseidon epoch 生产域）。
+///
+/// 此前该路径存在 poker_l1（Merlin）与 texas 操作员（FiatShamirSha3）
+/// 同标签不同海绵的域分裂，本次统一到单一 Poseidon 域。
 #[must_use]
-pub fn new_leave_transcript() -> MerlinTranscript {
-    MerlinTranscript::new(b"zk_leave_proof_v1")
+pub fn new_leave_transcript() -> PoseidonFeltTranscript {
+    PoseidonFeltTranscript::new_domain(poker_protocol::transcript_domains::LEAVE_POSEIDON_V2)
 }
 
-/// Create the Fiat--Shamir transcript used by reconstruction V3.
+/// Create the Fiat--Shamir transcript used by reconstruction V3
+/// （2026-09 Poseidon epoch 生产域）。
 #[must_use]
-pub fn new_reconstruct_v3_transcript() -> FiatShamirTranscript {
-    FiatShamirTranscript::new(
-        poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_V3_PROOF_LABEL,
+pub fn new_reconstruct_v3_transcript() -> PoseidonFeltTranscript {
+    PoseidonFeltTranscript::new_domain(
+        poker_protocol::transcript_domains::RECONSTRUCT_V3_POSEIDON,
     )
 }
 
@@ -103,14 +107,20 @@ pub fn reconstruction_v3_user_readable_cards(
 ///
 /// The proof statement separately binds keys and card points; this digest
 /// prevents cross-table, cross-hand, or cross-curve replay.
+///
+/// 压缩函数为 `poseidon_bytes_digest`（`poseidon_hash_many`，2026-09 起
+/// 取代 blake2b；AIR 重放与 poseidon252 组件同构）。域标签 bump 隔离旧
+/// blake2b 域摘要。
 #[must_use]
 pub fn reconstruction_v3_context_digest(table: &super::types::TexasPokerTable) -> [u8; 32] {
     let mut material = Vec::with_capacity(96);
-    material.extend_from_slice(b"zchain.texas_poker.reconstruction_v3.context.v1");
+    material.extend_from_slice(
+        poker_protocol::transcript_domains::RECONSTRUCTION_V3_CONTEXT_DIGEST_DOMAIN,
+    );
     material.extend_from_slice(&table.id.to_bytes());
     material.extend_from_slice(&table.hand_id.to_le_bytes());
     material.extend_from_slice(b"stark-curve-v1");
-    blake2b_256(&material)
+    poker_protocol::poseidon_bytes_digest(&material)
 }
 
 /// Digest the authenticated prior owner-readable hand and its init-deck
@@ -119,6 +129,9 @@ pub fn reconstruction_v3_context_digest(table: &super::types::TexasPokerTable) -
 /// This value is recomputed by VM replay and the AIR precompile adapter. It is
 /// not accepted from the prover. The full pre-state root in the call context
 /// additionally commits to the rest of the table state.
+///
+/// 压缩函数与域标签同 [`reconstruction_v3_context_digest`]（2026-09
+/// Poseidon 迁移）。
 pub fn reconstruction_v3_prior_state_digest(
     table: &super::types::TexasPokerTable,
     seat_index: u8,
@@ -129,7 +142,9 @@ pub fn reconstruction_v3_prior_state_digest(
         )
     })?;
     let mut material = Vec::new();
-    material.extend_from_slice(b"zchain.texas_poker.reconstruction_v3.prior_state.v2");
+    material.extend_from_slice(
+        poker_protocol::transcript_domains::RECONSTRUCTION_V3_PRIOR_STATE_DIGEST_DOMAIN,
+    );
     material.extend_from_slice(&table.id.to_bytes());
     material.extend_from_slice(&table.hand_id.to_le_bytes());
     material.push(seat_index);
@@ -164,16 +179,7 @@ pub fn reconstruction_v3_prior_state_digest(
         material.extend_from_slice(ciphertext.c1.compress().as_ref());
         material.extend_from_slice(ciphertext.c2.compress().as_ref());
     }
-    Ok(blake2b_256(&material))
-}
-
-fn blake2b_256(payload: &[u8]) -> [u8; 32] {
-    let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
-    Update::update(&mut hasher, &(payload.len() as u64).to_le_bytes());
-    Update::update(&mut hasher, payload);
-    let mut digest = [0u8; 32];
-    hasher.finalize_variable(&mut digest).expect("32 <= 64");
-    digest
+    Ok(poker_protocol::poseidon_bytes_digest(&material))
 }
 
 // ========== ZK skip 回退 ==========

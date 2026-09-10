@@ -196,7 +196,7 @@ pub struct OccupiedSeat {
     /// 会话交易公钥（P1-2 修复，2026-09-09）：该座位 VM 层交易签名的
     /// 验证锚——Stark Schnorr 32B 压缩点。join 时经链上 vault
     /// `set_session_tx_pk`（买入同笔 multicall）核验后写入；后续
-    /// `TableRuntime` 签名交易按此钥验证。定宽形式（TODO #41④，2026-09-10）：
+    /// `TableRuntime` 签名交易按此钥验证。定宽形式（2026-09-10）：
     /// tag 恒 Stark v1、raw 恒 32B，全零压缩点 = 未登记（仅 fixture/旧路径；
     /// 签名路径拒绝）。
     pub tx_pk: crate::signature::StarkTxPubkey,
@@ -256,7 +256,7 @@ pub struct PlayingSeat {
     pub status: PlayingSeatStatus,
 }
 
-/// 定宽记录公共写入（TODO #47-②）：`payload_len(u32 LE) || tag || 载荷 ||
+/// 定宽记录公共写入：`payload_len(u32 LE) || tag || 载荷 ||
 /// 零填充到 width`。载荷+头部超宽即失败。
 fn to_payload<T: BorshSerialize>(value: &T) -> borsh::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
@@ -321,7 +321,7 @@ fn read_padded_record<R: borsh::io::Read>(
     Ok((tag, buf[1..].to_vec()))
 }
 
-/// TODO #47-②（2026-09-10）：`Seat` 的定宽记录宽度。载荷超宽即序列化
+/// `Seat` 的定宽记录宽度。载荷超宽即序列化
 /// 失败（fail-closed）；所有变体序列化结果恒等长，native borsh 与
 /// canonical ABI 的固定宽度语义合一。
 const SEAT_RECORD_WIDTH: usize = 512;
@@ -332,7 +332,7 @@ const SEAT_TAG_WAITING: u8 = 1;
 const SEAT_TAG_PLAYING: u8 = 2;
 const SEAT_TAG_DEPARTED: u8 = 3;
 
-/// TODO #47-②（2026-09-10）：`Seat` 手写固定宽度 Borsh。
+/// `Seat` 手写固定宽度 Borsh。
 ///
 /// 记录布局：`payload_len(u32 LE) || tag(u8) || 派生载荷 || 零填充到
 /// [`SEAT_RECORD_WIDTH`]。单射性 = len/tag/载荷一致 + 填充必须全零
@@ -394,7 +394,7 @@ impl BorshDeserialize for Seat {
 ///
 /// Each lifecycle variant carries only meaningful data. This is also the canonical Borsh/state-root
 /// representation; impossible flat combinations such as an empty seat with chips or a waiting seat
-/// with hole cards cannot be constructed. Borsh 采用手写定宽记录（TODO #47-②）。
+/// with hole cards cannot be constructed. Borsh 采用手写定宽记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seat {
     /// Unoccupied slot. Time-bank is retained as a slot policy counter.
@@ -1388,7 +1388,7 @@ impl RevealTokenState {
 
 /// Canonical progress payload of an active reconstruction phase.
 ///
-/// TODO #41-③（2026-09-10）：52 张聚合密文的累加器已迁至
+/// 52 张聚合密文的累加器已迁至
 /// [`DeckState::reconstruct_accumulated`]（材料统一由 deck 载体承载，
 /// HandPhase 不再内嵌变长大对象）；本结构只保留进度掩码。
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -1544,7 +1544,7 @@ impl ShufflingPhase {
 /// Single active hand phase. Shuffle uses a nested union so fresh and reconstruct payloads cannot
 /// encode each other's fields.
 ///
-/// TODO #47-②（2026-09-10）：Borsh 采用手写定宽记录式实现——所有变体
+/// Borsh 采用手写定宽记录式实现——所有变体
 /// 序列化结果恒等长（[`HAND_PHASE_RECORD_WIDTH`]），native 编码长度不再
 /// 随阶段/揭示批大小漂移。变体判别值与历史 derive 枚举序一致。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1596,7 +1596,7 @@ pub enum HandPhase {
     },
 }
 
-/// `HandPhase` 定宽记录宽度（TODO #47-②）。最宽变体为 Reconstructing
+/// `HandPhase` 定宽记录宽度。最宽变体为 Reconstructing
 /// （含 ≤18 条揭示分配 + 悬挂揭示负载）；超宽即序列化失败（fail-closed）。
 const HAND_PHASE_RECORD_WIDTH: usize = 4096;
 
@@ -2048,7 +2048,7 @@ pub struct DeckState {
     pub cards_dealt: u8,
     /// Owner-private partial ciphertexts at canonical `(seat, hole_slot)` positions.
     pub owner_readable_hole_cards: PartialHoleCardLedger,
-    /// 重构累加器（TODO #41-③，自 `ReconstructState` 迁入）：已验证
+    /// 重构累加器（自 `ReconstructState` 迁入）：已验证
     /// contribution 逐次合入 canonical aggregate-key base deck 后的 52 张
     /// 密文。`None` 表示尚无玩家提交。材料统一由 deck 载体承载，HandPhase
     /// 不再内嵌变长大对象。
@@ -2282,7 +2282,7 @@ pub struct TexasPokerTable {
     pub rules: TableRules,
 
     /// 座位列表（长度 = max_players）。
-    /// 座位槽位（定宽，TODO #41①，2026-09-10）：恒 9 槽，索引
+    /// 座位槽位（定宽，2026-09-10）：恒 9 槽，索引
     /// `[0, max_players)` 之外的槽位必须保持 `Vacant` 填充
     /// （`validate_state_schema` 强制）。此前为 `Vec<Seat>`，其长度恒等于
     /// `max_players`（不变式由本函数历史强制）；定宽后整表 borsh 序列化
@@ -3610,7 +3610,7 @@ mod tests {
     fn test_table_new() {
         let table = TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
         assert_eq!(table.max_players, 6);
-        assert_eq!(table.seats.len(), 9); // 定宽槽位（TODO #41①）
+        assert_eq!(table.seats.len(), 9); // 定宽槽位
         assert!(table.padding_seats_are_vacant());
         assert_eq!(table.small_blind, 50);
         assert_eq!(table.big_blind, 100);
@@ -4034,7 +4034,7 @@ mod tests {
     fn test_reconstruct_state_default() {
         let state = ReconstructState::default();
         assert_eq!(state.pending_mask, 0);
-        // 累加器已迁 DeckState（TODO #41-③）：DeckState::default 的累加器恒 None。
+        // 累加器已迁 DeckState：DeckState::default 的累加器恒 None。
         assert!(DeckState::default().reconstruct_accumulated.is_none());
     }
 
@@ -4066,7 +4066,7 @@ mod tests {
         assert_eq!(seat, recovered);
     }
 
-    // ========== 定宽记录 Borsh（TODO #47-②）==========
+    // ========== 定宽记录 Borsh ==========
 
     #[test]
     fn seat_record_encoding_is_constant_width() {

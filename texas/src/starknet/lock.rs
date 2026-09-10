@@ -197,8 +197,9 @@ pub async fn schedule_leave_release(wallet: &str, last_hand_id: u32, hand_settle
     }
 }
 
-/// 全量释放玩家锁（force_unlock）：仅在"已离桌且最后一手已结算"时调用。
-async fn release_player_lock(wallet: &str) {
+/// 全量释放玩家锁（force_unlock）：仅在"已离桌且最后一手已结算"或
+/// "桌台关闭、在座玩家集体离场"时调用。
+pub(crate) async fn release_player_lock(wallet: &str) {
     let Some(chain) = super::chain() else { return };
     let vault = match vault_address() {
         Ok(v) => v,

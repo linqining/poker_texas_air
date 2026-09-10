@@ -35,7 +35,7 @@ struct PersistedDeckStateV30 {
     contributor_mask: SeatMask,
     cards_dealt: u8,
     owner_readable_hole_cards: super::types::PartialHoleCardLedger,
-    // 重构累加器（TODO #41-③，自 HandPhase/ReconstructState 迁入 deck 载体）。
+    // 重构累加器（自 HandPhase/ReconstructState 迁入 deck 载体）。
     reconstruct_accumulated: Option<Vec<super::types::ElGamalCiphertext>>,
 }
 
@@ -81,7 +81,7 @@ struct PersistedTexasPokerHotTableV31 {
 
 fn persisted_seats(seats: &[Seat], max_players: u8) -> PokerL1Result<Vec<Seat>> {
     // 持久化布局保持变长（仅存 `[0, max_players)` 活动槽位，外部存储
-    // 格式不变）；运行时形状为定宽 `[Seat; 9]`（TODO #41①）。
+    // 格式不变）；运行时形状为定宽 `[Seat; 9]`。
     let active = &seats[..usize::from(max_players)];
     for seat in active {
         seat.validate_canonical()?;
@@ -106,7 +106,7 @@ fn restore_seats(seats: Vec<Seat>, max_players: u8) -> PokerL1Result<[Seat; 9]> 
         seat.validate_canonical()?;
     }
     // 持久化布局保持变长（外部存储格式不变）；恢复为定宽运行时形状，
-    // `max_players` 之外的槽位以 Vacant 填充（TODO #41①）。
+    // `max_players` 之外的槽位以 Vacant 填充。
     let mut out: [Seat; 9] = std::array::from_fn(|_| Seat::empty());
     for (index, seat) in seats.into_iter().enumerate() {
         out[index] = seat;

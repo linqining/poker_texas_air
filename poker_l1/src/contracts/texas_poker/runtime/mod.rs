@@ -3,7 +3,8 @@
 //! 所有"区块链性"收敛于此：selector 路由与 borsh 解码、caller 认证
 //! （座位解析 + `signature/` 交易签名验证）、`DispatchContext` 时钟供给、
 //! pre/post clone 事务原子性、call_seq/hand_id 记账、canonical 编解码与
-//! 状态根（`state_codec`）、ProveTask 产出（→ L1 证明层 `src/airs`）。
+//! 状态根（`state_codec`）、ProveTask 产出（→ 链下证明编排层 Orchestrator
+//! `poker_texas_air` 消费生成证明）。
 //!
 //! 依赖方向：runtime → core（单向）。核心状态机（`super::core`）不得反向
 //! 引用本目录任何模块（由 `poker_l1/tests/arch_core_purity.rs` 强制）。

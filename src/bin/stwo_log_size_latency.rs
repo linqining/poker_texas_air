@@ -157,6 +157,7 @@ fn fixture(log_size: u32) -> Result<Fixture, String> {
         max_players: 6,
         small_blind: 10,
         big_blind: 20,
+        rit_mode: 0, // RIT_MODE_DISABLED
     };
     let pre_root = compute_state_root(&pre_table)
         .map_err(|error| format!("pre state root failed: {error}"))?;

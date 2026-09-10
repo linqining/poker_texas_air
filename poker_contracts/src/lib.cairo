@@ -17,3 +17,7 @@ mod settlement_payout_anonymizer;
 /// #25 全链路私密提现（unshield 方向第二个 anonymizer）：vault 筹码 →
 /// STRK20 池 open note，不经玩家公开钱包。
 mod cashout_unshield_helper;
+
+/// 桌台注册表：合约分配 table_id + 不可变 params_hash + 只追加的
+/// Open→Closed 生命周期。"关桌后不开新手"的链上权威信号源。
+mod poker_table_registry;

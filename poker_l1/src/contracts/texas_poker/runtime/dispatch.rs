@@ -450,6 +450,12 @@ pub struct CreateTableArgs {
     pub small_blind: u64,
     /// 大盲注金额。
     pub big_blind: u64,
+    /// Run It Twice 桌面策略（`RIT_MODE_DISABLED` / `RIT_MODE_TWICE`）。
+    ///
+    /// 严格 5 字段编码：载荷必须精确携带本字段，旧 4 字段编码与尾随
+    /// 垃圾字节一律反序列化失败（fail-closed）；缺省语义即不开启
+    /// （`RIT_MODE_DISABLED`），非协议值由 core::apply_create_table 拒绝。
+    pub rit_mode: u8,
 }
 
 /// `fold_with_proof` 参数（局中 fold + 剥离加密层）。
@@ -776,7 +782,7 @@ pub fn dispatch(
     log_events(&events);
 
     // Post-commit Prover：构造证明任务（pre/post table + method 元数据）。
-    // return_value = borsh(L1DispatchOutput { events, prove_task })，
+    // return_value = borsh(DispatchOutput { events, prove_task })，
     // Orchestrator 从链层取回后反序列化生成 proof。
     let return_value = build_dispatch_output(context, &events, selector, args, pre_table, table)?;
 
@@ -817,10 +823,10 @@ pub fn tx_message_hash(
     out
 }
 
-/// 构造 `L1DispatchOutput` 并序列化为 return_value 字节。
+/// 构造 `DispatchOutput` 并序列化为 return_value 字节。
 ///
 /// 根据 selector 推导 method_kind discriminant + 构造 MethodInput，
-/// 封装为 `L1DispatchOutput { events, prove_task }`。
+/// 封装为 `DispatchOutput { events, prove_task }`。
 /// 没有状态变化（例如 no-op advance_deadline）时仅返回 events；所有已注册 selector
 /// 一旦改变状态都必须产生 task。未知 selector 返回错误，不能静默丢 task。
 fn build_dispatch_output(
@@ -831,10 +837,10 @@ fn build_dispatch_output(
     pre_table: TexasPokerTable,
     post_table: &TexasPokerTable,
 ) -> PokerL1Result<Vec<u8>> {
-    use super::prove_task::{L1DispatchOutput, L1ProveTask};
+    use super::prove_task::{DispatchOutput, ProveTask};
 
     if pre_table == *post_table {
-        let out = L1DispatchOutput::events_only(events.to_vec());
+        let out = DispatchOutput::events_only(events.to_vec());
         return borsh::to_vec(&out)
             .map_err(|e| PokerL1Error::Serialization(format!("dispatch output borsh: {e}")));
     }
@@ -843,7 +849,7 @@ fn build_dispatch_output(
     let table_id = post_table.id.creation_nonce;
     let hand_id = post_table.hand_id;
     let call_seq = post_table.call_seq;
-    let task = L1ProveTask::new(
+    let task = ProveTask::new(
         kind,
         context.clone(),
         canonical_args,
@@ -853,7 +859,7 @@ fn build_dispatch_output(
         hand_id,
         call_seq,
     );
-    let out = L1DispatchOutput::with_task(events.to_vec(), task);
+    let out = DispatchOutput::with_task(events.to_vec(), task);
     borsh::to_vec(&out)
         .map_err(|e| PokerL1Error::Serialization(format!("dispatch output borsh: {e}")))
 }
@@ -900,6 +906,7 @@ fn build_method_input(
                 max_players: a.max_players,
                 small_blind: a.small_blind,
                 big_blind: a.big_blind,
+                rit_mode: a.rit_mode,
             },
         ));
     }
@@ -1634,6 +1641,7 @@ fn dispatch_create_table(
         input.max_players,
         input.small_blind,
         input.big_blind,
+        input.rit_mode,
     )
 }
 
@@ -1959,6 +1967,7 @@ mod tests {
     use crate::object_model::ObjectID;
     use crate::signature::TaggedPubkey;
     use crate::contracts::texas_poker::utils::{g1_generator, g1_identity};
+    use crate::contracts::texas_poker::constants::RIT_MODE_DISABLED;
 
     /// `tx_message_hash` 已知答案向量（KAT）：签名域是 poker_l1 ↔
     /// client-wasm（WasmTxSession）↔ texas e2e 的三方契约，任何一处
@@ -2043,7 +2052,7 @@ mod tests {
         }
     }
 
-    fn decode_output(result: &DispatchResult) -> super::super::prove_task::L1DispatchOutput {
+    fn decode_output(result: &DispatchResult) -> super::super::prove_task::DispatchOutput {
         borsh::from_slice(&result.return_value).expect("dispatch output 应是有效 borsh")
     }
 
@@ -2213,6 +2222,7 @@ mod tests {
             max_players: 9,
             small_blind: 25,
             big_blind: 50,
+            rit_mode: RIT_MODE_DISABLED,
         };
         let args_bytes = borsh::to_vec(&args).unwrap();
         let result = dispatch(&ctx, &mut table, &selectors::create_table(), &args_bytes).unwrap();
@@ -2221,6 +2231,10 @@ mod tests {
         assert_eq!(table.max_players, 9);
         assert_eq!(table.small_blind, 25);
         assert_eq!(table.big_blind, 50);
+        assert_eq!(
+            table.rules.rit_mode, RIT_MODE_DISABLED,
+            "create_table 不开启 RIT 时必须落为 DISABLED"
+        );
         assert_eq!(table.pot, 0, "create_table 应覆写为初始状态");
         assert!(!result.modified_objects.is_empty());
     }
@@ -2234,10 +2248,86 @@ mod tests {
             max_players: 10, // 越界
             small_blind: 25,
             big_blind: 50,
+            rit_mode: RIT_MODE_DISABLED,
         };
         let args_bytes = borsh::to_vec(&args).unwrap();
         let result = dispatch(&ctx, &mut table, &selectors::create_table(), &args_bytes);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn dispatch_create_table_enables_rit_twice() {
+        use crate::contracts::texas_poker::constants::RIT_MODE_TWICE;
+        let ctx = make_context();
+        let mut table = make_table();
+        let args = CreateTableArgs {
+            name: "rit-table".into(),
+            max_players: 6,
+            small_blind: 25,
+            big_blind: 50,
+            rit_mode: RIT_MODE_TWICE,
+        };
+        let args_bytes = borsh::to_vec(&args).unwrap();
+        dispatch(&ctx, &mut table, &selectors::create_table(), &args_bytes).unwrap();
+        assert_eq!(
+            table.rules.rit_mode, RIT_MODE_TWICE,
+            "显式传入 RIT_MODE_TWICE 的建桌必须落为桌面 RIT 策略"
+        );
+    }
+
+    #[test]
+    fn dispatch_create_table_rejects_unknown_rit_mode_atomically() {
+        let ctx = make_context();
+        let mut table = make_table();
+        table.pot = 999; // 失败标记：拒绝后桌台必须原样保留
+        let pre_name = table.name.clone();
+        let args = CreateTableArgs {
+            name: "bad-rit".into(),
+            max_players: 6,
+            small_blind: 25,
+            big_blind: 50,
+            rit_mode: 3, // 非协议常量
+        };
+        let args_bytes = borsh::to_vec(&args).unwrap();
+        let result = dispatch(&ctx, &mut table, &selectors::create_table(), &args_bytes);
+        assert!(result.is_err());
+        assert_eq!(table.pot, 999, "rit_mode 校验失败不得覆写桌台");
+        assert_eq!(table.name, pre_name);
+    }
+
+    #[test]
+    fn create_table_args_reject_legacy_payload_fail_closed() {
+        // 严格编码：旧 v2 载荷（4 字段，无 rit_mode 尾字节）必须反序列化失败。
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&6u32.to_le_bytes()); // String len
+        legacy.extend_from_slice(b"legacy");
+        legacy.push(9); // max_players
+        legacy.extend_from_slice(&25u64.to_le_bytes()); // small_blind
+        legacy.extend_from_slice(&50u64.to_le_bytes()); // big_blind
+        assert!(borsh::from_slice::<CreateTableArgs>(&legacy).is_err());
+
+        // 走完整 dispatch 也必须被拒，且不覆写桌台。
+        let ctx = make_context();
+        let mut table = make_table();
+        table.pot = 999; // 失败标记：拒绝后桌台必须原样保留
+        let pre_name = table.name.clone();
+        dispatch(&ctx, &mut table, &selectors::create_table(), &legacy).unwrap_err();
+        assert_eq!(table.pot, 999);
+        assert_eq!(table.name, pre_name);
+
+        // 新 5 字段编码正常解码；rit_mode=DISABLED 建桌成功且不开启 RIT。
+        let mut strict = legacy.clone();
+        strict.push(RIT_MODE_DISABLED);
+        let decoded: CreateTableArgs = borsh::from_slice(&strict).unwrap();
+        assert_eq!(decoded.rit_mode, RIT_MODE_DISABLED);
+        dispatch(&ctx, &mut table, &selectors::create_table(), &strict).unwrap();
+        assert_eq!(table.name, "legacy");
+        assert_eq!(table.rules.rit_mode, RIT_MODE_DISABLED);
+
+        // 尾随垃圾（超出 5 字段）仍按 borsh 尾随纪律拒绝。
+        let mut trailing = strict.clone();
+        trailing.extend_from_slice(&[0, 7]);
+        assert!(borsh::from_slice::<CreateTableArgs>(&trailing).is_err());
     }
 
     #[test]
@@ -2339,6 +2429,7 @@ mod tests {
             max_players: 2,
             small_blind: 10,
             big_blind: 20,
+            rit_mode: RIT_MODE_DISABLED,
         };
         let create_bytes = borsh::to_vec(&create_args).unwrap();
         dispatch(
@@ -3045,6 +3136,7 @@ mod tests {
             max_players: 4,
             small_blind: 10,
             big_blind: 20,
+            rit_mode: RIT_MODE_DISABLED,
         };
         dispatch(
             &ctx_creator,
@@ -3375,6 +3467,7 @@ mod tests {
                     max_players: 6,
                     small_blind: 50,
                     big_blind: 100,
+                    rit_mode: RIT_MODE_DISABLED,
                 })
                 .unwrap(),
                 0,

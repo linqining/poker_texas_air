@@ -690,6 +690,16 @@ fn poseidon_over_bytes(bytes: &[u8]) -> Felt {
     poseidon_hash_many(&input)
 }
 
+/// 任意字节串的 Poseidon 摘要（32 字节大端）。
+///
+/// 生产域 [`poseidon_over_bytes`] 的公开门面：长度前缀 + 31 字节大端分块 +
+/// `poseidon_hash_many`（Cairo 原生置换）。2026-09 Poseidon 迁移中取代
+/// utils 层的 `blake2b_256` 作为语句摘要压缩函数（无位运算、无查表，
+/// Cairo/AIR 重放与 Stwo `poseidon252` 组件同构）。
+pub fn poseidon_bytes_digest(bytes: &[u8]) -> [u8; 32] {
+    poseidon_over_bytes(bytes).to_bytes_be()
+}
+
 fn stark_hash_to_curve(digest: &[u8]) -> StarkPoint {
     let start = poseidon_over_bytes(digest);
     for i in 0u64..1024 {
@@ -1034,8 +1044,13 @@ pub struct HandBatchEquationWords {
 /// 序列化、无 keccak）。
 ///
 /// 规范（三端一致，勿改）：
-/// - init:  `state = poseidon([ascii("poker/bg-fold/v1")])`（协议名经
+/// - init（BG 折叠纪元 [`PoseidonFeltTranscript::new_bg_fold`]）:
+///   `state = poseidon([ascii("poker/bg-fold/v1")])`（协议名经
 ///   `append_message` 进入 transcript，见 BG 的 `bg12_protocol` 步）。
+/// - init（2026-09 生产域 [`CryptoTranscript::new`]）:
+///   `state = poseidon([poseidon_over_bytes(protocol_name)])`——协议名
+///   先经长度前缀 + 31 字节大端分块压缩为单 felt（`poseidon_over_bytes`），
+///   支持任意长度 context，域分离由初始状态强制。
 /// - append_message(label, msg):
 ///   `state = poseidon([state, ascii(label[..31]), felt(msg.len()), felt(msg)])`
 ///   —— **约束**：msg 必须为 ≤31 字节的短消息（ASCII 标签 / 小端 u64），
@@ -1063,6 +1078,15 @@ impl PoseidonFeltTranscript {
     pub fn new_bg_fold() -> Self {
         Self {
             state: poseidon_hash_many(&[ascii_felt(BG_FOLD_DOMAIN)]),
+        }
+    }
+
+    /// 生产域初始状态（2026-09 Poseidon 迁移）：任意长度协议名/context
+    /// 先经 [`poseidon_over_bytes`] 压成单 felt，再做域初始置换。
+    /// 与 BG 折叠纪元 [`Self::new_bg_fold`] 域分离，不可互验。
+    pub fn new_domain(protocol_name: &[u8]) -> Self {
+        Self {
+            state: poseidon_hash_many(&[poseidon_over_bytes(protocol_name)]),
         }
     }
 
@@ -1100,10 +1124,11 @@ fn message_felts(msg: &[u8]) -> Vec<Felt> {
 }
 
 impl crate::CryptoTranscript for PoseidonFeltTranscript {
-    fn new(_protocol_name: &[u8]) -> Self {
-        // 协议名由调用方 append_message 绑定（BG 的 bg12_protocol 步）；
-        // 海绵初始化固定为 BG 折叠纪元域标签，保证 Cairo 重放唯一。
-        Self::new_bg_fold()
+    fn new(protocol_name: &[u8]) -> Self {
+        // 2026-09 Poseidon 迁移：生产域按协议名派生初始状态（任意长度
+        // context 经 poseidon_over_bytes 压缩），域分离由初始状态强制。
+        // BG 折叠纪元路线固定走 new_bg_fold()，不经本入口。
+        Self::new_domain(protocol_name)
     }
 
     fn append_message(&mut self, label: &[u8], message: &[u8]) {
@@ -1305,6 +1330,64 @@ mod tests {
         direct.append_scalar::<StarkCurve>(b"s", &s);
         blocked.append_message(b"s", &s.as_bytes());
         assert_ne!(direct.state(), blocked.state());
+    }
+
+    /// 2026-09 生产域（`new_domain` / trait `new`）：协议名派生初始状态、
+    /// 域分离、任意长度 context 确定性。
+    #[test]
+    fn production_domain_semantics() {
+        use crate::CryptoTranscript as _;
+        use crate::transcript_domains;
+
+        // trait new == inherent new_domain。
+        let a = PoseidonFeltTranscript::new(transcript_domains::SHUFFLE_V2_POSEIDON);
+        let b = PoseidonFeltTranscript::new_domain(transcript_domains::SHUFFLE_V2_POSEIDON);
+        assert_eq!(a.state(), b.state());
+
+        // 不同协议域隔离；与 BG 折叠纪元域亦隔离。
+        let leave = PoseidonFeltTranscript::new_domain(transcript_domains::LEAVE_POSEIDON_V2);
+        assert_ne!(a.state(), leave.state());
+        assert_ne!(a.state(), PoseidonFeltTranscript::new_bg_fold().state());
+
+        // 任意长度 context（>31B）经 poseidon_over_bytes 压缩：确定性 + 内容敏感。
+        let long_ctx = [0x5Au8; 73];
+        let c1 = PoseidonFeltTranscript::new_domain(&long_ctx);
+        let c2 = PoseidonFeltTranscript::new_domain(&long_ctx);
+        assert_eq!(c1.state(), c2.state());
+        let mut flipped = long_ctx;
+        flipped[0] ^= 0x01;
+        assert_ne!(c1.state(), PoseidonFeltTranscript::new_domain(&flipped).state());
+
+        // 域分离传导到挑战：同 absorbs 序列在不同域下挑战不同。
+        let mut x = PoseidonFeltTranscript::new_domain(transcript_domains::SHUFFLE_V2_POSEIDON);
+        let mut y = PoseidonFeltTranscript::new_domain(transcript_domains::LEAVE_POSEIDON_V2);
+        x.append_message(b"stmt", b"same-statement");
+        y.append_message(b"stmt", b"same-statement");
+        assert_ne!(
+            x.challenge::<StarkCurve>(b"c").scalar,
+            y.challenge::<StarkCurve>(b"c").scalar
+        );
+    }
+
+    /// `poseidon_bytes_digest`：长度前缀绑定 + 跨 31B 边界 + KAT。
+    #[test]
+    fn poseidon_bytes_digest_binds_length_and_content() {
+        let empty = poseidon_bytes_digest(b"");
+        let one = poseidon_bytes_digest(b"A");
+        let two = poseidon_bytes_digest(b"AA");
+        assert_ne!(one, two, "31B chunking must be length-prefixed");
+        assert_ne!(empty, one);
+        let b31 = poseidon_bytes_digest(&[0x11u8; 31]);
+        let b32 = poseidon_bytes_digest(&[0x11u8; 32]);
+        assert_ne!(b31, b32);
+        // KAT：与 poseidon_over_bytes 同公式（长度前缀 felt + 31B 分块 felts）。
+        let mut chunk = [0u8; 32];
+        chunk[29..].copy_from_slice(b"abc");
+        let expected =
+            poseidon_hash_many(&[Felt::from(3u64), Felt::from_bytes_be(&chunk)]).to_bytes_be();
+        assert_eq!(poseidon_bytes_digest(b"abc"), expected);
+        // 32 字节输出（可作 [u8; 32] 语句摘要）。
+        assert_eq!(poseidon_bytes_digest(b"abc").len(), 32);
     }
 
     #[test]

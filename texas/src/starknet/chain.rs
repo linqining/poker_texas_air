@@ -83,7 +83,7 @@ impl StarknetChain {
             .map_err(|e| format!("call_contract failed: {e}"))
     }
 
-    /// finalized 高度公共 state root 取数通道（TODO #48①）。
+    /// finalized 高度公共 state root 取数通道。
     ///
     /// 读取承载 ObjectDb 根承诺的合约视图
     /// `finalized_state_root(key_hi: felt252, key_lo: felt252) -> felt252`

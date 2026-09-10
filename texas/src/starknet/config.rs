@@ -80,6 +80,9 @@ pub struct StarknetConfig {
     /// 平台 treasury 地址（抽水接收方，`STARKNET_TREASURY_ADDRESS`）。
     /// 留空回退 operator 地址。
     pub treasury_address: String,
+    /// PokerTableRegistry 合约地址（`STARKNET_TABLE_REGISTRY_ADDRESS`）。
+    /// 留空 = 纯链下模式（不建链上桌台锚点）。
+    pub table_registry_address: String,
     // 抽水参数不在本结构：链上/链下同一来源
     // `crate::pokergame::rake::rake_params`（STARKNET_RAKE_BPS/CAP）。
 }
@@ -129,12 +132,21 @@ impl StarknetConfig {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(false),
             treasury_address: std::env::var("STARKNET_TREASURY_ADDRESS").unwrap_or_default(),
+            table_registry_address: std::env::var("STARKNET_TABLE_REGISTRY_ADDRESS")
+                .unwrap_or_default(),
         }
     }
 
     /// RPC 是否可用（决定买入校验/上链提交是否真正执行）。
     pub fn rpc_enabled(&self) -> bool {
         !self.rpc_url.is_empty()
+    }
+
+    /// 桌台注册表是否启用（`STARKNET_TABLE_REGISTRY_ADDRESS` 配置即开启）。
+    /// 开启后：建桌写注册表拿合约分配 id、关桌写链、开局前可读回状态；
+    /// 未开启 = 纯链下模式（table_id 用服务端本地分配，行为不变）。
+    pub fn table_registry_enabled(&self) -> bool {
+        !self.table_registry_address.is_empty()
     }
 
     /// 是否启用 snip36 递归证明结算模式（牌局结束异步证明后提交；

@@ -84,7 +84,7 @@ pub enum TexasPokerEvent {
     TableCreated {
         /// 牌桌对象 ID。
         table_id: ObjectID,
-        /// 牌桌展示名称的 blake2b-256 承诺（定宽化，TODO #45；展示名本体
+        /// 牌桌展示名称的 blake2b-256 承诺（定宽化；展示名本体
         /// 由非共识的 metadata 对象承载）。
         name_commitment: [u8; 32],
     },
@@ -139,7 +139,7 @@ pub enum TexasPokerEvent {
         small_blind: u64,
         /// 大盲金额（chip）。
         big_blind: u64,
-        /// 参与本手的座位位掩码（bit i = 座位 i；TODO #45 定宽化）。
+        /// 参与本手的座位位掩码（bit i = 座位 i；定宽）。
         participants: SeatMask,
     },
     /// 盲注（含 ante）投注完成、即将进入 preflop 下注轮时发出。

@@ -183,7 +183,7 @@ pub const fn encode_tag(scheme: SignatureScheme, version: u8) -> u8 {
     (scheme.scheme_id() << 4) | (version & 0x0F)
 }
 
-/// Stark 会话交易公钥（定宽形式，TODO #41④，2026-09-10）。
+/// Stark 会话交易公钥（定宽形式，2026-09-10）。
 ///
 /// 会话交易签名当前唯一启用方案是 Stark Schnorr v1（32B 压缩点），
 /// 状态字段 `OccupiedSeat.tx_pk` 使用本定宽类型以消除 borsh `Vec`

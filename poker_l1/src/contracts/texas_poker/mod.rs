@@ -13,7 +13,8 @@
 //!   属性测试 / 形式化对齐。
 //! - [`runtime`]：**链运行时**——selector 路由与 borsh 解码、caller 认证、
 //!   `DispatchContext` 时钟供给、事务原子性、call_seq/hand_id 记账、
-//!   canonical 编解码与状态根（state_codec）、ProveTask 产出（→ L1 证明层）。
+//!   canonical 编解码与状态根（state_codec）、ProveTask 产出（→ 链下证明编排层
+//!   Orchestrator 消费）。
 //!
 //! 扁平路径兼容：下列 `pub use` 保持全部旧导入路径不变
 //! （`texas_poker::types::TexasPokerTable` 等），新代码请使用
@@ -82,7 +83,7 @@ pub const TEXAS_POKER_GOVERNANCE_OBJECT_TYPE: &str = "TexasPokerGovernancePolicy
 /// Incompatible older layouts are deliberately unsupported.
 /// Version 30 adds the per-seat registered session tx public key
 /// (`OccupiedSeat.tx_pk`，P1-2 会话委托：座位级签名验证锚).
-/// Version 32（2026-09-10，TODO #41）定宽化布局：座位槽位恒 9（`[Seat; 9]`，
+/// Version 32（2026-09-10）定宽化布局：座位槽位恒 9（`[Seat; 9]`，
 /// `max_players` 之外 Vacant 填充）、会话交易公钥为定宽 `StarkTxPubkey`
 /// （tag + `[u8; 32]`，去 Vec 长度前缀）。Incompatible older layouts are
 /// deliberately unsupported.
@@ -90,8 +91,8 @@ pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 32;
 
 /// ObjectDb-only hot-state schema.
 ///
-/// Runtime/proof snapshots use resolved schema v32（座位定宽 + tx_pk 定宽，
-/// TODO #41）. The v33 ObjectDb encoding combines immutable
+/// Runtime/proof snapshots use resolved schema v32（座位定宽 + tx_pk 定宽）.
+/// The v33 ObjectDb encoding combines immutable
 /// context commitments with the same physical tagged-seat and typed-reveal representation.
 pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 33;
 

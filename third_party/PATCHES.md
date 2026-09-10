@@ -21,3 +21,12 @@ Reference numbers (from proving-tool measurements): 43,752 steps ≈ 10 s
 prove (small program); 438,607 steps ≈ 29 s (full hand); proof size ≈ 14 MB
 JSON / 1.5 MB binary (96-bit security params: blake2s channel, FRI pow 26,
 blowup 1, 70 queries).
+
+# Local patches carried by third_party/flock
+
+Upstream: vendored flock (BLAKE3 binary-field R1CS prover fork), keeps its own
+nested workspace at `third_party/flock/Cargo.toml`.
+
+| Patch | Location | Motivation |
+|---|---|---|
+| `[lib] test = false`（lib 测试目标停用） | `crates/flock-prover/Cargo.toml` | vendored lib 测试在 debug profile 下深递归栈溢出（SIGABRT），污染 `cargo test --workspace`；本 crate 仅作为 `poker_texas_air` 的 hash 证明后端（`src/blake3_flock.rs`）被依赖，其内部测试不在回归范围。恢复测试：删除该 `[lib]` 节即可。 |

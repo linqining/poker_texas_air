@@ -89,7 +89,8 @@ impl TryFrom<u8> for CurveId {
 pub enum TranscriptId {
     Merlin = 1,
     FiatShamirSha3 = 2,
-    /// Poseidon252 transcript reserved for the Ristretto AIR protocol.
+    /// Poseidon252 transcript：Ristretto AIR 协议保留 + 2026-09 起 Stark
+    /// 曲线 sigma 证明的生产域（`PoseidonFeltTranscript`，felt 直通）。
     Poseidon252 = 3,
     /// Flock BLAKE3 transcript used by the trustless Ristretto AIR v2 route.
     FlockBlake3 = 4,
@@ -285,6 +286,12 @@ impl ShuffleVerifyRequest {
                 ShuffleProofSystem::BayerGrothV2,
                 TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
             )
+            // 2026-09 Poseidon 迁移：生产域（epoch 双收，旧域仅限在途证明）。
+            | (
+                CurveId::StarkCurve,
+                ShuffleProofSystem::BayerGrothV2,
+                TranscriptId::Poseidon252,
+            )
             | (
                 CurveId::Ristretto255,
                 ShuffleProofSystem::RistrettoAirV1,
@@ -425,6 +432,12 @@ impl ReconstructionVerifyRequest {
                 CurveId::StarkCurve,
                 ReconstructionProofSystem::BayerGrothOrderedV2,
                 TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
+            ) => {}
+            // 2026-09 Poseidon 迁移：生产域（epoch 双收，旧域仅限在途证明）。
+            (
+                CurveId::StarkCurve,
+                ReconstructionProofSystem::BayerGrothOrderedV2,
+                TranscriptId::Poseidon252,
             ) => {}
             (CurveId::Ristretto255, _, _) => {
                 return Err(AbiError::UnsupportedProofSystem(self.proof_system as u8))
@@ -578,6 +591,12 @@ impl ReconstructionV3VerifyRequest {
                 CurveId::StarkCurve,
                 ReconstructionProofSystem::BayerGrothSlotOrV3,
                 TranscriptId::Merlin | TranscriptId::FiatShamirSha3,
+            )
+            // 2026-09 Poseidon 迁移：生产域（epoch 双收，旧域仅限在途证明）。
+            | (
+                CurveId::StarkCurve,
+                ReconstructionProofSystem::BayerGrothSlotOrV3,
+                TranscriptId::Poseidon252,
             )
             | (
                 CurveId::Ristretto255,

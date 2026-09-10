@@ -1,6 +1,6 @@
 use super::*;
 use poker_protocol::crypto::EcPoint;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript;
 use crate::pokergame::game_state::LeaveGameRoundJson;
 
 impl Table {
@@ -202,9 +202,11 @@ impl Table {
         if sub_input.is_empty() {
             return Err("leave stripped nothing".to_string());
         }
-        // 兼容 Move 合约 leave_proof::verify 与 poker_protocol 生产代码：
-        // 必须使用 FiatShamirTranscript 和协议名 zk_leave_proof_v1。
-        let mut transcript = FiatShamirTranscript::new(b"zk_leave_proof_v1");
+        // 2026-09 Poseidon epoch：与 poker_l1 状态机同一 leave 生产域
+        // （修复此前 Merlin/FiatShamirSha3 同标签不同海绵的域分裂）。
+        let mut transcript = PoseidonFeltTranscript::new_domain(
+            poker_protocol::transcript_domains::LEAVE_POSEIDON_V2,
+        );
         if !leave_round.leave_proof.verify(&sub_input, &sub_output, player_pk, &mut transcript) {
             return Err("Invalid leave proof".to_string());
         }

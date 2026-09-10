@@ -16,7 +16,6 @@
 
 use poker_protocol::crypto::{DefaultCurve};
 use poker_protocol::crypto::curve::{Curve, CurveScalar};
-use poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript as _CT;
 use rand::rngs::OsRng;
 
 use super::mirror::TableMirror;
@@ -34,8 +33,8 @@ fn game_layer_join(
     let round = player.join_game_and_shuffle(&game.deck_encrypted, &agg_prev);
     let ms = &round.mask_and_shuffle_round;
     // 服务器侧验证（与 join_player_and_shuffle 相同的两步证明校验）
-    let mut transcript = poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript::new(
-        b"zk_mask_shuffle_proof_v2",
+    let mut transcript = poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript::new_domain(
+        poker_protocol::transcript_domains::MASK_SHUFFLE_V2_POSEIDON,
     );
     let input_cards: Vec<ZgCt> = game.deck_encrypted.clone();
     assert!(
@@ -161,7 +160,7 @@ fn play_full_hand_artifacts(
     // ---- reveal / betting 交替推进到 river ----
     // 客户端语义：每个玩家对"待揭示密文"生成 token = sk·c1 + Schnorr 证明
     // （证明绑定完整密文——包括摊牌阶段，与真实客户端一致）。
-    use poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript as FsT;
+    use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript as PfT;
     use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof as ZgRevealProof;
 
     let clients: [&ClientPlayer; 2] = [&client1, &client2];
@@ -190,7 +189,7 @@ fn play_full_hand_artifacts(
                 let token = ct.gen_reveal_token(&client.sk);
                 let proof = ZgRevealProof::prove(
                     &client.sk, &client.pk, &ct, &token, &mut OsRng,
-                    &mut FsT::new(b"reveal_token_proof_v3"),
+                    &mut PfT::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
                 );
                 tokens.push(super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)).unwrap());
                 proofs.push(super::mirror::conv::reveal_token_proof(&proof).unwrap());
@@ -367,7 +366,7 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
     );
 
     // hole reveal ×2（客户端 token 基于游戏层密文生成）
-    use poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript as FsT;
+    use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript as PfT;
     use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof as ZgRevealProof;
     let clients: [&ClientPlayer; 2] = [&client1, &client2];
     loop {
@@ -385,7 +384,7 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
             tokens.push(super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)).unwrap());
             proofs.push(super::mirror::conv::reveal_token_proof(
                 &ZgRevealProof::prove(&client.sk, &client.pk, &ct, &token, &mut OsRng,
-                    &mut FsT::new(b"reveal_token_proof_v3"))).unwrap());
+                    &mut PfT::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON))).unwrap());
         }
         mirror.submit_reveal_tokens(seat, tokens, proofs).expect("hole reveal");
     }
@@ -715,8 +714,8 @@ fn e2e_mixed_join_paths_materializes() {
     {
         let input_cards: Vec<ZgCt> = game.deck_encrypted.clone();
         // remask + shuffle 共享 transcript（挑战链顺序敏感）
-        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript::new(
-            b"zk_mask_shuffle_proof_v2",
+        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript::new_domain(
+            poker_protocol::transcript_domains::MASK_SHUFFLE_V2_POSEIDON,
         );
         assert!(
             ms.remask_proof.verify(&input_cards, &ms.mask_cards, &c2.pk, &mut transcript),
@@ -1029,7 +1028,7 @@ mod runtime_authority_e2e {
         CipherDeck, SeatMask, ShuffleState,
     };
     use poker_l1::object_model::ObjectID;
-    use poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript as RtFsT;
+    use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript as RtPfT;
 
     /// 测试玩家钱包：Starknet felt hex（寻址）+ **随机会话密钥**
     /// （授权锚——P1-2 会话委托：地址派生只用于寻址，交易签名按座位
@@ -1208,6 +1207,7 @@ mod runtime_authority_e2e {
                 max_players: 4,
                 small_blind: 10,
                 big_blind: 20,
+                rit_mode: poker_l1::contracts::texas_poker::constants::RIT_MODE_DISABLED,
             })
             .expect("args"),
         )
@@ -1374,7 +1374,7 @@ mod runtime_authority_e2e {
                         &ct,
                         &token,
                         &mut OsRng,
-                        &mut RtFsT::new(b"reveal_token_proof_v3"),
+                        &mut RtPfT::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
                     );
                     let args = borsh::to_vec(&SubmitRevealTokensArgs {
                         seat_index: seat as u8,
@@ -1426,7 +1426,7 @@ mod runtime_authority_e2e {
                         ct,
                         &token,
                         &mut OsRng,
-                        &mut RtFsT::new(b"reveal_token_proof_v3"),
+                        &mut RtPfT::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
                     );
                     tokens.push(
                         super::super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(

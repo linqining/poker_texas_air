@@ -15,6 +15,8 @@ pub mod stark_curve;
 pub mod tx_schnorr;
 pub mod error;
 pub mod transcript;
+/// 生产 Fiat–Shamir transcript 域标签（Poseidon epoch，2026-09 迁移）。
+pub mod transcript_domains;
 
 #[cfg(feature = "borsh")]
 mod borsh_impl;
@@ -36,8 +38,8 @@ pub use backend::{
 pub use stark_curve::{
     handbatch_endorsement_challenge, handbatch_leave_challenge, handbatch_proto_label,
     handbatch_reconstruct_challenge, handbatch_reveal_challenge, handbatch_v1_label,
-    PoseidonFeltTranscript, StarkCompressedPoint, StarkCurve, StarkElGamalCiphertext, StarkPoint,
-    StarkScalar,
+    poseidon_bytes_digest, PoseidonFeltTranscript, StarkCompressedPoint, StarkCurve,
+    StarkElGamalCiphertext, StarkPoint, StarkScalar,
 };
 pub use curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
 pub use error::VerificationError;

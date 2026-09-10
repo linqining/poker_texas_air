@@ -1,4 +1,4 @@
-//! 状态镜像认证接纳门（TODO #43，2026-09-10）。
+//! 状态镜像认证接纳门（2026-09-10）。
 //!
 //! 把「prover-supplied canonical 状态镜像 = host-attested 输入」升级为
 //! chain-anchored 的最后一厘米：将三条相互独立的语句组合为一个接纳判定。
@@ -24,7 +24,7 @@
 //! 与 [`crate::canonical_state_hash`] 的分工：那边证明「镜像字节 → 承诺」，
 //! 本模块证明「承诺 → 链上根下的叶子」。两者合起来即为 #43 的
 //! "authenticated state image"；「canonical transition AIR 内部重算
-//! Blake2b」的单一 statement 合成仍是后续项（见 TODO #43）。
+//! Blake2b」的单一 statement 合成仍是后续项（见 TODO #48）。
 
 use crate::blake2b_lookup_compression::{
     verify_blake2b_lookup_smt_fixed_value_path, ArchivedBlake2bLookupSmtFixedValuePathProof,
@@ -39,7 +39,7 @@ use crate::texas_canonical_air::{
     verify_canonical_tagged_batch, ArchivedCanonicalTaggedProof,
 };
 
-/// finalized 高度公共 state root 的取数通道（TODO #48①）。
+/// finalized 高度公共 state root 的取数通道。
 ///
 /// 实现方从共识事实（finalized 块状态下的 ObjectDb 根承诺，合约视图 /
 /// RPC）解析出 `state_object_key` 对应的根；实现必须是 fail-closed 的——
@@ -72,7 +72,7 @@ pub fn admit_state_image_from_source(
     admit_state_image(smt_proof, &expected_root, object_key, image_commitment)
 }
 
-/// 单一入口的组合验证（TODO #48②）：canonical transition 批次 + 两端点
+/// 单一入口的组合验证：canonical transition 批次 + 两端点
 /// 镜像哈希语句 + 两端点 SMT inclusion 接纳，一次调用按序完成。
 ///
 /// 验证顺序（任一步失败即整体失败）：

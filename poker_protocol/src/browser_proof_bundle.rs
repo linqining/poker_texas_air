@@ -11,7 +11,7 @@ use crate::{
     zk_shuffle::{
         error::VerificationError,
         reveal_token_proof::{RevealTokenProof, REVEAL_TOKEN_PROOF_LABEL},
-        transcript_ext::{CryptoTranscript, FiatShamirTranscript, MerlinTranscript},
+        transcript_ext::{CryptoTranscript, PoseidonFeltTranscript},
         ShuffleProof,
     },
 };
@@ -32,7 +32,7 @@ impl BrowserShuffleV2Bundle {
         if self.input_cards.len() != N_CARDS || self.output_cards.len() != N_CARDS {
             return Err(VerificationError::LengthMismatch);
         }
-        let mut transcript = FiatShamirTranscript::new(b"zk_shuffle_proof_v2");
+        let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::SHUFFLE_V2_POSEIDON);
         self.proof.verify(
             &self.input_cards,
             &self.output_cards,
@@ -56,7 +56,9 @@ pub struct BrowserRevealTokenBundle {
 impl BrowserRevealTokenBundle {
     /// Verify the token against the independently supplied player key.
     pub fn verify(&self) -> Result<(), VerificationError> {
-        let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let mut transcript = PoseidonFeltTranscript::new_domain(
+            crate::transcript_domains::REVEAL_TOKEN_V3_POSEIDON,
+        );
         self.proof
             .verify(
                 &self.encrypted_card,

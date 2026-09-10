@@ -1,9 +1,9 @@
-//! L1 证明任务 — dispatch 层产出，Orchestrator（poker_texas_air）消费。
+//! 证明任务 — dispatch 层产出，链上调用与链下 Orchestrator（poker_texas_air）共用。
 //!
 //! ## 角色
 //!
-//! `dispatch` 主函数执行成功后，构造 [`L1ProveTask`]（含 pre/post table 快照 +
-//! method 元数据），与 events 一起封装进 [`L1DispatchOutput`]，borsh 序列化
+//! `dispatch` 主函数执行成功后，构造 [`ProveTask`]（含 pre/post table 快照 +
+//! method 元数据），与 events 一起封装进 [`DispatchOutput`]，borsh 序列化
 //! 为 `DispatchResult.return_value`。
 //!
 //! 链下 Orchestrator 从链层取回 return_value，反序列化为
@@ -27,7 +27,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 
 // Transient decoded command view shared with the AIR crate. It is deliberately not a field of
-// L1ProveTask; consumers derive it from `method_kind + canonical_args`.
+// ProveTask; consumers derive it from `method_kind + canonical_args`.
 pub use vm_common::prove_task::MethodInput;
 
 use super::events::TexasPokerEvent;
@@ -36,11 +36,11 @@ use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
 use crate::contracts::dispatch::DispatchContext;
 
-/// 单次 method 调用的证明任务（L1 侧定义）。
+/// 单次 method 调用的证明任务（合约层定义，链上调用与链下 prover 共用）。
 ///
 /// borsh 布局与 `poker_texas_air::prove_task::ProveTask` 完全一致。
 #[derive(Debug, Clone)]
-pub struct L1ProveTask {
+pub struct ProveTask {
     /// 方法种类（u8 discriminant，与 poker_texas_air::MethodKind 兼容）。
     pub method_kind: u8,
     /// 执行该调用时经过交易层认证的完整 dispatch 上下文。
@@ -62,7 +62,7 @@ pub struct L1ProveTask {
     pub call_seq: u32,
 }
 
-impl L1ProveTask {
+impl ProveTask {
     /// 构造新的证明任务。
     #[must_use]
     pub fn new(
@@ -81,9 +81,9 @@ impl L1ProveTask {
             &context,
             &pre_table,
         )
-        .expect("L1ProveTask requires a validated canonical command");
+        .expect("ProveTask requires a validated canonical command");
         super::dispatch::CanonicalCommand::from_u8(method_kind)
-            .expect("L1ProveTask requires a known canonical command tag");
+            .expect("ProveTask requires a known canonical command tag");
         Self {
             method_kind,
             context,
@@ -100,7 +100,7 @@ impl L1ProveTask {
     #[must_use]
     pub fn selector(&self) -> [u8; 32] {
         super::dispatch::CanonicalCommand::from_u8(self.method_kind)
-            .expect("validated L1ProveTask command tag")
+            .expect("validated ProveTask command tag")
             .selector()
     }
 
@@ -115,7 +115,7 @@ impl L1ProveTask {
     }
 }
 
-impl BorshSerialize for L1ProveTask {
+impl BorshSerialize for ProveTask {
     fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
         self.method_kind.serialize(writer)?;
         self.context.serialize(writer)?;
@@ -128,7 +128,7 @@ impl BorshSerialize for L1ProveTask {
     }
 }
 
-impl BorshDeserialize for L1ProveTask {
+impl BorshDeserialize for ProveTask {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
         let method_kind = u8::deserialize_reader(reader)?;
         let context = DispatchContext::deserialize_reader(reader)?;
@@ -170,11 +170,11 @@ impl BorshDeserialize for L1ProveTask {
 ///
 /// borsh 布局与 `poker_texas_air::prove_task::DispatchOutput` 完全一致。
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub struct L1DispatchOutput {
+pub struct DispatchOutput {
     /// 事件日志。
     pub events: Vec<TexasPokerEvent>,
     /// 证明任务（None 表示此次 dispatch 无需证明）。
-    pub prove_task: Option<L1ProveTask>,
+    pub prove_task: Option<ProveTask>,
 }
 
 /// Canonical Treasury transfer derived from one settlement in a dispatch output.
@@ -195,7 +195,7 @@ pub struct SettlementTreasuryReceipt {
     pub post_rake_pot: u64,
 }
 
-impl L1DispatchOutput {
+impl DispatchOutput {
     /// 仅含 events（无证明任务）的便捷构造。
     #[must_use]
     pub fn events_only(events: Vec<TexasPokerEvent>) -> Self {
@@ -207,7 +207,7 @@ impl L1DispatchOutput {
 
     /// 含 events + 证明任务的构造。
     #[must_use]
-    pub fn with_task(events: Vec<TexasPokerEvent>, prove_task: L1ProveTask) -> Self {
+    pub fn with_task(events: Vec<TexasPokerEvent>, prove_task: ProveTask) -> Self {
         Self {
             events,
             prove_task: Some(prove_task),
@@ -372,8 +372,8 @@ mod tests {
     }
 
     #[test]
-    fn l1_prove_task_borsh_roundtrip() {
-        let task = L1ProveTask::new(
+    fn prove_task_borsh_roundtrip() {
+        let task = ProveTask::new(
             6, // MethodKind::Fold = 6
             dummy_context(),
             vec![],
@@ -384,7 +384,7 @@ mod tests {
             3,
         );
         let bytes = borsh::to_vec(&task).unwrap();
-        let recovered: L1ProveTask = borsh::from_slice(&bytes).unwrap();
+        let recovered: ProveTask = borsh::from_slice(&bytes).unwrap();
         assert_eq!(recovered.method_kind, 6);
         assert_eq!(recovered.table_id, 42);
         assert_eq!(recovered.context, dummy_context());

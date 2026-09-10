@@ -55,6 +55,14 @@ pub enum PokerL1Error {
     #[error("tx nonce {nonce} already applied for this account (replay/stale rejected)")]
     StaleTxNonce { nonce: u64 },
 
+    // ===== 入口队列乱序容忍（TableRuntime 抢跑流水线） =====
+    /// 命令早于其相位窗口到达（典型：reveal 令牌抢跑，窗口尚未打开）。
+    /// 专用变体供入口队列做**唯一可重试类**分类（继续暂存等窗口）——
+    /// 与 [`PokerL1Error::StaleTxNonce`] 同一设计模式：队列按变体分类，
+    /// 绝不解析错误文本。窗口状态前进后同一命令可原样应用。
+    #[error("phase window closed: {detail}")]
+    PhaseWindowClosed { detail: String },
+
     // ===== 序列化 / 通用 =====
     /// 序列化 / 反序列化错误。
     #[error("serialization error: {0}")]
@@ -104,6 +112,7 @@ impl PokerL1Error {
             Self::InvalidCurvePoint(_) | Self::InvalidCurveScalar(_) => {
                 ErrorCategory::ProofRejection
             }
+            Self::PhaseWindowClosed { .. } => ErrorCategory::Retryable,
             Self::UnknownScheme { .. }
             | Self::InvalidPubkeyLength { .. }
             | Self::CurveMismatch { .. }
@@ -152,6 +161,11 @@ mod tests {
             PokerL1Error::StaleTxNonce { nonce: 7 }.category(),
             ErrorCategory::ClientInput
         );
+        assert_eq!(
+            PokerL1Error::PhaseWindowClosed { detail: "w".into() }.category(),
+            ErrorCategory::Retryable
+        );
+        assert!(PokerL1Error::PhaseWindowClosed { detail: "w".into() }.is_retryable());
         assert_eq!(
             PokerL1Error::Serialization("bad payload".into()).category(),
             ErrorCategory::Internal
