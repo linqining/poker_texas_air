@@ -155,11 +155,10 @@ pub fn reconstruction_v3_prior_state_digest(
     })?;
     material.extend_from_slice(&reconstruct_epoch_ms.to_le_bytes());
     material.extend_from_slice(aggregate_pk.0.compress().as_ref());
-    let plaintext_cards = generate_plaintext_cards();
-    material.extend_from_slice(&(plaintext_cards.len() as u32).to_le_bytes());
-    for card in &plaintext_cards {
-        material.extend_from_slice(card.compress().as_ref());
-    }
+    // 52 张明文牌点以协议常量承诺吸收（单 32B felt 直通），替代
+    // len 前缀 + 52×32B 压缩字节逐点吸收——摘要材料从 ~1.9KB 缩到
+    // ~0.2KB，且重算路径不再依赖 52 次 hash_to_curve 开方。
+    material.extend_from_slice(&plaintext_cards_commitment());
 
     let readable_records = table
         .deck_state
@@ -277,14 +276,37 @@ pub fn hash_to_g1(msg: &[u8]) -> G1Projective {
 
 /// 生成 52 张确定性明文牌点。
 ///
-/// 对 `i = 0..52`：`hash_to_g1("texas_poker/card/{i}")`
+/// 对 `i = 0..52`：`hash_to_g1("texas_poker/card/{i}")`。
+///
+/// 协议常量，进程级缓存：首次调用付 52 次 hash_to_curve（含域内开方，
+/// 实测 ~6ms），之后零成本——AIR 命令流重放 / precompile adapter 的每次
+/// 重算（set_initial_encrypted_deck、reconstruction V3 语句校验、
+/// prior-state digest 等）不再重复付开方。
 pub fn generate_plaintext_cards() -> Vec<G1Projective> {
-    (0..N_CARDS)
-        .map(|i| {
-            let label = format!("texas_poker/card/{i}");
-            hash_to_g1(label.as_bytes())
+    static PLAINTEXT_CARDS: std::sync::OnceLock<Vec<G1Projective>> = std::sync::OnceLock::new();
+    PLAINTEXT_CARDS
+        .get_or_init(|| {
+            (0..N_CARDS)
+                .map(|i| {
+                    let label = format!("texas_poker/card/{i}");
+                    hash_to_g1(label.as_bytes())
+                })
+                .collect()
         })
-        .collect()
+        .clone()
+}
+
+/// 52 张明文牌点的常量承诺：`poseidon_hash_many(52×(x,y))`。
+///
+/// 协议常量（由 [`generate_plaintext_cards`] 唯一确定），进程级缓存，
+/// 只算一次。felt 直通形态（仿射坐标单射、无压缩位歧义），AIR/Cairo
+/// 侧可按常量吸收或逐置换精确重放。
+#[must_use]
+pub fn plaintext_cards_commitment() -> [u8; 32] {
+    static COMMITMENT: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *COMMITMENT.get_or_init(|| {
+        poker_protocol_core::poseidon_points_commitment(&generate_plaintext_cards())
+    })
 }
 
 // ========== G1 辅助 ==========
@@ -502,6 +524,21 @@ mod tests {
         let bytes = serialize_g1(&p);
         let recovered = parse_g1(&bytes).unwrap();
         assert!(g1_equal(&p, &recovered));
+    }
+
+    /// 明文牌常量承诺：确定性 + 缓存一致性。KAT 十六进制钉死三端
+    /// （host / wasm / Cairo）对拍的承诺常量——改动牌派生公式或承诺
+    /// 形态都会破坏该向量。
+    #[test]
+    fn test_plaintext_cards_commitment_kat() {
+        let c1 = plaintext_cards_commitment();
+        let c2 = plaintext_cards_commitment();
+        assert_eq!(c1, c2, "commitment is a protocol constant");
+        assert_eq!(
+            hex::encode(c1),
+            "006671365b5e8f80170f61e581b961d59648d443f7d770e265e30acc4ab085f7",
+            "cards commitment deviated from the pinned protocol constant"
+        );
     }
 
     #[test]

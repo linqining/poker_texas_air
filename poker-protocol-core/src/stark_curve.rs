@@ -700,6 +700,23 @@ pub fn poseidon_bytes_digest(bytes: &[u8]) -> [u8; 32] {
     poseidon_over_bytes(bytes).to_bytes_be()
 }
 
+/// 点批量的 felt 直通承诺：`poseidon_hash_many(⌊x0,y0,x1,y1,…⌋)`（32B 大端）。
+///
+/// 协议常量点集合（如 52 张明文牌点）的规范绑定形态：AIR/Cairo 侧可按
+/// 常量吸收或逐置换精确重放，无字节打包、无压缩位歧义（仿射坐标单射）。
+/// 空切片退化为对空输入的一次置换；含恒等元的点在调用方拒绝（此处 panic）。
+pub fn poseidon_points_commitment(points: &[StarkPoint]) -> [u8; 32] {
+    let mut felts = Vec::with_capacity(points.len() * 2);
+    for point in points {
+        let (x, y) = point
+            .to_affine_parts()
+            .expect("commitment point must be non-identity");
+        felts.push(x);
+        felts.push(y);
+    }
+    poseidon_hash_many(&felts).to_bytes_be()
+}
+
 fn stark_hash_to_curve(digest: &[u8]) -> StarkPoint {
     let start = poseidon_over_bytes(digest);
     for i in 0u64..1024 {
@@ -1388,6 +1405,28 @@ mod tests {
         assert_eq!(poseidon_bytes_digest(b"abc"), expected);
         // 32 字节输出（可作 [u8; 32] 语句摘要）。
         assert_eq!(poseidon_bytes_digest(b"abc").len(), 32);
+    }
+
+    /// `poseidon_points_commitment`：确定性 + 点序敏感 + 单点差敏感。
+    #[test]
+    fn poseidon_points_commitment_binds_order_and_content() {
+        let a = <StarkCurve as Curve>::hash_to_curve(b"commitment/card-a");
+        let b = <StarkCurve as Curve>::hash_to_curve(b"commitment/card-b");
+        let ab = poseidon_points_commitment(&[a, b]);
+        let ba = poseidon_points_commitment(&[b, a]);
+        let a2 = poseidon_points_commitment(&[a, a]);
+        assert_ne!(ab, ba, "point order must be bound");
+        assert_ne!(ab, a2, "point content must be bound");
+        assert_eq!(
+            ab,
+            poseidon_points_commitment(&[a, b]),
+            "commitment must be deterministic"
+        );
+        // KAT：与 poseidon_hash_many([ax,ay,bx,by]) 同公式。
+        let (ax, ay) = a.to_affine_parts().unwrap();
+        let (bx, by) = b.to_affine_parts().unwrap();
+        let expected = poseidon_hash_many(&[ax, ay, bx, by]).to_bytes_be();
+        assert_eq!(poseidon_points_commitment(&[a, b]), expected);
     }
 
     #[test]

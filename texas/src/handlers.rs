@@ -195,6 +195,55 @@ pub async fn get_table_hand(
     }
 }
 
+/// 关桌（终态）：置 closed 标志 → 广播 → 释放会话锁 + 链上注册表关桌。
+/// 鉴权：`Authorization: Bearer <OPERATOR_ADMIN_TOKEN>`；未配置 token 时
+/// 仅 debug 构建（本地联调）放行，release 构建一律 403。
+pub async fn close_table(
+    headers: HeaderMap,
+    Extension(state): Extension<Arc<AppState>>,
+    Path(table_id): Path<String>,
+) -> Response {
+    let expected = state.config.operator_admin_token.as_deref();
+    let authorized = match expected {
+        Some(expected_token) => get_token_from_headers(&headers)
+            .is_some_and(|t| constant_time_eq(t.as_bytes(), expected_token.as_bytes())),
+        None => cfg!(debug_assertions),
+    };
+    if !authorized {
+        tracing::warn!("[close_table] unauthorized close attempt for table {table_id}");
+        return err_resp(StatusCode::FORBIDDEN, "Operator authorization required");
+    }
+
+    let table_id = match parse_id(&table_id) {
+        Some(id) => id,
+        None => return err_resp(StatusCode::BAD_REQUEST, "Invalid table_id"),
+    };
+    match state.socket_state.close_table(table_id, "operator request").await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "closed", "table_id": table_id})),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "already_closed", "table_id": table_id})),
+        )
+            .into_response(),
+        Err(e) => err_resp(StatusCode::NOT_FOUND, &e),
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 pub async fn join_game(
     headers: HeaderMap,
     Extension(state): Extension<Arc<AppState>>,

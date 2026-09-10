@@ -48,6 +48,13 @@ D_OUT=$($SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" deploy --class-hash "$
 DUAL=$(ADDR_OF "$D_OUT")
 echo "DUAL=$DUAL"
 
+# 桌台注册表（"关桌后不开新手"的链上锚点）：owner 兜底 + 闲置关桌宽限
+# 期（秒，REGISTRY_GRACE 可覆盖；devnet 默认 1 小时便于联调关桌路径）。
+R_CLASS=$(declare_one PokerTableRegistry)
+D_OUT=$($SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" deploy --class-hash "$R_CLASS" --calldata "$OWNER,${REGISTRY_GRACE:-3600}" 2>&1)
+REGISTRY=$(ADDR_OF "$D_OUT")
+echo "REGISTRY=$REGISTRY"
+
 # DAPV 为默认结算路径：vault 的 settlement 绑定指向 PokerDualSettlement
 #（legacy 回退时由 server 自动重绑）。
 $SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" invoke --contract "$VAULT" --fn set_settlement_contract --calldata "$DUAL" >/dev/null
@@ -62,6 +69,7 @@ STARKNET_STRK_ADDRESS=$STRK
 STARKNET_VAULT_ADDRESS=$VAULT
 STARKNET_SETTLEMENT_ADDRESS=$SETTLEMENT
 STARKNET_DUAL_SETTLEMENT_ADDRESS=$DUAL
+STARKNET_TABLE_REGISTRY_ADDRESS=$REGISTRY
 STARKNET_SETTLEMENT_MODE=auto
 STARKNET_OPERATOR_ADDRESS=$OWNER
 STARKNET_OPERATOR_PRIVATE_KEY=$OPKEY

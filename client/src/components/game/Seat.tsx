@@ -347,6 +347,13 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
             }}
           >
             {!isPlayerSeated ? (
+              currentTable.closed ? (
+                // 关桌终态：以空位样式的提示替代入座按钮（服务端 SIT_DOWN
+                // 也会以 TABLE_CLOSED 拒绝，这里只是不打扰用户）
+                <EmptySeat>
+                  <Markdown>{getLocalizedString('game_table_closed')}</Markdown>
+                </EmptySeat>
+              ) : (
               <Button
                 small
                 onClick={() => {
@@ -434,6 +441,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
               >
                 {getLocalizedString('game_sitdown-btn')}
               </Button>
+              )
             ) : (
               <EmptySeat>
                 <Markdown>{getLocalizedString('game_table_empty-seat')}</Markdown>

@@ -82,6 +82,48 @@ async fn main() -> std::io::Result<()> {
     socket_state.init_table_event_channels(io.clone()).await;
     socket::register_handlers(&io);
 
+    // 桌台注册表锚定（可选）：配置了 STARKNET_TABLE_REGISTRY_ADDRESS 时，
+    // 启动引导把初始桌台写上链，拿合约分配的 registry_table_id（协议：
+    // "关桌后不开新手"的链上信号源；建桌失败仅告警，不阻塞启动）。
+    // 先取参数快照再出锁：注册表调用是跨 await 的网络 I/O，state 写锁
+    // 绝不跨越 await（tokio RwLock 不可重入 + 全局单锁冻结 tick）。
+    if starknet::chain().is_some_and(|c| c.config.table_registry_enabled()) {
+        let registry_snapshot: Vec<(u32, u32, u64, u64)> = {
+            let gs = socket_state.state.write().await;
+            gs.tables
+                .values()
+                .map(|t| {
+                    (
+                        t.summary.id,
+                        t.max_players(),
+                        t.summary.meta.small_blind as u64,
+                        t.summary.meta.big_blind as u64,
+                    )
+                })
+                .collect()
+        };
+        for (table_id, max_players, small_blind, big_blind) in registry_snapshot {
+            match starknet::table_registry::register_table(max_players, small_blind, big_blind)
+                .await
+            {
+                Some(registry_id) => {
+                    let mut gs = socket_state.state.write().await;
+                    if let Some(table) = gs.tables.get_mut(&table_id) {
+                        table.registry_table_id = Some(registry_id);
+                    }
+                    tracing::info!(
+                        "[table-registry] table {table_id} anchored on-chain as registry id {registry_id}"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        "[table-registry] table {table_id} NOT anchored (running without on-chain anchor)"
+                    );
+                }
+            }
+        }
+    }
+
     let app_state = Arc::new(AppState {
         db: socket_state.db.clone(),
         config: config.clone(),
@@ -93,6 +135,8 @@ async fn main() -> std::io::Result<()> {
         .route("/auth/wallet", routing::post(handlers::wallet_login))
         .route("/auth/wallet/logout", routing::post(handlers::wallet_logout))
         .route("/tables/:table_id", routing::get(handlers::get_table))
+        // 关桌（终态）：operator 鉴权（OPERATOR_ADMIN_TOKEN），关桌后不再开局
+        .route("/tables/:table_id/close", routing::post(handlers::close_table))
         // P0-2 牌局记录看板：最近手牌列表 + 单手详情
         .route("/tables/:table_id/history", routing::get(handlers::get_table_history))
         .route("/tables/:table_id/history/:hand_seq", routing::get(handlers::get_table_hand))

@@ -14,6 +14,7 @@ pub mod transcript_domains {
     pub use poker_protocol_core::transcript_domains::*;
 }
 pub use poker_protocol_core::poseidon_bytes_digest;
+pub use poker_protocol_core::poseidon_points_commitment;
 
 /// BN254 direct-sigma settlement route: canonical card derivation and curve
 /// re-exports (docs/design/DUAL_PROOF_PROTOCOL.md). Curve-independent of protocol

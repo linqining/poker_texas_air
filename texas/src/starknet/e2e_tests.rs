@@ -904,6 +904,7 @@ async fn sepolia_settle_smoke() {
         prover_work_dir: "/tmp/zgame-prover".into(),
         auth_strict: false,
         treasury_address: op_addr.clone(),
+        table_registry_address: String::new(),
     };
     let chain = super::init(config);
     let operator = chain.operator().await.expect("operator account");

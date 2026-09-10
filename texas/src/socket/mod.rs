@@ -62,6 +62,8 @@ pub(crate) struct TableSummary {
     pub current_number_players: usize,
     pub small_blind: u64,
     pub big_blind: u64,
+    /// 桌台已关闭（终态）：大厅据此置灰入口，客户端不再引导入座。
+    pub closed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -479,6 +481,7 @@ impl SocketState {
                 current_number_players: t.players().len(),
                 small_blind: t.summary.min_bet,
                 big_blind: t.summary.min_bet * 2,
+                closed: t.is_closed(),
             })
             .collect()
     }
@@ -493,6 +496,51 @@ impl SocketState {
                 name: p.name.clone(),
             })
             .collect()
+    }
+
+    /// 关桌（终态，"关桌后不开新手"的服务端权威执行点）：
+    /// 写锁内置 closed 标志（幂等）→ 广播终态视图 → 异步释放所有在座
+    /// 玩家的 vault 会话锁 + 链上注册表关桌写链。
+    /// 返回 `Ok(false)` = 桌台此前已关闭（幂等重复调用）。
+    pub async fn close_table(self: &Arc<Self>, table_id: u32, reason: &str) -> Result<bool, String> {
+        let (seated_wallets, registry_id) = {
+            let mut gs = self.state.write().await;
+            let Some(table) = gs.tables.get_mut(&table_id) else {
+                return Err(format!("table {table_id} not found"));
+            };
+            if !table.close_table() {
+                return Ok(false);
+            }
+            let wallets: Vec<String> =
+                table.players().values().map(|w| w.0.clone()).collect();
+            (wallets, table.registry_table_id)
+        };
+        tracing::info!(
+            "[TABLE-CLOSE] table {table_id} closed (reason={reason}); releasing {} seated player lock(s)",
+            seated_wallets.len()
+        );
+
+        // 终态视图广播（客户端据此禁用入座并提示）
+        if let Some(io) = get_socket_io() {
+            broadcast::broadcast_to_table(
+                &io,
+                self,
+                table_id,
+                Some("Table closed — no new hands will start"),
+            )
+            .await;
+        }
+
+        // 副作用异步化：锁释放/链上写不阻塞管理端点；本地 closed 标志已生效
+        tokio::spawn(async move {
+            for wallet in seated_wallets {
+                crate::starknet::lock::release_player_lock(&wallet).await;
+            }
+            if let Some(registry_id) = registry_id {
+                crate::starknet::table_registry::close_table(registry_id).await;
+            }
+        });
+        Ok(true)
     }
 
     pub async fn get_action_sender(&self, table_id: u32) -> Option<tokio::sync::mpsc::Sender<ActionRequest>> {

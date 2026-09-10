@@ -44,9 +44,13 @@ pub const FORCE_SHUFFLE_POSEIDON_V1: &[u8] = b"force_shuffle_poseidon_v1";
 pub const RECONSTRUCTION_V3_CONTEXT_DIGEST_DOMAIN: &[u8] =
     b"zchain.texas_poker.reconstruction_v3.context.v2.poseidon";
 
-/// reconstruction V3 前置状态摘要域（字节材料前缀，随压缩函数切换 bump）。
+/// reconstruction V3 前置状态摘要域（字节材料前缀）。
+///
+/// v4（2026-09-11）：52 张明文牌点改为常量承诺
+/// `poseidon_hash_many(52×(x,y))` 单 32B 吸收（替代 len + 52×32B 逐点
+/// 压缩字节），重算路径不再依赖 52 次 hash_to_curve 开方。
 pub const RECONSTRUCTION_V3_PRIOR_STATE_DIGEST_DOMAIN: &[u8] =
-    b"zchain.texas_poker.reconstruction_v3.prior_state.v3.poseidon";
+    b"zchain.texas_poker.reconstruction_v3.prior_state.v4.poseidon";
 
 #[cfg(test)]
 mod tests {

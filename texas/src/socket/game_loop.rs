@@ -662,6 +662,19 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
 
             // Auto-start logic (do_start_hand: start_shuffle)
             if active_count >= MIN_START_NUM as usize {
+                // 关桌闸（终态）："关桌后不开新手"的服务端权威执行点——
+                // 已关闭的桌跳过倒计时与开局，循环保持存活（已进行中的手
+                // 会正常打完并结算， Waiting 分支自然停在这里）。
+                let closed = { state.state.read().await.tables.get(&table_id).is_some_and(|t| t.is_closed()) };
+                if closed {
+                    if ready_at != 0 {
+                        let mut gs = state.state.write().await;
+                        if let Some(table) = gs.tables.get_mut(&table_id) {
+                            table.set_ready_at(0);
+                        }
+                    }
+                    return true;
+                }
                 let io_c = io.clone();
                 let state_c = state.clone();
                 if ready_at != 0 {

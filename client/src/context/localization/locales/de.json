@@ -48,6 +48,7 @@
   "game_state-info_river": "River",
   "game_state-info_showdown": "Showdown",
   "game_table_empty-seat": "Freier Platz",
+  "game_table_closed": "Tisch geschlossen — keine neuen Hände",
   "game_ui_all-in": "All In",
   "game_ui_bet": "Einsatz",
   "game_ui_call": "Mitgehen",

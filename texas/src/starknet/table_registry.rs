@@ -15,6 +15,7 @@
 //!   牌局——注册表是锚定增强，不是资金安全的依赖（资金安全由 vault 锁 +
 //!   `unlock_after_deadline` 保证）。
 
+use starknet::accounts::Account;
 use starknet::core::types::Call;
 use starknet_crypto::Felt;
 
@@ -66,6 +67,23 @@ pub async fn register_table(max_players: u32, small_blind: u64, big_blind: u64) 
                 tx_hash,
                 params_hash
             );
+            // 登记后读回核验（对齐部署工具的 read-back 惯例）：交易从提交到
+            // accepted 有几秒延迟，轮询三次；读回失败只告警——id 推导基于
+            // 计数器，不依赖本检查。
+            for attempt in 1..=3 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                match is_open(new_id).await {
+                    Some(true) => {
+                        tracing::info!("[table-registry] read-back ok: id {new_id} is Open on-chain");
+                        break;
+                    }
+                    other => {
+                        tracing::warn!(
+                            "[table-registry] read-back attempt {attempt}/3: id {new_id} state {other:?}"
+                        );
+                    }
+                }
+            }
             Some(new_id)
         }
         Err(e) => {

@@ -875,6 +875,22 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
     socket.on(actions::SIT_DOWN_V2, async move |s: SocketRef, Data::<serde_json::Value>(payload_raw), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let payload = parse_payload!(actions::SIT_DOWN_V2, payload_raw, SitDownV2Payload);
+
+        // 关桌闸：终态桌不再接受入座（"关桌后不开新手"——入座本身不动钱，
+        // 但拒绝入座避免玩家锁进一张永远不开局的桌）。
+        {
+            let gs = state.state.read().await;
+            if gs.tables.get(&payload.table_id).is_some_and(|t| t.is_closed()) {
+                let _ = s.emit("error", &serde_json::json!({
+                    "code": "TABLE_CLOSED",
+                    "msg": "本桌已关闭，不再接受入座",
+                    "action": "sit_down",
+                    "table_id": payload.table_id
+                }));
+                return;
+            }
+        }
+
         // 1. Validate request (auth, amount, pk, player, balance)
         let (player, player_pk) = match validate_sit_down_request(&s, &state, &payload).await {
             Some(v) => v,
