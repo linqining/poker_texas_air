@@ -17,9 +17,15 @@
 //! - **生命周期**：街道推进/收尾由 VM 相位驱动游戏层 ceremony
 //!   （apply_betting_view 的联锁触发）。
 //!
-//! 开关：默认开启（单一表示的正确性前提）；`TEXAS_SHADOW_PROVER=0`
-//! 作为紧急停用开关（停用期间的手牌不可证明、不上链——与历史
-//! "缺 join 证明则 hand unprovable" 同类语义）。
+//! 开关（两个，均在启动时读环境变量并缓存）：
+//! - 默认开启（单一表示的正确性前提）；`TEXAS_SHADOW_PROVER=0`
+//!   作为紧急停用开关（停用期间的手牌不可证明、不上链——与历史
+//!   "缺 join 证明则 hand unprovable" 同类语义）。
+//! - `prover_mode()`：证明走向选择。`TEXAS_PROVER_MODE=dev`（或
+//!   `TEXAS_ENV=dev`）→ **本地 prover**——proved 模式的批次 attestation
+//!   在进程内 host ρ-fold 校验后直接出具、settlement 电路 fact 本地登记，
+//!   不依赖外部 prover 服务（`STARKNET_PROVER_URL`）；`remote`（默认）
+//!   → 外部 prover 服务，生产语义（服务器绝不进程内出证）。
 //!
 //! 开销说明：reveal 在游戏层与 VM 各验证一次（双倍 EC 成本）——这是
 //! 单一状态 + fail-closed 的代价；betting 动作为纯整数搬运，开销可忽略。
@@ -458,6 +464,39 @@ impl ShadowHand {
 pub(crate) fn enabled() -> bool {
     static ENV_INIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENV_INIT.get_or_init(|| std::env::var("TEXAS_SHADOW_PROVER").ok().as_deref() != Some("0"))
+}
+
+/// 证明走向（第二个开关，[`prover_mode`] 的解析结果）。
+///
+/// - `Local`：本地进程内 prover——dev 联调用。批次 attestation 由
+///   `dual_settle::LocalBatchProver` 进程内 host ρ-fold 校验后出具；
+///   settlement 电路跳过外部 HTTP prover，fact 由 operator 直接种上
+///   链（`register_settlement_fact`），proved 路径在本地 devnet 可闭环。
+/// - `Remote`：外部 prover 服务（`STARKNET_PROVER_URL`）——生产语义，
+///   服务器绝不进程内出证，prover 不可用即回退 linear。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProverMode {
+    Local,
+    Remote,
+}
+
+/// 证明走向开关：`TEXAS_PROVER_MODE` 显式指定（`dev`/`local` → 本地，
+/// `remote`/`http` → 外部服务）；未设置时跟随 `TEXAS_ENV`（=dev → 本地，
+/// 其余 → remote）。启动时解析一次并缓存（与 [`enabled`] 同语义）。
+pub(crate) fn prover_mode() -> ProverMode {
+    static ENV_INIT: std::sync::OnceLock<ProverMode> = std::sync::OnceLock::new();
+    *ENV_INIT.get_or_init(|| {
+        match std::env::var("TEXAS_PROVER_MODE").ok().as_deref().map(str::trim) {
+            Some("dev" | "local") => return ProverMode::Local,
+            Some("remote" | "http") => return ProverMode::Remote,
+            _ => {}
+        }
+        if std::env::var("TEXAS_ENV").ok().as_deref() == Some("dev") {
+            ProverMode::Local
+        } else {
+            ProverMode::Remote
+        }
+    })
 }
 
 /// 开局引导（record_hand_start 成功后由 Table 挂载，见 prove_log）。

@@ -173,13 +173,15 @@ pub struct ProvedSettlement {
 
 /// 递给外部 prover 的 workload（也是 JSON 导出文件的 schema）。
 ///
-/// 当前 HTTP prover 客户端是必然报错的存根（proved 模式自动回退 linear），
-/// 本结构是 prover 工具落地时的 wire schema 占位——字段在存根路径下只写
-/// 不读，属有意预留。
+/// 远端模式（`HttpBatchProver`）下字段只写不读（存根必然报错 → 回退
+/// linear）；本地模式（`LocalBatchProver`，`shadow::ProverMode::Local`）
+/// 会读取全部字段做进程内校验并出具 attestation。
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ProverWorkload {
     pub hand_binding: Felt,
+    /// wire/export schema 字段（workload JSON 消费方使用；attestation
+    /// 本身只绑定 hand_binding + 批次词，本地 prover 不读）。
+    #[allow(dead_code)]
     pub hand_id: u32,
     pub batch_words: Vec<[u8; 32]>,
     pub p_batch_commitment: Felt,
@@ -266,6 +268,43 @@ impl BatchProver for HttpBatchProver {
                 "batch prover client not implemented (STARKNET_PROVER_URL={url:?}) — \
                  proved mode stays dark until the standalone prover tool exists"
             ))
+        })
+    }
+}
+
+/// dev 本地 batch prover（`shadow::ProverMode::Local`）：进程内出具
+/// attestation，无需外部 prover 服务。校验两道门，任一失败即回退 linear：
+/// 1. 批次可解析且 host ρ-fold 折叠到单位点（与 Cairo 端
+///    `verify_hand_batch_stark` 同构——本地做的是真验证，不是放行）；
+/// 2. `p_batch_commitment` 从 workload 自身批次词重算一致。
+///
+/// 仅限 dev：生产的 proved 结算必须由外部 prover 出具真实 STARK 证明
+/// （`HttpBatchProver`）。
+pub struct LocalBatchProver;
+
+impl BatchProver for LocalBatchProver {
+    fn request_attestation<'a>(
+        &'a self,
+        workload: &'a ProverWorkload,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ProverAttestation, String>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let hb = workload.hand_binding.to_bytes_be();
+            let equations = parse_batch_terms(&hb, &workload.batch_words)
+                .ok_or_else(|| "local prover: batch payload unparsable".to_string())?;
+            if !host_fold_check(&hb, &equations) {
+                return Err("local prover: host rho-fold check failed".into());
+            }
+            let recomputed =
+                compute_p_batch_commitment(workload.hand_binding, &workload.batch_words)?;
+            if recomputed != workload.p_batch_commitment {
+                return Err(format!(
+                    "local prover: commitment mismatch (recomputed {recomputed:#x} != workload {:#x})",
+                    workload.p_batch_commitment
+                ));
+            }
+            Ok(ProverAttestation { p_batch_commitment: recomputed })
         })
     }
 }
@@ -1105,6 +1144,41 @@ pub fn settle_entry_calldata(
     }
 }
 
+/// dev 本地 prover 的 settlement fact 登记：读 dual `circuit_program_hash`
+/// 视图 → `fact = poseidon([program_hash ++ 公开段])` → operator 调
+/// `register_settlement_fact`（owner/prover 白名单）。仅
+/// `shadow::ProverMode::Local` 调用——生产的 fact 必须由跑过真实电路
+/// 证明的 prover 登记，本地直登只用于 devnet e2e 闭环（v2 入口的
+/// fact-registry 锚）。
+async fn local_register_settlement_fact(
+    req: &super::settlement_prover::SettlementPrivateRequest,
+) -> Result<String, String> {
+    let chain = super::chain().ok_or("starknet chain not initialized")?;
+    let dual_addr = super::chain::parse_felt(&chain.config.dual_settlement_address)
+        .ok_or("invalid dual settlement contract address")?;
+    let program_hash = *chain
+        .call_contract(
+            dual_addr,
+            super::chain::selector("circuit_program_hash"),
+            vec![],
+        )
+        .await?
+        .first()
+        .ok_or("empty circuit_program_hash return")?;
+    let fact = Felt::from_bytes_be(&req.settlement_fact(program_hash.to_bytes_be())?);
+    let operator = chain.operator().await.ok_or("operator account unavailable")?;
+    let result = operator
+        .execute_v3(vec![Call {
+            to: dual_addr,
+            selector: super::chain::selector("register_settlement_fact"),
+            calldata: vec![fact],
+        }])
+        .send()
+        .await
+        .map_err(|e| format!("register_settlement_fact invoke: {e}"))?;
+    Ok(format!("{:#x}", result.transaction_hash))
+}
+
 pub async fn submit_dual_settlement(
     dual: &DualSettlement,
     dual_address: &str,
@@ -1120,16 +1194,23 @@ pub async fn submit_dual_settlement(
     // 模式决策（proved → 尝试 prover → 失败回退 linear）。
     let mode = if chain.config.settle_mode == SettleMode::Proved {
         export_prover_workload(dual, std::path::Path::new(&chain.config.prover_work_dir));
+        // prover 走向开关（shadow::prover_mode）：dev 本地模式在进程内
+        // 校验并出具 attestation（fact 由 operator 直登），生产 remote
+        // 模式走 STARKNET_PROVER_URL 外部服务。
+        let local_prover =
+            super::shadow::prover_mode() == super::shadow::ProverMode::Local;
         // P2-M2：settlement-private 电路 inputs 导出 + prover attestation。
         // best-effort：任何失败只告警，绝不阻塞结算（与 batch prover 同语义）。
         // P2-M4/M3：请求成功时构建公开段（15 felt），按
         // STARKNET_DAPV_SETTLE_ENTRY 选择 settle 入口（v2 默认 / proved_private）。
         let mut proved_settle: Option<(&'static str, Vec<Felt>)> = None;
         {
+            // 本地模式无外部电路 prover：url 置空（configured=false），
+            // 下面以 local_prover 为总门进段构建 + fact 直登。
             let settlement_prover = super::settlement_prover::HttpSettlementProver::new(
-                chain.config.prover_url.clone(),
+                if local_prover { None } else { chain.config.prover_url.clone() },
             );
-            if settlement_prover.configured() {
+            if local_prover || settlement_prover.configured() {
                 match super::settlement_prover::prepare_request(
                     dual.hand_id,
                     dual.hand_binding,
@@ -1159,14 +1240,25 @@ pub async fn submit_dual_settlement(
                             segment.len()
                         );
                         proved_settle = Some((selector, calldata));
-                        match settlement_prover.prove_settlement_private(&req).await {
-                            Ok(att) => tracing::info!(
-                                "[settlement-private] attested (program {})",
-                                att.program_hash
-                            ),
-                            Err(e) => tracing::warn!(
-                                "[settlement-private] prover attestation failed (non-fatal): {e}"
-                            ),
+                        if local_prover {
+                            match local_register_settlement_fact(&req).await {
+                                Ok(tx) => tracing::info!(
+                                    "[settlement-private] dev local attestation (no STARK proof) — fact registered tx={tx}"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    "[settlement-private] local fact registration failed (non-fatal): {e}"
+                                ),
+                            }
+                        } else {
+                            match settlement_prover.prove_settlement_private(&req).await {
+                                Ok(att) => tracing::info!(
+                                    "[settlement-private] attested (program {})",
+                                    att.program_hash
+                                ),
+                                Err(e) => tracing::warn!(
+                                    "[settlement-private] prover attestation failed (non-fatal): {e}"
+                                ),
+                            }
                         }
                     }
                     Err(e) => tracing::warn!(
@@ -1175,14 +1267,19 @@ pub async fn submit_dual_settlement(
                 }
             }
         }
-        let prover = HttpBatchProver::new(chain.config.prover_url.clone());
         let workload = ProverWorkload {
             hand_binding: dual.hand_binding,
             hand_id: dual.hand_id,
             batch_words: dual.batch_words.clone(),
             p_batch_commitment: dual.proved.p_batch_commitment,
         };
-        let mut resolved = resolve_settle_mode_with_prover(&prover, &workload).await;
+        let mut resolved = if local_prover {
+            tracing::info!("[dapv-proved] local prover mode — batch attestation in-process");
+            resolve_settle_mode_with_prover(&LocalBatchProver, &workload).await
+        } else {
+            let prover = HttpBatchProver::new(chain.config.prover_url.clone());
+            resolve_settle_mode_with_prover(&prover, &workload).await
+        };
         // Proved 结算依赖公开段——构建失败（赢家 payout commitment 缺失等）
         // 则降级 linear，绝不发不完整 calldata。v2/proved_private 均同此门。
         match proved_settle {
@@ -2986,6 +3083,64 @@ mod settle_mode_tests {
             resolve_settle_mode_with_prover(&bad, &workload).await,
             SettleMode::Linear
         );
+    }
+
+    // ---- 4b. 本地 batch prover（dev 模式，shadow::ProverMode::Local）----
+    //
+    // 本地 prover 做的是真验证（解析 + host ρ-fold + 承诺重算），不是
+    // 无条件放行；与远端共用同一决策函数，失败同样回退 linear。
+
+    fn workload_of(dual: &DualSettlement) -> ProverWorkload {
+        ProverWorkload {
+            hand_binding: dual.hand_binding,
+            hand_id: dual.hand_id,
+            batch_words: dual.batch_words.clone(),
+            p_batch_commitment: dual.proved.p_batch_commitment,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_batch_prover_attests_valid_batch() {
+        let dual = build_test_dual();
+        let workload = workload_of(&dual);
+        let att = LocalBatchProver
+            .request_attestation(&workload)
+            .await
+            .expect("well-formed batch must attest locally");
+        assert_eq!(att.p_batch_commitment, workload.p_batch_commitment);
+        assert_eq!(
+            resolve_settle_mode_with_prover(&LocalBatchProver, &workload).await,
+            SettleMode::Proved
+        );
+    }
+
+    #[tokio::test]
+    async fn local_batch_prover_rejects_tampered_batch() {
+        let dual = build_test_dual();
+        let mut workload = workload_of(&dual);
+        // 篡改 ownership 首条认可词（词 5 = pk_x）：fold/解析必破。
+        workload.batch_words[5][31] ^= 1;
+        let err = LocalBatchProver
+            .request_attestation(&workload)
+            .await
+            .expect_err("tampered batch must be rejected");
+        tracing::debug!("local prover rejection: {err}");
+        assert_eq!(
+            resolve_settle_mode_with_prover(&LocalBatchProver, &workload).await,
+            SettleMode::Linear
+        );
+    }
+
+    #[tokio::test]
+    async fn local_batch_prover_rejects_commitment_mismatch() {
+        let dual = build_test_dual();
+        let mut workload = workload_of(&dual);
+        workload.p_batch_commitment = workload.p_batch_commitment + Felt::ONE;
+        let err = LocalBatchProver
+            .request_attestation(&workload)
+            .await
+            .expect_err("commitment mismatch must be rejected");
+        assert!(err.contains("commitment mismatch"), "error text: {err}");
     }
 
     // ---- 5. workload JSON 导出 ----

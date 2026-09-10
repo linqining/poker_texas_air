@@ -1,20 +1,22 @@
-//! Texas Poker 事件定义（移植自 `texas_poker_move/sources/table_events.move`）。
+//! Texas Poker 事件定义（本模块为事件的权威定义）。
 //!
-//! 将所有 40+ 种事件统一为 `TexasPokerEvent` 枚举，Borsh 序列化后由预编译合约
-//! 通过 `emit_event` syscall 写入事件日志（链下索引）。
+//! 所有事件统一为 `TexasPokerEvent` 枚举，Borsh 序列化后由预编译合约
+//! 通过 `emit_event` 写入事件日志（链下索引）。
 //!
-//! 事件分类（与 Move 端一致）：
+//! 事件分类：
 //! 1. 牌桌生命周期：TableCreated / PlayerJoined / PlayerLeft / LeaveRequested
-//! 2. 手牌生命周期：HandStarted / BlindsPosted / BettingRoundStarted / RoundAdvanced /
-//!    PotCollected / WinnerAwarded / HandSettled / HandEndedWithoutShowdown / HandReset
-//! 3. 下注操作：PlayerFolded / PlayerChecked / PlayerCalled / PlayerRaised / PlayerAllIn
+//! 2. 手牌生命周期：HandStarted / BlindsPosted / AntePosted / BettingRoundStarted /
+//!    CurrentTurnChanged / RoundAdvanced / PotCollected / CommunityCardRevealed /
+//!    ShowdownHoleCardsRevealed / WinnerAwarded / RakeCollected / HandSettled /
+//!    HandEndedWithoutShowdown / HandReset / SettlementPlanCommitted
+//! 3. 下注操作：PlayerFolded / PlayerChecked / PlayerBet / PlayerCalled / PlayerRaised /
+//!    PlayerAllIn / TimeBankConsumed
 //! 4. 洗牌协议：ShuffleVerified / ShuffleTurn / ShuffleComplete / ShuffleTimeout
-//! 5. 揭示协议：RevealPhase / RevealTokenSubmitted / RevealPhaseComplete / RevealTimeout /
-//!    CommunityCardRevealed / ShowdownHoleCardsRevealed
+//! 5. 揭示协议：RevealPhase / RevealTokenSubmitted / RevealPhaseComplete / RevealTimeout
 //! 6. 重构协议：ReconstructInitiated / ReconstructDeckSubmitted / ReconstructComplete /
 //!    ReconstructTimeout
-//! 7. 玩家管理：PlayerKicked / PlayerRefund
-//! 8. 配置与牌组重建：TimeoutConfigUpdated / DeckRebuilt / CurrentTurnChanged
+//! 7. 玩家管理：PlayerKicked / PlayerRefund / AddonRequested / AddonCredited / RebuyProcessed
+//! 8. 配置与牌组重建：DeckRebuilt / RunItTwiceTriggered
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -26,8 +28,8 @@ use super::types::SeatMask;
 
 // ========== 退款类型常量 ==========
 //
-// 退款/重置/弃牌原因常量的唯一定义在 `core/constants.rs`（Move 对齐视角）。
-// 此处 re-export 维持 `events::X` 历史导入路径（state_machine / src/airs 消费者仍在用）。
+// 退款/重置/弃牌原因常量的唯一定义在 `core/constants.rs`。
+// 此处 re-export 维持 `events::X` 导入路径（state_machine / src/airs 消费者仍在用）。
 
 pub use super::constants::{
     FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN, FOLD_REASON_MANUAL, REFUND_TYPE_BET_ONLY,
@@ -71,10 +73,10 @@ pub const POT_TYPE_MAIN: u8 = 0;
 /// 边池。
 pub const POT_TYPE_SIDE: u8 = 1;
 
-/// Texas Poker 事件枚举（所有变体 copy + drop，Borsh 友好）。
+/// Texas Poker 事件枚举（所有变体均为纯数据，Borsh 序列化友好）。
 ///
-/// 镜像 `table_events.move` 的所有 struct，统一为 enum 便于在
-/// `dispatch` 阶段收集 `Vec<TexasPokerEvent>` 后批量 emit。
+/// 统一为单一 enum，便于在 `dispatch` 阶段收集 `Vec<TexasPokerEvent>` 后批量 emit。
+/// 变体声明顺序即 Borsh 判别式顺序，新增变体只能追加在末尾，不可插入或删除中间变体。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum TexasPokerEvent {
     // ========== 1. 牌桌生命周期 ==========
@@ -391,7 +393,7 @@ pub enum TexasPokerEvent {
         card_indices: [u8; 6],
         /// 对应牌的点数（2-14，与 card_indices 同序）。
         card_ranks: [u8; 6],
-        /// 对应牌的花色（table.move 编码 0-3，与 card_indices 同序）。
+        /// 对应牌的花色（编码 0-3，见 card 模块花色常量，与 card_indices 同序）。
         card_suits: [u8; 6],
         /// 有效牌数（1..=6）。
         card_count: u8,
@@ -469,21 +471,6 @@ pub enum TexasPokerEvent {
     },
 
     // ========== 8. 配置与牌组重建 ==========
-    /// 超时配置更新（`set_timeout_config` 生效后发出，全量回显新值）。
-    TimeoutConfigUpdated {
-        /// 牌桌对象 ID。
-        table_id: ObjectID,
-        /// 行动超时阈值（毫秒）。
-        betting_timeout_ms: u64,
-        /// 洗牌超时阈值（毫秒）。
-        shuffle_timeout_ms: u64,
-        /// 揭示超时阈值（毫秒）。
-        reveal_timeout_ms: u64,
-        /// 重构超时阈值（毫秒）。
-        reconstruct_timeout_ms: u64,
-        /// 摊牌展示时长（毫秒）。
-        showdown_display_ms: u64,
-    },
     /// 牌组重建（超时降级或重构完成后以明文规范牌组替换原牌组）。
     DeckRebuilt {
         /// 牌桌对象 ID。
@@ -634,7 +621,7 @@ pub enum TexasPokerEvent {
 
 /// 将事件追加到事件日志（链下索引友好）。
 ///
-/// 镜像 Move `event::emit(...)`：仅追加，不返回值。
+/// 仅追加，不返回值。
 /// 调用方在 `dispatch` 中收集所有事件后，由 Precompile::call 批量 emit。
 pub fn emit_event(events: &mut Vec<TexasPokerEvent>, evt: TexasPokerEvent) {
     events.push(evt);
@@ -695,7 +682,7 @@ mod tests {
             phase: 3, // flop
             card_indices: [0, 1, 2, 0, 0, 0],
             card_ranks: [14, 13, 7, 0, 0, 0], // A, K, 7
-            card_suits: [0, 1, 2, 0, 0, 0],   // spade, heart, diamond
+            card_suits: [0, 1, 2, 0, 0, 0],   // club, diamond, heart
             card_count: 3,
         };
         let bytes = borsh::to_vec(&evt).unwrap();
@@ -756,9 +743,8 @@ mod tests {
     }
 
     #[test]
-    fn test_constants_match_move() {
-        // 验证常量值与 Move 端一致（REFUND_TYPE_STACK_AND_BET / RESET_REASON_KICK
-        // 无任何构造点，已随重复定义一并删除）
+    fn test_constants_values() {
+        // 验证原因/类型常量的数值（链下索引按这些数值解码事件字段）
         assert_eq!(REFUND_TYPE_STACK_ONLY, 0);
         assert_eq!(REFUND_TYPE_BET_ONLY, 2);
 
@@ -788,7 +774,7 @@ mod tests {
     #[test]
     fn test_all_variants_borsh_serializable() {
         // 烟雾测试：枚举每个分支的 Borsh 序列化至少不 panic。
-        // 覆盖所有 40 个变体，确保 derive(Serialize, Deserialize) 正确。
+        // 覆盖所有 45 个变体，确保 derive(Serialize, Deserialize) 正确。
         let table_id = dummy_table_id();
         let samples: Vec<TexasPokerEvent> = vec![
             TexasPokerEvent::TableCreated {
@@ -985,14 +971,6 @@ mod tests {
                 amount: 0,
                 refund_type: 0,
             },
-            TexasPokerEvent::TimeoutConfigUpdated {
-                table_id,
-                betting_timeout_ms: 0,
-                shuffle_timeout_ms: 0,
-                reveal_timeout_ms: 0,
-                reconstruct_timeout_ms: 0,
-                showdown_display_ms: 0,
-            },
             TexasPokerEvent::DeckRebuilt {
                 table_id,
                 reason: 0,
@@ -1070,8 +1048,8 @@ mod tests {
             let _recovered: TexasPokerEvent =
                 borsh::from_slice(&bytes).expect("Borsh deserialize 失败");
         }
-        // 验证样本数量（46 个变体；CardIsIdentity/IdentityRedeal/RedealRequested
-        // 三个从未发出的 redeal 协议事件已删除）
-        assert_eq!(samples.len(), 46, "事件变体数应为 46");
+        // 验证样本数量（45 个变体；从未发出的 redeal 协议事件与
+        // 无发射点的 TimeoutConfigUpdated 已删除）
+        assert_eq!(samples.len(), 45, "事件变体数应为 45");
     }
 }

@@ -53,6 +53,10 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Starknet dev mode: no STARKNET_RPC_URL, on-chain checks skipped");
     }
     starknet::init(sn_config);
+    tracing::info!(
+        "Prover mode: {:?} (TEXAS_PROVER_MODE; dev = in-process local prover, remote = STARKNET_PROVER_URL service)",
+        starknet::shadow::prover_mode()
+    );
     // Plan C：paymaster 中继（未配置时自动禁用，客户端回退直签）。
     starknet::paymaster::init_from_env();
 

@@ -294,7 +294,9 @@ impl SettlementPrivateRequest {
     /// fact-registry 锚：`fact = poseidon([circuit_program_hash ++ 公开段])`。
     /// 电路 program_hash 部署时钉入合约常量，prover 侧经
     /// `register_settlement_fact` 登记，`..._v2` 结算入口校验。
-    #[cfg(test)]
+    /// 生产由真实电路证明的 prover 登记；dev 本地模式
+    /// （`shadow::ProverMode::Local`）由 operator 直登
+    /// （`dual_settle::local_register_settlement_fact`）。
     pub fn settlement_fact(&self, circuit_program_hash: [u8; 32]) -> Result<[u8; 32], String> {
         let ph = wire_felt(&circuit_program_hash)?;
         let mut fields = vec![ph];

@@ -1,27 +1,25 @@
-//! Texas Poker 牌的数据结构（移植自 `texas_poker_move/sources/card.move`）。
+//! Texas Poker 牌的数据结构。
 //!
-//! # 花色编码差异
-//!
-//! 注意：原 Move 合约存在两套花色编码：
-//! - `Card`（table.move 用）：SPADES=0, HEARTS=1, DIAMONDS=2, CLUBS=3
-//! - `PlayingCard`（Mental Poker 解密后映射用）：Club=0, Diamond=1, Heart=2, Spade=3
-//!
-//! 本模块同时提供两套常量，并在 `playing_card_to_card` 中处理映射。
+//! 全仓库统一一套花色编码：CLUBS=0, DIAMONDS=1, HEARTS=2, SPADES=3
+//! （与客户端 Mental Poker `PlayingCard` 的 `id()` 一致，canonical id 的
+//! 高位即花色：`suit = id / 13`，`rank = id % 13 + 2`）。
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 
-// ===== Card 花色常量（table.move 编码）=====
+// ===== Card 花色常量 =====
 
-/// 黑桃（table.move 编码 0）。
-pub const SPADES: u8 = 0;
-/// 红心（table.move 编码 1）。
-pub const HEARTS: u8 = 1;
-/// 方块（table.move 编码 2）。
-pub const DIAMONDS: u8 = 2;
-/// 梅花（table.move 编码 3）。
-pub const CLUBS: u8 = 3;
+/// 梅花（编码 0）。
+pub const CLUBS: u8 = 0;
+/// 方块（编码 1）。
+pub const DIAMONDS: u8 = 1;
+/// 红心（编码 2）。
+pub const HEARTS: u8 = 2;
+/// 黑桃（编码 3）。
+pub const SPADES: u8 = 3;
+/// 合法花色上界（0-3）。
+pub const MAX_SUIT: u8 = 3;
 
 // ===== Card 点数常量 =====
 
@@ -79,9 +77,9 @@ impl Card {
     /// 构造新牌。
     #[must_use]
     pub const fn new(suit: u8, rank: u8) -> Self {
-        if suit <= CLUBS && rank >= TWO && rank <= ACE {
+        if suit <= MAX_SUIT && rank >= TWO && rank <= ACE {
             Self(suit * 13 + (rank - TWO))
-        } else if suit <= CLUBS && rank == 0 {
+        } else if suit <= MAX_SUIT && rank == 0 {
             // Transient evaluator-only padding. Canonical state rejects these values.
             Self(52 + suit)
         } else {
@@ -107,7 +105,7 @@ impl Card {
         Self(idx)
     }
 
-    /// Return the table-encoding suit (`0..=3`) or `u8::MAX` for a generic invalid sentinel.
+    /// Return the suit (`0..=3`) or `u8::MAX` for a generic invalid sentinel.
     #[must_use]
     pub const fn suit(self) -> u8 {
         if self.0 < 52 {
@@ -174,59 +172,6 @@ impl Default for Card {
 impl std::fmt::Display for Card {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.display())
-    }
-}
-
-// ===== PlayingCard（Mental Poker 解密后映射用）=====
-
-/// Mental Poker 解密后的牌结构（花色编码与 `Card` 不同）。
-///
-/// 与 Move `PlayingCard` struct 一致：
-/// - rank: 2-14
-/// - suit: 0=Club, 1=Diamond, 2=Heart, 3=Spade
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
-)]
-pub struct PlayingCard {
-    /// 点数（2-14，A=14）。
-    pub rank: u8,
-    /// 花色（0=Club, 1=Diamond, 2=Heart, 3=Spade）。
-    pub suit: u8,
-}
-
-impl PlayingCard {
-    /// 构造新 PlayingCard。
-    #[must_use]
-    pub const fn new(rank: u8, suit: u8) -> Self {
-        Self { rank, suit }
-    }
-
-    /// 将 PlayingCard 转为 Card（处理花色编码差异）。
-    ///
-    /// 映射规则（与 table.move:254-262 一致）：
-    /// - PlayingCard Club(0)    → Card CLUBS(3)
-    /// - PlayingCard Diamond(1) → Card DIAMONDS(2)
-    /// - PlayingCard Heart(2)   → Card HEARTS(1)
-    /// - PlayingCard Spade(3)   → Card SPADES(0)
-    #[must_use]
-    pub fn to_card(&self) -> Card {
-        let card_suit = match self.suit {
-            0 => CLUBS,
-            1 => DIAMONDS,
-            2 => HEARTS,
-            3 => SPADES,
-            _ => CLUBS, // 不应发生
-        };
-        Card::new(card_suit, self.rank)
     }
 }
 
@@ -494,24 +439,6 @@ mod tests {
         assert_eq!(Card::new(HEARTS, KING).display(), "K♥");
         assert_eq!(Card::new(DIAMONDS, TEN).display(), "10♦");
         assert_eq!(Card::new(CLUBS, TWO).display(), "2♣");
-    }
-
-    #[test]
-    fn test_playing_card_to_card_mapping() {
-        // PlayingCard Club(0) → Card CLUBS(3)
-        assert_eq!(PlayingCard::new(ACE, 0).to_card(), Card::new(CLUBS, ACE));
-        // PlayingCard Diamond(1) → Card DIAMONDS(2)
-        assert_eq!(
-            PlayingCard::new(KING, 1).to_card(),
-            Card::new(DIAMONDS, KING)
-        );
-        // PlayingCard Heart(2) → Card HEARTS(1)
-        assert_eq!(
-            PlayingCard::new(QUEEN, 2).to_card(),
-            Card::new(HEARTS, QUEEN)
-        );
-        // PlayingCard Spade(3) → Card SPADES(0)
-        assert_eq!(PlayingCard::new(JACK, 3).to_card(), Card::new(SPADES, JACK));
     }
 
     // ===== 定容容器（持久化 canonical 表示的第一道防线）=====

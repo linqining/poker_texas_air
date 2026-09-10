@@ -21,6 +21,8 @@ client/.env*
 !.env.example
 poker_protocol_lean/.lake/
 texas/.env
+texas/.env.test
+texas/.env.dev.local
 .vite
 src/airs_lean/.lake/
 poker_contracts/hand-verify-native/parity-checker/target/

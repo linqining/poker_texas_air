@@ -86,6 +86,11 @@ chain id `SN_SEPOLIA`，RPC `https://starknet-sepolia-rpc.publicnode.com`。
 
 ## 当前部署：本地 devnet（starknet-devnet --seed 0，端口 5051）
 
+> 2026-09-10 起 `scripts/local_deploy.sh` 已切现代接线（与主网/Sepolia 一致）：
+> 不再部署 PokerToken/pSTRK，vault 直接绑定规范 STRK（devnet 费用代币同址）。
+> 一键流程（devnet + 部署 + 服务器本地 prover 启动）：`scripts/dev.sh`；
+> Sepolia 测试网：`scripts/test.sh` + `texas/.env.test`。
+
 chain id `SN_SEPOLIA`。地址随 devnet 重启 + 重新部署而变化（当前快照）：
 
 | 合约 | 地址 |
