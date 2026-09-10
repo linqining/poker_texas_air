@@ -1,6 +1,6 @@
 //! 当前 method AIR 的枚举与 selector 计算。
 //!
-//! 保留与 [`poker_l1::vm::contracts::texas_poker::dispatch`] 一致的稳定 discriminant 空间，
+//! 保留与 [`poker_l1::contracts::texas_poker::dispatch`] 一致的稳定 discriminant 空间，
 //! 当前包含 19 个 active selector；5/10/15/16 已退休且不重排。
 //!
 //! # 分类
@@ -17,10 +17,10 @@ pub const METHOD_SELECTOR_LEN: usize = 32;
 
 /// 计算方法选择器：`blake2b_256(method_name)[0..32]`。
 ///
-/// 直接转发 [`poker_l1::vm::contracts::texas_poker::runtime::dispatch::compute_method_selector`]，
+/// 直接转发 [`poker_l1::contracts::texas_poker::runtime::dispatch::compute_method_selector`]，
 /// 保证与 L1 dispatch 的 selector 空间单一来源。
 pub fn compute_method_selector(method_name: &str) -> [u8; METHOD_SELECTOR_LEN] {
-    poker_l1::vm::contracts::texas_poker::runtime::dispatch::compute_method_selector(method_name)
+    poker_l1::contracts::texas_poker::runtime::dispatch::compute_method_selector(method_name)
 }
 
 /// 当前方法种类的枚举。
@@ -286,7 +286,7 @@ mod tests {
         for kind in MethodKind::all() {
             assert_eq!(
                 kind.selector(),
-                poker_l1::vm::contracts::texas_poker::runtime::dispatch::compute_method_selector(
+                poker_l1::contracts::texas_poker::runtime::dispatch::compute_method_selector(
                     kind.method_name()
                 ),
                 "selector 漂移: {}",

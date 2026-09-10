@@ -37,7 +37,7 @@ impl StateRootEndpointStatement {
     /// The statement message is the domain-prefixed hot bytes, so the flock
     /// chain proves `root = BLAKE3_chain(domain || hot_bytes)` directly.
     pub fn from_table(
-        table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
     ) -> TexasAirResult<Self> {
         Ok(Self::from_preimage(hot_table_state_bytes(table)?))
     }
@@ -203,10 +203,10 @@ impl ArchivedStateRootBindingProof {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+    use poker_l1::contracts::texas_poker::types::TexasPokerTable;
 
     fn table(id: u8) -> TexasPokerTable {
-        poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
+        poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             poker_l1::object_model::ObjectID::new([id; 20], 7),
             format!("binding-{id}"),
             [0xCD; 20],

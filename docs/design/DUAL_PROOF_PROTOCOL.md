@@ -583,7 +583,7 @@ Groth16=20000）与 `ZkVerifierRegistry` 热插拔槽位，补齐生产后端：
   verify 的 native 实现，即 poker-protocol-bg 的直接复用）；
 - **G 侧**：`StwoVerifier` 直接调 workspace 内 stwo 验证 `texas_canonical_air`
   证明，注册 `SCHEME_STWO = 1`；
-- `vm/contracts/texas_poker` 结算 dispatch：连续两次 `zk_verify`（G + 全部 P）
+- `contracts/texas_poker` 结算 dispatch：连续两次 `zk_verify`（G + 全部 P）
   通过才走 `SettlementPlan` 应用——「两者有效才结算」在自有链上是完整原生语义。
 
 ## 8. 性能预算（估算，M0/M1 以实测替换）

@@ -26,7 +26,7 @@
 //!
 //! - state root 在可信 host 端从 canonical Borsh preimage 重算，并与完整公开输入一起
 //!   混入 Fiat–Shamir；当前 method AIR 内没有嵌入 Poseidon verifier 组件
-//! - 直接复用 `poker_l1::vm::contracts::texas_poker::types::TexasPokerTable`（业务类型）
+//! - 直接复用 `poker_l1::contracts::texas_poker::types::TexasPokerTable`（业务类型）
 
 #![cfg_attr(texas_release_tests, allow(unexpected_cfgs))]
 #![deny(unsafe_code)]

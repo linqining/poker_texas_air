@@ -990,7 +990,7 @@ fn split_among_winners(
 mod tests {
     use super::*;
     use crate::object_model::ObjectID;
-    use crate::vm::contracts::texas_poker::types::SeatStatus;
+    use crate::contracts::texas_poker::types::SeatStatus;
 
     #[derive(BorshSerialize, Clone)]
     struct LegacyRunoutPotPlanV1 {

@@ -6,7 +6,7 @@
 //! 游戏运行时(texas) → 链运行时(runtime/) → 纯核心状态机(core/)
 //! ```
 //!
-//! 本测试扫描 `src/vm/contracts/texas_poker/core/` 全部源码，强制三条规则：
+//! 本测试扫描 `src/contracts/texas_poker/core/` 全部源码，强制三条规则：
 //!
 //! 1. **纯度**：核心不含时钟（`std::time`/`SystemTime`/`Instant`）、IO
 //!    （`std::fs`/`std::net`/`std::io`）、异步运行时（`tokio`）；随机数只
@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-const CORE_DIR: &str = "src/vm/contracts/texas_poker/core";
+const CORE_DIR: &str = "src/contracts/texas_poker/core";
 
 /// 全文禁止的子串（核心必须零出现——含测试代码，测试也不该碰时钟/IO）。
 const FORBIDDEN_SUBSTRINGS: &[&str] = &[

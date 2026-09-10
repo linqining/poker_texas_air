@@ -11,7 +11,7 @@
 
 use std::time::Instant;
 
-use poker_l1::vm::contracts::texas_poker::types::TableRules;
+use poker_l1::contracts::texas_poker::types::TableRules;
 use poker_texas_air::canonical_rake_opening::CanonicalRakeOpening;
 use poker_texas_air::texas_canonical::{
     CanonicalActionPayload, CanonicalPhase, CanonicalRoundAdvanceOpening, CanonicalSeat,

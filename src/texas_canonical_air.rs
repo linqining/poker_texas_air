@@ -8368,7 +8368,7 @@ impl FrameworkEval for CanonicalAir {
 /// the opening to the pre rules commitment without any native hashing.
 pub fn prove_canonical_raked_tagged_batch(
     witnesses: &[CanonicalTransitionWitness],
-    rules: &poker_l1::vm::contracts::texas_poker::types::TableRules,
+    rules: &poker_l1::contracts::texas_poker::types::TableRules,
 ) -> TexasAirResult<ArchivedCanonicalTaggedProof> {
     let has_raked = witnesses
         .iter()
@@ -10313,8 +10313,8 @@ mod tests {
     /// A full sole-survivor cascade: kick seat 0, then the typed award
     /// terminal kicks seat 1 and pays the complete pot to seat 2.
     /// Table rules with a live percentage rake, used by the raked fixtures.
-    fn raked_table_rules() -> poker_l1::vm::contracts::texas_poker::types::TableRules {
-        poker_l1::vm::contracts::texas_poker::types::TableRules {
+    fn raked_table_rules() -> poker_l1::contracts::texas_poker::types::TableRules {
+        poker_l1::contracts::texas_poker::types::TableRules {
             max_players: 4,
             small_blind: 25,
             big_blind: 50,

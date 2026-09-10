@@ -2926,13 +2926,13 @@ mod tests {
     use crate::test_support::well_formed_tx_pk_fixture;
     use super::*;
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::constants::ROUND_FLOP;
-    use poker_l1::vm::contracts::texas_poker::state_machine;
-    use poker_l1::vm::contracts::texas_poker::types::{
+    use poker_l1::contracts::texas_poker::constants::ROUND_FLOP;
+    use poker_l1::contracts::texas_poker::state_machine;
+    use poker_l1::contracts::texas_poker::types::{
         ReconstructState, RevealAssignment, RevealPurpose, RevealTarget, RevealTokenState, Seat,
         SeatStatus, TexasPokerTable,
     };
-    use poker_l1::vm::contracts::texas_poker::utils::{g1_generator, scalar_from_u64};
+    use poker_l1::contracts::texas_poker::utils::{g1_generator, scalar_from_u64};
     use poker_protocol::crypto::types::ECPoint;
 
     fn image() -> CanonicalStateImage {
@@ -3320,7 +3320,7 @@ mod tests {
         table.deck_state.contributor_mask = 0b11;
         table
             .enter_revealing(
-                poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP,
+                poker_l1::contracts::texas_poker::constants::ROUND_PREFLOP,
                 RevealTokenState {
                     purpose: RevealPurpose::DealHole,
                     assignments: vec![

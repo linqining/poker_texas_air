@@ -18,11 +18,11 @@ pub mod table_runtime;
 // ==== 兼容 re-exports ====
 // runtime 三文件划界前与 core 文件是扁平兄弟，代码内大量 `super::types` /
 // `super::utils` 等路径。这里保持这些路径继续有效；runtime 新代码请直接
-// 写 `crate::vm::contracts::texas_poker::core::...`。
-pub use crate::vm::contracts::texas_poker::core::{
+// 写 `crate::contracts::texas_poker::core::...`。
+pub use crate::contracts::texas_poker::core::{
     betting, card, constants, events, state_machine, types, utils,
 };
-pub use crate::vm::contracts::texas_poker::{
+pub use crate::contracts::texas_poker::{
     TEXAS_POKER_GOVERNANCE_OBJECT_TYPE, TEXAS_POKER_HOT_STATE_SCHEMA_VERSION,
     TEXAS_POKER_METADATA_OBJECT_TYPE, TEXAS_POKER_RULES_OBJECT_TYPE, TEXAS_POKER_TABLE_OBJECT_TYPE,
     TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,

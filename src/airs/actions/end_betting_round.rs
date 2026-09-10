@@ -6,10 +6,10 @@
 //! Complete table semantics remain bound by the
 //! production verifier's canonical VM replay.
 
-use poker_l1::vm::contracts::texas_poker::constants::{
+use poker_l1::contracts::texas_poker::constants::{
     ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER, ROUND_SHOWDOWN, ROUND_TURN,
 };
-use poker_l1::vm::contracts::texas_poker::types::{NO_SEAT, TexasPokerTable};
+use poker_l1::contracts::texas_poker::types::{NO_SEAT, TexasPokerTable};
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
 

@@ -18,13 +18,13 @@
 
 use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
-use poker_l1::vm::contracts::dispatch::DispatchContext;
-use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch};
-use poker_l1::vm::contracts::texas_poker::dispatch::{
+use poker_l1::contracts::dispatch::DispatchContext;
+use poker_l1::contracts::texas_poker::dispatch::{self as texas_dispatch};
+use poker_l1::contracts::texas_poker::dispatch::{
     RaiseArgs, SeatIndexArgs, SubmitRevealTokensArgs,
 };
-use poker_l1::vm::contracts::texas_poker::runtime::caller_id::wallet_to_address;
-use poker_l1::vm::contracts::texas_poker::types::{CipherDeck, SeatMask, ShuffleState, TexasPokerTable};
+use poker_l1::contracts::texas_poker::runtime::caller_id::wallet_to_address;
+use poker_l1::contracts::texas_poker::types::{CipherDeck, SeatMask, ShuffleState, TexasPokerTable};
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 // 别名：源仓库里 ptx_protocol 是 poker_protocol 的重命名依赖；迁入工作区后
 // cargo 不允许同一路径依赖出现两次，这里用 use 别名等价替代。
@@ -145,7 +145,7 @@ impl TableMirror {
         tx_pk: Option<poker_l1::signature::TaggedPubkey>,
         pk_ownership_proof: Vec<u8>,
     ) -> Result<(), String> {
-        use poker_l1::vm::contracts::texas_poker::dispatch::JoinTableArgs;
+        use poker_l1::contracts::texas_poker::dispatch::JoinTableArgs;
         let args = borsh::to_vec(&JoinTableArgs {
             player,
             buy_in: buy_in_chips,
@@ -153,7 +153,7 @@ impl TableMirror {
             // P1-2 会话委托：核验过的会话交易公钥（None = 未登记哨兵，
             // 签名路径 fail-closed；mirror 注入路径不需要 tx 签名）。
             tx_pk: tx_pk.unwrap_or_else(
-                poker_l1::vm::contracts::texas_poker::types::unregistered_tx_pk,
+                poker_l1::contracts::texas_poker::types::unregistered_tx_pk,
             ),
             pk_ownership_proof,
         })
@@ -209,7 +209,7 @@ impl TableMirror {
         // 翻前结束（无人跟注的 uncontested 底池）不抽。VM 结算的硬性不变量
         // `uncontested pot must not be raked` 天然满足前半条；这里启用百分比
         // 模式使"到翻后的争夺底池"按 bps 抽水（有单手 cap）。
-        self.table.rake_mode = poker_l1::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+        self.table.rake_mode = poker_l1::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
         self.table.rake_bps = self.rake_bps;
         self.table.rake_cap = self.rake_cap;
 
@@ -242,7 +242,7 @@ impl TableMirror {
         // 规范化推进：武装 deadline + 驱动 ShuffleComplete → DealHole，
         // 与 dispatch 后的 canonical 归一化保持一致。
         let mut events = Vec::new();
-        poker_l1::vm::contracts::texas_poker::state_machine::normalize_until_blocked(
+        poker_l1::contracts::texas_poker::state_machine::normalize_until_blocked(
             &mut self.table,
             crate::relayer::util::now_ms(),
             &mut events,
@@ -267,9 +267,9 @@ impl TableMirror {
                 // showdown：验证目标是 ledger 保存的完整密文（与客户端生成
                 // 证明所用密文逐字节一致）；其他阶段用当前 deck 密文。
                 let ct = if self.table.reveal_phase()
-                    == poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN
+                    == poker_l1::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN
                 {
-                    let poker_l1::vm::contracts::texas_poker::types::RevealTarget::Hole {
+                    let poker_l1::contracts::texas_poker::types::RevealTarget::Hole {
                         seat_index: owner,
                         card_slot,
                     } = a.target
@@ -354,7 +354,7 @@ impl TableMirror {
         // pre-payout 表。派奖后 board 复位、pot 清零，无法再派生 settlement plan。
         if matches!(
             self.table.hand_phase,
-            poker_l1::vm::contracts::texas_poker::types::HandPhase::ShowdownDisplay { .. }
+            poker_l1::contracts::texas_poker::types::HandPhase::ShowdownDisplay { .. }
         ) {
             self.mark_pre_settlement();
         }
@@ -570,8 +570,8 @@ pub(crate) fn mirror_bootstrap(
 }
 
 /// 从座位提取玩家地址（settle_hand 参与者来源）。
-pub fn seat_player_addr(seat: &poker_l1::vm::contracts::texas_poker::types::Seat) -> Option<poker_l1::Address> {
-    use poker_l1::vm::contracts::texas_poker::types::Seat;
+pub fn seat_player_addr(seat: &poker_l1::contracts::texas_poker::types::Seat) -> Option<poker_l1::Address> {
+    use poker_l1::contracts::texas_poker::types::Seat;
     match seat {
         Seat::Playing { playing } => Some(playing.occupied.player),
         Seat::Waiting { occupied } => Some(occupied.player),

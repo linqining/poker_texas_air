@@ -28,7 +28,7 @@ use crate::state_root::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchCallPublicInput {
     /// Consensus/execution context supplied to the VM dispatch.
-    pub context: poker_l1::vm::contracts::dispatch::DispatchContext,
+    pub context: poker_l1::contracts::dispatch::DispatchContext,
     /// Exact routed Texas Poker selector.
     pub selector: [u8; 32],
     /// Exact Borsh argument bytes consumed by the VM.
@@ -105,8 +105,8 @@ impl TexasPublicInputs {
     ///
     /// 当 preimage 编码失败（字段序列化异常）时返回错误。
     pub fn from_tables(
-        pre_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
-        post_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        pre_table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
+        post_table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
         kind: MethodKind,
         table_id: u64,
         hand_id: u32,
@@ -249,7 +249,7 @@ impl TexasPublicInputs {
     /// authenticated by consensus anchors.
     pub fn bind_dispatch_call(
         &mut self,
-        context: poker_l1::vm::contracts::dispatch::DispatchContext,
+        context: poker_l1::contracts::dispatch::DispatchContext,
         selector: [u8; 32],
         raw_args: Vec<u8>,
     ) -> TexasAirResult<()> {

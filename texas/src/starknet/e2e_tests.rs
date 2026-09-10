@@ -130,7 +130,7 @@ fn play_full_hand_artifacts(
     // ---- 结算构建（#20 Phase 2 现行架构）：TableMirror 是 settle 时
     // 一次性重建器（非常驻 VM/第二本账）——从本手证明日志注入 deck，
     // 产出 ProveTask 链 + pre-payout 快照，供 dapv calldata 对拍 ----
-    use poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof;
+    use poker_l1::contracts::texas_poker::utils::create_pk_ownership_proof;
     let zpk1 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client1.pk)).unwrap();
     let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
     let proof1 = create_pk_ownership_proof(&sk1, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng))
@@ -226,7 +226,7 @@ fn play_full_hand_artifacts(
     );
 
     // 平分检测（须在派奖前：派奖后 board 复位无法 derive）
-    let plan_check = poker_l1::vm::contracts::texas_poker::settlement::derive_settlement_plan(&mirror.table)
+    let plan_check = poker_l1::contracts::texas_poker::settlement::derive_settlement_plan(&mirror.table)
         .map_err(|e| format!("plan: {e}"))?;
     let all_zero_delta = mirror.table.seats.iter().enumerate().all(|(i, s)| {
         plan_check.awards.get(i).copied().unwrap_or(0) as i128 == s.total_bet() as i128
@@ -346,7 +346,7 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
     }
     let game_deck: Vec<ZgCt> = game.deck_encrypted.clone();
 
-    use poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof;
+    use poker_l1::contracts::texas_poker::utils::create_pk_ownership_proof;
     let zpk1 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client1.pk)).unwrap();
     let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
     let proof1 = create_pk_ownership_proof(&sk1, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng)).unwrap();
@@ -1015,17 +1015,17 @@ fn dual_placeholder() -> String {
 
 mod runtime_authority_e2e {
     use super::*;
-    use poker_l1::vm::contracts::texas_poker::runtime::caller_id;
-    use poker_l1::vm::contracts::texas_poker::runtime::dispatch::{selectors, tx_message_hash};
-    use poker_l1::vm::contracts::texas_poker::runtime::table_runtime::{
+    use poker_l1::contracts::texas_poker::runtime::caller_id;
+    use poker_l1::contracts::texas_poker::runtime::dispatch::{selectors, tx_message_hash};
+    use poker_l1::contracts::texas_poker::runtime::table_runtime::{
         CallerIdentity, Submission, TableRuntime,
     };
-    use poker_l1::vm::contracts::texas_poker::runtime::dispatch::{
+    use poker_l1::contracts::texas_poker::runtime::dispatch::{
         CreateTableArgs, JoinTableArgs, SeatIndexArgs, SubmitRevealTokensArgs,
     };
-    use poker_l1::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
-    use poker_l1::vm::contracts::texas_poker::state_machine::normalize_until_blocked;
-    use poker_l1::vm::contracts::texas_poker::types::{
+    use poker_l1::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+    use poker_l1::contracts::texas_poker::state_machine::normalize_until_blocked;
+    use poker_l1::contracts::texas_poker::types::{
         CipherDeck, SeatMask, ShuffleState,
     };
     use poker_l1::object_model::ObjectID;
@@ -1098,11 +1098,11 @@ mod runtime_authority_e2e {
     /// VM 当前 reveal 窗口中该座位待提交的密文（canonical 顺序）——
     /// 与 TableMirror::pending_reveal_ciphertexts 同语义（直接在 VM 表上计算）。
     fn pending_ciphertexts(
-        table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
         seat_index: u8,
     ) -> Result<Vec<ZgCt>, String> {
-        use poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN;
-        use poker_l1::vm::contracts::texas_poker::types::RevealTarget;
+        use poker_l1::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN;
+        use poker_l1::contracts::texas_poker::types::RevealTarget;
         let Some(state) = table.reveal_token_state() else {
             return Err("reveal phase is NONE".into());
         };
@@ -1185,7 +1185,7 @@ mod runtime_authority_e2e {
         // ---- 链运行时：开桌 + host 背书入座（P1-2 修复：签名通道不接受
         //     join——未入座无验签锚；join 由服务端完成 vault 登记核验后
         //     经 submit_unsigned 放行，此处直接模拟该路径）----
-        let table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
+        let table = poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             ObjectID::new([0x5A; 20], 77),
             "rt-e2e".to_string(),
             creator.address,
@@ -1223,7 +1223,7 @@ mod runtime_authority_e2e {
             ))
             .expect("pk bridge"),
             tx_pk: w1.session_pk.clone(),
-            pk_ownership_proof: poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof(
+            pk_ownership_proof: poker_l1::contracts::texas_poker::utils::create_pk_ownership_proof(
                 &sk1,
                 &<DefaultCurve as Curve>::Scalar::random(&mut OsRng),
             )
@@ -1255,7 +1255,7 @@ mod runtime_authority_e2e {
             ))
             .expect("pk bridge"),
             tx_pk: w2.session_pk.clone(),
-            pk_ownership_proof: poker_l1::vm::contracts::texas_poker::utils::create_pk_ownership_proof(
+            pk_ownership_proof: poker_l1::contracts::texas_poker::utils::create_pk_ownership_proof(
                 &sk2,
                 &<DefaultCurve as Curve>::Scalar::random(&mut OsRng),
             )
@@ -1502,7 +1502,7 @@ mod runtime_authority_e2e {
         );
 
         // ---- 派奖前：结算计划派生 + 守恒 ----
-        let plan = poker_l1::vm::contracts::texas_poker::settlement::derive_settlement_plan(&rt.table)
+        let plan = poker_l1::contracts::texas_poker::settlement::derive_settlement_plan(&rt.table)
             .expect("settlement plan");
         let gross: u64 = rt.table.seats.iter().map(|s| s.total_bet()).sum();
         let awards: u64 = plan.awards.iter().sum();

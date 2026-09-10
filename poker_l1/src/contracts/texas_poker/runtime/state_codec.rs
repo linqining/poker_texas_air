@@ -431,7 +431,7 @@ pub fn decode_table_state(bytes: &[u8]) -> PokerL1Result<TexasPokerTable> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::contracts::texas_poker::constants::DEFAULT_TIME_BANK_MS;
+    use crate::contracts::texas_poker::constants::DEFAULT_TIME_BANK_MS;
 
     #[test]
     fn current_resolved_and_hot_roundtrip() {

@@ -12,7 +12,7 @@
 //! `WasmTxSession` 同源）；本文件保留路由/验签外壳与 poker_l1 错误类型。
 //!
 //! 注意：本方案配套的调用方身份是**公开可派生**的（见
-//! `vm::contracts::texas_poker::runtime::caller_id`）——签名是完整性
+//! `contracts::texas_poker::runtime::caller_id`）——签名是完整性
 //! 层（消息/nonce 承诺 + 重放锚），不是钱包持有证明。
 
 use poker_protocol::crypto::curve::{CurvePoint, CurveScalar};

@@ -4270,7 +4270,7 @@ pub fn apply_leave_table(
 mod tests {
     use super::*;
     use crate::object_model::ObjectID;
-    use crate::vm::contracts::texas_poker::types::EMPTY_PLAYER;
+    use crate::contracts::texas_poker::types::EMPTY_PLAYER;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 

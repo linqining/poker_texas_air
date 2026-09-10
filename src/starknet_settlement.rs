@@ -31,8 +31,8 @@
 //! single felt before submitting a `settle_hand` call; the Cairo contract
 //! validates equality against the registered halves in storage.
 
-use poker_l1::vm::contracts::texas_poker::settlement::SettlementPlan;
-use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, Seat, TexasPokerTable};
+use poker_l1::contracts::texas_poker::settlement::SettlementPlan;
+use poker_l1::contracts::texas_poker::types::{EMPTY_PLAYER, Seat, TexasPokerTable};
 use starknet_crypto::Felt;
 
 use crate::error::{TexasAirError, TexasAirResult};
@@ -667,13 +667,13 @@ mod tests {
     fn action_log_sample() -> Felt {
         Felt::from(0xA11CE_u64)
     }
-    use poker_l1::vm::contracts::texas_poker::utils::g1_generator as g1_gen;
+    use poker_l1::contracts::texas_poker::utils::g1_generator as g1_gen;
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::card::{BoardCards, HoleCards};
-    use poker_l1::vm::contracts::texas_poker::settlement::{
+    use poker_l1::contracts::texas_poker::card::{BoardCards, HoleCards};
+    use poker_l1::contracts::texas_poker::settlement::{
         SettlementPlan, SettlementRunoutSchedule,
     };
-    use poker_l1::vm::contracts::texas_poker::types::{
+    use poker_l1::contracts::texas_poker::types::{
         DeckState, HandPhase, OccupiedSeat, PlayingSeat, PlayingSeatStatus, TableRules,
     };
     use poker_protocol::crypto::types::ECPoint;

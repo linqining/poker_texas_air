@@ -47,7 +47,7 @@ pub struct MethodBatchCommandV2 {
     /// Canonical legacy command tag used only at the dispatch boundary.
     pub method_kind: MethodKind,
     /// Authenticated VM execution context.
-    pub context: poker_l1::vm::contracts::dispatch::DispatchContext,
+    pub context: poker_l1::contracts::dispatch::DispatchContext,
     /// Sole canonical command payload.
     pub raw_args: Vec<u8>,
 }
@@ -60,9 +60,9 @@ pub struct MethodBatchCommandV2 {
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct MethodBatchV2 {
     version: u8,
-    initial_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    initial_table: poker_l1::contracts::texas_poker::types::TexasPokerTable,
     commands: Vec<MethodBatchCommandV2>,
-    final_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    final_table: poker_l1::contracts::texas_poker::types::TexasPokerTable,
 }
 
 /// Durable reference from one tagged method row to its method and Stage batch scope.
@@ -161,12 +161,12 @@ pub struct MethodPayloadV2 {
 /// receipt cannot be detached from the VM call replayed by the host. The digest
 /// does not by itself authenticate that the task came from a consensus block.
 pub fn dispatch_call_digest(
-    context: &poker_l1::vm::contracts::dispatch::DispatchContext,
+    context: &poker_l1::contracts::dispatch::DispatchContext,
     selector: &[u8; 32],
     canonical_args: &[u8],
 ) -> crate::error::TexasAirResult<[u8; 32]> {
     let method_tag =
-        poker_l1::vm::contracts::texas_poker::dispatch::CanonicalCommand::from_archive_selector(
+        poker_l1::contracts::texas_poker::dispatch::CanonicalCommand::from_archive_selector(
             selector,
         )
         .ok_or_else(|| {
@@ -193,12 +193,12 @@ pub fn dispatch_call_digest(
 /// Consensus anchors authenticate external transaction bytes, while proof tasks persist the
 /// slimmer actor-less payload. This is the only conversion path between those representations.
 pub fn dispatch_call_digest_from_legacy_args(
-    context: &poker_l1::vm::contracts::dispatch::DispatchContext,
+    context: &poker_l1::contracts::dispatch::DispatchContext,
     selector: &[u8; 32],
     legacy_args: &[u8],
 ) -> crate::error::TexasAirResult<[u8; 32]> {
     let (_, canonical_args) =
-        poker_l1::vm::contracts::texas_poker::dispatch::canonical_command_parts(
+        poker_l1::contracts::texas_poker::dispatch::canonical_command_parts(
             selector,
             legacy_args,
         )
@@ -221,15 +221,15 @@ pub struct ProveTask {
     ///
     /// Orchestrator 会据此重放权限和业务逻辑，但不会独立证明该上下文已被交易层或
     /// 共识层认证；生产调用方必须通过外部 block/receipt 锚提供来源保证。
-    pub context: poker_l1::vm::contracts::dispatch::DispatchContext,
+    pub context: poker_l1::contracts::dispatch::DispatchContext,
     /// Canonical Borsh command payload selected by `method_kind`.
     ///
     /// Selector and typed [`MethodInput`] are derived views and are deliberately not stored.
     pub raw_args: Vec<u8>,
     /// 调用前表台快照（算 pre_state_root + 派生 pre 字段）。
-    pub pre_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    pub pre_table: poker_l1::contracts::texas_poker::types::TexasPokerTable,
     /// 调用后表台快照（算 post_state_root + 派生 post 字段）。
-    pub post_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    pub post_table: poker_l1::contracts::texas_poker::types::TexasPokerTable,
     /// 表台 ID（公开输入，防跨表台聚合攻击）。
     pub table_id: u64,
     /// 手牌序号（同一 table 内递增）。
@@ -243,15 +243,15 @@ impl ProveTask {
     #[must_use]
     pub fn new(
         method_kind: MethodKind,
-        context: poker_l1::vm::contracts::dispatch::DispatchContext,
+        context: poker_l1::contracts::dispatch::DispatchContext,
         raw_args: Vec<u8>,
-        pre_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
-        post_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        pre_table: poker_l1::contracts::texas_poker::types::TexasPokerTable,
+        post_table: poker_l1::contracts::texas_poker::types::TexasPokerTable,
         table_id: u64,
         hand_id: u32,
         call_seq: u32,
     ) -> Self {
-        poker_l1::vm::contracts::texas_poker::dispatch::derive_authenticated_method_input(
+        poker_l1::contracts::texas_poker::dispatch::derive_authenticated_method_input(
             method_kind as u8,
             &raw_args,
             &context,
@@ -278,7 +278,7 @@ impl ProveTask {
 
     /// Decode the transient typed input from the only persisted command payload.
     pub fn method_input(&self) -> crate::error::TexasAirResult<MethodInput> {
-        poker_l1::vm::contracts::texas_poker::dispatch::derive_authenticated_method_input(
+        poker_l1::contracts::texas_poker::dispatch::derive_authenticated_method_input(
             self.method_kind as u8,
             &self.raw_args,
             &self.context,
@@ -296,7 +296,7 @@ impl ProveTask {
     /// Proof consumers must use this view when decoding full crypto statements. `raw_args`
     /// deliberately omits actor fields and is only the persisted digest-bound representation.
     pub fn replay_args(&self) -> crate::error::TexasAirResult<Vec<u8>> {
-        poker_l1::vm::contracts::texas_poker::dispatch::replay_dispatch_args(
+        poker_l1::contracts::texas_poker::dispatch::replay_dispatch_args(
             self.method_kind as u8,
             &self.raw_args,
             &self.context,
@@ -476,7 +476,7 @@ impl MethodBatchV2 {
         let mut tasks: Vec<ProveTask> = Vec::with_capacity(self.commands.len());
         for (index, command) in self.commands.iter().enumerate() {
             let selector = command.method_kind.selector();
-            let replay_args = poker_l1::vm::contracts::texas_poker::dispatch::replay_dispatch_args(
+            let replay_args = poker_l1::contracts::texas_poker::dispatch::replay_dispatch_args(
                 command.method_kind as u8,
                 &command.raw_args,
                 &command.context,
@@ -487,7 +487,7 @@ impl MethodBatchV2 {
                     "method batch command {index} canonical replay payload failed: {error}"
                 ))
             })?;
-            let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
+            let result = poker_l1::contracts::texas_poker::dispatch::dispatch(
                 &command.context,
                 &mut table,
                 &selector,
@@ -557,7 +557,7 @@ impl MethodBatchV2 {
         hasher.update(&crate::state_root::compute_state_root(&self.final_table)?.bytes());
         for task in tasks {
             let command =
-                poker_l1::vm::contracts::texas_poker::dispatch::CanonicalCommand::from_u8(
+                poker_l1::contracts::texas_poker::dispatch::CanonicalCommand::from_u8(
                     task.method_kind as u8,
                 )
                 .ok_or_else(|| {
@@ -582,7 +582,7 @@ impl MethodBatchV2 {
     #[must_use]
     pub const fn initial_table(
         &self,
-    ) -> &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable {
+    ) -> &poker_l1::contracts::texas_poker::types::TexasPokerTable {
         &self.initial_table
     }
 
@@ -590,7 +590,7 @@ impl MethodBatchV2 {
     #[must_use]
     pub const fn final_table(
         &self,
-    ) -> &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable {
+    ) -> &poker_l1::contracts::texas_poker::types::TexasPokerTable {
         &self.final_table
     }
 
@@ -625,7 +625,7 @@ impl MethodPayloadV2 {
         crypto_binding: Option<&crate::precompile_binding::PrecompileCallBinding>,
     ) -> crate::error::TexasAirResult<Self> {
         batch.validate()?;
-        let command = poker_l1::vm::contracts::texas_poker::dispatch::CanonicalCommand::from_u8(
+        let command = poker_l1::contracts::texas_poker::dispatch::CanonicalCommand::from_u8(
             task.method_kind as u8,
         )
         .ok_or_else(|| {
@@ -809,20 +809,20 @@ impl BorshDeserialize for ProveTask {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
         let method_kind = MethodKind::deserialize_reader(reader)?;
         let context =
-            poker_l1::vm::contracts::dispatch::DispatchContext::deserialize_reader(reader)?;
+            poker_l1::contracts::dispatch::DispatchContext::deserialize_reader(reader)?;
         let raw_args = Vec::<u8>::deserialize_reader(reader)?;
         let pre_table =
-            poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::deserialize_reader(
+            poker_l1::contracts::texas_poker::types::TexasPokerTable::deserialize_reader(
                 reader,
             )?;
         let post_table =
-            poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::deserialize_reader(
+            poker_l1::contracts::texas_poker::types::TexasPokerTable::deserialize_reader(
                 reader,
             )?;
         let table_id = u64::deserialize_reader(reader)?;
         let hand_id = u32::deserialize_reader(reader)?;
         let call_seq = u32::deserialize_reader(reader)?;
-        poker_l1::vm::contracts::texas_poker::dispatch::derive_authenticated_method_input(
+        poker_l1::contracts::texas_poker::dispatch::derive_authenticated_method_input(
             method_kind as u8,
             &raw_args,
             &context,
@@ -851,7 +851,7 @@ impl BorshDeserialize for ProveTask {
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct DispatchOutput {
     /// 事件日志（40 种 TexasPokerEvent）。
-    pub events: Vec<poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent>,
+    pub events: Vec<poker_l1::contracts::texas_poker::events::TexasPokerEvent>,
     /// 证明任务（None 表示此次 dispatch 无需证明，如 tick 无状态变更时）。
     pub prove_task: Option<ProveTask>,
 }
@@ -860,7 +860,7 @@ impl DispatchOutput {
     /// 仅含 events（无证明任务）的便捷构造。
     #[must_use]
     pub fn events_only(
-        events: Vec<poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent>,
+        events: Vec<poker_l1::contracts::texas_poker::events::TexasPokerEvent>,
     ) -> Self {
         Self {
             events,
@@ -871,7 +871,7 @@ impl DispatchOutput {
     /// 含 events + 证明任务的构造。
     #[must_use]
     pub fn with_task(
-        events: Vec<poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent>,
+        events: Vec<poker_l1::contracts::texas_poker::events::TexasPokerEvent>,
         prove_task: ProveTask,
     ) -> Self {
         Self {
@@ -886,12 +886,12 @@ mod tests {
     use super::*;
     use crate::test_support as seat_fixture;
     use poker_l1::signature::TaggedPubkey;
-    use poker_l1::vm::contracts::dispatch::DispatchContext;
-    use poker_l1::vm::contracts::texas_poker::dispatch::CreateTableArgs;
+    use poker_l1::contracts::dispatch::DispatchContext;
+    use poker_l1::contracts::texas_poker::dispatch::CreateTableArgs;
 
-    fn dummy_table(name: &str) -> poker_l1::vm::contracts::texas_poker::types::TexasPokerTable {
+    fn dummy_table(name: &str) -> poker_l1::contracts::texas_poker::types::TexasPokerTable {
         use poker_l1::object_model::ObjectID;
-        let mut table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
+        let mut table = poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             ObjectID::new([0xFF; 20], 0),
             name.into(),
             [0xAA; 20],
@@ -900,7 +900,7 @@ mod tests {
             100,
         );
         seat_fixture::set_player(&mut table.seats[2], [0xAA; 20]);
-        table.seats[2].set_status(poker_l1::vm::contracts::texas_poker::types::SeatStatus::Active);
+        table.seats[2].set_status(poker_l1::contracts::texas_poker::types::SeatStatus::Active);
         table
     }
 
@@ -918,7 +918,7 @@ mod tests {
     }
 
     fn canonical_create_task() -> ProveTask {
-        use poker_l1::vm::contracts::texas_poker::dispatch::{dispatch, selectors};
+        use poker_l1::contracts::texas_poker::dispatch::{dispatch, selectors};
 
         let context = dummy_context();
         let mut table = dummy_table("uninitialized");
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[test]
     fn canonical_deadline_payload_is_empty_and_timestamp_payloads_fail_closed() {
-        use poker_l1::vm::contracts::texas_poker::dispatch::{canonical_command_parts, selectors};
+        use poker_l1::contracts::texas_poker::dispatch::{canonical_command_parts, selectors};
 
         let context = dummy_context();
         let (_, canonical) = canonical_command_parts(&selectors::advance_deadline(), &[]).unwrap();

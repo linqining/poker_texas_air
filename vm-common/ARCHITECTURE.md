@@ -152,7 +152,7 @@ Phase 1–5 全部在 Option B 框架下完成，**不修改任何现有 executo
 
 ### 4.3 PrecompileCatalog 是只读目录，不参与运行时分派
 
-`PrecompileCatalog::default_catalog()` 在编译期硬编码 28 个条目（4 哈希 + 3 签名 + 3 配对 + 17 业务 + 1 ZK），反映 `poker_l1/src/vm/contracts/` 与 `poker_zkvm/src/precompiles/` 的实际实现。它**不**参与运行时合约分派（那是 `PrecompileRegistry` 的职责），仅作为开发者查询接口与未来工具链（如 SDK、文档生成器）的数据源。
+`PrecompileCatalog::default_catalog()` 在编译期硬编码 28 个条目（4 哈希 + 3 签名 + 3 配对 + 17 业务 + 1 ZK），反映 `poker_l1/src/contracts/` 与 `poker_zkvm/src/precompiles/` 的实际实现。它**不**参与运行时合约分派（那是 `PrecompileRegistry` 的职责），仅作为开发者查询接口与未来工具链（如 SDK、文档生成器）的数据源。
 
 ### 4.4 ID 生成使用 SipHash-1-0-3 + 0xFF 前缀
 
@@ -200,7 +200,7 @@ Phase 1–5 全部在 Option B 框架下完成，**不修改任何现有 executo
 ### 6.3 PrecompileCatalog 自动化校验
 
 当前 28 个条目手动维护，可能与实际实现漂移。未来可：
-- 在 CI 中增加测试，遍历 `poker_l1/src/vm/contracts/` 与 `poker_zkvm/src/precompiles/` 目录，校验 catalog 条目与实际文件一致。
+- 在 CI 中增加测试，遍历 `poker_l1/src/contracts/` 与 `poker_zkvm/src/precompiles/` 目录，校验 catalog 条目与实际文件一致。
 - 或用 procedural macro 从合约注册注解自动生成 catalog。
 
 ### 6.4 CryptoProvider 完整实现

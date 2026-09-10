@@ -4,7 +4,7 @@
 //! `SettlementPlanCommitted` event plus per-seat awards. STWO binds this compact projection; it
 //! does not re-run the BLS12-381 reveal proof, hand evaluator, or side-pot planner in AIR.
 
-use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
+use poker_l1::contracts::texas_poker::events::TexasPokerEvent;
 
 use crate::error::{TexasAirError, TexasAirResult};
 

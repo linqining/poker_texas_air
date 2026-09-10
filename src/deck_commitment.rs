@@ -7,7 +7,7 @@
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::to_vec;
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::contracts::texas_poker::types::TexasPokerTable;
 
 const DOMAIN: &[u8] = b"zchain.texas_poker.deck_ciphertexts.v1";
 
@@ -38,9 +38,9 @@ pub fn deck_commitment(table: &TexasPokerTable) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use poker_l1::vm::contracts::texas_poker::utils::{g1_generator as g1_gen, g1_identity as g1_id, G1Projective};
+    use poker_l1::contracts::texas_poker::utils::{g1_generator as g1_gen, g1_identity as g1_id, G1Projective};
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::types::{ElGamalCiphertext, TexasPokerTable};
+    use poker_l1::contracts::texas_poker::types::{ElGamalCiphertext, TexasPokerTable};
 
     fn table_with_ciphertexts(count: usize, second: G1Projective) -> TexasPokerTable {
         let mut table = TexasPokerTable::new(

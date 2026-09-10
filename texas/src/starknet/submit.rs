@@ -8,10 +8,10 @@
 //! dev 模式（未配置 settlement 合约/操作员）只生成 calldata 并记日志，
 //! 保证无链环境可以跑完整流程（证明生成照常执行）。
 
-use poker_l1::vm::contracts::texas_poker::settlement::{
+use poker_l1::contracts::texas_poker::settlement::{
     derive_fold_win_plan, derive_settlement_plan, SettlementPlan,
 };
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::contracts::texas_poker::types::TexasPokerTable;
 use poker_texas_air::outer_aggregate::{prove_outer_aggregate, verify_outer_aggregate, VerifiedOuterAggregate};
 use poker_texas_air::orchestrator::Orchestrator;
 use poker_texas_air::starknet_settlement::{
@@ -181,7 +181,7 @@ pub fn settle_hand(
     //     e2e 对拍断言）；这里 felt → hex 后交由权威实现截断。
     let remap_player = |p: Felt| -> Felt {
         let truncated: [u8; 20] =
-            poker_l1::vm::contracts::texas_poker::runtime::caller_id::wallet_to_address(
+            poker_l1::contracts::texas_poker::runtime::caller_id::wallet_to_address(
                 &format!("{p:#x}"),
             )
             .expect("canonical felt hex always truncates to 20 bytes");
@@ -394,7 +394,7 @@ pub fn i128_to_felt(value: i128) -> Felt {
 pub(crate) fn apply_pending_final_fold(snap: &TexasPokerTable, seat: u8) -> TexasPokerTable {
     let mut table = snap.clone();
     if let Some(target) = table.seats.get_mut(usize::from(seat)) {
-        target.set_status(poker_l1::vm::contracts::texas_poker::types::SeatStatus::Folded);
+        target.set_status(poker_l1::contracts::texas_poker::types::SeatStatus::Folded);
     }
     // 对齐 VM end_without_showdown 的第一步：把本轮在途 bet（含翻前盲注）
     // 收进 pot。快照打在终局 fold 之前，盲注/当街下注尚未收集——
@@ -421,8 +421,8 @@ mod tests {
     #[test]
     fn pending_final_fold_yields_single_unfolded() {
         use poker_l1::object_model::ObjectID;
-        use poker_l1::vm::contracts::texas_poker::card::Card;
-        use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
+        use poker_l1::contracts::texas_poker::card::Card;
+        use poker_l1::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xF2; 20], 0),
             "fold-snapshot-test".into(),
@@ -461,10 +461,10 @@ mod tests {
             .try_into()
             .unwrap();
         folded.rules.rake_mode =
-            poker_l1::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+            poker_l1::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
         folded.rules.rake_bps = 500;
         folded.rules.rake_cap = 1_000;
-        let plan = poker_l1::vm::contracts::texas_poker::settlement::derive_fold_win_plan(&folded)
+        let plan = poker_l1::contracts::texas_poker::settlement::derive_fold_win_plan(&folded)
             .expect("fold plan derives after final fold applied");
         assert_eq!(plan.rake, 10, "400 - 200 uncalled = 200 contested * 5%");
         assert_eq!(plan.awards[0], 390);
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn pending_final_fold_collects_preflop_blinds_into_pot() {
         use poker_l1::object_model::ObjectID;
-        use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
+        use poker_l1::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xF3; 20], 0),
             "preflop-fold-snapshot-test".into(),
@@ -502,7 +502,7 @@ mod tests {
         assert!(folded.seats.iter().all(|s| s.bet() == 0), "bets drained");
         let sum: u64 = folded.seats.iter().map(|s| s.total_bet()).sum();
         assert_eq!(sum, folded.pot, "Σ total_bet == pot after collection");
-        let plan = poker_l1::vm::contracts::texas_poker::settlement::derive_fold_win_plan(&folded)
+        let plan = poker_l1::contracts::texas_poker::settlement::derive_fold_win_plan(&folded)
             .expect("preflop fold-win plan must derive (no board → no rake)");
         assert_eq!(plan.rake, 0, "no flop, no drop");
         assert_eq!(plan.awards[0], 200);

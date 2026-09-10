@@ -2606,7 +2606,7 @@ mod bg_fold_tests {
 #[cfg(test)]
 mod settle_mode_tests {
     use super::*;
-    use poker_l1::vm::contracts::texas_poker::settlement::{
+    use poker_l1::contracts::texas_poker::settlement::{
         SettlementPlan, SettlementRunoutSchedule, SETTLEMENT_SEATS,
     };
 

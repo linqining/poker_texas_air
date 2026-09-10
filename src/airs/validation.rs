@@ -6,8 +6,8 @@
 //! Poker dispatch, compares the complete post table and exposes the canonical
 //! task used by method-specific row reconstruction.
 
-use poker_l1::vm::contracts::texas_poker::dispatch::{dispatch, replay_dispatch_args};
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::contracts::texas_poker::dispatch::{dispatch, replay_dispatch_args};
+use poker_l1::contracts::texas_poker::types::TexasPokerTable;
 use stwo::core::fields::m31::M31;
 
 use crate::error::{TexasAirError, TexasAirResult};
@@ -29,7 +29,7 @@ pub(crate) struct CanonicalDispatch {
     /// One transient decode of the canonical command payload for stage validators.
     pub(crate) method_input: MethodInput,
     /// Events emitted by the canonical native replay.
-    pub(crate) events: Vec<poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent>,
+    pub(crate) events: Vec<poker_l1::contracts::texas_poker::events::TexasPokerEvent>,
 }
 
 /// Replay an exact dispatch call and bind every verifier-controlled task field.

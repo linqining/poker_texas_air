@@ -832,7 +832,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                     "submit_shuffle_v2 task has the wrong MethodInput variant".into(),
                 ));
             };
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
+            let args: poker_l1::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
                 borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit_shuffle_v2 raw args borsh: {error}"
@@ -926,7 +926,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                     "submit_reconstruct_deck task has the wrong MethodInput variant".into(),
                 ));
             };
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
+            let args: poker_l1::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
                 borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit_reconstruct_deck raw args borsh: {error}"
@@ -1004,7 +1004,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                     "fold_with_proof task has the wrong MethodInput variant".into(),
                 ));
             };
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::FoldWithProofArgs =
+            let args: poker_l1::contracts::texas_poker::dispatch::FoldWithProofArgs =
                 borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "fold_with_proof raw args borsh: {error}"
@@ -1099,7 +1099,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                     "submit_player_reveal_tokens task has the wrong MethodInput variant".into(),
                 ));
             };
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
+            let args: poker_l1::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
                 borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit_player_reveal_tokens raw args borsh: {error}"

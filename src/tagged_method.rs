@@ -854,7 +854,7 @@ fn verify_crypto_receipt(
     let replay_args = task.replay_args()?;
     let binding = match task.method_kind {
         MethodKind::FoldWithProof => {
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::FoldWithProofArgs =
+            let args: poker_l1::contracts::texas_poker::dispatch::FoldWithProofArgs =
                 borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "fold_with_proof tagged receipt args: {error}"
@@ -871,7 +871,7 @@ fn verify_crypto_receipt(
             PrecompileCallBinding::verify_leave_dleq(&request)?
         }
         MethodKind::SubmitShuffleV2 => {
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
+            let args: poker_l1::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
                 borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit_shuffle_v2 tagged receipt args: {error}"
@@ -903,7 +903,7 @@ fn verify_crypto_receipt(
             PrecompileCallBinding::verify_shuffle(&request)?
         }
         MethodKind::SubmitPlayerRevealTokens => {
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
+            let args: poker_l1::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
                 borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit reveal tagged receipt args: {error}"
@@ -914,7 +914,7 @@ fn verify_crypto_receipt(
             PrecompileCallBinding::verify_reveal_tokens(&request)?
         }
         MethodKind::SubmitReconstructDeck => {
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
+            let args: poker_l1::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
                 borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit reconstruct tagged receipt args: {error}"

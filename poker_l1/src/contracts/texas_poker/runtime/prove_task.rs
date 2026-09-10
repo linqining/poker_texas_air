@@ -34,7 +34,7 @@ use super::events::TexasPokerEvent;
 use super::types::TexasPokerTable;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
-use crate::vm::contracts::dispatch::DispatchContext;
+use crate::contracts::dispatch::DispatchContext;
 
 /// 单次 method 调用的证明任务（L1 侧定义）。
 ///

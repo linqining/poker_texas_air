@@ -1,10 +1,10 @@
 //! Canonical helpers for constructing tagged-seat test fixtures.
 
 use poker_l1::signature::{SignatureScheme, TaggedPubkey, CURRENT_VERSION};
-use poker_l1::vm::contracts::texas_poker::utils::g1_generator as g1_gen;
+use poker_l1::contracts::texas_poker::utils::g1_generator as g1_gen;
 use poker_l1::Address;
-use poker_l1::vm::contracts::texas_poker::card::HoleCards;
-use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, PlayingSeat, Seat, SeatStatus};
+use poker_l1::contracts::texas_poker::card::HoleCards;
+use poker_l1::contracts::texas_poker::types::{EMPTY_PLAYER, PlayingSeat, Seat, SeatStatus};
 use poker_protocol::crypto::curve::CurvePoint;
 use poker_protocol::crypto::types::ECPoint;
 

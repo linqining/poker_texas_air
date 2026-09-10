@@ -14,12 +14,12 @@
 //!   gross pot, and uncontested layers carry no rake.
 
 use crate::object_model::ObjectID;
-use crate::vm::contracts::texas_poker::card::Card;
-use crate::vm::contracts::texas_poker::settlement::{
+use crate::contracts::texas_poker::card::Card;
+use crate::contracts::texas_poker::settlement::{
     SETTLEMENT_SEATS, SettlementBoards, SettlementPlan, derive_settlement_plan_for_boards,
 };
-use crate::vm::contracts::texas_poker::side_pot::calculate_side_pots;
-use crate::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
+use crate::contracts::texas_poker::side_pot::calculate_side_pots;
+use crate::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
 
 /// A locked showdown scene: the table snapshot plus its boards.
 pub struct SettlementScene {
@@ -235,7 +235,7 @@ pub fn raked_odd_chip_split() -> SettlementScene {
     );
     table.pot = 100;
     table.chip_pool = 5_000;
-    table.rules.rake_mode = crate::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+    table.rules.rake_mode = crate::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
     table.rules.rake_bps = 500;
     table.rules.rake_cap = 1_000;
     table.community_cards = vec![
@@ -260,9 +260,9 @@ pub fn raked_odd_chip_split() -> SettlementScene {
 pub mod fold_win {
     use super::{Card, SettlementBoards, SettlementScene, SeatStatus, base_table, seat};
 
-    fn raked_rules(table: &mut crate::vm::contracts::texas_poker::types::TexasPokerTable) {
+    fn raked_rules(table: &mut crate::contracts::texas_poker::types::TexasPokerTable) {
         table.rules.rake_mode =
-            crate::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+            crate::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
         table.rules.rake_bps = 500;
         table.rules.rake_cap = 1_000;
     }
@@ -455,7 +455,7 @@ pub fn run_it_twice_split_winners() -> SettlementScene {
     ];
     SettlementScene {
         boards: SettlementBoards::twice(
-            crate::vm::contracts::texas_poker::types::RitStartStreet::Flop,
+            crate::contracts::texas_poker::types::RitStartStreet::Flop,
             board1,
             board2,
         ),
@@ -469,8 +469,8 @@ pub fn side_pot_layers(
     folded: &[bool],
     all_in: &[bool],
 ) -> Result<
-    crate::vm::contracts::texas_poker::side_pot::SidePotResult,
-    crate::vm::contracts::texas_poker::side_pot::SidePotError,
+    crate::contracts::texas_poker::side_pot::SidePotResult,
+    crate::contracts::texas_poker::side_pot::SidePotError,
 > {
     calculate_side_pots(bets, folded, all_in)
 }
@@ -478,7 +478,7 @@ pub fn side_pot_layers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::contracts::texas_poker::settlement::derive_fold_win_plan;
+    use crate::contracts::texas_poker::settlement::derive_fold_win_plan;
 
     #[test]
     fn three_seat_ladder_semantics_are_locked() {

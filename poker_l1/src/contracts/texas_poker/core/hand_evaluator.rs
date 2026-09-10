@@ -306,7 +306,7 @@ pub fn find_winners(hands: &[(u8, Vec<Card>)]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::contracts::texas_poker::card::*;
+    use crate::contracts::texas_poker::card::*;
 
     fn card(suit: u8, rank: u8) -> Card {
         Card::new(suit, rank)

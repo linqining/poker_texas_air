@@ -48,7 +48,7 @@ use super::prove_task::{L1DispatchOutput, L1ProveTask};
 use super::types::TexasPokerTable;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
-use crate::vm::contracts::dispatch::DispatchContext;
+use crate::contracts::dispatch::DispatchContext;
 use crate::{Address, ChainId};
 
 /// 一次提交的调用者身份——全部字段由钱包地址确定性派生。
@@ -395,7 +395,7 @@ mod tests {
     fn signed_submission_anchors_to_seat_registered_key() {
         use crate::object_model::ObjectID;
         use crate::signature::stark_scheme;
-        use crate::vm::contracts::texas_poker::runtime::dispatch::{
+        use crate::contracts::texas_poker::runtime::dispatch::{
             selectors, tx_message_hash, CreateTableArgs, JoinTableArgs,
         };
         use poker_protocol::crypto::curve::{CurvePoint, CurveScalar};
@@ -616,7 +616,7 @@ mod tests {
 
         // 签名一条可真实应用的命令（leave_table，座位 1）。
         let mut signed_apply = |wallet: &str, sk, seat: u8, nonce: u64| -> PokerL1Result<()> {
-            let args = borsh::to_vec(&crate::vm::contracts::texas_poker::dispatch::LeaveTableArgs {
+            let args = borsh::to_vec(&crate::contracts::texas_poker::dispatch::LeaveTableArgs {
                 seat_index: seat,
             })
             .unwrap();

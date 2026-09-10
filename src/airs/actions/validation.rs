@@ -6,10 +6,10 @@
 //! module decodes the canonical table preimages, replays the native VM action,
 //! and reconstructs the exact AIR row before Stwo verification.
 
-use poker_l1::vm::contracts::texas_poker::constants::FOLD_REASON_FORCE_ADMIN;
-use poker_l1::vm::contracts::texas_poker::dispatch::SeatIndexArgs;
-use poker_l1::vm::contracts::texas_poker::state_machine;
-use poker_l1::vm::contracts::texas_poker::types::{Seat, TexasPokerTable};
+use poker_l1::contracts::texas_poker::constants::FOLD_REASON_FORCE_ADMIN;
+use poker_l1::contracts::texas_poker::dispatch::SeatIndexArgs;
+use poker_l1::contracts::texas_poker::state_machine;
+use poker_l1::contracts::texas_poker::types::{Seat, TexasPokerTable};
 use stwo::core::fields::m31::M31;
 
 use super::bet::{BetAir, BetRow};
@@ -571,7 +571,7 @@ pub(crate) fn validate_kick_player(
     }
     let version_increment = 1;
     let reset_cascade = if canonical.post.round_state()
-        == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+        == poker_l1::contracts::texas_poker::constants::ROUND_WAITING
         && canonical.post.pot == 0
     {
         let composition =
@@ -584,7 +584,7 @@ pub(crate) fn validate_kick_player(
                 crate::airs::composition::SettlementKind::WithoutShowdown => true,
                 crate::airs::composition::SettlementKind::ResetOnly => {
                     canonical.pre.round_state()
-                        == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+                        == poker_l1::contracts::texas_poker::constants::ROUND_WAITING
                         && canonical.pre.pot == 0
                         && pre_seat.bet() == 0
                 }

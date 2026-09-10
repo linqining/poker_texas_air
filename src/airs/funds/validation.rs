@@ -6,8 +6,8 @@
 //! pre/post table images, replay the native funds state machine, and rebuild
 //! the exact row accepted by the AIR.
 
-use poker_l1::vm::contracts::texas_poker::state_machine;
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::contracts::texas_poker::state_machine;
+use poker_l1::contracts::texas_poker::types::TexasPokerTable;
 use stwo::core::fields::m31::M31;
 
 use super::addon::{AddonAir, AddonInput, AddonRow};

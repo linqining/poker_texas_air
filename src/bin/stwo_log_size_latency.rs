@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use bincode::Options;
 use poker_l1::object_model::ObjectID;
-use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+use poker_l1::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
 use poker_texas_air::airs::lifecycle::create_table::{
     CreateTableAir, CreateTableInput, CreateTableRow,
 };

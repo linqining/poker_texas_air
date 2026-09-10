@@ -19,7 +19,7 @@
 #![allow(missing_docs)]
 
 use borsh::BorshDeserialize;
-use poker_l1::vm::contracts::texas_poker::types::TableRules;
+use poker_l1::contracts::texas_poker::types::TableRules;
 
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::hash_prover::HashProofProvider as _;

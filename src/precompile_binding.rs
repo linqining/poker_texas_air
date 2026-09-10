@@ -10,7 +10,7 @@
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
-use poker_l1::vm::contracts::texas_poker::types::{RevealTarget, seat_mask_contains};
+use poker_l1::contracts::texas_poker::types::{RevealTarget, seat_mask_contains};
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext, N_CARDS};
 use poker_protocol::precompile::{
     NativeBls12381ReconstructionV3Verifier, NativeBls12381ShuffleVerifier,
@@ -142,10 +142,10 @@ impl RevealTokenVerifyRequest {
     /// Rebuild the exact proof statements consumed by the native L1 dispatch.
     pub fn from_dispatch(
         call_context: Vec<u8>,
-        pre_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
-        args: &poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs,
+        pre_table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
+        args: &poker_l1::contracts::texas_poker::dispatch::SubmitRevealTokensArgs,
     ) -> TexasAirResult<Self> {
-        use poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN;
+        use poker_l1::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN;
 
         if args.reveal_tokens.len() != args.proofs.len() {
             return Err(TexasAirError::SpecViolation(
@@ -410,7 +410,7 @@ impl PrecompileCallBinding {
     /// Verify and bind a canonical leave-layer DLEq request.
     pub fn verify_leave_dleq(request: &LeaveDleqVerifyRequest) -> TexasAirResult<Self> {
         let request_bytes = request.encode()?;
-        let mut transcript = poker_l1::vm::contracts::texas_poker::utils::new_leave_transcript();
+        let mut transcript = poker_l1::contracts::texas_poker::utils::new_leave_transcript();
         if !request.leave_proof.verify(
             &request.input_cards,
             &request.output_cards,

@@ -11,7 +11,7 @@
 
 use std::sync::OnceLock;
 
-use poker_l1::vm::contracts::texas_poker::constants::{DEFAULT_RAKE_BPS, DEFAULT_RAKE_CAP};
+use poker_l1::contracts::texas_poker::constants::{DEFAULT_RAKE_BPS, DEFAULT_RAKE_CAP};
 
 /// 抽水参数（进程级，从环境变量读一次）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

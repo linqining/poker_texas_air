@@ -41,9 +41,9 @@ pub(crate) fn felt_from_canonical_bytes(bytes: &[u8; 32]) -> Option<Felt> {
 
 // Historical sub-structure encoding regression fixtures.
 #[cfg(test)]
-use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
+use poker_l1::contracts::texas_poker::betting::BettingRound;
 #[cfg(test)]
-use poker_l1::vm::contracts::texas_poker::types::{
+use poker_l1::contracts::texas_poker::types::{
     DeckState, ReconstructState, RevealTokenState, ShuffleState, TimeoutConfig,
 };
 
@@ -160,7 +160,7 @@ pub fn u64_to_field(v: u64) -> Felt {
 /// lengths.  Adding or changing any serialized VM field therefore changes the
 /// verifier replay input without requiring a second manual field list to be kept in sync.
 pub fn table_state_preimage(
-    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<Vec<Felt>> {
     canonical_borsh_preimage("zchain.texas_poker.table.v11", table)
 }
@@ -173,11 +173,11 @@ pub fn table_state_preimage(
 /// version/tag/length/chunk 编码契约，任何非 canonical 编码都会被拒绝。
 pub fn table_from_state_preimage(
     image: &[Felt],
-) -> TexasAirResult<poker_l1::vm::contracts::texas_poker::types::TexasPokerTable> {
+) -> TexasAirResult<poker_l1::contracts::texas_poker::types::TexasPokerTable> {
     const TAG: &str = "zchain.texas_poker.table.v11";
     let payload = decode_canonical_borsh_preimage(image, TAG)?;
     let table =
-        poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::try_from_slice(&payload)
+        poker_l1::contracts::texas_poker::types::TexasPokerTable::try_from_slice(&payload)
             .map_err(|e| {
                 TexasAirError::SerializationError(format!(
                     "TexasPokerTable canonical Borsh decode failed: {e}"
@@ -208,9 +208,9 @@ pub const ABSENT_TABLE_PREIMAGE: &[u8] = b"zchain.texas_poker.absent.v1";
 /// Whether `table` is the exact in-memory ObjectDb-absence placeholder that
 /// `create_table` proves a transition from.
 pub fn is_absent_table(
-    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
 ) -> bool {
-    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+    use poker_l1::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
     let absent = TexasPokerTable::new(table.id, String::new(), EMPTY_PLAYER, 2, 1, 1);
     table == &absent
 }
@@ -226,7 +226,7 @@ pub fn is_absent_table(
 ///
 /// 当字段编码失败（如 ObjectID 序列化异常）时返回错误。
 pub fn compute_state_root(
-    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<StateRoot> {
     if is_absent_table(table) {
         return Ok(StateRoot(state_root_digest(ABSENT_TABLE_PREIMAGE)));
@@ -241,9 +241,9 @@ pub fn compute_state_root(
 /// derivation from the transcript-bound preimage) use this exact encoding,
 /// so the flock statement's public preimage is never ambiguous.
 pub fn hot_table_state_bytes(
-    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<Vec<u8>> {
-    poker_l1::vm::contracts::texas_poker::state_codec::encode_hot_table_state(table)
+    poker_l1::contracts::texas_poker::state_codec::encode_hot_table_state(table)
         .map_err(|e| TexasAirError::StateRootError(format!("encode Texas hot table: {e}")))
 }
 
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_table_state_preimage_roundtrip() {
-        let mut table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
+        let mut table = poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             poker_l1::object_model::ObjectID::new([0xAB; 20], 7),
             "canonical-roundtrip".into(),
             [0xCD; 20],
@@ -526,7 +526,7 @@ mod tests {
         seat_fixture::set_player(&mut table.seats[2], [0x22; 20]);
         seat_fixture::set_stack(&mut table.seats[2], 1_000_000);
         seat_fixture::set_bet(&mut table.seats[2], 65_536);
-        table.seats[2].set_status(poker_l1::vm::contracts::texas_poker::types::SeatStatus::Active);
+        table.seats[2].set_status(poker_l1::contracts::texas_poker::types::SeatStatus::Active);
 
         let image = table_state_preimage(&table).expect("canonical table should encode");
         let decoded = table_from_state_preimage(&image).expect("canonical table should decode");
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn test_table_state_preimage_rejects_noncanonical_chunk_prefix() {
         const TAG: &str = "zchain.texas_poker.table.v11";
-        let table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
+        let table = poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             poker_l1::object_model::ObjectID::new([0x11; 20], 3),
             "noncanonical-prefix".into(),
             [0x33; 20],
@@ -627,7 +627,7 @@ mod tests {
         let deck = poseidon_deck_state(&DeckState::default());
         let shuffle = poseidon_shuffle_state(&ShuffleState::default());
         let reveal = poseidon_reveal_token_state(&RevealTokenState {
-            purpose: poker_l1::vm::contracts::texas_poker::types::RevealPurpose::DealHole,
+            purpose: poker_l1::contracts::texas_poker::types::RevealPurpose::DealHole,
             assignments: vec![],
         });
         let reconstruct = poseidon_reconstruct_state(&ReconstructState::default());
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn test_side_pots_root_encoding() {
-        use poker_l1::vm::contracts::texas_poker::side_pot::SidePot;
+        use poker_l1::contracts::texas_poker::side_pot::SidePot;
         // 两个 side_pot 列表，内容不同 → 哈希不同
         let sp1 = vec![SidePot::new(100, 0b0011)];
         let sp2 = vec![SidePot::new(100, 0b0101)];

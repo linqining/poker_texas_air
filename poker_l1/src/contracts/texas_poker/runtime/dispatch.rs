@@ -45,7 +45,7 @@ use crate::Address;
 use crate::ChainId;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
-use crate::vm::contracts::dispatch::{DispatchContext, DispatchResult};
+use crate::contracts::dispatch::{DispatchContext, DispatchResult};
 
 /// 方法选择器长度（32 字节 = blake2b_256 输出）。
 pub const METHOD_SELECTOR_LEN: usize = 32;
@@ -1954,7 +1954,7 @@ mod tests {
     use super::*;
     use crate::object_model::ObjectID;
     use crate::signature::TaggedPubkey;
-    use crate::vm::contracts::texas_poker::utils::{g1_generator, g1_identity};
+    use crate::contracts::texas_poker::utils::{g1_generator, g1_identity};
 
     /// `tx_message_hash` 已知答案向量（KAT）：签名域是 poker_l1 ↔
     /// client-wasm（WasmTxSession）↔ texas e2e 的三方契约，任何一处

@@ -1,7 +1,7 @@
 //! `create_table` AIR — 创建新桌台。
 //!
-//! 移植自 [`poker_l1::vm::contracts::texas_poker::dispatch::dispatch_create_table`]
-//! 与 [`poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new`]。
+//! 移植自 [`poker_l1::contracts::texas_poker::dispatch::dispatch_create_table`]
+//! 与 [`poker_l1::contracts::texas_poker::types::TexasPokerTable::new`]。
 //!
 //! ## 业务规约
 //!
@@ -358,7 +358,7 @@ pub fn validate_public_inputs(
     air: &CreateTableAir,
     public_inputs: &TexasPublicInputs,
 ) -> TexasAirResult<()> {
-    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+    use poker_l1::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
 
     if public_inputs.kind != MethodKind::CreateTable {
         return Err(TexasAirError::SpecViolation(
@@ -447,7 +447,7 @@ pub fn validate_public_inputs(
 mod tests {
     use super::*;
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+    use poker_l1::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
 
     fn canonical_transition() -> (
         CreateTableAir,

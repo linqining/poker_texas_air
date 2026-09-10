@@ -24,10 +24,10 @@
 //! 开销说明：reveal 在游戏层与 VM 各验证一次（双倍 EC 成本）——这是
 //! 单一状态 + fail-closed 的代价；betting 动作为纯整数搬运，开销可忽略。
 
-use poker_l1::vm::contracts::texas_poker::settlement::{
+use poker_l1::contracts::texas_poker::settlement::{
     derive_fold_win_plan, derive_settlement_plan,
 };
-use poker_l1::vm::contracts::texas_poker::types::HandPhase;
+use poker_l1::contracts::texas_poker::types::HandPhase;
 
 use super::mirror::{seat_player_addr, TableMirror};
 use super::prove_log::HandSettleInput;
@@ -397,7 +397,7 @@ impl ShadowHand {
 
     /// 从 VM 状态提取下注视图（座位序 = 参与者升序，pk 反查映射）。
     fn betting_view(&self) -> BettingView {
-        use poker_l1::vm::contracts::texas_poker::types::HandPhase;
+        use poker_l1::contracts::texas_poker::types::HandPhase;
         let t = &self.mirror.table;
         let mut pk_by_seat: Vec<(u8, &str)> = Vec::with_capacity(self.by_pk.len());
         for (pk, addr) in &self.by_pk {

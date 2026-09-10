@@ -5,8 +5,8 @@
 //! specific to this branch while the production verifier independently replays
 //! the complete reset and binds its full pre/post state images.
 
-use poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING;
-use poker_l1::vm::contracts::texas_poker::types::{NO_SEAT, TexasPokerTable};
+use poker_l1::contracts::texas_poker::constants::ROUND_WAITING;
+use poker_l1::contracts::texas_poker::types::{NO_SEAT, TexasPokerTable};
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
 

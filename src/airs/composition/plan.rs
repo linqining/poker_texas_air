@@ -3,13 +3,13 @@
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
-use poker_l1::vm::contracts::texas_poker::constants::{
+use poker_l1::contracts::texas_poker::constants::{
     FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN, FOLD_REASON_MANUAL, ROUND_WAITING,
 };
-use poker_l1::vm::contracts::texas_poker::events::{
+use poker_l1::contracts::texas_poker::events::{
     RESET_REASON_LAST_PLAYER_STANDING, TexasPokerEvent,
 };
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::contracts::texas_poker::types::TexasPokerTable;
 
 use super::bet_collection::BetCollectionPlan;
 use super::round_advance::{NO_CURRENT_TURN, RoundAdvancePlan};
@@ -357,7 +357,7 @@ pub fn derive_composite_transition_plan_from_task(
     }
     crate::orchestrator::validate_full_dispatch_task(task)?;
     let mut replay = task.pre_table.clone();
-    let replay_args = poker_l1::vm::contracts::texas_poker::dispatch::replay_dispatch_args(
+    let replay_args = poker_l1::contracts::texas_poker::dispatch::replay_dispatch_args(
         task.method_kind as u8,
         &task.raw_args,
         &task.context,
@@ -369,7 +369,7 @@ pub fn derive_composite_transition_plan_from_task(
             task.method_kind.method_name()
         ))
     })?;
-    let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
+    let result = poker_l1::contracts::texas_poker::dispatch::dispatch(
         &task.context,
         &mut replay,
         &task.selector(),
@@ -1319,10 +1319,10 @@ fn hash_bytes(domain: &[u8], payload: &[u8]) -> [u8; 32] {
 mod tests {
     use crate::test_support as seat_fixture;
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
-    use poker_l1::vm::contracts::texas_poker::constants::{ROUND_FLOP, ROUND_PREFLOP};
-    use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
-    use poker_l1::vm::contracts::texas_poker::types::{RevealTokenState, SeatStatus};
+    use poker_l1::contracts::texas_poker::betting::BettingRound;
+    use poker_l1::contracts::texas_poker::constants::{ROUND_FLOP, ROUND_PREFLOP};
+    use poker_l1::contracts::texas_poker::events::TexasPokerEvent;
+    use poker_l1::contracts::texas_poker::types::{RevealTokenState, SeatStatus};
 
     use super::*;
 
@@ -1380,9 +1380,9 @@ mod tests {
         let mut post = pre.clone();
         post.set_seat_acted_this_round(0, true);
         post.enter_revealing(
-            poker_l1::vm::contracts::texas_poker::constants::ROUND_TURN,
+            poker_l1::contracts::texas_poker::constants::ROUND_TURN,
             RevealTokenState {
-                purpose: poker_l1::vm::contracts::texas_poker::types::RevealPurpose::Board,
+                purpose: poker_l1::contracts::texas_poker::types::RevealPurpose::Board,
                 assignments: vec![],
             },
             1,
@@ -1432,7 +1432,7 @@ mod tests {
             + pre.pot;
         let mut post = pre.clone();
         let mut events = Vec::new();
-        poker_l1::vm::contracts::texas_poker::state_machine::apply_fold(&mut post, 0, &mut events)
+        poker_l1::contracts::texas_poker::state_machine::apply_fold(&mut post, 0, &mut events)
             .unwrap();
         post.call_seq += 1;
 
