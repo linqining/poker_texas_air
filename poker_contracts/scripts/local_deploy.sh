@@ -33,6 +33,22 @@ declare_one() {
   CLASS_OF "$out"
 }
 
+# invoke（带重试）：瞬时 RPC/estimate 抖动直接 fail 会留下半接线环境，
+# 且 `>/dev/null` 会把错误吞掉——失败重试 3 次，间隔 3s，仍败则打印错误。
+invoke_retry() {
+  local contract=$1 fn=$2 calldata=$3 attempt out
+  for attempt in 1 2 3; do
+    if out=$($SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" invoke \
+        --contract "$contract" --fn "$fn" --calldata "$calldata" 2>&1); then
+      return 0
+    fi
+    echo "invoke $fn (attempt $attempt/3) failed: $out" >&2
+    sleep 3
+  done
+  echo "invoke $fn failed after 3 attempts — aborting" >&2
+  return 1
+}
+
 V_CLASS=$(declare_one PokerVault)
 D_OUT=$($SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" deploy --class-hash "$V_CLASS" --calldata "$OWNER,$STRK,0" 2>&1)
 VAULT=$(ADDR_OF "$D_OUT")
@@ -57,9 +73,9 @@ echo "REGISTRY=$REGISTRY"
 
 # DAPV 为默认结算路径：vault 的 settlement 绑定指向 PokerDualSettlement
 #（legacy 回退时由 server 自动重绑）。
-$SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" invoke --contract "$VAULT" --fn set_settlement_contract --calldata "$DUAL" >/dev/null
+invoke_retry "$VAULT" set_settlement_contract "$DUAL"
 # owner 流动性：devnet 预充值账户自带 STRK（费用代币），approve + 买入 100 chips。
-$SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" invoke --contract "$STRK" --fn approve --calldata "$VAULT,100000000000000000000000,0" >/dev/null
+invoke_retry "$STRK" approve "$VAULT,100000000000000000000000,0"
 DEPOSIT=$(TX_OF "$($SNOPS --url "$URL" --pk "$OPKEY" --addr "$OWNER" invoke --contract "$VAULT" --fn deposit --calldata 100000000000000000000,0 2>&1)")
 echo "DEPOSIT_TX=$DEPOSIT"
 

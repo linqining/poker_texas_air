@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 一键本地开发环境（dev 模式）。
 #
-# 流程：starknet-devnet（--seed 0, :5051）→ 合约构建 + devnet 部署
-# → 生成 texas/.env.dev.local（地址快照）→ 以本地 prover
+# 流程：starknet-devnet（--seed 0, :5051）→ 账户 = 根目录 .env.dev
+# （ADDRESS/PRIVATE_KEY，自动 /mint 充值 + 部署账户）→ 合约构建 + devnet
+# 部署 → 生成 texas/.env.dev.local（地址快照）→ 以本地 prover
 # （TEXAS_PROVER_MODE=dev）启动 texas 服务器，连接本地开发网提交。
 #
 # 用法：
@@ -15,13 +16,15 @@
 #   scripts/dev.sh --debug          # 服务器用 debug 构建（默认 release，
 #                                   # 递归证明在 debug 下极慢，仅排查用）
 #
-# 环境变量：DEVNET_URL / DEVNET_PORT 覆盖 devnet 地址；SCARB_HOME 覆盖
-# scarb 工具链位置（默认 ~/.local/opt/toolchains/scarb-2.19.4）。
+# 环境变量：DEVNET_URL / DEVNET_PORT 覆盖 devnet 地址；ENV_DEV 覆盖账户
+# 文件位置（默认仓库根目录 .env.dev）；SCARB_HOME 覆盖 scarb 工具链位置
+# （默认 ~/.local/opt/toolchains/scarb-2.19.4）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEVNET_URL="${DEVNET_URL:-http://127.0.0.1:5051}"
 DEVNET_PORT="${DEVNET_PORT:-5051}"
+ENV_DEV="${ENV_DEV:-$ROOT/.env.dev}"
 SCARB_HOME="${SCARB_HOME:-$HOME/.local/opt/toolchains/scarb-2.19.4}"
 ENV_FILE="$ROOT/texas/.env.dev.local"
 PROFILE=release
@@ -67,62 +70,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---------- 2) devnet 预充值账户 #0（seed 0 固定）= owner/operator ----------
-ACCOUNTS=$(python3 - "$DEVNET_URL" <<'PY'
-import json, sys, urllib.request, urllib.error
-
-def find_key(obj, key):
-    if isinstance(obj, dict):
-        if key in obj:
-            return obj[key]
-        for v in obj.values():
-            r = find_key(v, key)
-            if r is not None:
-                return r
-    elif isinstance(obj, list):
-        for v in obj:
-            r = find_key(v, key)
-            if r is not None:
-                return r
-    return None
-
-base = sys.argv[1].rstrip("/")
-data = None
-# 新版 devnet：/prestated_data（GET/POST 都试）；旧版：/predeployed_accounts
-attempts = [
-    ("/prestated_data", "GET", None),
-    ("/prestated_data", "POST", b"{}"),
-    ("/predeployed_accounts", "GET", None),
-]
-for path, method, body in attempts:
-    try:
-        req = urllib.request.Request(base + path, data=body, method=method,
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.load(resp)
-    except Exception:
-        continue
-    if find_key(data, "predeployed_accounts") or isinstance(data, list):
-        break
-
-accounts = find_key(data, "predeployed_accounts") if data is not None else None
-if isinstance(data, list) and not accounts:
-    accounts = data
-if not accounts:
-    sys.exit("devnet 未返回预充值账户（/prestated_data 与 /predeployed_accounts 均不可用），"
-             "请确认 devnet 版本；也可手动设置 OWNER/OPKEY 后修改本脚本")
-first = accounts[0]
-charge = find_key(data, "charge_token_address") \
-    or "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
-print(first["address"])
-print(first["private_key"])
-print(charge)
-PY
-)
-OWNER=$(echo "$ACCOUNTS" | sed -n '1p')
-OPKEY=$(echo "$ACCOUNTS" | sed -n '2p')
-STRK=$(echo "$ACCOUNTS" | sed -n '3p')
-log "owner/operator = devnet 预充值账户 #0: $OWNER"
+# ---------- 2) owner/operator 账户：根目录 .env.dev（ADDRESS/PRIVATE_KEY）----------
+[[ -f "$ENV_DEV" ]] || { echo "缺少账户文件 $ENV_DEV（需要 ADDRESS= / PRIVATE_KEY= 两行）"; exit 1; }
+OWNER=$(grep -E '^ADDRESS=' "$ENV_DEV" | head -1 | cut -d= -f2- | tr -d '[:space:]')
+OPKEY=$(grep -E '^PRIVATE_KEY=' "$ENV_DEV" | head -1 | cut -d= -f2- | tr -d '[:space:]')
+[[ -n "$OWNER" && -n "$OPKEY" ]] || {
+  echo "$ENV_DEV 里未找到 ADDRESS / PRIVATE_KEY"; exit 1; }
+log "owner/operator = $ENV_DEV 账户: $OWNER"
 
 # ---------- 3) 构建（合约 + snops + 服务器）----------
 if [[ "$SKIP_BUILD" != 1 ]]; then
@@ -137,12 +91,52 @@ if [[ "$SKIP_BUILD" != 1 ]]; then
   cargo build -p texas --"$PROFILE"
 else
   log "跳过构建"
-  [[ -x "$ROOT/target/debug/snops" || -x "$ROOT/target/release/snops" ]] || {
-    echo "--skip-build 但没有 snops 产物，请先完整运行一次"; exit 1; }
 fi
+SNOPS="$ROOT/target/debug/snops"
+[[ -x "$SNOPS" ]] || SNOPS="$ROOT/target/release/snops"
+[[ -x "$SNOPS" ]] || { echo "找不到 snops 产物（target/{debug,release}/snops），请先构建"; exit 1; }
 
-# ---------- 4) 部署合约到 devnet ----------
+# ---------- 4) 账户上链准备 + 部署合约到 devnet ----------
 if [[ "$SKIP_DEPLOY" != 1 ]]; then
+  # 4a) 充值 STRK（费用代币；重复充值无害）。
+  #     新版 devnet：devnet_mint JSON-RPC；旧版：HTTP POST /mint。
+  MINT_AMT=10000000000000000000000   # 10,000 STRK（FRI）
+  if curl -sf "$DEVNET_URL" -X POST -H 'Content-Type: application/json' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"devnet_mint","params":{"address":"'"$OWNER"'","amount":'"$MINT_AMT"',"unit":"FRI"}}' \
+      >/dev/null 2>&1 \
+     || curl -sf -X POST "$DEVNET_URL/mint" -H 'Content-Type: application/json' \
+      -d '{"address":"'"$OWNER"'","amount":'"$MINT_AMT"'}' >/dev/null 2>&1; then
+    log "已为 $OWNER 充值 10,000 STRK"
+  else
+    log "警告: 充值失败（devnet_mint 与 /mint 均不可用；账户可能已有余额，继续）"
+  fi
+  # 4b) 账户未部署则先 deploy_account（.env.dev 账户是 Sepolia deployer，
+  #     在全新 devnet 上不存在；OZ 类 = devnet 内置账户类，无需 declare）。
+  #     新旧 devnet 的 block_id 形式不同：先试裸 "latest"，再试对象形式。
+  CLASS_AT=$(curl -sf "$DEVNET_URL" -X POST -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"starknet_getClassHashAt","params":["latest","'"$OWNER"'"]}' 2>/dev/null) \
+    || CLASS_AT=$(curl -sf "$DEVNET_URL" -X POST -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"starknet_getClassHashAt","params":[{"block_tag":"latest"},"'"$OWNER"'"]}' 2>/dev/null) \
+    || CLASS_AT=""
+  if echo "$CLASS_AT" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+h = d.get("result") if isinstance(d, dict) else None
+sys.exit(0 if h not in (None, "", "0x0", "0x00") else 1)
+' 2>/dev/null; then
+    log "账户已在 devnet 部署，跳过 deploy-acct"
+  else
+    log "部署 .env.dev 账户（snops deploy-acct，OZ salt 0）…"
+    "$SNOPS" --url "$DEVNET_URL" --pk "$OPKEY" deploy-acct >>/tmp/devnet-deploy.log 2>&1 || {
+      echo "账户部署失败，日志见 /tmp/devnet-deploy.log（若 class hash 未在 devnet 声明，请检查 devnet 版本）"
+      tail -5 /tmp/devnet-deploy.log
+      exit 1
+    }
+  fi
+  # 4c) 合约部署（vault 绑定规范 STRK，现代接线）。
   log "部署合约到 devnet（poker_contracts/scripts/local_deploy.sh）…"
   OWNER="$OWNER" OPKEY="$OPKEY" URL="$DEVNET_URL" \
     "$ROOT/poker_contracts/scripts/local_deploy.sh" >/tmp/devnet-deploy.log 2>&1 || {
@@ -162,10 +156,11 @@ else
 fi
 
 # ---------- 5) 生成服务器环境（本地 prover + 本地开发网提交）----------
-STRK="${STARKNET_STRK_ADDRESS:-$STRK}"
+STRK="${STARKNET_STRK_ADDRESS:-0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d}"
 DUAL="${STARKNET_DUAL_SETTLEMENT_ADDRESS:-}"
 SETTLE="${STARKNET_SETTLEMENT_ADDRESS:-}"
 VAULT="${STARKNET_VAULT_ADDRESS:-}"
+REGISTRY="${STARKNET_TABLE_REGISTRY_ADDRESS:-}"
 cat > "$ENV_FILE" <<EOF
 # 由 scripts/dev.sh 生成（本地 devnet 部署快照）——devnet 重建后地址会变。
 # dev 模式：TEXAS_ENV=dev → TEXAS_PROVER_MODE 缺省即本地 prover；
@@ -182,6 +177,7 @@ STARKNET_STRK_ADDRESS=$STRK
 STARKNET_VAULT_ADDRESS=$VAULT
 STARKNET_SETTLEMENT_ADDRESS=$SETTLE
 STARKNET_DUAL_SETTLEMENT_ADDRESS=$DUAL
+STARKNET_TABLE_REGISTRY_ADDRESS=$REGISTRY
 STARKNET_OPERATOR_ADDRESS=$OWNER
 STARKNET_OPERATOR_PRIVATE_KEY=$OPKEY
 STARKNET_AUTH_STRICT=false
