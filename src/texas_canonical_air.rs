@@ -1426,8 +1426,17 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     let post_pending_count = w.post.protocol_pending_mask.count_ones();
     let reconstruct_completion =
         w.protocol_completion.kind == CanonicalProtocolCompletionKind::Reconstruct;
+    let shuffle_completion = w.protocol_completion.kind == CanonicalProtocolCompletionKind::Shuffle;
     out.push(
-        if protocol_submit && !reconstruct_completion && post_pending_count != 0 {
+        // 完成行（reconstruct/shuffle）的 post pending 由 completion 约束
+        // 精确锚定，AIR 将 inverse 列归零（不允许自由建议）；生成器必须
+        // 同步排除两类完成行，否则 shuffle 完成行与 AIR 恒矛盾。
+        // 2026-09-10 整手牌性能扫描中发现（原先只排除 reconstruct）。
+        if protocol_submit
+            && !reconstruct_completion
+            && !shuffle_completion
+            && post_pending_count != 0
+        {
             M31::from(post_pending_count).inverse()
         } else if shuffle_timeout && post_pending_count > 1 {
             let product = post_pending_count * (post_pending_count - 1);
@@ -1713,7 +1722,18 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     out.push(M31::from(u32::from(completion.post_shuffle_pending_mask)));
     out.push(M31::from(u32::from(completion.post_shuffle_completed_mask)));
     debug_assert_eq!(out.len(), PROTOCOL_COMPLETION_TIMESTAMP_BITS_OFFSET);
-    append_u64_bits(&mut out, completion.completion_timestamp_ms);
+    // 位分解仅服务 reconstruct 完成行的 range16 检查；AIR 对其余行（含
+    // shuffle 完成行）强制清零，生成器必须同步写 0，否则 shuffle 完成
+    // 行的 bits(时间戳) 与 AIR 归零约束恒矛盾（2026-09-10 整手牌性能
+    // 扫描中发现）。
+    append_u64_bits(
+        &mut out,
+        if reconstruct_completion {
+            completion.completion_timestamp_ms
+        } else {
+            0
+        },
+    );
     let timestamp_sum = u64_limbs(completion.completion_timestamp_ms)
         .into_iter()
         .map(|limb| u64::from(limb.0))
@@ -5290,8 +5310,14 @@ impl FrameworkEval for CanonicalAir {
             eval.add_constraint(
                 is_reveal_kick.clone() * pre_bit.clone() * later_transition_selector,
             );
-            let non_final_protocol_submit =
-                is_protocol_submit.clone() - is_reconstruct_completion.clone();
+            // 完成行（reconstruct/shuffle）的 pending 掩码由 completion
+            // 组合约束整体锚定（reveal pending = 活跃集），不走"清提交者
+            // 位"的逐位演化。原先只排除 reconstruct，shuffle 完成行在此
+            // 被要求清位、又同时要求等于活跃集，恒矛盾（2026-09-10
+            // 整手牌性能扫描中发现）。
+            let non_final_protocol_submit = is_protocol_submit.clone()
+                - is_reconstruct_completion.clone()
+                - is_shuffle_completion.clone();
             eval.add_constraint(
                 non_final_protocol_submit * (post_bit.clone() - pre_bit.clone() + selector.clone()),
             );
@@ -5498,7 +5524,13 @@ impl FrameworkEval for CanonicalAir {
         eval.add_constraint(
             is_shuffle_completion.clone() * (post_phase.clone() - M31::from(2u32).into()),
         );
-        eval.add_constraint(is_shuffle_completion.clone() * post_subtag.clone());
+        // subtag 钉死为收集子标签 1（镜像 host 校验 pre/post subtag == 1，
+        // 洗牌完成只发生在收集相位；曾误写为强制归零，与 host 校验
+        // "活跃相位 subtag 非零"矛盾，导致完成行端到端不可证，
+        // 2026-09-10 整手牌性能扫描中发现并修正）。
+        eval.add_constraint(
+            is_shuffle_completion.clone() * (post_subtag.clone() - M31::from(1u32).into()),
+        );
         eval.add_constraint(
             is_shuffle_completion.clone() * (post_street.clone() - pre_street.clone()),
         );
@@ -5574,6 +5606,14 @@ impl FrameworkEval for CanonicalAir {
             z // S4_after_completion
         });
         let non_reconstruct_completion = active.clone() - is_reconstruct_completion.clone();
+        // 完成 opening 的"实值"建议列（时间戳/游标/掩码/承诺锚/inverse/
+        // 进位）在 shuffle 完成行同样必须放开——它们由上方 ShuffleComplete
+        // 组合约束接管。原先清零门只排除 reconstruct，导致 shuffle 完成
+        // 行的建议被强制归零、与其自身约束恒矛盾（2026-09-10 整手牌性能
+        // 扫描中发现；该分支此前从未被 prove 过）。时间戳/游标的位分解
+        // 仅 reconstruct 使用，维持对 shuffle 行清零以保证建议确定性。
+        let completion_row = is_reconstruct_completion.clone() + is_shuffle_completion.clone();
+        let non_completion_advice = active.clone() - completion_row.clone();
         for value in protocol_completion_timestamp
             .iter()
             .chain(std::iter::once(&protocol_completion_pre_cards_dealt))
@@ -5581,11 +5621,11 @@ impl FrameworkEval for CanonicalAir {
             .chain(std::iter::once(&protocol_completion_post_pending_mask))
             .chain(std::iter::once(&protocol_completion_post_completed_mask))
         {
-            eval.add_constraint(non_reconstruct_completion.clone() * value.clone());
+            eval.add_constraint(non_completion_advice.clone() * value.clone());
         }
         for commitment in &protocol_completion_commitments {
             for limb in commitment {
-                eval.add_constraint(non_reconstruct_completion.clone() * limb.clone());
+                eval.add_constraint(non_completion_advice.clone() * limb.clone());
             }
         }
         for bits in &protocol_completion_timestamp_bits {
@@ -5594,10 +5634,10 @@ impl FrameworkEval for CanonicalAir {
             }
         }
         eval.add_constraint(
-            non_reconstruct_completion.clone() * protocol_completion_timestamp_inv.clone(),
+            non_completion_advice.clone() * protocol_completion_timestamp_inv.clone(),
         );
         for carry in &protocol_completion_deadline_carries {
-            eval.add_constraint(non_reconstruct_completion.clone() * carry.clone());
+            eval.add_constraint(non_completion_advice.clone() * carry.clone());
         }
         for bits in &protocol_completion_cursor_range {
             for bit in bits {
@@ -13257,4 +13297,323 @@ mod tests {
         assert!(result.is_ok(), "short commitment vector must not panic");
         assert!(result.expect("verification result").is_err());
     }
+
+    /// 整手牌 canonical STARK 证明性能扫描（2026-09-10，#41-#48 trace 优化后）。
+    ///
+    /// 一手完整牌局按当前 direct-AIR 可证边界拆成四个 batch
+    /// （SubmitReveal 专用 crypto AIR 未接入前，Revealing→Betting 桥是
+    /// TODO #22 的已知缺口，跨段由生产侧另行续链）：
+    /// 1. `桌务+洗牌协议`：JoinTable ×3 → StartHand → SubmitShuffle ×2
+    ///    （非最终）→ SubmitShuffle 完成（Shuffle completion opening，
+    ///    进入 Revealing）。
+    /// 2. `下注街`：Bet → Call → AdvanceRound（betting 入场镜像既有
+    ///    betting 测试的合成 pre；street 2→3 翻牌→转牌）。
+    /// 3. `终局结算`：EndWithoutShowdown（未摊牌独赢 + 下一手重置投影）。
+    /// 4. `超时重置`：ResetOnly（零底注归一化，独立 batch 类别）。
+    ///
+    /// 每段独立 prove/verify 计时并输出证明体积；主链三段（1-3）合计即
+    /// 一手牌的证明成本，段 4 为辅助归一化类别。带 `--ignored --nocapture`
+    /// 运行。
+    #[ignore = "slow prove (full hand, 4 batches); run via `-- --ignored --nocapture`"]
+    #[test]
+    fn canonical_full_hand_proof_perf_sweep() {
+        let started = std::time::Instant::now();
+
+        // ---- 段 1：桌务 + 洗牌协议（7 个转移，承诺逐环相扣）。
+        // 三人桌：两人局中第二次提交必为"最终提交"。含 ShuffleComplete
+        // 完成行（2026-09-10 修复 AIR subtag 约束笔误后首次端到端可证）。
+        let mut base = image();
+        base.max_players = 3;
+        let join0 = join_table_at(base, 0, [2; 32], [31; 32], [32; 32]);
+        let join1 = join_table_at(join0.post.clone(), 1, [3; 32], [35; 32], [36; 32]);
+        let join2 = join_table_at(join1.post.clone(), 2, [4; 32], [37; 32], [38; 32]);
+        let mut start_post = join2.post.clone();
+        start_post.hand_id = 2;
+        start_post.button = 1;
+        start_post.phase = CanonicalPhase::Shuffling;
+        start_post.phase_subtag = 1;
+        start_post.deadline_ms = 100;
+        start_post.protocol_pending_mask = 0b111;
+        start_post.call_seq = 0;
+        start_post.seats[0].status = CanonicalSeatStatus::Active;
+        start_post.seats[1].status = CanonicalSeatStatus::Active;
+        start_post.seats[2].status = CanonicalSeatStatus::Active;
+        let mut start = CanonicalTransitionWitness {
+            pre: join2.post.clone(),
+            post: start_post,
+            kind: CanonicalTransitionKind::StartHand,
+            actor: [2; 32],
+            action: CanonicalActionPayload {
+                seat: NO_CANONICAL_SEAT,
+                amount: 0,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [0; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 0,
+        };
+        start.seal();
+
+        let mut shuffle0_post = start.post.clone();
+        shuffle0_post.call_seq += 1;
+        shuffle0_post.deck_commitment = [54; 32];
+        shuffle0_post.protocol_pending_mask = 0b110;
+        let mut shuffle0 = CanonicalTransitionWitness {
+            pre: start.post.clone(),
+            post: shuffle0_post,
+            kind: CanonicalTransitionKind::SubmitShuffle,
+            actor: [2; 32],
+            action: CanonicalActionPayload {
+                seat: 0,
+                amount: 0,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [53; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 0,
+        };
+        shuffle0.seal();
+
+        // 第二位贡献者的 shuffle 提交（非最终形态：3 人局仍余 1 位待提交）。
+        let mut shuffle1_post = shuffle0.post.clone();
+        shuffle1_post.call_seq += 1;
+        shuffle1_post.deck_commitment = [55; 32];
+        shuffle1_post.protocol_pending_mask = 0b100;
+        let mut shuffle1 = CanonicalTransitionWitness {
+            pre: shuffle0.post.clone(),
+            post: shuffle1_post,
+            kind: CanonicalTransitionKind::SubmitShuffle,
+            actor: [82; 32],
+            action: CanonicalActionPayload {
+                seat: 1,
+                amount: 0,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [83; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 0,
+        };
+        shuffle1.seal();
+
+        // 第三位（最后一位待提交）贡献者的完成提交：轮转终局 deck 并经
+        // Shuffle completion opening 规范化进入 preflop reveal 相位
+        // （hole 游标 0→2×3 参与者，reveal pending = 活跃集）。
+        let completion_timestamp = 9_000;
+        let mut final_post = shuffle1.post.clone();
+        final_post.call_seq += 1;
+        final_post.phase = CanonicalPhase::Revealing;
+        final_post.deadline_ms =
+            completion_timestamp + u64::from(shuffle1.post.reveal_timeout_ms);
+        final_post.protocol_pending_mask = 0b111;
+        final_post.deck_commitment = [50; 32];
+        let mut final_submit = CanonicalTransitionWitness {
+            pre: shuffle1.post.clone(),
+            post: final_post,
+            kind: CanonicalTransitionKind::SubmitShuffle,
+            actor: [84; 32],
+            action: CanonicalActionPayload {
+                seat: 2,
+                amount: 0,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [85; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: crate::texas_canonical::CanonicalProtocolCompletionOpening {
+                kind: crate::texas_canonical::CanonicalProtocolCompletionKind::Shuffle,
+                completion_timestamp_ms: completion_timestamp,
+                pre_cards_dealt: 0,
+                post_cards_dealt: 6,
+                suspended_reveal_commitment: [0; 32],
+                post_shuffle_pending_mask: 0b111,
+                post_shuffle_completed_mask: 0b111,
+                pre_deck_commitment: shuffle1.post.deck_commitment,
+                post_deck_commitment: [50; 32],
+                pre_reconstruction_commitment: shuffle1.post.reconstruction_commitment,
+                post_reconstruction_commitment: shuffle1.post.reconstruction_commitment,
+            },
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 0,
+        };
+        final_submit.seal();
+
+        // ---- 段 2：下注街（3 个转移；street 2 翻牌圈，bet 入场为既有
+        // betting 测试同款合成 pre） ----
+        let bet_witness = bet();
+        let mut call_pre = bet_witness.post.clone();
+        let mut call_post = call_pre.clone();
+        call_post.call_seq += 1;
+        call_post.current_turn = NO_CANONICAL_SEAT;
+        call_post.acted_mask = 0b11;
+        call_post.seats[1].acted = true;
+        call_post.seats[1].stack -= 100;
+        call_post.seats[1].bet = 100;
+        call_post.seats[1].total_bet = 100;
+        let mut call_witness = CanonicalTransitionWitness {
+            pre: call_pre,
+            post: call_post,
+            kind: CanonicalTransitionKind::Call,
+            actor: [31; 32],
+            action: CanonicalActionPayload {
+                seat: 1,
+                amount: 100,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [0; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 0,
+        };
+        call_witness.seal();
+
+        let mut advance_post = call_witness.post.clone();
+        advance_post.call_seq += 1;
+        advance_post.phase = CanonicalPhase::Revealing;
+        advance_post.phase_subtag = 2;
+        advance_post.street = 3;
+        advance_post.deadline_ms = 200;
+        advance_post.protocol_pending_mask = 0b11;
+        advance_post.current_bet = 0;
+        advance_post.min_raise = 0;
+        advance_post.pot = 200;
+        for seat in &mut advance_post.seats {
+            seat.bet = 0;
+        }
+        let mut advance_witness = CanonicalTransitionWitness {
+            pre: call_witness.post.clone(),
+            post: advance_post,
+            kind: CanonicalTransitionKind::AdvanceRound,
+            actor: [0; 32],
+            action: CanonicalActionPayload {
+                seat: NO_CANONICAL_SEAT,
+                amount: 0,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [0; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening {
+                pre_cards_dealt: 7,
+                post_cards_dealt: 8,
+                pre_board_len: 3,
+                post_board_len: 3,
+                pre_second_board_len: 0,
+                post_second_board_len: 0,
+                run_it_twice: false,
+                reveal_purpose: 2,
+                assignment_count: 1,
+                assignments: [
+                    CanonicalBoardRevealAssignment {
+                        present: true,
+                        encrypted_card_index: 7,
+                        runout_index: 0,
+                        board_position: 3,
+                        pending_mask: 0b11,
+                        submitted_mask: 0,
+                    },
+                    CanonicalBoardRevealAssignment::EMPTY,
+                    CanonicalBoardRevealAssignment::EMPTY,
+                    CanonicalBoardRevealAssignment::EMPTY,
+                    CanonicalBoardRevealAssignment::EMPTY,
+                    CanonicalBoardRevealAssignment::EMPTY,
+                ],
+            },
+            protocol_completion: Default::default(),
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 0,
+        };
+        advance_witness.seal();
+
+        // ---- 段 3：终局结算（未摊牌独赢，含下一手重置投影，1 个转移）。
+        // ResetOnly 不能链接在其后：host 校验拒绝 Waiting→Waiting，
+        // 它是零底注超时/错误状态的独立归一化 batch（作为辅助段单测）。
+        let end_witness = end_without_showdown();
+        let aux_reset = reset_only();
+
+        let segments: [(&str, Vec<CanonicalTransitionWitness>); 4] = [
+            (
+                "table+shuffle protocol",
+                vec![join0, join1, join2, start, shuffle0, shuffle1, final_submit],
+            ),
+            ("betting street", vec![bet_witness, call_witness, advance_witness]),
+            ("terminal settlement", vec![end_witness]),
+            ("timeout reset (aux)", vec![aux_reset]),
+        ];
+
+        println!(
+            "{:<24} {:>5} {:>8} {:>12} {:>12} {:>10}",
+            "segment", "txs", "log2", "prove_ms", "verify_ms", "proof_kb"
+        );
+        let mut total_prove = std::time::Duration::ZERO;
+        let mut total_verify = std::time::Duration::ZERO;
+        let mut total_bytes = 0usize;
+        let mut total_transitions = 0usize;
+        for (name, witnesses) in &segments {
+            for witness in witnesses {
+                witness
+                    .validate_shape()
+                    .unwrap_or_else(|e| panic!("{name}: invalid shape: {e}"));
+            }
+            let prove_started = std::time::Instant::now();
+            let archive = prove_canonical_tagged_batch(witnesses)
+                .unwrap_or_else(|e| panic!("{name}: prove failed: {e}"));
+            let prove_elapsed = prove_started.elapsed();
+            let verify_started = std::time::Instant::now();
+            verify_canonical_tagged_proof(&archive)
+                .unwrap_or_else(|e| panic!("{name}: verify failed: {e}"));
+            verify_canonical_tagged_batch(witnesses, &archive)
+                .unwrap_or_else(|e| panic!("{name}: batch verify failed: {e}"));
+            let verify_elapsed = verify_started.elapsed();
+
+            total_prove += prove_elapsed;
+            total_verify += verify_elapsed;
+            total_bytes += archive.stark_proof_bytes.len();
+            total_transitions += witnesses.len();
+            println!(
+                "{:<24} {:>5} {:>8} {:>12} {:>12} {:>10.1}",
+                name,
+                witnesses.len(),
+                archive.log_size,
+                prove_elapsed.as_millis(),
+                verify_elapsed.as_millis(),
+                archive.stark_proof_bytes.len() as f64 / 1024.0,
+            );
+        }
+        println!(
+            "{:<24} {:>5} {:>8} {:>12} {:>12} {:>10.1}",
+            "FULL HAND TOTAL",
+            total_transitions,
+            "-",
+            total_prove.as_millis(),
+            total_verify.as_millis(),
+            total_bytes as f64 / 1024.0,
+        );
+        println!(
+            "wall clock (incl. trace gen + validation): {:?}",
+            started.elapsed()
+        );
+    }
 }
+

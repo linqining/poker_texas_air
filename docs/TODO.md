@@ -205,6 +205,25 @@ poseidon / snip36-execution / MIGRATION / deadlock-review / RFP 对齐等）
   负例）。**RevealComplete 仍 fail-closed**：其 post 状态含位置规则
   current_turn（BB 后首个活跃座/heads-up 特例）与盲注派生 current_bet，
   需先设计盲注/规则 opening（无 AIR 可锚定源），见 STATUS.md；
+  **ShuffleComplete 端到端修复（2026-09-10，整手牌性能扫描中发现）**：
+  ② 组合时该分支从未被 prove 过（既有测试仅 host 侧 validate），AIR/
+  生成器存在 4 处自相矛盾，修复后首次 prove/verify 通过——
+  (a) AIR subtag 约束笔误：完成行被强制 `post_subtag=0`，与文档语义
+  及 host 校验"活跃相位 subtag 非零"矛盾 → 改为绝对钉死
+  `post_subtag - 1`（镜像 host 的 pre/post subtag==1，只允许从收集
+  子标签完成；复核时从相对传播收紧为绝对钉死）；
+  (b) 逐位 pending 演化未排除 shuffle 完成行：提交者位被要求清零，又
+  同时要求 post pending = 活跃集，恒矛盾 → `non_final_protocol_submit`
+  同步排除两类完成行；
+  (c) 完成 opening 实值建议（时间戳/游标/掩码/承诺锚/inverse/进位）的
+  清零门只排除 reconstruct，shuffle 完成行建议被强制归零 → 新增
+  `non_completion_advice` 门；时间戳位分解仅 reconstruct 使用，生成器
+  对 shuffle 完成行同步写 0；
+  (d) `protocol_pending_post_inv` 生成器只排除 reconstruct，shuffle
+  完成行写非零 inverse 与 AIR 归零矛盾 → 同步排除。
+  新增 `canonical_full_hand_proof_perf_sweep`（#[ignore]）：整手牌
+  主链 11 转移 3 batch + 辅助 reset 段 1 转移，端到端（含完成行）
+  prove 1.69s / verify 1.23s / 4.29 MB（release，log2=8 域）。
   ③ ~~终端级联批量证明~~ **复核除名（2026-09-05）**：验收批量已存在并通过
   （award/reset/raked 三套级联批量测试 + schedule 篡改负例）；
   ④ **reconstruction 提交解除 fail-closed —— 完成（与 ShuffleComplete 同批）**：
