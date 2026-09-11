@@ -40,10 +40,9 @@
 //!    truncated leftover rounds) rides in the witness tree and is forced by
 //!    the multiset chain, not by preprocessed trust.
 //!
-//! [`prove_name_commitment_v2`]/[`verify_name_commitment_v2`] wrap this into
-//! the canonical `zchain.string.v2` name statement consumed by the lifecycle
-//! AIRs, closing #22⑤'s "AIR independently recomputes" acceptance against
-//! the `state_root_binding` anchor seam.
+//! 历史：#22⑤ 的 `zchain.string.v2` 名字承诺封装（prove/verify
+//! name_commitment_v2）曾在本模块，随展示名出共识（poker_l1 v34）整体移除；
+//! chain-spec 机制保留给状态根 Poseidon252 化（#42）复用。
 
 #![allow(missing_docs)]
 
@@ -1853,49 +1852,6 @@ pub fn verify_poseidon252_chain_v2(
 // Tests
 // ===========================================================================
 
-// ===========================================================================
-// Canonical byte-scope composition (TODO #22⑤ item 6)
-// ===========================================================================
-
-/// The Poseidon252 statement behind [`crate::state_root::table_name_commitment`]:
-/// the exact `zchain.string.v2` borsh-chunked field preimage of the name
-/// bytes, as a chain spec.  Both sides of this seam derive the spec from the
-/// same public name, so the proven anchor and the legacy host commitment are
-/// the same value by construction — only now the value is established by the
-/// v2 STARK instead of a trusted recomputation.
-pub fn name_commitment_spec(name: &str) -> TexasAirResult<native::Poseidon252ChainSpec> {
-    let message = crate::state_root::canonical_borsh_preimage(
-        "zchain.string.v2",
-        &name.as_bytes().to_vec(),
-    )?;
-    Ok(native::Poseidon252ChainSpec::hash_many(&message))
-}
-
-/// Prove the name commitment: the AIR recomputes
-/// `poseidon_hash_many(canonical_borsh_preimage("zchain.string.v2", name))`
-/// and pins the terminal state as the claimed anchor.
-pub fn prove_name_commitment_v2(
-    name: &str,
-) -> TexasAirResult<ArchivedPoseidon252V2Proof> {
-    prove_poseidon252_chain_v2(&name_commitment_spec(name)?)
-}
-
-/// Verify a name-commitment proof against the public name bytes: the spec
-/// must match the derived one byte for byte (no scope splice), and the STARK
-/// must verify without any host Poseidon recomputation.
-pub fn verify_name_commitment_v2(
-    archive: &ArchivedPoseidon252V2Proof,
-    name: &str,
-) -> TexasAirResult<()> {
-    let expected = name_commitment_spec(name)?;
-    if archive.spec != expected {
-        return Err(TexasAirError::ConstraintUnsatisfied(
-            "v2 name commitment spec detached from the public name bytes".into(),
-        ));
-    }
-    verify_poseidon252_chain_v2(archive)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2140,32 +2096,6 @@ mod tests {
 
     #[test]
 #[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
-    fn name_commitment_matches_legacy_host_hash() {
-        // Test-only oracle: the AIR-proven anchor lane 0 equals the legacy
-        // host commitment for the same public bytes.
-        for name in ["test", "alpha", "a much longer table name"] {
-            let archive = prove_name_commitment_v2(name).expect("prove");
-            let anchor = Felt::from_bytes_be(&archive.claimed_anchor[0]);
-            assert_eq!(
-                anchor,
-                crate::state_root::table_name_commitment(name),
-                "name {name}"
-            );
-            verify_name_commitment_v2(&archive, name).expect("verify");
-        }
-    }
-
-    #[test]
-#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
-    fn name_commitment_rejects_foreign_name() {
-        let archive = prove_name_commitment_v2("test").expect("prove");
-        assert!(verify_name_commitment_v2(&archive, "tesu").is_err());
-        // The empty-string preimage differs from any real name's.
-        assert!(verify_name_commitment_v2(&archive, "").is_err());
-    }
-
-    #[test]
-#[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn v2_rejects_swapped_order() {
         let a = native::Poseidon252ChainSpec::hash_many(&[
             Felt::from(7u64),
@@ -2199,7 +2129,6 @@ mod tests {
         use poker_l1::contracts::texas_poker::types::TexasPokerTable;
         let mut table = TexasPokerTable::new(
             poker_l1::object_model::ObjectID::new([0xAB; 20], 9),
-            "poseidon252-v2-perf".into(),
             [0xCD; 20],
             9,
             50,

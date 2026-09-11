@@ -425,7 +425,6 @@ mod tests {
         use poker_l1::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xF2; 20], 0),
-            "fold-snapshot-test".into(),
             [0xEE; 20],
             2,
             1,
@@ -480,7 +479,6 @@ mod tests {
         use poker_l1::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xF3; 20], 0),
-            "preflop-fold-snapshot-test".into(),
             [0xEF; 20],
             2,
             1,

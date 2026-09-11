@@ -1,7 +1,7 @@
 //! Canonical persisted-state codec for Texas Poker tables.
 //!
-//! Production deliberately supports only the current resolved snapshot (v30，座位新增
-//! 会话交易公钥 `OccupiedSeat.tx_pk`) and the ObjectDb hot-table layout (v33-hot).
+//! Production deliberately supports only the current resolved snapshot (v34，无桌台名，
+//! 名字非共识) and the ObjectDb hot-table layout (v35-hot，context 只绑 rules/governance).
 //! Historical schemas are not consensus inputs and fail closed instead of
 //! carrying an ever-growing migration surface in the execution path.
 
@@ -25,6 +25,7 @@ use crate::Address;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 
+/// Metadata 对象 id 派生域（非共识对象，仅寻址用；热状态不再绑定其 digest）。
 const METADATA_CONTEXT_DOMAIN: &[u8] = b"zchain.texas_poker.metadata.v1";
 const RULES_CONTEXT_DOMAIN: &[u8] = b"zchain.texas_poker.rules.v1";
 const GOVERNANCE_CONTEXT_DOMAIN: &[u8] = b"zchain.texas_poker.governance.v1";
@@ -43,7 +44,6 @@ struct PersistedDeckStateV30 {
 struct PersistedTexasPokerTableV30 {
     id: ObjectID,
     state_schema_version: u8,
-    name: String,
     creator: Address,
     rules: TableRules,
     seats: Vec<Seat>,
@@ -127,7 +127,6 @@ fn persisted_deck(table: &TexasPokerTable) -> PersistedDeckStateV30 {
 fn restore_table(
     id: ObjectID,
     rules: TableRules,
-    name: String,
     creator: Address,
     seats: Vec<Seat>,
     acted_mask: SeatMask,
@@ -148,7 +147,6 @@ fn restore_table(
     // 本文件不再保留平行的本地实现。
     let table = TexasPokerTable {
         id,
-        name,
         creator,
         rules,
         seats,
@@ -182,7 +180,6 @@ impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV30 {
         Ok(Self {
             id: value.id,
             state_schema_version: TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
-            name: value.name.clone(),
             creator: value.creator,
             rules: value.rules.clone(),
             seats: persisted_seats(&value.seats, value.max_players)?,
@@ -214,7 +211,6 @@ impl TryFrom<PersistedTexasPokerTableV30> for TexasPokerTable {
         restore_table(
             value.id,
             value.rules,
-            value.name,
             value.creator,
             value.seats,
             value.acted_mask,
@@ -310,16 +306,15 @@ pub fn table_governance_object_id(table_id: ObjectID) -> ObjectID {
 }
 
 /// Compute the exact immutable-object IDs and domain-separated digests bound by a hot table.
+///
+/// v35-hot 起 metadata 不再被热状态绑定：展示名非共识，独立 metadata 对象
+/// 仅按 `table_metadata_object_id` 寻址，供热/UI 消费。
 pub fn table_context_bindings(
     table_id: ObjectID,
     openings: &TableContextOpenings,
 ) -> PokerL1Result<TableContextBindings> {
     openings.validate_canonical()?;
     Ok(TableContextBindings {
-        metadata: TableContextBinding {
-            object_id: table_metadata_object_id(table_id),
-            digest: context_digest(table_id, METADATA_CONTEXT_DOMAIN, &openings.metadata)?,
-        },
         rules: TableContextBinding {
             object_id: table_rules_object_id(table_id),
             digest: context_digest(table_id, RULES_CONTEXT_DOMAIN, &openings.rules)?,
@@ -385,7 +380,6 @@ pub fn decode_hot_table_state(
     restore_table(
         value.id,
         openings.rules.clone(),
-        openings.metadata.name.clone(),
         openings.governance.creator,
         value.seats,
         value.acted_mask,
@@ -403,7 +397,14 @@ pub fn decode_hot_table_state(
 }
 
 /// Build the four objects atomically created for a table: hot state, metadata, rules, governance.
-pub fn table_storage_objects(table: &TexasPokerTable) -> PokerL1Result<[Object; 4]> {
+///
+/// metadata（展示名）非共识，热状态不再绑定其 digest；本函数显式接收
+/// `metadata` 以构造独立 Immutable 对象（按 `table_metadata_object_id` 寻址）。
+pub fn table_storage_objects(
+    table: &TexasPokerTable,
+    metadata: &super::types::TableMetadata,
+) -> PokerL1Result<[Object; 4]> {
+    metadata.validate_canonical()?;
     let openings = TableContextOpenings::from_table(table);
     openings.validate_canonical()?;
     Ok([
@@ -417,7 +418,7 @@ pub fn table_storage_objects(table: &TexasPokerTable) -> PokerL1Result<[Object; 
             table_metadata_object_id(table.id),
             Ownership::Immutable,
             TEXAS_POKER_METADATA_OBJECT_TYPE,
-            borsh::to_vec(&openings.metadata)?,
+            borsh::to_vec(metadata)?,
         ),
         Object::new(
             table_rules_object_id(table.id),
@@ -460,7 +461,7 @@ mod tests {
 
     #[test]
     fn current_resolved_and_hot_roundtrip() {
-        let table = TexasPokerTable::new(ObjectID::default(), "table".into(), [7; 20], 2, 10, 20);
+        let table = TexasPokerTable::new(ObjectID::default(), [7; 20], 2, 10, 20);
         let resolved = encode_table_state(&table).unwrap();
         assert_eq!(decode_table_state(&resolved).unwrap(), table);
 
@@ -472,7 +473,7 @@ mod tests {
 
     #[test]
     fn old_schema_fails_closed() {
-        let table = TexasPokerTable::new(ObjectID::default(), "table".into(), [7; 20], 2, 10, 20);
+        let table = TexasPokerTable::new(ObjectID::default(), [7; 20], 2, 10, 20);
         let mut bytes = encode_table_state(&table).unwrap();
         let schema_offset = ObjectID::default().to_bytes().len();
         bytes[schema_offset] = TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION - 1;
@@ -481,7 +482,7 @@ mod tests {
 
     #[test]
     fn old_hot_schema_fails_closed() {
-        let table = TexasPokerTable::new(ObjectID::default(), "table".into(), [7; 20], 2, 10, 20);
+        let table = TexasPokerTable::new(ObjectID::default(), [7; 20], 2, 10, 20);
         let openings = TableContextOpenings::from_table(&table);
         let mut bytes = encode_hot_table_state(&table).unwrap();
         let schema_offset = ObjectID::default().to_bytes().len();

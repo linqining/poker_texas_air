@@ -2704,7 +2704,8 @@ mod bg_fold_tests {
 mod settle_mode_tests {
     use super::*;
     use poker_l1::contracts::texas_poker::settlement::{
-        SettlementPlan, SettlementRunoutSchedule, SETTLEMENT_SEATS,
+        SettlementPlan, SettlementPotPlan, SettlementRunoutSchedule, SETTLEMENT_PLAN_VERSION,
+        SETTLEMENT_SEATS,
     };
 
     fn random_scalar() -> Sc {
@@ -2773,14 +2774,15 @@ mod settle_mode_tests {
         HandSettlement {
             hand_id: 3,
             plan: SettlementPlan {
-                version: 2,
+                version: SETTLEMENT_PLAN_VERSION,
                 schedule: SettlementRunoutSchedule::Single,
                 gross_pot: 200,
                 rake: 0,
                 total_awards: 200,
                 winner_mask: 0b0001,
                 awards,
-                pots: vec![],
+                pot_count: 0,
+                pots: [SettlementPotPlan::inactive(); SETTLEMENT_SEATS],
             },
             register_calldata: vec![],
             settle_calldata: vec![],
@@ -2796,7 +2798,7 @@ mod settle_mode_tests {
     }
 
     fn build_test_dual() -> DualSettlement {
-        let mirror = TableMirror::new(7, "test", [0xAA; 20], 9, 10, 20, [0xAA; 20]);
+        let mirror = TableMirror::new(7, [0xAA; 20], 9, 10, 20, [0xAA; 20]);
         let settlement = synthetic_settlement();
         let binding = prepare_handbatch_binding(&mirror, &settlement).expect("binding");
         let endorsements: Vec<Endorsement> = (0..2)
@@ -2832,7 +2834,7 @@ mod settle_mode_tests {
 
     #[test]
     fn tampered_endorsement_fails_closed_before_onchain() {
-        let mirror = TableMirror::new(7, "test", [0xAA; 20], 9, 10, 20, [0xAA; 20]);
+        let mirror = TableMirror::new(7, [0xAA; 20], 9, 10, 20, [0xAA; 20]);
         let settlement = synthetic_settlement();
         let binding = prepare_handbatch_binding(&mirror, &settlement).expect("binding");
 
@@ -2924,7 +2926,7 @@ mod settle_mode_tests {
 
     #[test]
     fn fold_check_cannot_detect_missing_endorsements() {
-        let mirror = TableMirror::new(7, "test", [0xAA; 20], 9, 10, 20, [0xAA; 20]);
+        let mirror = TableMirror::new(7, [0xAA; 20], 9, 10, 20, [0xAA; 20]);
         let settlement = synthetic_settlement();
         let binding = prepare_handbatch_binding(&mirror, &settlement).expect("binding");
 

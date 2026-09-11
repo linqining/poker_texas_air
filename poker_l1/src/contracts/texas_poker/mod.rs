@@ -87,14 +87,18 @@ pub const TEXAS_POKER_GOVERNANCE_OBJECT_TYPE: &str = "TexasPokerGovernancePolicy
 /// `max_players` 之外 Vacant 填充）、会话交易公钥为定宽 `StarkTxPubkey`
 /// （tag + `[u8; 32]`，去 Vec 长度前缀）。Incompatible older layouts are
 /// deliberately unsupported.
-pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 32;
+/// Version 34（2026-09-11）桌台名出共识：`TexasPokerTable` 不再携带 `name`，
+/// 展示名只存于非共识 metadata 对象（`TexasPokerTableMetadata`）。Incompatible
+/// older layouts are deliberately unsupported.
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 34;
 
 /// ObjectDb-only hot-state schema.
 ///
-/// Runtime/proof snapshots use resolved schema v32（座位定宽 + tx_pk 定宽）.
-/// The v33 ObjectDb encoding combines immutable
-/// context commitments with the same physical tagged-seat and typed-reveal representation.
-pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 33;
+/// Runtime/proof snapshots use resolved schema v34（座位定宽 + tx_pk 定宽，
+/// 无桌台名）. The v35 ObjectDb encoding combines immutable rules/governance
+/// context commitments with the same physical tagged-seat and typed-reveal
+/// representation；metadata 对象不再被热状态 digest 绑定（展示名非共识）.
+pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 35;
 
 // Phase 3.3: TexasPokerPrecompile impl（待 state_machine/dispatch 完成后补）
 // pub struct TexasPokerPrecompile { ... }

@@ -208,7 +208,6 @@ mod tests {
     fn table(id: u8) -> TexasPokerTable {
         poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             poker_l1::object_model::ObjectID::new([id; 20], 7),
-            format!("binding-{id}"),
             [0xCD; 20],
             6,
             50,

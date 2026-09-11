@@ -654,7 +654,6 @@ impl Orchestrator {
     ) -> TexasAirResult<B::Output> {
         let method_input = task.method_input()?;
         let MethodInput::CreateTable {
-            name,
             max_players,
             small_blind,
             big_blind,
@@ -668,7 +667,6 @@ impl Orchestrator {
         };
 
         let input = CreateTableInput {
-            name: name.clone(),
             max_players: *max_players,
             small_blind: *small_blind,
             big_blind: *big_blind,
@@ -677,6 +675,8 @@ impl Orchestrator {
         let pre_version = u64::from(task.pre_table.call_seq);
         let post_version = u64::from(task.post_table.call_seq);
 
+        // 展示名非共识（v34 起出热状态）：create_table 不再证明名字承诺，
+        // v2 名字承诺归档机制（#22⑤ 消费侧）已整体移除。
         let mut row = CreateTableRow::active(
             &input,
             state_root_to_m31_limbs(pre_root),
@@ -2754,10 +2754,9 @@ mod tests {
     use poker_l1::contracts::texas_poker::state_machine;
     use poker_l1::contracts::texas_poker::types::{EMPTY_PLAYER, SeatStatus, TexasPokerTable};
 
-    fn make_table(name: &str) -> TexasPokerTable {
+    fn make_table() -> TexasPokerTable {
         TexasPokerTable::new(
             ObjectID::new([0xFF; 20], 0),
-            name.into(),
             [0xA0; 20],
             6,
             50,
@@ -2766,14 +2765,7 @@ mod tests {
     }
 
     fn make_create_placeholder() -> TexasPokerTable {
-        TexasPokerTable::new(
-            ObjectID::new([0xFF; 20], 0),
-            String::new(),
-            EMPTY_PLAYER,
-            2,
-            1,
-            1,
-        )
+        TexasPokerTable::new(ObjectID::new([0xFF; 20], 0), EMPTY_PLAYER, 2, 1, 1)
     }
 
     fn enter_betting_fixture(
@@ -2850,7 +2842,7 @@ mod tests {
     #[test]
 #[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn set_leave_after_hand_dispatch_proves_and_issues_receipt() {
-        let mut pre = make_table("set-leave");
+        let mut pre = make_table();
         seat_fixture::set_player(&mut pre.seats[0], [0x11; 20]);
         seat_fixture::set_stack(&mut pre.seats[0], 1_000);
         let raw_args = borsh::to_vec(&SetLeaveAfterHandArgs {
@@ -2892,7 +2884,6 @@ mod tests {
     fn archived_method_proof_roundtrips_and_verifies_after_restart() {
         let pre = make_create_placeholder();
         let args = CreateTableArgs {
-            name: "archive-created".into(),
             max_players: 6,
             small_blind: 50,
             big_blind: 100,
@@ -2929,7 +2920,6 @@ mod tests {
             [0xC0; 20],
             texas_dispatch::selectors::create_table(),
             borsh::to_vec(&CreateTableArgs {
-                name: "original".into(),
                 max_players: 6,
                 small_blind: 50,
                 big_blind: 100,
@@ -2946,8 +2936,8 @@ mod tests {
             [0xC0; 20],
             texas_dispatch::selectors::create_table(),
             borsh::to_vec(&CreateTableArgs {
-                name: "different".into(),
-                max_players: 6,
+                // statement 必须可区分（历史用 name 差异，出共识后改规则参数）。
+                max_players: 9,
                 small_blind: 50,
                 big_blind: 100,
                 rit_mode: RIT_MODE_DISABLED,
@@ -2985,7 +2975,6 @@ mod tests {
     fn orchestrator_prove_create_table() {
         let pre = make_create_placeholder();
         let raw_args = borsh::to_vec(&CreateTableArgs {
-            name: "post".into(),
             max_players: 6,
             small_blind: 50,
             big_blind: 100,
@@ -3010,7 +2999,7 @@ mod tests {
     #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_prove_fold() {
-        let mut pre = make_table("pre");
+        let mut pre = make_table();
         pre.call_seq = 1;
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         for i in 0..3 {
@@ -3036,7 +3025,7 @@ mod tests {
     #[ignore = "slow prove (~11s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_advance_deadline_auto_fold_with_consensus_timestamp() {
-        let mut pre = make_table("auto-fold-consensus-time");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1);
         for i in 0..3 {
             seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
@@ -3059,8 +3048,8 @@ mod tests {
             .expect("expired auto_fold must prove against the consensus timestamp");
     }
 
-    fn terminal_admin_fold_table(name: &str) -> TexasPokerTable {
-        let mut pre = make_table(name);
+    fn terminal_admin_fold_table() -> TexasPokerTable {
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1);
         pre.pot = 250;
         pre.hand_id = 17;
@@ -3102,7 +3091,7 @@ mod tests {
     #[ignore = "slow prove (~8s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_terminal_advance_deadline_settlement_and_archive() {
-        let pre = terminal_admin_fold_table("terminal-advance-deadline");
+        let pre = terminal_admin_fold_table();
         let (task, post) = dispatch_task(
             pre,
             [0x77; 20],
@@ -3116,7 +3105,7 @@ mod tests {
     #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_terminal_force_fold_settlement_and_archive() {
-        let pre = terminal_admin_fold_table("terminal-force-fold");
+        let pre = terminal_admin_fold_table();
         let creator = pre.creator;
         let (task, post) = dispatch_task(
             pre,
@@ -3132,7 +3121,7 @@ mod tests {
     #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_terminal_tick_settlement_and_archive() {
-        let pre = terminal_admin_fold_table("terminal-advance-deadline-fold");
+        let pre = terminal_admin_fold_table();
         let (task, post) = dispatch_task(
             pre,
             [0x77; 20],
@@ -3168,7 +3157,7 @@ mod tests {
 
     #[test]
     fn orchestrator_omits_proof_for_waiting_noop_tick() {
-        let mut pre = make_table("waiting-advance-deadline-start-hand");
+        let mut pre = make_table();
         for i in 0..2 {
             seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
             seat_fixture::set_stack(&mut pre.seats[i], 1_000);
@@ -3195,7 +3184,7 @@ mod tests {
     #[ignore = "slow prove (~54s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_addon_ripple_carry() {
-        let mut pre = make_table("addon-ripple-carry");
+        let mut pre = make_table();
         seat_fixture::set_player(&mut pre.seats[0], [0x41; 20]);
         seat_fixture::set_stack(&mut pre.seats[0], 100);
         seat_fixture::set_pending_addon(&mut pre.seats[0], 65_535);
@@ -3220,7 +3209,7 @@ mod tests {
     #[test]
 #[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn orchestrator_accepts_rebuy_ripple_carry() {
-        let mut pre = make_table("rebuy-ripple-carry");
+        let mut pre = make_table();
         seat_fixture::set_player(&mut pre.seats[0], [0x42; 20]);
         seat_fixture::set_stack(&mut pre.seats[0], 65_535);
         pre.chip_pool = 65_535;
@@ -3244,7 +3233,7 @@ mod tests {
     #[ignore = "slow prove (~2s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_kick_player_pot_ripple_carry() {
-        let mut pre = make_table("kick-ripple-carry");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.pot = 65_535;
         for i in 0..3 {
@@ -3271,7 +3260,7 @@ mod tests {
     #[ignore = "slow prove (~41s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_binds_force_fold_creator_authorization_receipt() {
-        let mut pre = make_table("force-fold-admin-binding");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         for index in 0..3 {
             seat_fixture::set_player(
@@ -3298,7 +3287,7 @@ mod tests {
     #[ignore = "slow prove (~5s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_binds_start_hand_creator_authorization_receipt() {
-        let mut pre = make_table("start-hand-admin-binding");
+        let mut pre = make_table();
         for seat_index in [0usize, 2] {
             seat_fixture::set_player(
                 &mut pre.seats[seat_index],
@@ -3323,7 +3312,7 @@ mod tests {
 
     #[test]
     fn source_dispatch_rejects_retired_reset_for_next_hand_before_task_creation() {
-        let mut waiting = make_table("reset-admin-binding");
+        let mut waiting = make_table();
         for seat_index in [0usize, 2] {
             seat_fixture::set_player(
                 &mut waiting.seats[seat_index],
@@ -3357,7 +3346,7 @@ mod tests {
     #[test]
 #[ignore = "slow prove (~10-25s); full gate runs --include-ignored"]
     fn orchestrator_accepts_leave_table_funds_ripple_carry() {
-        let mut pre = make_table("leave-ripple-carry");
+        let mut pre = make_table();
         seat_fixture::set_player(&mut pre.seats[0], [0x43; 20]);
         seat_fixture::set_stack(&mut pre.seats[0], 65_535);
         seat_fixture::set_pending_addon(&mut pre.seats[0], 1);
@@ -3379,7 +3368,7 @@ mod tests {
     #[ignore = "slow prove (~52s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_nonzero_mid_round_call() {
-        let mut pre = make_table("mid-round-call");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.pot = 25;
         pre.hand_id = 7;
@@ -3411,7 +3400,7 @@ mod tests {
     #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_end_round_call_collection() {
-        let mut pre = make_table("end-round-call");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 1, 0);
         pre.pot = 25;
         pre.hand_id = 7;
@@ -3452,7 +3441,7 @@ mod tests {
     #[ignore = "slow prove (~2s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_end_round_raise_collection() {
-        let mut pre = make_table("end-round-raise");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 1, 0);
         pre.pot = 25;
         pre.hand_id = 13;
@@ -3495,7 +3484,7 @@ mod tests {
     #[ignore = "slow prove (~49s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_normal_mid_round_raise() {
-        let mut pre = make_table("normal-mid-round-raise");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.pot = 55;
         pre.hand_id = 8;
@@ -3535,7 +3524,7 @@ mod tests {
     #[ignore = "slow prove (~26s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_short_all_in_raise_without_reopening() {
-        let mut pre = make_table("short-all-in-raise");
+        let mut pre = make_table();
         enter_betting_fixture(
             &mut pre,
             ROUND_PREFLOP,
@@ -3588,7 +3577,7 @@ mod tests {
     #[ignore = "slow prove (~2s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_accepts_postflop_mid_round_bet() {
-        let mut pre = make_table("postflop-bet");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_FLOP, BettingRound::new(100, 0), 0, 0);
         pre.pot = 300;
         pre.hand_id = 10;
@@ -3625,7 +3614,7 @@ mod tests {
     #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_end_round_bet_collection() {
-        let mut pre = make_table("end-round-bet");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_FLOP, BettingRound::new(100, 0), 0, 0);
         pre.pot = 300;
         pre.hand_id = 14;
@@ -3663,7 +3652,7 @@ mod tests {
     #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_last_opponent_fold_settlement() {
-        let mut pre = make_table("fold-settlement");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.pot = 250;
         pre.hand_id = 11;
@@ -3735,7 +3724,7 @@ mod tests {
     #[ignore = "slow prove (~17s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_heads_up_end_round_check() {
-        let mut pre = make_table("end-round-check");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 1, 0);
         pre.hand_id = 3;
         pre.call_seq = 4;
@@ -3768,7 +3757,7 @@ mod tests {
     #[ignore = "slow prove (~7s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_kick_that_triggers_nested_reset() {
-        let mut pre = make_table("kick-nested-reset");
+        let mut pre = make_table();
         seat_fixture::set_player(&mut pre.seats[0], [0x31; 20]);
         seat_fixture::set_stack(&mut pre.seats[0], 1_000);
         pre.chip_pool = 1_000;
@@ -3791,7 +3780,7 @@ mod tests {
     #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_proves_active_kick_settlement_cascade() {
-        let mut pre = make_table("kick-active-settlement");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.hand_id = 9;
         pre.call_seq = 17;
@@ -3840,7 +3829,7 @@ mod tests {
     /// when no other seat has a live bet and native collect_bets_to_pot emits no marker event.
     #[test]
     fn active_kick_plan_accepts_immediate_collection_without_pot_event() {
-        let mut pre = make_table("kick-immediate-collection-only");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         for seat_index in 0..2 {
             seat_fixture::set_player(
@@ -3876,7 +3865,7 @@ mod tests {
     #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_check_is_now_supported() {
-        let mut pre = make_table("pre");
+        let mut pre = make_table();
         enter_betting_fixture(
             &mut pre,
             poker_l1::contracts::texas_poker::constants::ROUND_PREFLOP,
@@ -3945,7 +3934,7 @@ mod tests {
     #[ignore = "slow prove (~11s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_chain_two_tasks() {
-        let mut pre = make_table("two-real-dispatches");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.hand_id = 7;
         pre.call_seq = 11;
@@ -3991,7 +3980,7 @@ mod tests {
     #[ignore = "slow prove (~3s); full gate runs `--include-ignored`"]
     #[test]
     fn tagged_stage_batch_v4_mixes_zero_stage_and_composite_method_rows() {
-        let mut pre = make_table("tagged-stage-batch-v4");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.hand_id = 12;
         pre.call_seq = 30;
@@ -4107,7 +4096,7 @@ mod tests {
     #[ignore = "slow prove (~4s); full gate runs `--include-ignored`"]
     #[test]
     fn orchestrator_chain_matches_exact_external_anchor_shape() {
-        let mut pre = make_table("anchored-two-dispatches");
+        let mut pre = make_table();
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.hand_id = 9;
         pre.call_seq = 20;

@@ -67,10 +67,10 @@ pub enum MethodInput {
         /// 买入金额。
         buy_in: u64,
     },
-    /// `create_table`（name + max_players + small_blind + big_blind + rit_mode）。
+    /// `create_table`（max_players + small_blind + big_blind + rit_mode）。
+    ///
+    /// v34 起不携带 `name`：展示名非共识，不进 prove task。
     CreateTable {
-        /// 桌台名称。
-        name: String,
         /// 最大玩家数。
         max_players: u8,
         /// 小盲注。
@@ -137,7 +137,6 @@ mod tests {
                 buy_in: 2000,
             },
             MethodInput::CreateTable {
-                name: "t".into(),
                 max_players: 6,
                 small_blind: 50,
                 big_blind: 100,

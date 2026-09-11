@@ -671,7 +671,8 @@ mod tests {
     use poker_l1::object_model::ObjectID;
     use poker_l1::contracts::texas_poker::card::{BoardCards, HoleCards};
     use poker_l1::contracts::texas_poker::settlement::{
-        SettlementPlan, SettlementRunoutSchedule,
+        SettlementPlan, SettlementPotPlan, SettlementRunoutSchedule, SETTLEMENT_PLAN_VERSION,
+        SETTLEMENT_SEATS,
     };
     use poker_l1::contracts::texas_poker::types::{
         DeckState, HandPhase, OccupiedSeat, PlayingSeat, PlayingSeatStatus, TableRules,
@@ -730,7 +731,6 @@ mod tests {
     fn build_test_table(hand_id: u32) -> TexasPokerTable {
         TexasPokerTable {
             id: ObjectID::new([0xAB; 20], 0),
-            name: "test".to_string(),
             creator: [0xAA; 20],
             rules: TableRules::new(9, 5, 10),
             seats: [
@@ -760,14 +760,15 @@ mod tests {
 
     fn zero_rake_plan(winner_award: u64) -> SettlementPlan {
         SettlementPlan {
-            version: 1,
+            version: SETTLEMENT_PLAN_VERSION,
             schedule: SettlementRunoutSchedule::Single,
             gross_pot: 100,
             rake: 0,
             total_awards: winner_award,
             winner_mask: 1,
             awards: [winner_award, 0, 0, 0, 0, 0, 0, 0, 0],
-            pots: vec![],
+            pot_count: 0,
+            pots: [SettlementPotPlan::inactive(); SETTLEMENT_SEATS],
         }
     }
 
@@ -836,14 +837,15 @@ mod tests {
     fn settle_hand_rake_merges_with_player() {
         let table = build_test_table(7);
         let plan = SettlementPlan {
-            version: 1,
+            version: SETTLEMENT_PLAN_VERSION,
             schedule: SettlementRunoutSchedule::Single,
             gross_pot: 100,
             rake: 5,
             total_awards: 95,
             winner_mask: 1,
             awards: [95, 0, 0, 0, 0, 0, 0, 0, 0],
-            pots: vec![],
+            pot_count: 0,
+            pots: [SettlementPotPlan::inactive(); SETTLEMENT_SEATS],
         };
         // Rake recipient equals seat 0 (winner) → must merge.
         let winner_addr = [0x11; 20];
@@ -866,14 +868,15 @@ mod tests {
     fn settle_hand_rejects_missing_rake_recipient() {
         let table = build_test_table(7);
         let plan = SettlementPlan {
-            version: 1,
+            version: SETTLEMENT_PLAN_VERSION,
             schedule: SettlementRunoutSchedule::Single,
             gross_pot: 100,
             rake: 5,
             total_awards: 95,
             winner_mask: 1,
             awards: [95, 0, 0, 0, 0, 0, 0, 0, 0],
-            pots: vec![],
+            pot_count: 0,
+            pots: [SettlementPotPlan::inactive(); SETTLEMENT_SEATS],
         };
         let err = SettleHandCalldata::new([4u8; 32], 7, &table, &plan, None, action_log_sample()).unwrap_err();
         assert!(matches!(err, TexasAirError::SpecViolation(_)));

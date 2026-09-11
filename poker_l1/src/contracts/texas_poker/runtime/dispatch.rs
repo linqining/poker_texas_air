@@ -440,10 +440,10 @@ impl CanonicalCommand {
 // ========== Args 结构体（borsh 序列化 + typed 密码学字段） ==========
 
 /// `create_table` 参数。
+///
+/// v34 起不再携带 `name`：展示名非共识，由非共识 metadata 对象承载。
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct CreateTableArgs {
-    /// 桌台名称。
-    pub name: String,
     /// 最大玩家数（2..=9）。
     pub max_players: u8,
     /// 小盲注金额。
@@ -452,7 +452,7 @@ pub struct CreateTableArgs {
     pub big_blind: u64,
     /// Run It Twice 桌面策略（`RIT_MODE_DISABLED` / `RIT_MODE_TWICE`）。
     ///
-    /// 严格 5 字段编码：载荷必须精确携带本字段，旧 4 字段编码与尾随
+    /// 严格 4 字段编码：载荷必须精确携带本字段，旧编码与尾随
     /// 垃圾字节一律反序列化失败（fail-closed）；缺省语义即不开启
     /// （`RIT_MODE_DISABLED`），非协议值由 core::apply_create_table 拒绝。
     pub rit_mode: u8,
@@ -902,7 +902,6 @@ fn build_method_input(
         return Ok((
             K_CREATE_TABLE,
             MethodInput::CreateTable {
-                name: a.name,
                 max_players: a.max_players,
                 small_blind: a.small_blind,
                 big_blind: a.big_blind,
@@ -1637,7 +1636,6 @@ fn dispatch_create_table(
     state_machine::apply_create_table(
         table,
         context.caller,
-        input.name,
         input.max_players,
         input.small_blind,
         input.big_blind,
@@ -2001,7 +1999,6 @@ mod tests {
         // 使需要 creator 权限的测试（kick/start_hand/reset）天然通过。
         TexasPokerTable::new(
             ObjectID::new([0xFF; 20], 0),
-            "test".to_string(),
             [0xAA; 20],
             6,
             50,
@@ -2218,7 +2215,6 @@ mod tests {
         table.pot = 999;
 
         let args = CreateTableArgs {
-            name: "new_game".into(),
             max_players: 9,
             small_blind: 25,
             big_blind: 50,
@@ -2227,7 +2223,6 @@ mod tests {
         let args_bytes = borsh::to_vec(&args).unwrap();
         let result = dispatch(&ctx, &mut table, &selectors::create_table(), &args_bytes).unwrap();
 
-        assert_eq!(table.name, "new_game");
         assert_eq!(table.max_players, 9);
         assert_eq!(table.small_blind, 25);
         assert_eq!(table.big_blind, 50);
@@ -2244,7 +2239,6 @@ mod tests {
         let ctx = make_context();
         let mut table = make_table();
         let args = CreateTableArgs {
-            name: "bad".into(),
             max_players: 10, // 越界
             small_blind: 25,
             big_blind: 50,
@@ -2261,7 +2255,6 @@ mod tests {
         let ctx = make_context();
         let mut table = make_table();
         let args = CreateTableArgs {
-            name: "rit-table".into(),
             max_players: 6,
             small_blind: 25,
             big_blind: 50,
@@ -2280,9 +2273,7 @@ mod tests {
         let ctx = make_context();
         let mut table = make_table();
         table.pot = 999; // 失败标记：拒绝后桌台必须原样保留
-        let pre_name = table.name.clone();
         let args = CreateTableArgs {
-            name: "bad-rit".into(),
             max_players: 6,
             small_blind: 25,
             big_blind: 50,
@@ -2292,39 +2283,42 @@ mod tests {
         let result = dispatch(&ctx, &mut table, &selectors::create_table(), &args_bytes);
         assert!(result.is_err());
         assert_eq!(table.pot, 999, "rit_mode 校验失败不得覆写桌台");
-        assert_eq!(table.name, pre_name);
     }
 
     #[test]
     fn create_table_args_reject_legacy_payload_fail_closed() {
-        // 严格编码：旧 v2 载荷（4 字段，无 rit_mode 尾字节）必须反序列化失败。
+        // 严格编码：v34 前的旧载荷（5 字段：name String + 3 规则字段 +
+        // rit_mode）必须反序列化失败——新 schema 无 String 字段，legacy 字节
+        // 无法精确对齐，尾随垃圾按 borsh 纪律 fail-closed。
         let mut legacy = Vec::new();
         legacy.extend_from_slice(&6u32.to_le_bytes()); // String len
-        legacy.extend_from_slice(b"legacy");
+        legacy.extend_from_slice(b"legacy"); // name bytes
         legacy.push(9); // max_players
         legacy.extend_from_slice(&25u64.to_le_bytes()); // small_blind
         legacy.extend_from_slice(&50u64.to_le_bytes()); // big_blind
+        legacy.push(RIT_MODE_DISABLED);
         assert!(borsh::from_slice::<CreateTableArgs>(&legacy).is_err());
 
         // 走完整 dispatch 也必须被拒，且不覆写桌台。
         let ctx = make_context();
         let mut table = make_table();
         table.pot = 999; // 失败标记：拒绝后桌台必须原样保留
-        let pre_name = table.name.clone();
         dispatch(&ctx, &mut table, &selectors::create_table(), &legacy).unwrap_err();
         assert_eq!(table.pot, 999);
-        assert_eq!(table.name, pre_name);
 
-        // 新 5 字段编码正常解码；rit_mode=DISABLED 建桌成功且不开启 RIT。
-        let mut strict = legacy.clone();
+        // 新 4 字段编码正常解码；rit_mode=DISABLED 建桌成功且不开启 RIT。
+        let mut strict = Vec::new();
+        strict.push(9); // max_players
+        strict.extend_from_slice(&25u64.to_le_bytes()); // small_blind
+        strict.extend_from_slice(&50u64.to_le_bytes()); // big_blind
         strict.push(RIT_MODE_DISABLED);
         let decoded: CreateTableArgs = borsh::from_slice(&strict).unwrap();
         assert_eq!(decoded.rit_mode, RIT_MODE_DISABLED);
         dispatch(&ctx, &mut table, &selectors::create_table(), &strict).unwrap();
-        assert_eq!(table.name, "legacy");
+        assert_eq!(table.max_players, 9);
         assert_eq!(table.rules.rit_mode, RIT_MODE_DISABLED);
 
-        // 尾随垃圾（超出 5 字段）仍按 borsh 尾随纪律拒绝。
+        // 尾随垃圾（超出 4 字段）仍按 borsh 尾随纪律拒绝。
         let mut trailing = strict.clone();
         trailing.extend_from_slice(&[0, 7]);
         assert!(borsh::from_slice::<CreateTableArgs>(&trailing).is_err());
@@ -2425,7 +2419,6 @@ mod tests {
 
         // ========== Step 1: create_table ==========
         let create_args = CreateTableArgs {
-            name: "e2e_table".into(),
             max_players: 2,
             small_blind: 10,
             big_blind: 20,
@@ -2443,7 +2436,6 @@ mod tests {
         assert_eq!(table.call_seq, 1);
 
         // 验证 WAITING 状态 + 参数已设置
-        assert_eq!(table.name, "e2e_table");
         assert_eq!(table.max_players, 2);
         assert_eq!(table.small_blind, 10);
         assert_eq!(table.big_blind, 20);
@@ -3132,7 +3124,6 @@ mod tests {
 
         // create_table（creator 发起）
         let create_args = CreateTableArgs {
-            name: "leave-test".into(),
             max_players: 4,
             small_blind: 10,
             big_blind: 20,
@@ -3463,7 +3454,6 @@ mod tests {
             (
                 selectors::create_table(),
                 borsh::to_vec(&CreateTableArgs {
-                    name: "coverage".into(),
                     max_players: 6,
                     small_blind: 50,
                     big_blind: 100,

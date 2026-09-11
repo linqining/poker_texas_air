@@ -3241,7 +3241,7 @@ fn apply_settlement_plan(
             },
         );
     }
-    for pot in &plan.pots {
+    for pot in plan.active_pots() {
         let pot_type = if pot.pot_index == 0 {
             POT_TYPE_MAIN
         } else {
@@ -4132,7 +4132,6 @@ pub fn trigger_run_it_twice(
 pub fn apply_create_table(
     table: &mut TexasPokerTable,
     creator: Address,
-    name: String,
     max_players: u8,
     small_blind: u64,
     big_blind: u64,
@@ -4158,7 +4157,7 @@ pub fn apply_create_table(
     }
     let id = table.id;
     // P0-2：记录 creator 为调用方，作为后续管理类方法的权限基准。
-    *table = TexasPokerTable::new(id, name, creator, max_players, small_blind, big_blind);
+    *table = TexasPokerTable::new(id, creator, max_players, small_blind, big_blind);
     table.rules.rit_mode = rit_mode;
     Ok(())
 }
@@ -4312,45 +4311,25 @@ mod tests {
     }
 
     fn make_table() -> TexasPokerTable {
-        TexasPokerTable::new(dummy_id(), "test".into(), EMPTY_PLAYER, 4, 50, 100)
+        TexasPokerTable::new(dummy_id(), EMPTY_PLAYER, 4, 50, 100)
     }
 
     #[test]
     fn apply_create_table_sets_rit_mode_and_rejects_unknown_values_atomically() {
         // TWICE：显式开启必须落到桌面规则。
         let mut table = make_table();
-        apply_create_table(
-            &mut table,
-            [0xAA; 20],
-            "rit".into(),
-            6,
-            25,
-            50,
-            RIT_MODE_TWICE,
-        )
-        .unwrap();
+        apply_create_table(&mut table, [0xAA; 20], 6, 25, 50, RIT_MODE_TWICE).unwrap();
         assert_eq!(table.rules.rit_mode, RIT_MODE_TWICE);
 
         // DISABLED：默认不开启。
-        apply_create_table(
-            &mut table,
-            [0xAA; 20],
-            "plain".into(),
-            6,
-            25,
-            50,
-            RIT_MODE_DISABLED,
-        )
-        .unwrap();
+        apply_create_table(&mut table, [0xAA; 20], 6, 25, 50, RIT_MODE_DISABLED).unwrap();
         assert_eq!(table.rules.rit_mode, RIT_MODE_DISABLED);
 
         // 非协议值：fail-closed，且校验先于覆写——桌台原样保留。
-        let pre_name = table.name.clone();
-        let error =
-            apply_create_table(&mut table, [0xAA; 20], "bad".into(), 6, 25, 50, 3).unwrap_err();
+        let pre_rit = table.rules.rit_mode;
+        let error = apply_create_table(&mut table, [0xAA; 20], 6, 25, 50, 3).unwrap_err();
         assert!(error.to_string().contains("rit_mode"));
-        assert_eq!(table.name, pre_name);
-        assert_eq!(table.rules.rit_mode, RIT_MODE_DISABLED);
+        assert_eq!(table.rules.rit_mode, pre_rit);
     }
 
     fn community_assignment(encrypted_card_index: u8, board_position: u8) -> RevealAssignment {

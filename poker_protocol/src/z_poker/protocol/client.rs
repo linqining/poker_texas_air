@@ -193,9 +193,16 @@ impl ClientPlayer {
         tokens
     }
 
-    pub fn shuffle(&self, deck_encrypted: &[ElGamalCiphertext], agg_pk: &EcPoint) -> ShuffleRound {
+    /// 用户洗牌：置换由调用方（玩家/客户端）传入——洗牌决定权属于用户，
+    /// 库不代生成。非双射置换 fail-closed 拒绝。
+    pub fn shuffle(
+        &self,
+        deck_encrypted: &[ElGamalCiphertext],
+        agg_pk: &EcPoint,
+        permute: [usize; crate::crypto::N_CARDS],
+    ) -> Result<ShuffleRound, VerificationError> {
         let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::SHUFFLE_V2_POSEIDON);
-        ShuffleRound::execute(deck_encrypted, agg_pk, &mut transcript, &mut OsRng)
+        ShuffleRound::execute(deck_encrypted, agg_pk, permute, &mut transcript, &mut OsRng)
     }
 
     // curr_share_pk: 当前分享的公钥,不包含自己
@@ -203,7 +210,8 @@ impl ClientPlayer {
         &self,
         input_cards: &[ElGamalCiphertext],
         curr_share_pk: &EcPoint,
-    ) -> JoinGameAndShuffleRound {
+        permute: [usize; crate::crypto::N_CARDS],
+    ) -> Result<JoinGameAndShuffleRound, VerificationError> {
         let share_pk = *curr_share_pk + self.pk;
         let pk_proof = self.generate_pk_proof();
         let mask_and_shuffle_round = MaskAndShuffleRound::execute(
@@ -211,13 +219,14 @@ impl ClientPlayer {
             &share_pk,
             self.sk.clone(),
             &self.pk,
+            permute,
             &mut OsRng,
-        );
-        JoinGameAndShuffleRound {
+        )?;
+        Ok(JoinGameAndShuffleRound {
             pk_hex: hex::encode(self.pk.compress().as_ref()),
             pk_ownership_proof: pk_proof,
             mask_and_shuffle_round,
-        }
+        })
     }
 
     pub fn leave_game(&self, input_cards: &[ElGamalCiphertext]) -> LeaveGameRound {

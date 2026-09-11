@@ -50,6 +50,8 @@ pub struct MentalPokerGame {
     pub expelled_players: Vec<String>,
     pub expel_records: Vec<ExpelRecord>,
     pub entrusted_sk: HashMap<String, Scalar>,
+    /// reconstruct 重建 deck 时刻的旧纪元发牌计数（游标归零偏移）。
+    deal_cursor_offset: usize,
 }
 
 impl MentalPokerGame {
@@ -77,6 +79,7 @@ impl MentalPokerGame {
             expelled_players: vec![],
             expel_records: vec![],
             entrusted_sk: HashMap::new(),
+            deal_cursor_offset: 0,
         }
     }
 
@@ -135,6 +138,7 @@ impl MentalPokerGame {
             pk_hex: pk_hex.clone(),
             pk,
             hand_encrypted: vec![],
+            is_leave: false,
         };
         self.players.insert(pk_hex.clone(), state);
         // insert 后取回必然存在
@@ -220,7 +224,20 @@ impl MentalPokerGame {
     }
 
     pub fn deal_to_player(&mut self, player_pk: &str, n: usize) -> Result<(), VerificationError> {
-        let pending_players: Vec<EcPoint> = self.players.values().map(|p| p.pk).collect::<Vec<_>>();
+        // 已离场/被驱逐玩家（is_leave）不再参与 reveal pending——他们的
+        // token 永远不会到来。
+        let pending_players: Vec<EcPoint> = self
+            .players
+            .values()
+            .filter(|p| !p.is_leave)
+            .map(|p| p.pk)
+            .collect::<Vec<_>>();
+
+        // 游标与 deck 上界先行校验（避免与 players 可变借用交叠）。
+        let mut card_index = self.deal_cursor();
+        if card_index + n > self.deck_encrypted.len() {
+            return Err(VerificationError::TooManyCardsReplaced);
+        }
 
         let player = self
             .players
@@ -234,11 +251,6 @@ impl MentalPokerGame {
         }
 
         let pk_hex = player.pk_hex.clone();
-        let mut card_index =
-            Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted);
-        if card_index + n > self.deck_encrypted.len() {
-            return Err(VerificationError::TooManyCardsReplaced);
-        }
         let mut player_encrypted_cards = Vec::with_capacity(n);
         let mut encrypted_cards = Vec::with_capacity(n);
         for _ in 0..n {
@@ -275,11 +287,39 @@ impl MentalPokerGame {
         deal_idx
     }
 
+    /// 当前 deck 纪元内的发牌游标（front-consumed 计数）。
+    ///
+    /// 常规路径 = Σ 存活玩家底牌 + 公共牌；`note_deck_reconstructed` 后
+    /// 扣除重建时刻的旧纪元计数。
+    fn deal_cursor(&self) -> usize {
+        Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted)
+            .saturating_sub(self.deal_cursor_offset)
+    }
+
+    /// deck 整体重建（reconstruct 重建 + 全员重洗）后由宿主调用：
+    /// 发牌游标归零（原 todo "reconstruct deck后 deal index 需要重置"）。
+    ///
+    /// 重建 + 重洗后的 deck 是全新发牌序列，旧纪元的已发计数不再对应
+    /// 任何位置；此后 deal/redeal 从新 deck 位置 0 起步。已发牌的 reveal
+    /// 记录（底牌/公共牌密文与 token 状态）与位置计数解耦，不受影响。
+    ///
+    /// # 已知边界
+    /// 重洗会把"被换出的已发牌死槽"随机打散进新 deck，此后任何位置的
+    /// 抽取都可能命中死槽（解出非规范明文）。该协议级缺口随重构管线
+    /// 深挖（见 docs/TODO.md #39）处理，本方法只负责游标语义与新 deck
+    /// 对齐。
+    pub fn note_deck_reconstructed(&mut self) {
+        self.deal_cursor_offset =
+            Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted);
+    }
+
     pub fn deal_community_cards_encrypted(&mut self, n: usize) -> Vec<ElGamalCiphertext> {
         let mut encrypted_cards = Vec::with_capacity(n);
+        // 已离场/被驱逐玩家（is_leave）不参与公共牌 reveal pending。
         let pending_players = self
             .players
             .values()
+            .filter(|p| !p.is_leave)
             .map(|p| p.pk.clone())
             .collect::<Vec<_>>();
         // 公共牌总数硬上限（德扑 = 5）。超出的部分截断（而非报错），保证
@@ -293,8 +333,7 @@ impl MentalPokerGame {
             );
             return encrypted_cards;
         }
-        let deal_num =
-            Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted);
+        let deal_num = self.deal_cursor();
         for num in 0..n {
             let curr_idx = deal_num + num;
             let encrypt_card = self.deck_encrypted[curr_idx].clone();
@@ -600,9 +639,9 @@ impl MentalPokerGame {
                 }
             }
         }
-        // todo reconstruct deck后 deal index 需要重置
-        let deal_num =
-            Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted);
+        // 纪元化游标：reconstruct 重建 deck 后由宿主 note_deck_reconstructed
+        // 归零，重发从新 deck 位置 0 起步。
+        let deal_num = self.deal_cursor();
         if deal_num >= self.deck_encrypted.len() {
             return Err(VerificationError::TooManyCardsReplaced);
         }
@@ -616,7 +655,13 @@ impl MentalPokerGame {
         });
 
         // 替换玩家手牌中失败的牌，重置 reveal_state
-        let pending_players: Vec<EcPoint> = self.players.values().map(|p| p.pk).collect();
+        // 已离场/被驱逐玩家（is_leave）不参与重发牌 reveal pending。
+        let pending_players: Vec<EcPoint> = self
+            .players
+            .values()
+            .filter(|p| !p.is_leave)
+            .map(|p| p.pk)
+            .collect();
         if let Some(player) = self.players.get_mut(player_pk) {
             player.hand_encrypted[hand_index] = PlayerEncryptedCard {
                 card_index: deal_num as u32,
@@ -694,7 +739,11 @@ impl MentalPokerGame {
         let mut rng = OsRng;
         let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::FORCE_SHUFFLE_POSEIDON_V1);
 
-        let round = ShuffleRound::execute(&self.deck_encrypted, &agg_pk, &mut transcript, &mut rng);
+        // 代理洗牌：置换由本地 CSPRNG 生成（被代理玩家已离场/受托，
+        // 无用户置换可传；玩家本人的洗牌必须走客户端传入置换的路径）。
+        let round =
+            ShuffleRound::execute_random(&self.deck_encrypted, &agg_pk, &mut transcript, &mut rng)
+                .map_err(|_| VerificationError::ProofVerificationFailed)?;
 
         let mut transcript = PoseidonFeltTranscript::new_domain(crate::transcript_domains::FORCE_SHUFFLE_POSEIDON_V1);
         if !round.verify(&agg_pk, &mut transcript) {
@@ -976,6 +1025,7 @@ impl MentalPokerGame {
 
         if let Some(p) = self.players.get_mut(target_player_pk) {
             p.hand_encrypted.clear();
+            p.is_leave = true;
         }
 
         self.deal_results
@@ -1104,6 +1154,7 @@ mod tests {
             pk_hex: malformed_pk_hex.clone(),
             pk: player.pk,
             hand_encrypted: vec![],
+            is_leave: false,
         };
         game.players.insert(malformed_pk_hex.clone(), state);
 

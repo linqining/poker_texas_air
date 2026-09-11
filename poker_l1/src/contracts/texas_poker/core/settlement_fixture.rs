@@ -39,7 +39,7 @@ impl SettlementScene {
     pub fn assert_invariants(&self) -> SettlementPlan {
         let plan = self.plan().expect("scene derives a settlement plan");
         assert!(
-            plan.pots.len() <= SETTLEMENT_SEATS,
+            usize::from(plan.pot_count) <= SETTLEMENT_SEATS,
             "pot layers exceed the fixed settlement width"
         );
         assert_eq!(
@@ -47,16 +47,16 @@ impl SettlementScene {
             plan.rake + plan.total_awards,
             "settlement must conserve chips"
         );
-        let layer_gross: u64 = plan.pots.iter().map(|pot| pot.gross_amount).sum();
+        let layer_gross: u64 = plan.active_pots().iter().map(|pot| pot.gross_amount).sum();
         assert_eq!(layer_gross, plan.gross_pot, "layers must tile the pot");
-        let layer_rake: u64 = plan.pots.iter().map(|pot| pot.rake).sum();
+        let layer_rake: u64 = plan.active_pots().iter().map(|pot| pot.rake).sum();
         assert_eq!(layer_rake, plan.rake, "rake must tile across layers");
         let award_sum: u64 = plan.awards.iter().sum();
         assert_eq!(
             award_sum, plan.total_awards,
             "per-seat awards must tile the total"
         );
-        for pot in &plan.pots {
+        for pot in plan.active_pots() {
             if !pot.is_contested() {
                 assert_eq!(pot.rake, 0, "uncalled layers are never raked");
             }
@@ -85,7 +85,6 @@ impl SettlementScene {
 fn base_table(seats: u8) -> TexasPokerTable {
     TexasPokerTable::new(
         ObjectID::new([0xF1; 20], 0),
-        "settlement-fixture".into(),
         [0xEE; 20],
         seats,
         1,
@@ -487,7 +486,7 @@ mod tests {
         // Main pot 300 (3 × 100) to seat 0 (aces); side pot 200 (2 × 100)
         // to seat 1 (kings, best of the two deeper stacks); uncalled 100
         // returns to seat 2 unraked.
-        assert_eq!(plan.pots.len(), 3);
+        assert_eq!(plan.active_pots().len(), 3);
         assert_eq!(plan.rake, 0);
         assert_eq!(plan.awards[0], 300);
         assert_eq!(plan.awards[1], 200);
@@ -502,7 +501,7 @@ mod tests {
         // Nine distinct all-in levels slice nine layers: layer k (bet level
         // 10·(k+1)) is won by seat k, the best hand still eligible at that
         // depth; the final 10 of seat 8 is an uncalled return.
-        assert_eq!(plan.pots.len(), 9);
+        assert_eq!(plan.active_pots().len(), 9);
         assert_eq!(plan.rake, 0);
         for seat_index in 0..8usize {
             assert_eq!(
@@ -541,7 +540,7 @@ mod tests {
         assert_eq!(plan.awards[0], 50);
         assert_eq!(plan.total_awards, 50);
         assert_eq!(plan.winner_mask, 0b001);
-        assert_eq!(plan.pots.len(), 1);
+        assert_eq!(plan.active_pots().len(), 1);
         assert_eq!(plan.pots[0].rake, 0);
     }
 
@@ -596,7 +595,7 @@ mod tests {
         assert_eq!(plan.awards[1], 100);
         assert_eq!(plan.rake, 0);
         assert_eq!(plan.winner_mask, 0b11);
-        for pot in &plan.pots {
+        for pot in plan.active_pots() {
             assert_eq!(pot.runouts[0].winner_mask, 1 << 0);
             assert_eq!(pot.runouts[1].winner_mask, 1 << 1);
         }
@@ -608,8 +607,8 @@ mod tests {
         let folded = [false; 9];
         let all_in = [true; 9];
         let result = side_pot_layers(&bets, &folded, &all_in).expect("layers");
-        assert!(result.pots.len() <= SETTLEMENT_SEATS);
+        assert!(usize::from(result.pot_count) <= SETTLEMENT_SEATS);
         let again = side_pot_layers(&bets, &folded, &all_in).expect("re-derive");
-        assert_eq!(result.pots, again.pots);
+        assert_eq!(result, again);
     }
 }

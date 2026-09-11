@@ -104,10 +104,16 @@ pub struct RevealState {
     pub reveal_tokens: Vec<RevealTokenSimple>, // 每个玩家的reveal_token
 }
 
-//todo user flod, add is_leave state
 #[derive(Debug, Clone)]
 pub struct PlayerState {
     pub pk_hex: String,
     pub pk: PublicKey,
     pub hand_encrypted: Vec<PlayerEncryptedCard>,
+    /// 玩家已离开/被驱逐（fold/离场）。
+    ///
+    /// 被驱逐的玩家仍保留在 `players` 表中（底牌已清空、key 已移除），
+    /// 该标记让发牌/重发路径构建 reveal pending 集合时将其排除——否则
+    /// 永远等不到已离场玩家的 reveal token（原 todo "user flod, add
+    /// is_leave state"）。
+    pub is_leave: bool,
 }

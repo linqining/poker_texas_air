@@ -360,24 +360,6 @@ pub fn verify_dleq(
     g1_equal(&lhs, &rhs)
 }
 
-// ========== u64 → ASCII ==========
-
-/// u64 转 ASCII 字节表示（十进制字符串的字节序列）。
-pub fn u64_to_ascii(n: u64) -> Vec<u8> {
-    if n == 0 {
-        return vec![b'0'];
-    }
-    let mut digits = Vec::new();
-    let mut val = n;
-    while val > 0 {
-        let digit = (val % 10) as u8;
-        digits.push(digit + b'0');
-        val /= 10;
-    }
-    digits.reverse();
-    digits
-}
-
 // ========== ElGamal 操作（包装 ElGamalCiphertextGeneric 方法） ==========
 
 /// ElGamal 加密：`c1 = r·G, c2 = M + r·pk`。
@@ -598,14 +580,6 @@ mod tests {
         let c = scalar_from_u64(7);
         let s = scalar_from_u64(0);
         assert!(!verify_dleq(&g, &pk, &commitment, &s, &c));
-    }
-
-    #[test]
-    fn test_u64_to_ascii() {
-        assert_eq!(u64_to_ascii(0), vec![b'0']);
-        assert_eq!(u64_to_ascii(9), vec![b'9']);
-        assert_eq!(u64_to_ascii(10), vec![b'1', b'0']);
-        assert_eq!(u64_to_ascii(123), vec![b'1', b'2', b'3']);
     }
 
     #[test]

@@ -14,7 +14,11 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 
 /// Current durable method-proof archive schema.
-pub const METHOD_PROOF_ARCHIVE_VERSION: u8 = 3;
+///
+/// v5（2026-09-11，展示名出共识）：移除 `name_commitment_v2_bytes` 附件——
+/// 展示名非共识，`create_table` 不再证明/随附名字承诺（#22⑤ 消费侧机制
+/// 整体下线）。v4 及更早归档 fail-closed 拒绝。
+pub const METHOD_PROOF_ARCHIVE_VERSION: u8 = 5;
 
 /// Maximum accepted serialized Stwo proof size.
 pub const MAX_ARCHIVED_STARK_PROOF_BYTES: usize = 16 * 1024 * 1024;

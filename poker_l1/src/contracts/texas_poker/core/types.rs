@@ -2097,10 +2097,11 @@ pub struct TableRules {
     pub rit_mode: u8,
 }
 
-/// Low-frequency display metadata opened alongside the hot table state.
+/// Low-frequency display metadata stored as its own immutable ObjectDb object.
 ///
-/// The value is stored in its own immutable ObjectDb object.  Runtime/proof snapshots retain the
-/// resolved string so events, RPCs and create-table verification do not lose information.
+/// v34 起展示名不再进入共识热状态（`TexasPokerTable` 不携带 `name`）：
+/// 本对象按 `table_metadata_object_id(table_id)` 寻址，仅供 events、RPC 与
+/// create-table 验证路径之外的 UI/运营消费；hot state 不绑定其 digest。
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TableMetadata {
     /// Human-readable table name.
@@ -2157,11 +2158,12 @@ pub struct TableContextBinding {
     pub digest: [u8; 32],
 }
 
-/// The three low-frequency openings committed by a hot Texas table.
+/// The low-frequency openings committed by a hot table.
+///
+/// v35-hot 起 metadata（展示名）不再被热状态 digest 绑定：名字非共识，
+/// 由独立 metadata 对象按 `table_metadata_object_id` 寻址，仅供热/UI 消费。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TableContextBindings {
-    /// Display metadata binding.
-    pub metadata: TableContextBinding,
     /// Poker rules binding.
     pub rules: TableContextBinding,
     /// Administrator policy binding.
@@ -2171,8 +2173,6 @@ pub struct TableContextBindings {
 /// Resolved low-frequency values supplied when opening a hot table object.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TableContextOpenings {
-    /// Display metadata opening.
-    pub metadata: TableMetadata,
     /// Poker rules opening.
     pub rules: TableRules,
     /// Administrator policy opening.
@@ -2184,9 +2184,6 @@ impl TableContextOpenings {
     #[must_use]
     pub fn from_table(table: &TexasPokerTable) -> Self {
         Self {
-            metadata: TableMetadata {
-                name: table.name.clone(),
-            },
             rules: table.rules.clone(),
             governance: GovernancePolicy {
                 creator: table.creator,
@@ -2196,7 +2193,6 @@ impl TableContextOpenings {
 
     /// Validate every opening before hashing or hydrating runtime state.
     pub fn validate_canonical(&self) -> PokerL1Result<()> {
-        self.metadata.validate_canonical()?;
         self.rules.validate_canonical()?;
         self.governance.validate_canonical()
     }
@@ -2269,8 +2265,6 @@ impl TableRules {
 pub struct TexasPokerTable {
     /// 桌台 ObjectID（保留 `0xFF..02`）。
     pub id: ObjectID,
-    /// 桌台名称。
-    pub name: String,
     /// 桌台创建者（管理类方法权限基准：start_hand/kick_player/force_fold）。
     ///
     /// P0-2：在 `dispatch_create_table` 时记录为 `context.caller`。
@@ -3077,10 +3071,11 @@ impl TexasPokerTable {
     }
 
     /// 构造新桌台（空座位，WAITING 状态）。
+    ///
+    /// 展示名不属于共识状态（v34 起移除）；它由非共识 metadata 对象承载。
     #[must_use]
     pub fn new(
         id: ObjectID,
-        name: String,
         creator: Address,
         max_players: u8,
         small_blind: u64,
@@ -3097,7 +3092,6 @@ impl TexasPokerTable {
 
         Self {
             id,
-            name,
             creator,
             rules: TableRules::new(max_players, small_blind, big_blind),
             seats,
@@ -3572,7 +3566,7 @@ mod tests {
     #[test]
     fn table_schema_rejects_partial_slots_outside_table_and_materialized_overlap() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 2, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 2, 50, 100);
         table
             .deck_state
             .owner_readable_hole_cards
@@ -3608,7 +3602,7 @@ mod tests {
 
     #[test]
     fn test_table_new() {
-        let table = TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+        let table = TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 6, 50, 100);
         assert_eq!(table.max_players, 6);
         assert_eq!(table.seats.len(), 9); // 定宽槽位
         assert!(table.padding_seats_are_vacant());
@@ -3626,7 +3620,7 @@ mod tests {
     #[test]
     fn canonical_hand_phase_variant_replaces_incompatible_payload() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 6, 50, 100);
         table
             .enter_revealing(
                 ROUND_FLOP,
@@ -3648,7 +3642,7 @@ mod tests {
     #[test]
     fn enter_revealing_rejects_purpose_street_mismatch_atomically() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 6, 50, 100);
         let before = table.hand_phase.clone();
         let error = table
             .enter_revealing(
@@ -3668,7 +3662,7 @@ mod tests {
     #[test]
     fn enter_revealing_rejects_purpose_target_mismatch_atomically() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 6, 50, 100);
         let before = table.hand_phase.clone();
         let error = table
             .enter_revealing(
@@ -3697,7 +3691,7 @@ mod tests {
     #[test]
     fn canonical_hand_phase_carries_suspended_reveal_during_reconstruct() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 6, 50, 100);
         table
             .enter_reconstructing(
                 ROUND_TURN,
@@ -3728,7 +3722,7 @@ mod tests {
     #[test]
     fn shuffle_sub_union_separates_initial_and_reconstruct_payloads() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 6, 50, 100);
         table
             .enter_initial_shuffling(
                 ShuffleState {
@@ -3782,7 +3776,7 @@ mod tests {
     #[test]
     fn phase_helpers_clear_incompatible_payloads_and_deadline_overflow_is_atomic() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 6, 50, 100);
         table
             .enter_revealing(
                 ROUND_FLOP,
@@ -3818,25 +3812,25 @@ mod tests {
     fn test_table_new_invalid_params() {
         // max_players < 2
         let result = std::panic::catch_unwind(|| {
-            let _ = TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 1, 50, 100);
+            let _ = TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 1, 50, 100);
         });
         assert!(result.is_err());
 
         // max_players > 9
         let result = std::panic::catch_unwind(|| {
-            let _ = TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 10, 50, 100);
+            let _ = TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 10, 50, 100);
         });
         assert!(result.is_err());
 
         // big_blind = 0
         let result = std::panic::catch_unwind(|| {
-            let _ = TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 6, 50, 0);
+            let _ = TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 6, 50, 0);
         });
         assert!(result.is_err());
 
         // small_blind > big_blind
         let result = std::panic::catch_unwind(|| {
-            let _ = TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 6, 200, 100);
+            let _ = TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 6, 200, 100);
         });
         assert!(result.is_err());
     }
@@ -3911,7 +3905,7 @@ mod tests {
     #[test]
     fn test_table_find_seat() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 4, 50, 100);
         table.seats[0].fixture_set_player([0x01; 20]);
         table.seats[2].fixture_set_player([0x02; 20]);
 
@@ -3923,7 +3917,7 @@ mod tests {
     #[test]
     fn test_table_find_empty_seat() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 4, 50, 100);
         table.seats[0].fixture_set_player([0x01; 20]);
         table.seats[1].fixture_set_player([0x02; 20]);
 
@@ -3933,7 +3927,7 @@ mod tests {
     #[test]
     fn test_table_active_count() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 4, 50, 100);
         table.seats[0].fixture_set_player([0x01; 20]);
         table.seats[1].fixture_set_player([0x02; 20]);
         table.seats[2].fixture_set_player([0x03; 20]);
@@ -3950,7 +3944,6 @@ mod tests {
     fn test_table_borsh_roundtrip() {
         let mut table = TexasPokerTable::new(
             dummy_table_id(),
-            "test-table".into(),
             EMPTY_PLAYER,
             4,
             50,
@@ -3971,7 +3964,7 @@ mod tests {
     #[test]
     fn canonical_table_rejects_one_player_occupying_multiple_seats() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 4, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 4, 50, 100);
         for seat_index in [0usize, 2] {
             table.seats[seat_index].fixture_set_player([0xAB; 20]);
             table.seats[seat_index].set_status(SeatStatus::Active);
@@ -3993,7 +3986,7 @@ mod tests {
     #[test]
     fn betting_turn_accepts_only_a_live_seat_or_the_four_bit_sentinel() {
         let mut table =
-            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 4, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), EMPTY_PLAYER, 4, 50, 100);
         assert!(
             table
                 .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 0), u8::MAX, 1)

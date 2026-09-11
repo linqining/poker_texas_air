@@ -156,6 +156,17 @@ fn shuffle_proof_to_json(proof: &poker_protocol::zk_shuffle::ShuffleProof) -> St
     }
 }
 
+/// 解析浏览器端传入的洗牌置换（JSON 数组，长度必须恰为 N_CARDS）。
+/// 双射校验由协议层 `ShuffleRound::execute` fail-closed 承担。
+fn parse_permute(permute_json: &str) -> Result<[usize; poker_protocol::crypto::N_CARDS], JsValue> {
+    let vec: Vec<usize> = serde_json::from_str(permute_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid permute json: {e}")))?;
+    let arr: [usize; poker_protocol::crypto::N_CARDS] = vec.try_into().map_err(|v: Vec<usize>| {
+        JsValue::from_str(&format!("permute length must be {}, got {}", poker_protocol::crypto::N_CARDS, v.len()))
+    })?;
+    Ok(arr)
+}
+
 fn json_to_ct_vec(json_str: &str) -> Result<Vec<ElGamalCiphertext>, String> {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json_str)
         .map_err(|e| format!("JSON parse error: {}", e))?;
@@ -384,11 +395,22 @@ impl WasmClientPlayer {
         Ok(ecpoint_to_hex(&pt))
     }
 
-    pub fn shuffle(&self, deck_encrypted_json: &str, agg_pk_hex: &str) -> Result<JsValue, JsValue> {
+    /// 用户洗牌：`permute_json` 为浏览器端生成的洗牌置换（JSON 数组）——
+    /// 洗牌决定权在用户客户端，库不代生成。非双射置换 fail-closed 拒绝。
+    pub fn shuffle(
+        &self,
+        deck_encrypted_json: &str,
+        agg_pk_hex: &str,
+        permute_json: &str,
+    ) -> Result<JsValue, JsValue> {
         let deck = json_to_ct_vec(deck_encrypted_json).map_err(|e| JsValue::from_str(&e))?;
         let agg_pk = hex_to_ecpoint(agg_pk_hex).map_err(|e| JsValue::from_str(&e))?;
+        let permute = parse_permute(permute_json)?;
 
-        let round = self.inner.shuffle(&deck, &agg_pk);
+        let round = self
+            .inner
+            .shuffle(&deck, &agg_pk, permute)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
         let shuffle_proof_json = shuffle_proof_to_json(&round.proof);
 
@@ -406,11 +428,16 @@ impl WasmClientPlayer {
         &self,
         deck_encrypted_json: &str,
         agg_pk_hex: &str,
+        permute_json: &str,
     ) -> Result<JsValue, JsValue> {
         let deck = json_to_ct_vec(deck_encrypted_json).map_err(|e| JsValue::from_str(&e))?;
         let agg_pk = hex_to_ecpoint(agg_pk_hex).map_err(|e| JsValue::from_str(&e))?;
+        let permute = parse_permute(permute_json)?;
 
-        let round = self.inner.join_game_and_shuffle(&deck, &agg_pk);
+        let round = self
+            .inner
+            .join_game_and_shuffle(&deck, &agg_pk, permute)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         let ms = &round.mask_and_shuffle_round;
         let per_card_commitments_hex: Vec<String> = ms.remask_proof.per_card_commitments.iter()
             .map(ecpoint_to_hex).collect();

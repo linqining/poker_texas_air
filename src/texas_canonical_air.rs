@@ -209,11 +209,47 @@ const RAKE_CHIP_EXTRA_CARRIES_OFFSET: usize = RAKE_CHIP_INTERMEDIATE_OFFSET + 4;
 /// Per-seat `owes` advice for the betting successor relation: flag, four
 /// difference limbs, three subtraction borrows, and a non-zero inverse.
 const SEAT_OWES_ADVICE_OFFSET: usize = RAKE_CHIP_EXTRA_CARRIES_OFFSET + 3;
-const NUM_COLUMNS: usize = SEAT_OWES_ADVICE_OFFSET + MAX_CANONICAL_SEATS * (1 + 4 + 3 + 1 + 1);
+const SEAT_OWES_ADVICE_WIDTH: usize = MAX_CANONICAL_SEATS * (1 + 4 + 3 + 1 + 1);
+/// #22② RevealComplete advice, appended after the seat-owes block so every
+/// existing fixed-width ABI offset stays stable.  Every column is meaningful
+/// only on reveal-completion rows and zero elsewhere.
+///
+/// The completion selector `flag * SubmitReveal` is degree two, so a dedicated
+/// degree-1 gate column linearizes it (the `shuffle_timeout_gate` pattern);
+/// every body below may then use full degree two under that gate.
+const RC_GATE_OFFSET: usize = SEAT_OWES_ADVICE_OFFSET + SEAT_OWES_ADVICE_WIDTH;
+/// Small/big blind limbs (4 + 4), copied from the public blind scope.
+const RC_BLIND_LIMBS_OFFSET: usize = RC_GATE_OFFSET + 1;
+/// Inverses proving the participant count is non-zero, at least two, and the
+/// heads-up determinant: inverse(cnt), inverse(cnt-1), inverse(cnt-2).
+const RC_COUNT_INVS_OFFSET: usize = RC_BLIND_LIMBS_OFFSET + 8;
+/// Heads-up flag: exactly one iff exactly two Active seats.
+const RC_HU_OFFSET: usize = RC_COUNT_INVS_OFFSET + 3;
+/// One-hot small-blind and big-blind seat vectors.
+const RC_SB_ONEHOT_OFFSET: usize = RC_HU_OFFSET + 1;
+const RC_BB_ONEHOT_OFFSET: usize = RC_SB_ONEHOT_OFFSET + MAX_CANONICAL_SEATS;
+/// Per base (button, small blind, big blind): rotated activity bits for the
+/// eight non-zero circular distances, the "no earlier active" prefix
+/// recurrence, and the resulting first-after selector.
+const RC_ROT_OFFSET: usize = RC_BB_ONEHOT_OFFSET + MAX_CANONICAL_SEATS;
+const RC_Q_OFFSET: usize = RC_ROT_OFFSET + 3 * 8;
+const RC_F_OFFSET: usize = RC_Q_OFFSET + 3 * 8;
+/// Small-blind distance selector with a virtual distance-zero slot for the
+/// heads-up button-small-blind rule.
+const RC_FFA_OFFSET: usize = RC_F_OFFSET + 3 * 8;
+/// Blind-posting carry advice: stack (`pre = post + posted`) and total-bet
+/// (`post = pre + posted`) limb carries, three per seat each.
+const RC_STACK_CARRIES_OFFSET: usize = RC_FFA_OFFSET + 9;
+const RC_TOTAL_CARRIES_OFFSET: usize = RC_STACK_CARRIES_OFFSET + MAX_CANONICAL_SEATS * 3;
+/// Per-seat inverse proving a blind-posting seat keeps a non-zero stack
+/// (the uncapped discipline: no AllIn flip on reveal completion).
+const RC_STACK_NONZERO_INV_OFFSET: usize = RC_TOTAL_CARRIES_OFFSET + MAX_CANONICAL_SEATS * 3;
+const NUM_COLUMNS: usize = RC_STACK_NONZERO_INV_OFFSET + MAX_CANONICAL_SEATS;
 // The fixed public scope contains the table/sequence/image boundary plus the
 // five authenticated root domains (state, lifecycle, overlay, settlement and
 // custody) at both ends of the batch.
-const PREPROCESSED_COLUMNS: usize = 39 + 16 * 10 + 2 * STATE_IMAGE_PROJECTION_LIMBS + 4 + 6 + 1;
+const PREPROCESSED_COLUMNS: usize =
+    39 + 16 * 10 + 2 * STATE_IMAGE_PROJECTION_LIMBS + 4 + 6 + 13 + 1;
 const SEAT_STATUS_COUNT: usize = 6;
 const ROOT_SCOPE_OFFSET: usize = 39;
 const ROOT_DOMAIN_COUNT: usize = 5;
@@ -227,8 +263,14 @@ const REVEAL_TIMEOUT_CASCADE_SEAT_SCOPE_OFFSET: usize =
 // settlement terminals.  The companion Blake2b rules-opening proof
 // authenticates these columns to the pre rules commitment.
 const RAKE_SCOPE_OFFSET: usize = REVEAL_TIMEOUT_CASCADE_SEAT_SCOPE_OFFSET + 1;
+// Public blind/ante scope (four small-blind limbs, four big-blind limbs, the
+// ante mode and four ante limbs) for #22② reveal-completion rows.  The same
+// companion rules proof that authenticates the rake scope authenticates this
+// projection to the pre rules commitment.
+const BLIND_SCOPE_OFFSET: usize = RAKE_SCOPE_OFFSET + 6;
+const BLIND_SCOPE_ANTE_MODE_INDEX: usize = 8;
 // Shared 256-entry byte range table consumed through the LogUp relation.
-const RANGE_TABLE_SCOPE_OFFSET: usize = RAKE_SCOPE_OFFSET + 6;
+const RANGE_TABLE_SCOPE_OFFSET: usize = BLIND_SCOPE_OFFSET + 13;
 
 // `CanonicalStateImage` is deliberately a fixed Borsh ABI.  These constants
 // are byte positions in its 1,680-byte v5 encoding, not host projections.
@@ -387,6 +429,9 @@ pub struct ArchivedCanonicalTaggedProof {
     /// award terminal.  Present exactly when the batch contains a
     /// `RevealTimeoutRakedAward` row.
     pub rake_opening: Option<crate::canonical_rake_opening::CanonicalRakeOpening>,
+    /// Public authenticated blind/ante projection for #22② reveal-completion
+    /// rows.  Present exactly when the batch contains a final SubmitReveal.
+    pub blind_opening: Option<crate::canonical_rake_opening::CanonicalBlindOpening>,
     /// Lookup-backed Blake2b proof that the complete table-rules byte string
     /// hashes to the pre rules commitment, authenticating `rake_opening`.
     pub rules_hash: Option<crate::canonical_rake_opening::ArchivedCanonicalRulesHashProof>,
@@ -1740,13 +1785,20 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         .sum::<u64>();
     let is_reconstruct_completion = completion.kind == CanonicalProtocolCompletionKind::Reconstruct;
     let is_shuffle_completion = completion.kind == CanonicalProtocolCompletionKind::Shuffle;
-    out.push(if (is_reconstruct_completion || is_shuffle_completion) && timestamp_sum != 0 {
-        M31::from(timestamp_sum as u32).inverse()
-    } else {
-        M31::from(0u32)
-    });
+    let is_reveal_completion = completion.kind == CanonicalProtocolCompletionKind::Reveal;
+    out.push(
+        if (is_reconstruct_completion || is_shuffle_completion || is_reveal_completion)
+            && timestamp_sum != 0
+        {
+            M31::from(timestamp_sum as u32).inverse()
+        } else {
+            M31::from(0u32)
+        },
+    );
     // deadline 重挂的进位：reconstruct 用 shuffle_timeout，shuffle completion
-    // 用 reveal_timeout（start_preflop_reveal_phase 重挂 reveal deadline）。
+    // 用 reveal_timeout（start_preflop_reveal_phase 重挂 reveal deadline），
+    // reveal completion 用 betting_timeout（start_betting_round 重挂下注
+    // deadline）。
     out.extend(if is_reconstruct_completion {
         add_carries(
             completion.completion_timestamp_ms,
@@ -1756,6 +1808,11 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         add_carries(
             completion.completion_timestamp_ms,
             u64::from(w.pre.reveal_timeout_ms),
+        )
+    } else if is_reveal_completion {
+        add_carries(
+            completion.completion_timestamp_ms,
+            u64::from(w.pre.betting_timeout_ms),
         )
     } else {
         [M31::from(0u32); 3]
@@ -2094,9 +2151,155 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
             M31::from(0u32)
         });
         // settled = acted && !owes: an acted seat that has matched the water
-        // is no longer actionable and may be skipped by the turn scan.
+        // is no longer actionable and can be skipped by the turn scan.
         let settled = is_betting_row && seat.acted && !owes;
         out.push(M31::from(u32::from(settled)));
+    }
+    // ---- #22② RevealComplete advice ----
+    // Gate: SubmitReveal row carrying a completion opening.  Every following
+    // column is zero off reveal-completion rows.
+    let rc_row = w.kind == CanonicalTransitionKind::SubmitReveal
+        && w.protocol_completion.kind == CanonicalProtocolCompletionKind::Reveal;
+    out.push(M31::from(u32::from(rc_row)));
+    let blind = if rc_row {
+        w.blind_opening
+    } else {
+        crate::canonical_rake_opening::CanonicalBlindOpening::ZERO
+    };
+    out.extend(u64_limbs(blind.small_blind));
+    out.extend(u64_limbs(blind.big_blind));
+    let active_seat: [bool; MAX_CANONICAL_SEATS] = core::array::from_fn(|index| {
+        w.pre.seats[index].status == CanonicalSeatStatus::Active
+    });
+    let active_count = active_seat.iter().filter(|value| **value).count() as u32;
+    let nonzero_inv = |value: u32| {
+        if value != 0 {
+            M31::from(value).inverse()
+        } else {
+            M31::from(0u32)
+        }
+    };
+    // cnt != 0, cnt != 1 (at least two participants), cnt != 2 determinant.
+    // Only meaningful (and only emitted) on reveal-completion rows.
+    out.push(if rc_row {
+        nonzero_inv(active_count)
+    } else {
+        M31::from(0u32)
+    });
+    out.push(if rc_row {
+        nonzero_inv(active_count.saturating_sub(1))
+    } else {
+        M31::from(0u32)
+    });
+    out.push(if rc_row {
+        nonzero_inv(active_count.saturating_sub(2))
+    } else {
+        M31::from(0u32)
+    });
+    out.push(M31::from(u32::from(rc_row && active_count == 2)));
+    // Circular (mod nine) first-Active-after-base scan: rotated activity,
+    // "no earlier Active" prefix and the resulting selector.  On a valid
+    // reveal-completion image every occupied seat is Active, so this scan
+    // coincides with the VM's mod-max_players `find_next_participating_seat`.
+    let scan = |base: usize| -> ([bool; 8], [bool; 8], [bool; 8], Option<usize>) {
+        let mut rot = [false; 8];
+        let mut q = [false; 8];
+        let mut f = [false; 8];
+        let mut clear = true;
+        let mut first: Option<usize> = None;
+        for d in 1..=8 {
+            rot[d - 1] = active_seat[(base + d) % MAX_CANONICAL_SEATS];
+            q[d - 1] = clear;
+            f[d - 1] = rot[d - 1] && clear;
+            if rot[d - 1] {
+                clear = false;
+            }
+            if first.is_none() && f[d - 1] {
+                first = Some((base + d) % MAX_CANONICAL_SEATS);
+            }
+        }
+        (rot, q, f, first)
+    };
+    let heads_up = active_count == 2;
+    let button = usize::from(w.pre.button) % MAX_CANONICAL_SEATS;
+    let (rot_button, q_button, f_button, first_after_button) = scan(button);
+    // Small blind: heads-up posts from the button itself (virtual distance
+    // zero); otherwise the first Active seat after the button.
+    let sb_seat = if heads_up {
+        button
+    } else {
+        first_after_button.unwrap_or(button)
+    };
+    let (rot_sb, q_sb, f_sb, first_after_sb) = scan(sb_seat);
+    let bb_seat = first_after_sb.unwrap_or(sb_seat);
+    let (rot_bb, q_bb, f_bb, _) = scan(bb_seat);
+    // Storage order matches the evaluate-side reads: kind-grouped (all three
+    // rotated-activity blocks, then all prefix blocks, then all selector
+    // blocks), NOT interleaved per base.
+    let mut push_bits = |out: &mut Vec<M31>, values: [&[bool; 8]; 3]| {
+        for group in values {
+            for value in group {
+                out.push(M31::from(u32::from(rc_row && *value)));
+            }
+        }
+    };
+    let mut push_onehot = |out: &mut Vec<M31>, seat: usize| {
+        for index in 0..MAX_CANONICAL_SEATS {
+            out.push(M31::from(u32::from(rc_row && index == seat)));
+        }
+    };
+    push_onehot(&mut out, sb_seat);
+    push_onehot(&mut out, bb_seat);
+    push_bits(&mut out, [&rot_button, &rot_sb, &rot_bb]);
+    push_bits(&mut out, [&q_button, &q_sb, &q_bb]);
+    push_bits(&mut out, [&f_button, &f_sb, &f_bb]);
+    // Small-blind distance selector with the heads-up distance-zero slot.
+    out.push(M31::from(u32::from(rc_row && heads_up)));
+    for d in 0..8 {
+        out.push(M31::from(u32::from(rc_row && !heads_up && f_button[d])));
+    }
+    // Blind-posting arithmetic advice.  `pre = post + posted` for stacks and
+    // `post = pre + posted` for total bets, three carry limbs per seat each,
+    // stored as two contiguous per-seat blocks.
+    for index in 0..MAX_CANONICAL_SEATS {
+        let posted = if rc_row && index == sb_seat {
+            blind.small_blind
+        } else if rc_row && index == bb_seat {
+            blind.big_blind
+        } else {
+            0
+        };
+        if rc_row {
+            out.extend(add_carries(w.post.seats[index].stack, posted));
+        } else {
+            out.extend([M31::from(0u32); 3]);
+        }
+    }
+    for index in 0..MAX_CANONICAL_SEATS {
+        let posted = if rc_row && index == sb_seat {
+            blind.small_blind
+        } else if rc_row && index == bb_seat {
+            blind.big_blind
+        } else {
+            0
+        };
+        if rc_row {
+            out.extend(add_carries(w.pre.seats[index].total_bet, posted));
+        } else {
+            out.extend([M31::from(0u32); 3]);
+        }
+    }
+    for index in 0..MAX_CANONICAL_SEATS {
+        let posts_blind = rc_row && (index == sb_seat || index == bb_seat);
+        let stack_sum: u32 = u64_limbs(w.post.seats[index].stack)
+            .into_iter()
+            .map(|limb| u32::from(limb.0))
+            .sum();
+        out.push(if posts_blind && stack_sum != 0 {
+            M31::from(stack_sum).inverse()
+        } else {
+            M31::from(0u32)
+        });
     }
     debug_assert_eq!(out.len(), NUM_COLUMNS);
     out
@@ -2131,6 +2334,15 @@ fn mix_scope(channel: &mut Poseidon252Channel, proof: &ArchivedCanonicalTaggedPr
         Some(rake) => {
             channel.mix_u32s(&[1, u32::from(rake.rake_mode), u32::from(rake.rake_bps)]);
             channel.mix_u64(rake.rake_cap);
+        }
+        None => channel.mix_u32s(&[0]),
+    }
+    match &proof.blind_opening {
+        Some(blind) => {
+            channel.mix_u32s(&[1, u32::from(blind.ante_mode)]);
+            channel.mix_u64(blind.small_blind);
+            channel.mix_u64(blind.big_blind);
+            channel.mix_u64(blind.ante_amount);
         }
         None => channel.mix_u32s(&[0]),
     }
@@ -2251,6 +2463,11 @@ fn build_preprocessed_ids() -> Vec<PreProcessedColumnId> {
             id: format!("texas.canonical.rake-scope-{index}.v1"),
         });
     }
+    for index in 0..13 {
+        ids.push(PreProcessedColumnId {
+            id: format!("texas.canonical.blind-scope-{index}.v1"),
+        });
+    }
     ids.push(PreProcessedColumnId {
         id: "texas.canonical.range-table.v1".into(),
     });
@@ -2303,6 +2520,18 @@ fn scope_trace(proof: &ArchivedCanonicalTaggedProof, log_size: u32) -> MethodTra
             values[RAKE_SCOPE_OFFSET] = M31::from(u32::from(rake.rake_mode));
             values[RAKE_SCOPE_OFFSET + 1] = M31::from(u32::from(rake.rake_bps));
             values[RAKE_SCOPE_OFFSET + 2..RAKE_SCOPE_OFFSET + 6].copy_from_slice(&cap);
+        }
+        // The blind/ante projection is public batch scope for reveal
+        // completion rows, authenticated by the same companion rules proof.
+        if let Some(blind) = proof.blind_opening {
+            values[BLIND_SCOPE_OFFSET..BLIND_SCOPE_OFFSET + 4]
+                .copy_from_slice(&u64_limbs(blind.small_blind));
+            values[BLIND_SCOPE_OFFSET + 4..BLIND_SCOPE_OFFSET + 8]
+                .copy_from_slice(&u64_limbs(blind.big_blind));
+            values[BLIND_SCOPE_OFFSET + BLIND_SCOPE_ANTE_MODE_INDEX] =
+                M31::from(u32::from(blind.ante_mode));
+            values[BLIND_SCOPE_OFFSET + 9..BLIND_SCOPE_OFFSET + 13]
+                .copy_from_slice(&u64_limbs(blind.ante_amount));
         }
         if index == 0 {
             values[7..23].copy_from_slice(&pre_image);
@@ -2516,6 +2745,28 @@ fn trace_for_with_state_opening_scope(
             "a tagged batch carries at most one raked award terminal".into(),
         ));
     }
+    // #22②：批内 reveal 完成行携带同一份盲注 opening（公开 scope 列的来源）。
+    let blind_opening = witnesses
+        .iter()
+        .filter(|w| w.kind == CanonicalTransitionKind::SubmitReveal)
+        .find(|w| w.protocol_completion.kind == CanonicalProtocolCompletionKind::Reveal)
+        .map(|w| {
+            let opening = w.blind_opening;
+            if opening == crate::canonical_rake_opening::CanonicalBlindOpening::ZERO {
+                return Err(TexasAirError::SpecViolation(
+                    "reveal completion transition carries a zero blind opening".into(),
+                ));
+            }
+            if w.protocol_completion.sb_amount != opening.small_blind
+                || w.protocol_completion.bb_amount != opening.big_blind
+            {
+                return Err(TexasAirError::SpecViolation(
+                    "reveal completion opening is detached from the blind opening".into(),
+                ));
+            }
+            Ok(opening)
+        })
+        .transpose()?;
     let pre_state_image_bytes = borsh::to_vec(&first.pre)
         .map_err(|error| TexasAirError::SerializationError(error.to_string()))?;
     let post_state_image_bytes = borsh::to_vec(&last.post)
@@ -2559,6 +2810,7 @@ fn trace_for_with_state_opening_scope(
             post_state_image_bytes,
             range_claimed_sum: [0, 0, 0, 0],
             rake_opening,
+            blind_opening,
             rules_hash: None,
             state_object_key: state_opening.state_object_key,
             state_opening_epoch: state_opening.state_opening_epoch,
@@ -3176,6 +3428,26 @@ impl FrameworkEval for CanonicalAir {
             std::array::from_fn(|i| owes_flat[i * 10 + 8].clone());
         let seat_settled: [E::F; MAX_CANONICAL_SEATS] =
             std::array::from_fn(|i| owes_flat[i * 10 + 9].clone());
+        // ---- #22② RevealComplete advice (requested last, matching the
+        // appended storage order) ----
+        let rc_gate = eval.next_trace_mask();
+        let rc_blind_limbs: [E::F; 8] = std::array::from_fn(|_| eval.next_trace_mask());
+        let rc_count_invs: [E::F; 3] = std::array::from_fn(|_| eval.next_trace_mask());
+        let rc_hu = eval.next_trace_mask();
+        let rc_sb_onehot: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let rc_bb_onehot: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let rc_rot: [[E::F; 8]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
+        let rc_q: [[E::F; 8]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
+        let rc_f: [[E::F; 8]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
+        let rc_ffa: [E::F; 9] = std::array::from_fn(|_| eval.next_trace_mask());
+        let rc_stack_carries: [[E::F; 3]; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
+        let rc_total_carries: [[E::F; 3]; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
+        let rc_stack_nonzero_inv: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
         eval.add_constraint(active.clone() * flag.clone() * (flag.clone() - one.clone()));
         eval.add_constraint(seq_carry.clone() * (seq_carry.clone() - one.clone()));
         for (pre, post) in [
@@ -3331,15 +3603,20 @@ impl FrameworkEval for CanonicalAir {
         let is_reconstruct_completion =
             protocol_completion_flag.clone() * is_submit_reconstruct.clone();
         let is_shuffle_completion = protocol_completion_flag.clone() * is_submit_shuffle.clone();
+        // #22②：reveal 完成行（SubmitReveal × flag）。该选择子是二次的，
+        // 下方约束全部走线性化 gate 列（rc_gate，shuffle_timeout_gate 模式）。
+        let is_reveal_completion = protocol_completion_flag.clone() * is_submit_reveal.clone();
+        eval.add_constraint(
+            active.clone() * (rc_gate.clone() - is_reveal_completion.clone()),
+        );
+        eval.add_constraint(active.clone() * rc_gate.clone() * (rc_gate.clone() - one.clone()));
         let is_nonfinal_reconstruct =
             is_submit_reconstruct.clone() - is_reconstruct_completion.clone();
         eval.add_constraint(
             active.clone() * protocol_completion_flag.clone() * (protocol_completion_flag.clone() - one.clone()),
         );
-        // 完成只允许出现在 reconstruct / shuffle 提交行；reveal 完成的
-        // betting-state turn 规则未启用（见 STATUS.md #22②），显式禁止。
-        // [bisect C disabled]
-        // [bisect B disabled]
+        // 完成行（reconstruct/shuffle/reveal）分别由下方各自的组合约束
+        // 锚定；flag 只需保持布尔。
         let is_set_leave = kinds[CanonicalTransitionKind::SetLeaveAfterHand as usize].clone();
         let is_timeout_reset = is_reconstruct_timeout.clone();
         for value in &auxiliary {
@@ -3373,11 +3650,13 @@ impl FrameworkEval for CanonicalAir {
             + is_submit_reveal.clone()
             + is_submit_reconstruct.clone()
             + is_fold_with_proof.clone();
-        // #22④：SubmitShuffle/SubmitReconstruct 的状态机规范化语义已组合
-        // （协议进度、相位/截止时间、全字段冻结集），直接验证器放行；
-        // deck/重建承诺**轮转**与实际密文的绑定属 native/链上 EC_OP 通道
-        // （Plan D ④ 残留信任）。SubmitReveal/FoldWithProof 维持禁止。
-        let crypto_admitted = is_submit_shuffle.clone() + is_submit_reconstruct.clone();
+        // #22④/#22②：SubmitShuffle/SubmitReconstruct/SubmitReveal 的状态机
+        // 规范化语义已组合（协议进度、相位/截止时间、盲注开局/位置规则），
+        // 直接验证器放行；deck/重建/reveal 承诺**轮转**与实际密文的绑定属
+        // native/链上 EC_OP 通道（Plan D ④ 残留信任）。FoldWithProof 维持禁止。
+        let crypto_admitted = is_submit_shuffle.clone()
+            + is_submit_reconstruct.clone()
+            + is_submit_reveal.clone();
         eval.add_constraint(active.clone() * (is_crypto.clone() - crypto_admitted.clone()));
         let proof_bound = is_crypto.clone();
         // A crypto tag carries a real, fixed-width proof commitment rather
@@ -3437,30 +3716,41 @@ impl FrameworkEval for CanonicalAir {
             is_protocol_submit.clone()
                 * (pre_status.clone() * turn_delta_inv.clone() - one.clone()),
         );
-        // Protocol submissions carry proof payloads but must not become a
-        // side channel for economic, seat, or betting-state mutation.
-        for (pre, post) in [
-            (&pre_street, &post_street),
-            (&pre_turn, &post_turn),
-            (&pre_acted_mask, &post_acted_mask),
-            (&pre_leave_mask, &post_leave_mask),
-        ] {
-            eval.add_constraint(is_protocol_submit.clone() * (post.clone() - pre.clone()));
+    // Protocol submissions carry proof payloads but must not become a
+    // side channel for economic, seat, or betting-state mutation.
+    for (pre, post) in [
+        (&pre_street, &post_street),
+        (&pre_acted_mask, &post_acted_mask),
+        (&pre_leave_mask, &post_leave_mask),
+    ] {
+        eval.add_constraint(is_protocol_submit.clone() * (post.clone() - pre.clone()));
+    }
+    // #22②：非最终提交行保持 turn 双端 NO_SEAT 冻结；reveal 完成行的
+    // post turn 由位置规则组合约束（first-after-BB 扫描）接管。
+    eval.add_constraint(
+        (is_protocol_submit.clone() - is_reveal_completion.clone())
+            * (post_turn.clone() - pre_turn.clone()),
+    );
+    eval.add_constraint(
+        is_protocol_submit.clone()
+            * (pre_turn.clone() - M31::from(u32::from(NO_CANONICAL_SEAT)).into()),
+    );
+    // #22②：pot/chip_pool 在所有协议行（含 reveal 完成）冻结——盲注只在
+    // 座位 stack/bet 桶之间移动；current_bet/min_raise 在 reveal 完成行
+    // 跳变为大盲，由完成组合约束钉死。
+    for (pre, post) in [(&pre_pot, &post_pot), (&pre_chip_pool, &post_chip_pool)] {
+        for (left, right) in pre.iter().zip(post.iter()) {
+            eval.add_constraint(is_protocol_submit.clone() * (right.clone() - left.clone()));
         }
-        eval.add_constraint(
-            is_protocol_submit.clone()
-                * (pre_turn.clone() - M31::from(u32::from(NO_CANONICAL_SEAT)).into()),
-        );
-        for (pre, post) in [
-            (&pre_current, &post_current),
-            (&pre_min, &post_min),
-            (&pre_pot, &post_pot),
-            (&pre_chip_pool, &post_chip_pool),
-        ] {
-            for (left, right) in pre.iter().zip(post.iter()) {
-                eval.add_constraint(is_protocol_submit.clone() * (right.clone() - left.clone()));
-            }
+    }
+    for (pre, post) in [(&pre_current, &post_current), (&pre_min, &post_min)] {
+        for (left, right) in pre.iter().zip(post.iter()) {
+            eval.add_constraint(
+                (is_protocol_submit.clone() - is_reveal_completion.clone())
+                    * (right.clone() - left.clone()),
+            );
         }
+    }
         // Each family has one protocol-owned commitment surface.  Reconstruct
         // completion may additionally rebuild the deck, matching the VM.
         for commitment in [0usize, 2, 3, 4] {
@@ -5310,14 +5600,15 @@ impl FrameworkEval for CanonicalAir {
             eval.add_constraint(
                 is_reveal_kick.clone() * pre_bit.clone() * later_transition_selector,
             );
-            // 完成行（reconstruct/shuffle）的 pending 掩码由 completion
+            // 完成行（reconstruct/shuffle/reveal）的 pending 掩码由 completion
             // 组合约束整体锚定（reveal pending = 活跃集），不走"清提交者
             // 位"的逐位演化。原先只排除 reconstruct，shuffle 完成行在此
             // 被要求清位、又同时要求等于活跃集，恒矛盾（2026-09-10
             // 整手牌性能扫描中发现）。
             let non_final_protocol_submit = is_protocol_submit.clone()
                 - is_reconstruct_completion.clone()
-                - is_shuffle_completion.clone();
+                - is_shuffle_completion.clone()
+                - is_reveal_completion.clone();
             eval.add_constraint(
                 non_final_protocol_submit * (post_bit.clone() - pre_bit.clone() + selector.clone()),
             );
@@ -5386,9 +5677,10 @@ impl FrameworkEval for CanonicalAir {
         eval.add_constraint(is_reconstruct_completion.clone() * protocol_pending_post_inv.clone());
         let non_final_protocol_submit = is_protocol_submit.clone()
             - is_reconstruct_completion.clone()
-            - is_shuffle_completion.clone();
-        // #22②：freeze 只约束 non-final 提交与（仍未启用的）reveal 完成；
-        // reconstruct / shuffle 完成行由下方各自的组合约束接管。
+            - is_shuffle_completion.clone()
+            - is_reveal_completion.clone();
+        // #22②：freeze 只约束 non-final 提交；reconstruct / shuffle / reveal
+        // 完成行由下方各自的组合约束接管。
         for (pre, post) in [
             (&pre_phase, &post_phase),
             (&pre_subtag, &post_subtag),
@@ -5612,7 +5904,9 @@ impl FrameworkEval for CanonicalAir {
         // 行的建议被强制归零、与其自身约束恒矛盾（2026-09-10 整手牌性能
         // 扫描中发现；该分支此前从未被 prove 过）。时间戳/游标的位分解
         // 仅 reconstruct 使用，维持对 shuffle 行清零以保证建议确定性。
-        let completion_row = is_reconstruct_completion.clone() + is_shuffle_completion.clone();
+        let completion_row = is_reconstruct_completion.clone()
+            + is_shuffle_completion.clone()
+            + is_reveal_completion.clone();
         let non_completion_advice = active.clone() - completion_row.clone();
         for value in protocol_completion_timestamp
             .iter()
@@ -5799,16 +6093,25 @@ impl FrameworkEval for CanonicalAir {
                             - full_pre_status[index][status].clone()),
                 );
             }
+            // #22②：status/pending(time-bank addon)仍冻结；reveal 完成行
+            // 的 stack/bet/total 由盲注扣款 limb 方程接管。
             for (pre, post) in [
                 (&full_pre_stack[index], &full_post_stack[index]),
                 (&full_pre_bet[index], &full_post_bet[index]),
                 (&full_pre_total[index], &full_post_total[index]),
-                (&full_pre_pending[index], &full_post_pending[index]),
             ] {
                 for (left, right) in pre.iter().zip(post.iter()) {
                     eval.add_constraint(
-                        is_protocol_submit.clone() * (right.clone() - left.clone()),
+                        (is_protocol_submit.clone() - is_reveal_completion.clone())
+                            * (right.clone() - left.clone()),
                     );
+                }
+            }
+            for (pre, post) in [
+                (&full_pre_pending[index], &full_post_pending[index]),
+            ] {
+                for (left, right) in pre.iter().zip(post.iter()) {
+                    eval.add_constraint(is_protocol_submit.clone() * (right.clone() - left.clone()));
                 }
             }
             for (left, right) in full_pre_time_bank[index]
@@ -7996,6 +8299,300 @@ impl FrameworkEval for CanonicalAir {
                 (active.clone() - is_reveal_raked_award.clone()) * rake_config[index].clone(),
             );
         }
+        // ---- #22②：RevealComplete 组合约束（镜像 check_reveal_phase_complete
+        // -> post_blinds + start_betting_round(preflop) 的规范化语义）。所有
+        // 主体走线性化 gate 列（度数 1），约束保持声明度数 3。合法性词
+        //（reveal token 的密码学方程）仍属 native/链上 EC_OP 通道（Plan D）。
+        let blind_scope: [E::F; 13] = std::array::from_fn(|index| {
+            eval.get_preprocessed_column(preprocessed_ids()[BLIND_SCOPE_OFFSET + index].clone())
+        });
+        let gate = rc_gate.clone();
+        // 行内盲注建议 = 公开 blind scope；ante 模式必须 NONE（ante 组合是
+        // 独立的 fail-closed 边），ante 金额为零。
+        for limb in 0..8 {
+            eval.add_constraint(
+                gate.clone() * (rc_blind_limbs[limb].clone() - blind_scope[limb].clone()),
+            );
+        }
+        eval.add_constraint(gate.clone() * blind_scope[BLIND_SCOPE_ANTE_MODE_INDEX].clone());
+        for limb in 9..13 {
+            eval.add_constraint(gate.clone() * blind_scope[limb].clone());
+        }
+        // 全部新建议列在非 reveal 完成行（含 padding 行）清零。
+        {
+            let non_rc = active.clone() - gate.clone();
+            let zero = |eval: &mut E, value: E::F| {
+                eval.add_constraint(non_rc.clone() * value.clone());
+                eval.add_constraint(inactive.clone() * value);
+            };
+            for column in rc_count_invs
+                .iter()
+                .chain(std::iter::once(&rc_hu))
+                .chain(rc_blind_limbs.iter())
+            {
+                zero(&mut eval, column.clone());
+            }
+            for column in rc_sb_onehot.iter().chain(rc_bb_onehot.iter()) {
+                zero(&mut eval, column.clone());
+            }
+            for base in 0..3 {
+                for column in rc_rot[base]
+                    .iter()
+                    .chain(rc_q[base].iter())
+                    .chain(rc_f[base].iter())
+                {
+                    zero(&mut eval, column.clone());
+                }
+            }
+            for column in rc_ffa.iter() {
+                zero(&mut eval, column.clone());
+            }
+            for seat in 0..MAX_CANONICAL_SEATS {
+                for column in rc_stack_carries[seat]
+                    .iter()
+                    .chain(rc_total_carries[seat].iter())
+                    .chain(std::iter::once(&rc_stack_nonzero_inv[seat]))
+                {
+                    zero(&mut eval, column.clone());
+                }
+            }
+        }
+        // VM 头：Revealing(收集子标签 1, preflop) -> Betting(1, preflop)，
+        // acted 掩码双端为零，协议进度清零。
+        eval.add_constraint(gate.clone() * (pre_phase.clone() - M31::from(2u32).into()));
+        eval.add_constraint(gate.clone() * (pre_subtag.clone() - M31::from(1u32).into()));
+        eval.add_constraint(gate.clone() * (pre_street.clone() - M31::from(1u32).into()));
+        eval.add_constraint(gate.clone() * (post_phase.clone() - M31::from(4u32).into()));
+        eval.add_constraint(gate.clone() * (post_subtag.clone() - M31::from(1u32).into()));
+        eval.add_constraint(gate.clone() * (post_street.clone() - M31::from(1u32).into()));
+        eval.add_constraint(gate.clone() * pre_acted_mask.clone());
+        eval.add_constraint(gate.clone() * post_acted_mask.clone());
+        eval.add_constraint(gate.clone() * post_protocol_pending_mask.clone());
+        for bit in post_protocol_pending_mask_bits.iter() {
+            eval.add_constraint(gate.clone() * bit.clone());
+        }
+        // Opening 锚：cursor/legacy 掩码清零；deck/reconstruction 双端冻结并
+        // 锚定 opening；suspended-reveal 槽位保持零（reveal 承诺在完成提交
+        // 内轮转，与实际密文的绑定属 native/EC_OP 通道，与 shuffle 完成的
+        // deck 轮转同口径——pre/post 端点镜像本身就是 trace 列）。
+        eval.add_constraint(gate.clone() * protocol_completion_pre_cards_dealt.clone());
+        eval.add_constraint(gate.clone() * protocol_completion_post_cards_dealt.clone());
+        eval.add_constraint(gate.clone() * protocol_completion_post_pending_mask.clone());
+        eval.add_constraint(
+            gate.clone() * protocol_completion_post_completed_mask.clone(),
+        );
+        for limb in 0..16 {
+            eval.add_constraint(gate.clone() * protocol_completion_commitments[0][limb].clone());
+            for (opening, endpoint) in [
+                (
+                    &protocol_completion_commitments[1][limb],
+                    &pre_opaque_commitments[1][limb],
+                ),
+                (
+                    &protocol_completion_commitments[2][limb],
+                    &post_opaque_commitments[1][limb],
+                ),
+                (
+                    &protocol_completion_commitments[3][limb],
+                    &pre_opaque_commitments[3][limb],
+                ),
+                (
+                    &protocol_completion_commitments[4][limb],
+                    &post_opaque_commitments[3][limb],
+                ),
+            ] {
+                eval.add_constraint(gate.clone() * (opening.clone() - endpoint.clone()));
+            }
+        }
+        // Deadline：post = completion_timestamp + betting_timeout。
+        let betting_timeout_limbs = [
+            pre_timeout_config[BETTING_TIMEOUT_LIMB_OFFSET].clone(),
+            pre_timeout_config[BETTING_TIMEOUT_LIMB_OFFSET + 1].clone(),
+            zero_limb.clone(),
+            zero_limb.clone(),
+        ];
+        limb4_add_constraints_no_carry_bool(
+            &mut eval,
+            &gate,
+            &protocol_completion_timestamp,
+            &betting_timeout_limbs,
+            &post_deadline_image,
+            &protocol_completion_deadline_carries,
+        );
+        for carry in protocol_completion_deadline_carries.iter() {
+            eval.add_constraint(gate.clone() * carry.clone() * (carry.clone() - one.clone()));
+        }
+        // 参与者形状：占用座（非 Empty/Out）必须 Active——reveal 完成镜像里
+        // Folded/Waiting/AllIn 不可达，同时使 participating == Active 扫描。
+        let mut active_count: E::F = M31::from(0u32).into();
+        for index in 0..MAX_CANONICAL_SEATS {
+            let active_bit =
+                full_pre_status[index][CanonicalSeatStatus::Active as usize].clone();
+            let occupied_non_active = full_pre_status[index][CanonicalSeatStatus::Waiting as usize]
+                .clone()
+                + full_pre_status[index][CanonicalSeatStatus::Folded as usize].clone()
+                + full_pre_status[index][CanonicalSeatStatus::AllIn as usize].clone();
+            eval.add_constraint(gate.clone() * occupied_non_active);
+            active_count += active_bit;
+        }
+        // 计数纪律：非零、至少两名参与者（一人成局在 VM 早已 sole-survivor
+        // 收官，此处 fail-closed），以及单挑（恰好两名）判定。
+        eval.add_constraint(
+            gate.clone() * (active_count.clone() * rc_count_invs[0].clone() - one.clone()),
+        );
+        let count_minus_one = active_count.clone() - one.clone();
+        let count_minus_two = active_count.clone() - one.clone() - one.clone();
+        eval.add_constraint(
+            gate.clone() * (count_minus_one * rc_count_invs[1].clone() - one.clone()),
+        );
+        eval.add_constraint(gate.clone() * rc_hu.clone() * (rc_hu.clone() - one.clone()));
+        eval.add_constraint(gate.clone() * rc_hu.clone() * count_minus_two.clone());
+        eval.add_constraint(
+            gate.clone()
+                * (count_minus_two * rc_count_invs[2].clone() - (one.clone() - rc_hu.clone())),
+        );
+        // 位置规则：每个基座（button、SB、BB）做模 9 循环"首个 Active"扫描。
+        // rot_d = 基座 + d 处的 Active 位；q 前缀（此前无 Active）；f = 首位
+        // 选择子。占用收敛后该扫描与 VM 的 mod max_players 扫描一致。
+        let bases: [[E::F; MAX_CANONICAL_SEATS]; 3] = [
+            std::array::from_fn(|index| start_pre_button_selectors[index].clone()),
+            std::array::from_fn(|index| rc_sb_onehot[index].clone()),
+            std::array::from_fn(|index| rc_bb_onehot[index].clone()),
+        ];
+        for onehot in [&rc_sb_onehot, &rc_bb_onehot] {
+            let mut sum: E::F = M31::from(0u32).into();
+            for bit in onehot.iter() {
+                eval.add_constraint(gate.clone() * bit.clone() * (bit.clone() - one.clone()));
+                sum += bit.clone();
+            }
+            eval.add_constraint(gate.clone() * (sum - one.clone()));
+        }
+        for base in 0..3 {
+            let base_onehot = &bases[base];
+            eval.add_constraint(gate.clone() * (rc_q[base][0].clone() - one.clone()));
+            let mut selector_sum: E::F = M31::from(0u32).into();
+            for d in 0..8 {
+                let mut rotated: E::F = M31::from(0u32).into();
+                for j in 0..MAX_CANONICAL_SEATS {
+                    let target = (j + d + 1) % MAX_CANONICAL_SEATS;
+                    rotated += base_onehot[j].clone()
+                        * full_pre_status[target][CanonicalSeatStatus::Active as usize].clone();
+                }
+                eval.add_constraint(
+                    gate.clone() * (rc_rot[base][d].clone() - rotated),
+                );
+                eval.add_constraint(
+                    gate.clone()
+                        * (rc_f[base][d].clone()
+                            - rc_rot[base][d].clone() * rc_q[base][d].clone()),
+                );
+                if d > 0 {
+                    eval.add_constraint(
+                        gate.clone()
+                            * (rc_q[base][d].clone()
+                                - rc_q[base][d - 1].clone()
+                                    * (one.clone() - rc_rot[base][d - 1].clone())),
+                    );
+                }
+                selector_sum += rc_f[base][d].clone();
+            }
+            eval.add_constraint(gate.clone() * (selector_sum - one.clone()));
+        }
+        // SB 距离选择子：单挑 = button 本身（虚拟距离 0），否则 button 后
+        // 首个 Active（镜像 post_blinds 的 heads-up 特例）。
+        eval.add_constraint(gate.clone() * (rc_ffa[0].clone() - rc_hu.clone()));
+        let mut ffa_sum: E::F = M31::from(0u32).into();
+        for d in 0..8 {
+            eval.add_constraint(
+                gate.clone()
+                    * (rc_ffa[d + 1].clone() - rc_f[0][d].clone()
+                        + rc_hu.clone() * rc_f[0][d].clone()),
+            );
+            eval.add_constraint(
+                gate.clone() * rc_ffa[d + 1].clone() * (rc_ffa[d + 1].clone() - one.clone()),
+            );
+            ffa_sum += rc_ffa[d + 1].clone();
+        }
+        eval.add_constraint(gate.clone() * (rc_ffa[0].clone() + ffa_sum - one.clone()));
+        // SB/BB 单热从距离选择子与基座单热线性重建。
+        for i in 0..MAX_CANONICAL_SEATS {
+            let mut sb_expr: E::F = M31::from(0u32).into();
+            let mut bb_expr: E::F = M31::from(0u32).into();
+            for d in 0..9 {
+                sb_expr += rc_ffa[d].clone()
+                    * start_pre_button_selectors[(i + MAX_CANONICAL_SEATS - d) % MAX_CANONICAL_SEATS]
+                        .clone();
+            }
+            for d in 0..8 {
+                bb_expr += rc_f[1][d].clone()
+                    * rc_sb_onehot[(i + MAX_CANONICAL_SEATS - (d + 1)) % MAX_CANONICAL_SEATS]
+                        .clone();
+            }
+            eval.add_constraint(gate.clone() * (rc_sb_onehot[i].clone() - sb_expr));
+            eval.add_constraint(gate.clone() * (rc_bb_onehot[i].clone() - bb_expr));
+        }
+        // UTG = BB 后首个 Active（单挑时该扫描恰好回到 button，与 VM 的
+        // heads-up first-to-act 特例一致）。
+        let mut utg_seat: E::F = M31::from(0u32).into();
+        for d in 0..8 {
+            let mut seat_value: E::F = M31::from(0u32).into();
+            for j in 0..MAX_CANONICAL_SEATS {
+                seat_value += rc_bb_onehot[j].clone()
+                    * E::F::from(M31::from(((j + d + 1) % MAX_CANONICAL_SEATS) as u32));
+            }
+            utg_seat += rc_f[2][d].clone() * seat_value;
+        }
+        eval.add_constraint(gate.clone() * (post_turn.clone() - utg_seat));
+        // 下注价：current_bet = min_raise = BB（参与者全部 Active、无历史
+        // bet，max(座位 bet, BB) = BB）。
+        for limb in 0..4 {
+            eval.add_constraint(
+                gate.clone() * (post_current[limb].clone() - rc_blind_limbs[4 + limb].clone()),
+            );
+            eval.add_constraint(
+                gate.clone() * (post_min[limb].clone() - rc_blind_limbs[4 + limb].clone()),
+            );
+        }
+        // 逐座位盲注扣款：post_bet = posted（pre bet 为零）；pre_stack =
+        // post_stack + posted；post_total = pre_total + posted；盲注座
+        // post stack 非零（无封顶，无 AllIn 翻转）。
+        for index in 0..MAX_CANONICAL_SEATS {
+            let mut posted: [E::F; 4] = std::array::from_fn(|_| M31::from(0u32).into());
+            for limb in 0..4 {
+                posted[limb] = rc_sb_onehot[index].clone() * rc_blind_limbs[limb].clone()
+                    + rc_bb_onehot[index].clone() * rc_blind_limbs[4 + limb].clone();
+                eval.add_constraint(
+                    gate.clone()
+                        * (full_post_bet[index][limb].clone() - posted[limb].clone()),
+                );
+                eval.add_constraint(gate.clone() * full_pre_bet[index][limb].clone());
+            }
+            limb4_add_constraints(
+                &mut eval,
+                &gate,
+                &full_post_stack[index],
+                &posted,
+                &full_pre_stack[index],
+                &rc_stack_carries[index],
+            );
+            limb4_add_constraints(
+                &mut eval,
+                &gate,
+                &full_pre_total[index],
+                &posted,
+                &full_post_total[index],
+                &rc_total_carries[index],
+            );
+            let mut post_stack_sum: E::F = M31::from(0u32).into();
+            for limb in 0..4 {
+                post_stack_sum += full_post_stack[index][limb].clone();
+            }
+            let posts_blind = rc_sb_onehot[index].clone() + rc_bb_onehot[index].clone();
+            eval.add_constraint(
+                gate.clone()
+                    * (rc_stack_nonzero_inv[index].clone() * post_stack_sum - posts_blind),
+            );
+        }
         eval.add_constraint(is_reveal_raked_award.clone() * (rake_config[0].clone() - one.clone()));
         let rake_bps = rake_config[1].clone();
         let rake_cap_limbs: [E::F; 4] = [
@@ -8432,6 +9029,45 @@ pub fn prove_canonical_raked_tagged_batch(
     Ok(archive)
 }
 
+/// Prove a tagged batch containing a final `SubmitReveal` (RevealComplete)
+/// transition.  The complete table rules are hashed by the shared
+/// lookup-backed Blake2b STARK and attached alongside the public blind
+/// opening, so the verifier can bind the blind scope columns to the pre
+/// rules commitment without any native hashing.
+pub fn prove_canonical_reveal_completion_batch(
+    witnesses: &[CanonicalTransitionWitness],
+    rules: &poker_l1::contracts::texas_poker::types::TableRules,
+) -> TexasAirResult<ArchivedCanonicalTaggedProof> {
+    let has_reveal_completion = witnesses.iter().any(|w| {
+        w.kind == CanonicalTransitionKind::SubmitReveal
+            && w.protocol_completion.kind == CanonicalProtocolCompletionKind::Reveal
+    });
+    if !has_reveal_completion {
+        return Err(TexasAirError::SpecViolation(
+            "reveal-completion canonical proof requires a final SubmitReveal row".into(),
+        ));
+    }
+    crate::canonical_rake_opening::validate_rules_opening(rules)?;
+    // The composed relation posts blinds only: an ante configuration would
+    // need its own fixed ledger, so stay fail-closed here.
+    if rules.ante_mode != 0 || rules.ante_amount != 0 {
+        return Err(TexasAirError::SpecViolation(
+            "reveal-completion composition requires ANTE_MODE_NONE".into(),
+        ));
+    }
+    let mut archive = prove_canonical_tagged_batch(witnesses)?;
+    let expected = crate::canonical_rake_opening::blind_opening_of(rules);
+    if archive.blind_opening != Some(expected) {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "witness blind opening is detached from the table rules".into(),
+        ));
+    }
+    archive.rules_hash = Some(crate::canonical_rake_opening::prove_canonical_rules_hash(
+        rules,
+    )?);
+    Ok(archive)
+}
+
 /// Storage order of the 56 raked-award byte advice columns, matching the
 /// relation-entry emission order inside `CanonicalAir::evaluate`.
 const RAKE_BYTE_COLUMN_ORDER: [usize; 56] = [
@@ -8761,31 +9397,48 @@ pub fn verify_canonical_tagged_proof(archive: &ArchivedCanonicalTaggedProof) -> 
     verify_canonical_stark(archive)
 }
 
-/// Bind the public rake opening to the pre rules commitment through the
-/// companion lookup-backed Blake2b rules proof.  A raked terminal without
-/// the proof, or a proof without the terminal, fails closed.
+/// Bind the public rake/blind openings to the pre rules commitment through
+/// the companion lookup-backed Blake2b rules proof.  A carried opening
+/// without the proof, or a proof without any opening, fails closed.  Both
+/// projections share one rules statement, so a single proof authenticates
+/// them together.
 fn verify_canonical_rake_binding(
     archive: &ArchivedCanonicalTaggedProof,
     pre_image: &CanonicalStateImage,
 ) -> TexasAirResult<()> {
-    match (&archive.rake_opening, &archive.rules_hash) {
-        (Some(opening), Some(rules_hash)) => {
-            let authenticated = crate::canonical_rake_opening::verify_canonical_rules_hash(
-                rules_hash,
-                pre_image.rules_commitment,
-            )?;
-            if authenticated.rake != *opening {
-                return Err(TexasAirError::ConstraintUnsatisfied(
-                    "canonical rake opening is detached from the authenticated rules".into(),
-                ));
-            }
-            Ok(())
+    let has_opening = archive.rake_opening.is_some() || archive.blind_opening.is_some();
+    if !has_opening {
+        if archive.rules_hash.is_some() {
+            return Err(TexasAirError::SpecViolation(
+                "canonical rules proof must authenticate a carried opening".into(),
+            ));
         }
-        (None, None) => Ok(()),
-        _ => Err(TexasAirError::SpecViolation(
-            "canonical rake opening and rules proof must be carried together".into(),
-        )),
+        return Ok(());
     }
+    let Some(rules_hash) = &archive.rules_hash else {
+        return Err(TexasAirError::SpecViolation(
+            "canonical rake/blind opening and rules proof must be carried together".into(),
+        ));
+    };
+    let authenticated = crate::canonical_rake_opening::verify_canonical_rules_hash(
+        rules_hash,
+        pre_image.rules_commitment,
+    )?;
+    if let Some(opening) = &archive.rake_opening
+        && authenticated.rake != *opening
+    {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "canonical rake opening is detached from the authenticated rules".into(),
+        ));
+    }
+    if let Some(opening) = &archive.blind_opening
+        && crate::canonical_rake_opening::blind_opening_of(&authenticated.rules) != *opening
+    {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "canonical blind opening is detached from the authenticated rules".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn verify_canonical_stark(archive: &ArchivedCanonicalTaggedProof) -> TexasAirResult<()> {
@@ -9235,6 +9888,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -9282,6 +9936,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -9336,6 +9991,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -9371,6 +10027,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -9416,6 +10073,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -9462,6 +10120,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -9516,6 +10175,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -9571,6 +10231,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -9629,6 +10290,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -9714,6 +10376,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 2_000,
@@ -9793,6 +10456,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -9867,6 +10531,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -9920,6 +10585,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -9983,6 +10649,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -10014,6 +10681,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -10057,6 +10725,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -10173,6 +10842,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -10342,6 +11012,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 1_000,
@@ -10529,12 +11200,165 @@ mod tests {
                 post_deck_commitment: post_deck,
                 pre_reconstruction_commitment: reconstruction,
                 post_reconstruction_commitment: reconstruction,
+                ..Default::default()
             },
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
         };
+        witness.seal();
+        witness
+    }
+
+    /// #22②：RevealComplete 正例规则（盲注 50/100、无 ante、无抽水）。
+    fn blind_table_rules() -> poker_l1::contracts::texas_poker::types::TableRules {
+        poker_l1::contracts::texas_poker::types::TableRules {
+            max_players: 3,
+            small_blind: 50,
+            big_blind: 100,
+            timeout_config: Default::default(),
+            ante_mode: 0,
+            ante_amount: 0,
+            rake_mode: 0,
+            rake_bps: 0,
+            rake_cap: 0,
+            rit_mode: 0,
+        }
+    }
+
+    /// #22②：heads-up RevealComplete 正例 fixture——最后一份 reveal token
+    /// 入账，post_blinds + start_betting_round(preflop) 的规范化语义。
+    fn submit_reveal_completion() -> CanonicalTransitionWitness {
+        let rules = blind_table_rules();
+        let mut pre = image();
+        pre.phase = CanonicalPhase::Revealing;
+        pre.phase_subtag = 1;
+        pre.street = 1;
+        pre.deadline_ms = 5_000;
+        pre.button = 0;
+        pre.max_players = 2;
+        pre.protocol_pending_mask = 0b01;
+        pre.rules_commitment =
+            crate::canonical_rake_opening::canonical_rules_commitment(&rules).unwrap();
+        pre.chip_pool = 2_000;
+        for (index, seat) in pre.seats[..2].iter_mut().enumerate() {
+            *seat = CanonicalSeat {
+                status: CanonicalSeatStatus::Active,
+                acted: false,
+                stack: 1_000,
+                bet: 0,
+                total_bet: 0,
+                pending_addon: 0,
+                time_bank_ms: 0,
+                identity_commitment: [20 + index as u8; 32],
+                key_commitment: [30 + index as u8; 32],
+                hole_cards_commitment: [40 + index as u8; 32],
+            };
+        }
+        let timestamp = 9_000;
+        let mut post = pre.clone();
+        post.call_seq = 1;
+        post.phase = CanonicalPhase::Betting;
+        post.deadline_ms = timestamp + u64::from(pre.betting_timeout_ms);
+        post.protocol_pending_mask = 0;
+        post.reveal_commitment = [0x33; 32];
+        // 单挑：SB = button（座 0）先行动；BB = 座 1。
+        post.current_turn = 0;
+        post.current_bet = 100;
+        post.min_raise = 100;
+        post.seats[0].stack = 950;
+        post.seats[0].bet = 50;
+        post.seats[0].total_bet = 50;
+        post.seats[1].stack = 900;
+        post.seats[1].bet = 100;
+        post.seats[1].total_bet = 100;
+        let mut witness = CanonicalTransitionWitness {
+            pre,
+            post,
+            kind: CanonicalTransitionKind::SubmitReveal,
+            actor: [80; 32],
+            action: CanonicalActionPayload {
+                seat: 0,
+                amount: 0,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [81; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: crate::texas_canonical::CanonicalProtocolCompletionOpening {
+                kind: CanonicalProtocolCompletionKind::Reveal,
+                completion_timestamp_ms: timestamp,
+                post_current_turn: 0,
+                sb_seat: 0,
+                bb_seat: 1,
+                sb_amount: 50,
+                bb_amount: 100,
+                is_heads_up: true,
+                pre_reveal_commitment: [3; 32],
+                post_reveal_commitment: [0x33; 32],
+                pre_deck_commitment: [2; 32],
+                post_deck_commitment: [2; 32],
+                pre_reconstruction_commitment: [4; 32],
+                post_reconstruction_commitment: [4; 32],
+                ..Default::default()
+            },
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening {
+                small_blind: 50,
+                big_blind: 100,
+                ante_mode: 0,
+                ante_amount: 0,
+            },
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 0,
+        };
+        witness.seal();
+        witness
+    }
+
+    /// 三人局 RevealComplete 正例：button=1 → SB=2、BB=0、UTG=1（BB 后
+    /// 首个 Active），覆盖非单挑的位置规则分支。
+    fn submit_reveal_completion_three_way() -> CanonicalTransitionWitness {
+        let mut witness = submit_reveal_completion();
+        witness.pre.max_players = 3;
+        witness.pre.button = 1;
+        witness.pre.protocol_pending_mask = 0b100;
+        witness.pre.chip_pool = 3_000;
+        witness.pre.seats[2] = CanonicalSeat {
+            status: CanonicalSeatStatus::Active,
+            acted: false,
+            stack: 1_000,
+            bet: 0,
+            total_bet: 0,
+            pending_addon: 0,
+            time_bank_ms: 0,
+            identity_commitment: [22; 32],
+            key_commitment: [32; 32],
+            hole_cards_commitment: [42; 32],
+        };
+        witness.action.seat = 2;
+        witness.post = witness.pre.clone();
+        witness.post.call_seq = 1;
+        witness.post.phase = CanonicalPhase::Betting;
+        witness.post.deadline_ms = 9_000 + u64::from(witness.pre.betting_timeout_ms);
+        witness.post.protocol_pending_mask = 0;
+        witness.post.reveal_commitment = [0x33; 32];
+        witness.post.current_turn = 1;
+        witness.post.current_bet = 100;
+        witness.post.min_raise = 100;
+        witness.post.seats[0].stack = 900;
+        witness.post.seats[0].bet = 100;
+        witness.post.seats[0].total_bet = 100;
+        witness.post.seats[2].stack = 950;
+        witness.post.seats[2].bet = 50;
+        witness.post.seats[2].total_bet = 50;
+        witness.protocol_completion.post_current_turn = 1;
+        witness.protocol_completion.sb_seat = 2;
+        witness.protocol_completion.bb_seat = 0;
+        witness.protocol_completion.is_heads_up = false;
         witness.seal();
         witness
     }
@@ -10595,8 +11419,10 @@ mod tests {
                 post_deck_commitment: [50; 32],
                 pre_reconstruction_commitment: [4; 32],
                 post_reconstruction_commitment: [51; 32],
+                ..Default::default()
             },
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -10665,6 +11491,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -10705,6 +11532,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -10759,6 +11587,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -10828,6 +11657,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -10874,6 +11704,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -10932,6 +11763,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -11056,6 +11888,7 @@ mod tests {
             },
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -11148,6 +11981,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -11207,6 +12041,7 @@ mod tests {
             round_advance: Default::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -11813,6 +12648,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -11892,6 +12728,113 @@ mod tests {
         tampered.seal();
         assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
 }
+
+    #[test]
+    fn canonical_host_validates_reveal_completion_opening() {
+        use crate::texas_canonical::validate_batch;
+        for witness in [
+            submit_reveal_completion(),
+            submit_reveal_completion_three_way(),
+        ] {
+            witness.validate_shape().expect("reveal completion shape");
+            validate_batch(std::slice::from_ref(&witness))
+                .expect("reveal completion opening validates against VM normalization");
+        }
+    }
+
+    #[test]
+    fn canonical_host_rejects_tampered_reveal_completion() {
+        use crate::texas_canonical::validate_batch;
+        // 篡改首行动位（位置规则不符）。
+        let mut tampered = submit_reveal_completion();
+        tampered.post.current_turn = 1;
+        tampered.protocol_completion.post_current_turn = 1;
+        tampered.seal();
+        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        // 篡改盲注扣款（stack 与 SB 扣款脱钩）。
+        let mut tampered = submit_reveal_completion();
+        tampered.post.seats[0].stack = 999;
+        tampered.seal();
+        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        // 篡改下注价（current_bet != BB）。
+        let mut tampered = submit_reveal_completion();
+        tampered.post.current_bet = 50;
+        tampered.seal();
+        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        // 篡改 deadline（betting_timeout 重挂不符）。
+        let mut tampered = submit_reveal_completion();
+        tampered.post.deadline_ms += 1;
+        tampered.seal();
+        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        // 三人局：篡改 UTG 位置规则（BB 后首个 Active）。
+        let mut tampered = submit_reveal_completion_three_way();
+        tampered.post.current_turn = 2;
+        tampered.protocol_completion.post_current_turn = 2;
+        tampered.seal();
+        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+    }
+
+    #[test]
+    fn canonical_direct_air_asserts_reveal_completion_trace() {
+        for witness in [
+            submit_reveal_completion(),
+            submit_reveal_completion_three_way(),
+        ] {
+            let (trace, archive) = trace_for(std::slice::from_ref(&witness))
+                .expect("reveal completion trace");
+            assert_trace_satisfies_air(&trace, &archive);
+        }
+        // 位置规则/盲注 opening/gate 全部由 AIR 锚定：逐列篡改必须拒绝。
+        let witness = submit_reveal_completion();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("reveal completion trace");
+        assert_air_rejects_trace_mutation(&trace, &archive, POST_TURN_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_GATE_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_BLIND_LIMBS_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_BLIND_LIMBS_OFFSET + 4);
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_SB_ONEHOT_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_BB_ONEHOT_OFFSET + 1);
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_FFA_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_ROT_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_Q_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_F_OFFSET + 8);
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_STACK_CARRIES_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_STACK_NONZERO_INV_OFFSET);
+    }
+
+    #[ignore = "slow prove (~10s); full gate runs `--include-ignored`"]
+    #[test]
+    fn canonical_direct_air_proves_reveal_completion() {
+        let rules = blind_table_rules();
+        let witness = submit_reveal_completion();
+        let archive = prove_canonical_reveal_completion_batch(&[witness.clone()], &rules)
+            .expect("reveal completion proof");
+        verify_canonical_tagged_batch(&[witness.clone()], &archive)
+            .expect("reveal completion verification");
+
+        // 篡改归档的盲注 opening：与已验证规则脱钩，验证必须失败。
+        let mut detached = archive.clone();
+        let mut blind = detached.blind_opening.expect("blind opening carried");
+        blind.big_blind += 1;
+        detached.blind_opening = Some(blind);
+        assert!(verify_canonical_tagged_batch(&[witness.clone()], &detached).is_err());
+
+        // 换一套规则证明：rules_commitment 脱钩，验证必须失败。
+        let mut wrong = blind_table_rules();
+        wrong.big_blind = 200;
+        let witness_rules = submit_reveal_completion();
+        assert!(
+            prove_canonical_reveal_completion_batch(&[witness_rules], &wrong).is_err(),
+            "a blind opening detached from the table rules must not prove"
+        );
+
+        // 三人局（非单挑位置分支）同样贯通。
+        let three_way = submit_reveal_completion_three_way();
+        let archive = prove_canonical_reveal_completion_batch(&[three_way.clone()], &rules)
+            .expect("three-way reveal completion proof");
+        verify_canonical_tagged_batch(&[three_way], &archive)
+            .expect("three-way reveal completion verification");
+    }
 
     #[ignore = "slow prove (~8s); full gate runs `--include-ignored`"]
     #[test]
@@ -13353,6 +14296,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -13378,6 +14322,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -13404,6 +14349,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -13446,8 +14392,10 @@ mod tests {
                 post_deck_commitment: [50; 32],
                 pre_reconstruction_commitment: shuffle1.post.reconstruction_commitment,
                 post_reconstruction_commitment: shuffle1.post.reconstruction_commitment,
+                ..Default::default()
             },
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -13481,6 +14429,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -13540,6 +14489,7 @@ mod tests {
             },
             protocol_completion: Default::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,

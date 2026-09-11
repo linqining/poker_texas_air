@@ -1162,7 +1162,6 @@ mod tests {
     fn table() -> TexasPokerTable {
         TexasPokerTable::new(
             ObjectID::new([0xA1; 20], 42),
-            "canonical-advance-deadline".into(),
             [0xB2; 20],
             4,
             50,

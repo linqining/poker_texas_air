@@ -109,6 +109,9 @@ impl Table {
             }
         }
         self.mental_poker_game.deck_encrypted = reconstruct_deck;
+        // 重建 + 全员重洗后的 deck 是全新发牌序列：发牌游标归零，
+        // 此后 deal/redeal 从新 deck 位置 0 起步（z_poker todo 收口）。
+        self.mental_poker_game.note_deck_reconstructed();
 
         // 仅重置状态字段，保留 player_deck 供后续 on_reconstruct_shuffle_failed 重建牌组使用。
         // 下次 start_reconstruct 会清空 player_deck，此处无需清空。

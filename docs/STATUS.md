@@ -84,11 +84,41 @@ the hand's action log (`action_log_digest` tail word, #18 Phase B).
         本组合只证明"状态机规范化语义"，不证明洗牌/揭示方程。
    - **实施状态（2026-09-05）**：ShuffleComplete 已全部落地（枚举/校验/AIR
      约束/正反例测试，canonical 145/145；约束度数保持声明值 3——完成单元
-     布尔化 + 度数门拆分）。**RevealComplete 保持 fail-closed**：VM
-     `start_betting_round` 的 post 状态包含位置规则 current_turn（BB 后首个
-     活跃座，heads-up 特例）与盲注派生 current_bet，二者在 canonical 空间
-     无可锚定的 opening 源（rules_commitment 不透明）；需要先设计盲注/规则
-     opening 才能无损组合——单独排期。
+     布尔化 + 度数门拆分）。
+   - **RevealComplete 实施进展（2026-09-11，#22② 恢复实施）**：
+     ① **盲注/规则 opening 通道已落地**——复用 rules-opening（同一条
+     Blake2b 语句鉴权完整 `TableRules`）：`CanonicalBlindOpening`
+     （small/big blind、ante_mode、ante_amount）+ `blind_opening_of` 投影
+     + `validate_rules_opening` 扩展盲注/ante 不变量（big>0、sb≤bb、
+     ante 模式合法）。② **host 关系已组合**——`CompletionKind::Reveal = 3`
+     + opening 扩展（UTG/SB/BB 座位、实投面额、单挑布尔、reveal 承诺
+     端点锚）+ `validate_reveal_completion_opening`（镜像 `post_blinds` +
+     `start_betting_round(is_preflop)`：参与者全 Active、无封顶盲注、
+     ANTE_MODE_NONE、正常下注开局；越界形状独立错误 fail-closed）+
+     正反例测试（UTG/座位/面额/单挑/价格/deadline/承诺锚/封顶逐项）。
+     ③ **AIR 组合已贯通（2026-09-11 端到端 prove/verify 绿）**——重写为
+     "追加列 + 线性化 gate"布局：~166 条新 advice 列全部追加在 ABI 末尾
+     （既有偏移零扰动），完成选择子 `flag×SubmitReveal`（二次）经专用
+     度数 1 gate 列线性化（`shuffle_timeout_gate` 模式），全部约束保持
+     声明度数 3。位置规则 = 模 9 循环"首个 Active"扫描（每个基座
+     button/SB/BB：rotated activity + "此前无 Active"前缀 q 递推 + 首位
+     选择子 f = rot·q；SB 含单挑虚拟距离 0 槽 = button 本身；UTG =
+     BB 后首个 Active——单挑下该扫描恰好回到 button，与 VM 特例一致）；
+     占用收敛（非 Empty/Out 即 Active）+ 计数 ≥2 逆元使该扫描与 VM 的
+     mod max_players 扫描一致。盲注面额经公开 blind scope 预处理列
+     （13 列，插在 rake scope 与范围表之间）锚定到与 rake 共享的同一条
+     rules-hash 语句（`prove_canonical_reveal_completion_batch` +
+     `verify_canonical_rake_binding` 扩展）；逐座位资金移动
+     （post_bet=posted、pre_stack=post_stack+posted、
+     post_total=pre_total+posted）用 limb4 加法进位，盲注座 post stack
+     非零（无 AllIn 翻转）由逆元证明；deadline=ts+betting_timeout；
+     ante 必须 NONE（scope 列钉零）；reveal 承诺轮转留 native/EC_OP
+     通道（suspended 槽钉零，deck/reconstruction 双端冻结锚定）。
+     **准入已翻转**：`crypto_admitted` 与 `validate_direct_batch` 对
+     SubmitReveal 放行。测试：heads-up + 三人局（非单挑位置分支）
+     assert/prove/verify 正例 + 归档盲注脱钩/规则脱钩负例 + 12 列篡改
+     负例全绿。**fail-closed 收窄**（host 接受、AIR 拒绝的不可达形状）：
+     参与者 <2、占用座含 Folded/Waiting/AllIn、ante≠NONE。
    - **#22④ 准入翻转（2026-09-05）**：`validate_direct_batch` 对
      SubmitShuffle/SubmitReconstruct 放行；协议行全字段冻结集进 AIR
      （turn 双端 NO_SEAT、资金/参数/掩码/hand_id/timeout 配置/9 座位全像/
@@ -120,8 +150,10 @@ the hand's action log (`action_log_digest` tail word, #18 Phase B).
      `table_name_commitment(name)`（legacy 宿主哈希，仅测试用作 oracle）。
      测试 8/8（e2e/rowcheck/篡改三连/name 正反例）；全量门禁 `--include-ignored` 384/384（2026-09-06）；原 v1
      rowcheck、create_table 8/8 回归全绿。**残留**：create_table AIR 的
-     name-hash 期望值仍取宿主 `table_name_commitment`（约束 10）——切换为
-     消费 v2 归档的 claimed anchor 投影是下一步（方法归档结构改动）。
+     name-hash 期望值已切换为消费 v2 归档的 claimed anchor 投影
+     （2026-09-11：方法归档 v4 + `name_commitment` 公开输入；后被 v34/v35
+     展示名出共识重构整体移除——名字承诺随 metadata 对象出走，本项由
+     该重构收口）。
 3. ~~Terminal timeout cascade~~ — **closed (2026-09-05)**: the terminal
    cascade batch proofs exist and pass — multi-pending kick batches, the
    kicks→terminal-reset refund batch, the kicks→sole-survivor award batch

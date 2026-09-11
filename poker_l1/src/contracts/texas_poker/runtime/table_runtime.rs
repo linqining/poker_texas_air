@@ -489,7 +489,6 @@ mod tests {
 
         let table = TexasPokerTable::new(
             ObjectID::new([0x5A; 20], 1),
-            "t".into(),
             [0xC0; 20],
             2,
             10,
@@ -501,7 +500,6 @@ mod tests {
             1,
             &selectors::create_table(),
             &borsh::to_vec(&CreateTableArgs {
-                name: "t".into(),
                 max_players: 2,
                 small_blind: 10,
                 big_blind: 20,
@@ -776,7 +774,6 @@ mod tests {
 
         let table = TexasPokerTable::new(
             ObjectID::new([0x5A; 20], 1),
-            "t".into(),
             [0xC0; 20],
             2,
             10,
@@ -788,7 +785,6 @@ mod tests {
             1,
             &selectors::create_table(),
             &borsh::to_vec(&CreateTableArgs {
-                name: "t".into(),
                 max_players: 2,
                 small_blind: 10,
                 big_blind: 20,

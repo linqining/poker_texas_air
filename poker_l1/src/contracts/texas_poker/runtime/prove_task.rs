@@ -344,10 +344,9 @@ mod tests {
     use crate::object_model::ObjectID;
     use crate::signature::TaggedPubkey;
 
-    fn dummy_table(name: &str) -> TexasPokerTable {
+    fn dummy_table() -> TexasPokerTable {
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xFF; 20], 0),
-            name.into(),
             [0u8; 20],
             6,
             50,
@@ -377,8 +376,8 @@ mod tests {
             6, // MethodKind::Fold = 6
             dummy_context(),
             vec![],
-            dummy_table("pre"),
-            dummy_table("post"),
+            dummy_table(),
+            dummy_table(),
             42,
             1,
             3,

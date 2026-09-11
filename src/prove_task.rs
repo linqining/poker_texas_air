@@ -890,11 +890,10 @@ mod tests {
     use poker_l1::contracts::texas_poker::constants::RIT_MODE_DISABLED;
     use poker_l1::contracts::texas_poker::dispatch::CreateTableArgs;
 
-    fn dummy_table(name: &str) -> poker_l1::contracts::texas_poker::types::TexasPokerTable {
+    fn dummy_table() -> poker_l1::contracts::texas_poker::types::TexasPokerTable {
         use poker_l1::object_model::ObjectID;
         let mut table = poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             ObjectID::new([0xFF; 20], 0),
-            name.into(),
             [0xAA; 20],
             6,
             50,
@@ -922,9 +921,8 @@ mod tests {
         use poker_l1::contracts::texas_poker::dispatch::{dispatch, selectors};
 
         let context = dummy_context();
-        let mut table = dummy_table("uninitialized");
+        let mut table = dummy_table();
         let args = borsh::to_vec(&CreateTableArgs {
-            name: "batch-table".into(),
             max_players: 6,
             small_blind: 50,
             big_blind: 100,
@@ -942,8 +940,8 @@ mod tests {
             MethodKind::Fold,
             dummy_context(),
             vec![],
-            dummy_table("pre"),
-            dummy_table("post"),
+            dummy_table(),
+            dummy_table(),
             42,
             1,
             3,
@@ -966,8 +964,8 @@ mod tests {
             MethodKind::Fold,
             dummy_context(),
             vec![],
-            dummy_table("pre"),
-            dummy_table("post"),
+            dummy_table(),
+            dummy_table(),
             42,
             1,
             3,
@@ -991,8 +989,8 @@ mod tests {
             MethodKind::Fold,
             dummy_context(),
             vec![],
-            dummy_table("pre"),
-            dummy_table("post"),
+            dummy_table(),
+            dummy_table(),
             42,
             1,
             3,
@@ -1031,15 +1029,14 @@ mod tests {
             MethodKind::CreateTable,
             dummy_context(),
             borsh::to_vec(&CreateTableArgs {
-                name: "t".into(),
                 max_players: 6,
                 small_blind: 50,
                 big_blind: 100,
                 rit_mode: RIT_MODE_DISABLED,
             })
             .unwrap(),
-            dummy_table("pre"),
-            dummy_table("post"),
+            dummy_table(),
+            dummy_table(),
             1,
             0,
             0,

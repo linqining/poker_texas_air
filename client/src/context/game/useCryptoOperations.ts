@@ -65,6 +65,21 @@ function djb2Fingerprint(input: string): string {
   return h.toString(16);
 }
 
+/**
+ * 用户洗牌置换：Fisher-Yates + `crypto.getRandomValues`（CSPRNG）。
+ * 置换在客户端本地生成——洗牌决定权属于用户（z_poker permute 收口）。
+ */
+export function generatePermutation(n: number): number[] {
+  const arr = Array.from({ length: n }, (_, i) => i);
+  const buf = new Uint32Array(n);
+  crypto.getRandomValues(buf);
+  for (let i = n - 1; i > 0; i -= 1) {
+    const j = buf[i] % (i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 export const useCryptoOperations = (
   params: UseCryptoOperationsParams,
 ): UseCryptoOperationsReturn => {
@@ -155,14 +170,21 @@ export const useCryptoOperations = (
         return null;
       }
 
+      // 用户洗牌：置换在客户端本地生成（Fisher-Yates + CSPRNG）——洗牌
+      // 决定权属于用户，服务端/库都不再代生成（z_poker permute 收口）。
+      const deckLen = deckEncrypted.length;
+      const permute = generatePermutation(deckLen);
+      const permuteJson = JSON.stringify(permute);
+      logger.log('[Shuffle] user permute generated', { deckLen });
+
       let outputCards: unknown[];
       let shuffleProof: unknown;
       let maskAndShuffleRound: unknown;
       if (needsJoinLayer && sharePk) {
         const joinRaw = wrapCryptoOp(() => {
           const raw = (keys as unknown as {
-            join_game_and_shuffle: (deck: string, sharePk: string) => string;
-          }).join_game_and_shuffle(deckJson, sharePk);
+            join_game_and_shuffle: (deck: string, sharePk: string, permute: string) => string;
+          }).join_game_and_shuffle(deckJson, sharePk, permuteJson);
           if (!raw) throw new Error('join_game_and_shuffle returned null');
           return parseWasmResult<{
             pk_hex: string;
@@ -180,7 +202,9 @@ export const useCryptoOperations = (
         logger.log('[Shuffle] join-layer round built (remask+shuffle)');
       } else {
         const shuffleResult = wrapCryptoOp(() => {
-          const result = keys.shuffle(deckJson, aggregatePk);
+          const result = (keys as unknown as {
+            shuffle: (deck: string, aggregatePk: string, permute: string) => string;
+          }).shuffle(deckJson, aggregatePk, permuteJson);
           if (!result) throw new Error('Shuffle returned null');
           return parseWasmResult<ShuffleResult>(result);
         }, 'shuffle');

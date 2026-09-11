@@ -136,15 +136,6 @@ pub fn state_root_to_air_limbs(root: StateRoot) -> [M31; 4] {
     limbs
 }
 
-/// Compute the domain-separated commitment used for a table name.
-///
-/// The full-width value is included in the canonical table-state preimage
-/// and consumed directly by lifecycle AIR trace construction.
-#[must_use]
-pub fn table_name_commitment(name: &str) -> Felt {
-    poseidon_string(name)
-}
-
 /// 把 u64 编码为 Starknet `Felt`。
 #[must_use]
 pub fn u64_to_field(v: u64) -> Felt {
@@ -162,7 +153,7 @@ pub fn u64_to_field(v: u64) -> Felt {
 pub fn table_state_preimage(
     table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<Vec<Felt>> {
-    canonical_borsh_preimage("zchain.texas_poker.table.v12", table)
+    canonical_borsh_preimage("zchain.texas_poker.table.v13", table)
 }
 
 /// 从 canonical table preimage 反解完整 `TexasPokerTable`。
@@ -174,7 +165,7 @@ pub fn table_state_preimage(
 pub fn table_from_state_preimage(
     image: &[Felt],
 ) -> TexasAirResult<poker_l1::contracts::texas_poker::types::TexasPokerTable> {
-    const TAG: &str = "zchain.texas_poker.table.v12";
+    const TAG: &str = "zchain.texas_poker.table.v13";
     let payload = decode_canonical_borsh_preimage(image, TAG)?;
     let table =
         poker_l1::contracts::texas_poker::types::TexasPokerTable::try_from_slice(&payload)
@@ -211,7 +202,7 @@ pub fn is_absent_table(
     table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
 ) -> bool {
     use poker_l1::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
-    let absent = TexasPokerTable::new(table.id, String::new(), EMPTY_PLAYER, 2, 1, 1);
+    let absent = TexasPokerTable::new(table.id, EMPTY_PLAYER, 2, 1, 1);
     table == &absent
 }
 
@@ -427,12 +418,11 @@ pub fn field_element_to_u32_words(f: Felt) -> [u32; 8] {
     words
 }
 
+// 生产路径的唯一哈希宿主用户 `poseidon_string`（名字承诺）已随展示名出共识
+// 移除；以下两个 helper 目前仅测试交叉核验引用（poseidon_betting_round 等）。
+#[cfg(test)]
 fn poseidon_hash_many(inputs: &[Felt]) -> Felt {
     starknet_crypto::poseidon_hash_many(inputs)
-}
-
-fn poseidon_string(s: &str) -> Felt {
-    poseidon_borsh("zchain.string.v2", &s.as_bytes().to_vec())
 }
 
 /// 通用「borsh 序列化 → Poseidon」编码契约（带域分隔标签）。
@@ -454,6 +444,7 @@ fn poseidon_string(s: &str) -> Felt {
 ///
 /// `tag` 必须是稳定的、与类型一一对应的 ASCII 字符串（编码契约的一部分，
 /// prover 与 L1 两侧必须使用完全相同的 tag）。
+#[cfg(test)]
 pub(crate) fn poseidon_borsh<T: borsh::BorshSerialize>(tag: &str, value: &T) -> Felt {
     let fields = canonical_borsh_preimage(tag, value)
         .expect("Borsh serialization into an in-memory Vec must succeed");
@@ -513,7 +504,6 @@ mod tests {
     fn test_table_state_preimage_roundtrip() {
         let mut table = poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             poker_l1::object_model::ObjectID::new([0xAB; 20], 7),
-            "canonical-roundtrip".into(),
             [0xCD; 20],
             6,
             50,
@@ -535,10 +525,9 @@ mod tests {
 
     #[test]
     fn test_table_state_preimage_rejects_noncanonical_chunk_prefix() {
-        const TAG: &str = "zchain.texas_poker.table.v12";
+        const TAG: &str = "zchain.texas_poker.table.v13";
         let table = poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             poker_l1::object_model::ObjectID::new([0x11; 20], 3),
-            "noncanonical-prefix".into(),
             [0x33; 20],
             2,
             1,
@@ -558,15 +547,6 @@ mod tests {
             table_from_state_preimage(&image).is_err(),
             "non-zero bytes outside the declared chunk must be rejected"
         );
-    }
-
-    #[test]
-    fn test_poseidon_string_deterministic() {
-        let h1 = poseidon_string("hello");
-        let h2 = poseidon_string("hello");
-        assert_eq!(h1, h2, "poseidon 应确定性");
-        let h3 = poseidon_string("world");
-        assert_ne!(h1, h3, "不同字符串应产生不同哈希");
     }
 
     // ===== 阶段 1：preimage 编码契约测试（soundness 关键）=====

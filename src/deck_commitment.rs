@@ -45,7 +45,6 @@ mod tests {
     fn table_with_ciphertexts(count: usize, second: G1Projective) -> TexasPokerTable {
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xCC; 20], 0),
-            "commitment".into(),
             [0u8; 20],
             6,
             50,

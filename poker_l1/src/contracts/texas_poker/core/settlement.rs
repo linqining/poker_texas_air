@@ -25,7 +25,11 @@ use super::types::{RitStartStreet, Seat, TexasPokerTable};
 use crate::error::{PokerL1Error, PokerL1Result};
 
 /// Canonical settlement-plan encoding version.
-pub const SETTLEMENT_PLAN_VERSION: u8 = 2;
+///
+/// v3（2026-09-11，#40②）：`pots` 由 `Vec<SettlementPotPlan>` 定宽化为
+/// `[SettlementPotPlan; SETTLEMENT_SEATS]` + `pot_count`——模块头承诺的
+/// "投影进 AIR 列"最后一处变长输出消除。v2 及更早编码 fail-closed 拒绝。
+pub const SETTLEMENT_PLAN_VERSION: u8 = 3;
 /// Maximum number of independent boards supported by the protocol.
 pub const MAX_RUNOUTS: usize = 2;
 /// Fixed number of award/rank slots in every plan.
@@ -237,7 +241,7 @@ impl SettlementRunoutSchedule {
 }
 
 /// Settlement details for one pot on one runout.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize)]
 pub struct RunoutPotPlan {
     /// Amount of this pot assigned to the runout.
     pub amount: u64,
@@ -250,7 +254,9 @@ pub struct RunoutPotPlan {
 }
 
 impl RunoutPotPlan {
-    fn inactive() -> Self {
+    /// Canonical inactive slot（全零）。
+    #[must_use]
+    pub const fn inactive() -> Self {
         Self {
             amount: 0,
             winner_mask: 0,
@@ -291,7 +297,7 @@ impl BorshDeserialize for RunoutPotPlan {
 }
 
 /// Canonical settlement details for one main/side-pot layer.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize)]
 pub struct SettlementPotPlan {
     /// Stable layer index (`0` is the main pot).
     pub pot_index: u8,
@@ -308,6 +314,19 @@ pub struct SettlementPotPlan {
 }
 
 impl SettlementPotPlan {
+    /// Canonical inactive slot（全零，含 inactive runouts）。
+    #[must_use]
+    pub const fn inactive() -> Self {
+        Self {
+            pot_index: 0,
+            gross_amount: 0,
+            rake: 0,
+            net_amount: 0,
+            eligible_mask: 0,
+            runouts: [RunoutPotPlan::inactive(); MAX_RUNOUTS],
+        }
+    }
+
     /// Whether at least two seats are eligible to contest this layer.
     ///
     /// A one-seat outer layer is an uncalled return. It is never raked and is paid directly to
@@ -345,7 +364,11 @@ impl BorshDeserialize for SettlementPotPlan {
 }
 
 /// Fully normalized settlement output.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+///
+/// #40② 定宽化：`pots` 为固定 [`SETTLEMENT_SEATS`] 槽，`pots[0..pot_count]`
+/// 按水位升序携带活跃层，尾部空槽 canonical 全零（[`SettlementPotPlan::inactive`]）。
+/// 编码定宽，可直接排 AIR 列；空槽非零的编码 fail-closed 拒绝。
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub struct SettlementPlan {
     /// Encoding/domain version.
     pub version: u8,
@@ -361,18 +384,26 @@ pub struct SettlementPlan {
     pub winner_mask: u16,
     /// Aggregate award paid to each seat.
     pub awards: [u64; SETTLEMENT_SEATS],
-    /// Ordered main/side-pot layers (bounded by `MAX_PLAYERS`).
-    pub pots: Vec<SettlementPotPlan>,
+    /// 活跃 pot 层数（≥ 1；空槽计数）。
+    pub pot_count: u8,
+    /// Ordered main/side-pot layers（固定 9 槽，尾部 canonical 空槽）。
+    pub pots: [SettlementPotPlan; SETTLEMENT_SEATS],
 }
 
 impl SettlementPlan {
+    /// 活跃层切片（`pots[0..pot_count]`，按水位升序）。
+    #[must_use]
+    pub fn active_pots(&self) -> &[SettlementPotPlan] {
+        &self.pots[..usize::from(self.pot_count)]
+    }
+
     /// Domain-separated digest of the canonical plan encoding.
     pub fn digest(&self) -> PokerL1Result<[u8; 32]> {
         let encoded = borsh::to_vec(self).map_err(|error| {
             PokerL1Error::Serialization(format!("settlement plan borsh: {error}"))
         })?;
         let mut hasher = Blake2bVar::new(32).expect("32 <= Blake2b maximum output");
-        hasher.update(b"zchain.texas_poker.settlement_plan.v2");
+        hasher.update(b"zchain.texas_poker.settlement_plan.v3");
         hasher.update(&encoded);
         let mut digest = [0u8; 32];
         hasher
@@ -389,10 +420,23 @@ impl SettlementPlan {
                 self.version
             )));
         }
-        if seat_count > SETTLEMENT_SEATS || self.pots.len() > SETTLEMENT_SEATS {
+        if usize::from(self.pot_count) > SETTLEMENT_SEATS {
+            return Err(PokerL1Error::Serialization(
+                "settlement: pot_count exceeds fixed width".into(),
+            ));
+        }
+        if seat_count > SETTLEMENT_SEATS {
             return Err(PokerL1Error::Serialization(
                 "settlement: plan exceeds fixed seat/pot bounds".into(),
             ));
+        }
+        // 尾部空槽 canonical 全零（直构绕过反序列化时的防御性复核）。
+        for pot in &self.pots[usize::from(self.pot_count)..] {
+            if *pot != SettlementPotPlan::inactive() {
+                return Err(PokerL1Error::Serialization(
+                    "settlement: inactive pot slot is non-canonical".into(),
+                ));
+            }
         }
         let valid_seat_mask = if seat_count >= 16 {
             u16::MAX
@@ -414,7 +458,7 @@ impl SettlementPlan {
         let mut rake = 0u64;
         let mut awards = [0u64; SETTLEMENT_SEATS];
         let mut winner_mask = 0u16;
-        for (index, pot) in self.pots.iter().enumerate() {
+        for (index, pot) in self.active_pots().iter().enumerate() {
             if usize::from(pot.pot_index) != index {
                 return Err(PokerL1Error::Serialization(
                     "settlement: non-canonical pot index".into(),
@@ -539,6 +583,64 @@ impl SettlementPlan {
     }
 }
 
+impl BorshDeserialize for SettlementPlan {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let version = u8::deserialize_reader(reader)?;
+        let schedule = SettlementRunoutSchedule::deserialize_reader(reader)?;
+        let gross_pot = u64::deserialize_reader(reader)?;
+        let rake = u64::deserialize_reader(reader)?;
+        let total_awards = u64::deserialize_reader(reader)?;
+        let winner_mask = u16::deserialize_reader(reader)?;
+        let awards = <[u64; SETTLEMENT_SEATS]>::deserialize_reader(reader)?;
+        let pot_count = u8::deserialize_reader(reader)?;
+        if usize::from(pot_count) > SETTLEMENT_SEATS {
+            return Err(borsh::io::Error::new(
+                borsh::io::ErrorKind::InvalidData,
+                "settlement plan pot_count exceeds fixed width",
+            ));
+        }
+        let mut pots = [SettlementPotPlan::inactive(); SETTLEMENT_SEATS];
+        for (slot, pot) in pots.iter_mut().enumerate() {
+            if slot < usize::from(pot_count) {
+                // 活跃槽：走 SettlementPotPlan 的 fail-closed 校验（eligible 非空、
+                // inactive runout 载荷非零拒绝）。
+                *pot = SettlementPotPlan::deserialize_reader(reader)?;
+            } else {
+                // 空槽：逐字段读入并拒绝任何非零载荷（canonical 全零）。
+                let pot_index = u8::deserialize_reader(reader)?;
+                let gross_amount = u64::deserialize_reader(reader)?;
+                let slot_rake = u64::deserialize_reader(reader)?;
+                let net_amount = u64::deserialize_reader(reader)?;
+                let eligible_mask = u16::deserialize_reader(reader)?;
+                let runouts = <[RunoutPotPlan; MAX_RUNOUTS]>::deserialize_reader(reader)?;
+                if pot_index != 0
+                    || gross_amount != 0
+                    || slot_rake != 0
+                    || net_amount != 0
+                    || eligible_mask != 0
+                    || runouts != [RunoutPotPlan::inactive(); MAX_RUNOUTS]
+                {
+                    return Err(borsh::io::Error::new(
+                        borsh::io::ErrorKind::InvalidData,
+                        "inactive settlement pot slot carries non-zero payload",
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            version,
+            schedule,
+            gross_pot,
+            rake,
+            total_awards,
+            winner_mask,
+            awards,
+            pot_count,
+            pots,
+        })
+    }
+}
+
 /// Derive the normal one-board settlement plan from the table's community cards.
 pub fn derive_settlement_plan(table: &TexasPokerTable) -> PokerL1Result<SettlementPlan> {
     derive_settlement_plan_for_boards(
@@ -623,6 +725,23 @@ pub fn derive_fold_win_plan(table: &TexasPokerTable) -> PokerL1Result<Settlement
     awards[winner] = net;
     let mut runout_awards = [0u64; SETTLEMENT_SEATS];
     runout_awards[winner] = net;
+    let mut pots = [SettlementPotPlan::inactive(); SETTLEMENT_SEATS];
+    pots[0] = SettlementPotPlan {
+        pot_index: 0,
+        gross_amount: gross_pot,
+        rake,
+        net_amount: net,
+        eligible_mask: winner_bit,
+        runouts: [
+            RunoutPotPlan {
+                amount: net,
+                winner_mask: winner_bit,
+                ranks: [None; SETTLEMENT_SEATS],
+                awards: runout_awards,
+            },
+            RunoutPotPlan::inactive(),
+        ],
+    };
     let plan = SettlementPlan {
         version: SETTLEMENT_PLAN_VERSION,
         schedule: SettlementRunoutSchedule::Single,
@@ -631,22 +750,8 @@ pub fn derive_fold_win_plan(table: &TexasPokerTable) -> PokerL1Result<Settlement
         total_awards: net,
         winner_mask: winner_bit,
         awards,
-        pots: vec![SettlementPotPlan {
-            pot_index: 0,
-            gross_amount: gross_pot,
-            rake,
-            net_amount: net,
-            eligible_mask: winner_bit,
-            runouts: [
-                RunoutPotPlan {
-                    amount: net,
-                    winner_mask: winner_bit,
-                    ranks: [None; SETTLEMENT_SEATS],
-                    awards: runout_awards,
-                },
-                RunoutPotPlan::inactive(),
-            ],
-        }],
+        pot_count: 1,
+        pots,
     };
     plan.validate(usize::from(table.max_players))?;
     Ok(plan)
@@ -675,11 +780,8 @@ pub fn derive_settlement_plan_for_boards(
     let result = side_pot::calculate_side_pots(&bets, &folded, &all_in).map_err(|error| {
         PokerL1Error::Serialization(format!("settlement: side-pot calculation failed: {error}"))
     })?;
-    if result.pots.len() > SETTLEMENT_SEATS {
-        return Err(PokerL1Error::Serialization(
-            "settlement: side-pot count exceeds MAX_PLAYERS".into(),
-        ));
-    }
+    // #40①：SidePotResult 已定宽（9 槽 + pot_count），层数上限成为结构事实，
+    // 不再需要运行时越界检查。
     let gross_pot = result.total();
     if gross_pot > MAX_TOTAL_BET || gross_pot != table.pot {
         return Err(PokerL1Error::Serialization(format!(
@@ -687,7 +789,7 @@ pub fn derive_settlement_plan_for_boards(
             table.pot
         )));
     }
-    let contested_gross = result.pots.iter().try_fold(0u64, |sum, pot| {
+    let contested_gross = result.active().iter().try_fold(0u64, |sum, pot| {
         if pot.eligible_seats.count_ones() >= 2 {
             sum.checked_add(pot.amount).ok_or_else(|| {
                 PokerL1Error::Serialization("settlement: contested pot sum overflow".into())
@@ -697,7 +799,7 @@ pub fn derive_settlement_plan_for_boards(
         }
     })?;
     let pot_rakes = allocate_rake_fixed_rate(
-        &result.pots,
+        result.active(),
         table.rake_mode,
         table.rake_bps,
         table.rake_cap,
@@ -719,10 +821,11 @@ pub fn derive_settlement_plan_for_boards(
         total_awards: 0,
         winner_mask: 0,
         awards: [0; SETTLEMENT_SEATS],
-        pots: Vec::with_capacity(result.pots.len()),
+        pot_count: result.pot_count,
+        pots: [SettlementPotPlan::inactive(); SETTLEMENT_SEATS],
     };
 
-    for (pot_index, side_pot) in result.pots.iter().enumerate() {
+    for (pot_index, side_pot) in result.active().iter().enumerate() {
         if side_pot.amount == 0 || side_pot.eligible_seats == 0 {
             return Err(PokerL1Error::Serialization(format!(
                 "settlement: pot {pot_index} has zero amount or no eligible player"
@@ -778,7 +881,7 @@ pub fn derive_settlement_plan_for_boards(
                 })?;
             }
         }
-        plan.pots.push(SettlementPotPlan {
+        plan.pots[pot_index] = SettlementPotPlan {
             pot_index: u8::try_from(pot_index).map_err(|_| {
                 PokerL1Error::Serialization("settlement: pot index exceeds u8".into())
             })?,
@@ -787,7 +890,7 @@ pub fn derive_settlement_plan_for_boards(
             net_amount,
             eligible_mask: side_pot.eligible_seats,
             runouts,
-        });
+        };
     }
     plan.total_awards = plan.awards.iter().try_fold(0u64, |sum, amount| {
         sum.checked_add(*amount)
@@ -1033,7 +1136,6 @@ mod tests {
     fn table() -> TexasPokerTable {
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xFF; 20], 0),
-            "settlement".into(),
             [0xAA; 20],
             3,
             1,
@@ -1153,6 +1255,43 @@ mod tests {
     }
 
     #[test]
+    fn plan_encoding_is_fixed_width_and_fail_closed() {
+        let table = table();
+        let plan = derive_settlement_plan(&table).expect("derive plan");
+
+        // 定宽编码 round-trip：v3 plan 字节解码后逐字段一致。
+        let bytes = borsh::to_vec(&plan).unwrap();
+        let decoded: SettlementPlan = borsh::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, plan);
+
+        // 空槽携带非零载荷（最末字节 = 尾部空槽 runout award 的 MSB）→ fail-closed。
+        let mut tampered = bytes.clone();
+        let len = tampered.len();
+        tampered[len - 1] = 1;
+        assert!(
+            borsh::from_slice::<SettlementPlan>(&tampered).is_err(),
+            "non-zero inactive slot payload must be rejected"
+        );
+
+        // pot_count 越界 → fail-closed。
+        let mut oversized = plan.clone();
+        oversized.pot_count = SETTLEMENT_SEATS as u8 + 1;
+        assert!(validate_plan_bytes_reject(&oversized));
+
+        // 直构绕过反序列化：空槽非 canonical 全零 → validate 拒绝。
+        let mut non_canonical = plan.clone();
+        non_canonical.pots[SETTLEMENT_SEATS - 1].gross_amount = 1;
+        assert!(non_canonical.validate(usize::from(table.max_players)).is_err());
+    }
+
+    fn validate_plan_bytes_reject(plan: &SettlementPlan) -> bool {
+        borsh::to_vec(plan)
+            .ok()
+            .and_then(|bytes| borsh::from_slice::<SettlementPlan>(&bytes).ok())
+            .is_none()
+    }
+
+    #[test]
     fn single_runout_plan_is_canonical_and_conserves_funds() {
         let table = table();
         let plan = derive_settlement_plan(&table).expect("derive plan");
@@ -1160,7 +1299,7 @@ mod tests {
         assert_eq!(plan.gross_pot, 600);
         assert_eq!(plan.rake, 0);
         assert_eq!(plan.total_awards, 600);
-        assert_eq!(plan.pots.len(), 3);
+        assert_eq!(plan.active_pots().len(), 3);
         assert_eq!(plan.awards, [300, 200, 100, 0, 0, 0, 0, 0, 0]);
         assert_eq!(plan.digest().unwrap(), plan.clone().digest().unwrap());
         plan.validate(usize::from(table.max_players)).unwrap();
@@ -1240,7 +1379,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plan.pots.len(), 2);
+        assert_eq!(plan.active_pots().len(), 2);
         assert!(plan.pots[0].is_contested());
         assert_eq!(plan.pots[0].gross_amount, 100);
         assert_eq!(plan.pots[0].rake, 10);
@@ -1296,7 +1435,7 @@ mod tests {
         // The final 101-chip layer is uncontested, so only 505 chips are rakeable.
         assert_eq!(plan.rake, 25);
         assert_eq!(plan.total_awards, 581);
-        assert_eq!(plan.pots.len(), 3);
+        assert_eq!(plan.active_pots().len(), 3);
         assert!(plan.pots[0].is_contested());
         assert!(plan.pots[1].is_contested());
         assert!(!plan.pots[2].is_contested());

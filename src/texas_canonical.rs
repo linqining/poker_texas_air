@@ -546,6 +546,15 @@ pub enum CanonicalProtocolCompletionKind {
     /// unchanged, hole-card cursor 0 -> 2×participants, reveal pending mask =
     /// active participants, deadline re-armed with the reveal timeout).
     Shuffle = 2,
+    /// Final reveal contribution (preflop hole deal): the completing submit
+    /// advances the hand from `Revealing` into the preflop betting round
+    /// (`post_blinds` + `start_betting_round(is_preflop=true)`).  The opening
+    /// opens the blind-derived betting header (UTG turn, call price, min
+    /// raise) together with the SB/BB seat selection and the exact posted
+    /// amounts; the blind values themselves authenticate against the opaque
+    /// `rules_commitment` through the shared rules-opening channel
+    /// (`canonical_rake_opening::CanonicalBlindOpening`).
+    Reveal = 3,
 }
 
 impl Default for CanonicalProtocolCompletionKind {
@@ -575,6 +584,19 @@ pub struct CanonicalProtocolCompletionOpening {
     /// Complete shuffle progress opened by `on_complete_reconstruct`.
     pub post_shuffle_pending_mask: u16,
     pub post_shuffle_completed_mask: u16,
+    /// Reveal completion（#22②）：盲注/规则推导出的 betting 开局面。
+    /// `post_current_turn` = UTG（BB 后首个可行动座位；单挑 = button），
+    /// SB/BB 座位与实投金额（`min(blind, stack)` 的无封顶形状）一并打开；
+    /// 盲注面额的信任锚定在共享 rules-opening 通道上。
+    pub post_current_turn: u8,
+    pub sb_seat: u8,
+    pub bb_seat: u8,
+    pub sb_amount: u64,
+    pub bb_amount: u64,
+    pub is_heads_up: bool,
+    /// 亮牌承诺端点锚（完成提交本身轮转 reveal 承诺）。
+    pub pre_reveal_commitment: [u8; 32],
+    pub post_reveal_commitment: [u8; 32],
     /// Endpoint commitment statement reserved for reconstruction crypto and
     /// deck-state commitment composition.
     pub pre_deck_commitment: [u8; 32],
@@ -600,6 +622,10 @@ pub struct CanonicalTransitionWitness {
     /// is canonical-zero for every other kind and is bound to the pre rules
     /// commitment by the companion Blake2b rules-opening proof.
     pub rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening,
+    /// Authenticated blind/ante configuration for reveal-completion rows
+    /// (#22②).  Same rules-opening channel as `rake_opening`; canonical-zero
+    /// everywhere else.
+    pub blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening,
     pub transition_commitment: [u8; 32],
     pub nullifier: [u8; 32],
     pub deadline_height: u64,
@@ -806,18 +832,18 @@ pub fn validate_batch(witnesses: &[CanonicalTransitionWitness]) -> Result<(), St
 
 /// Validate the witness envelope accepted by the canonical direct AIR.
 ///
-/// #22④：`SubmitShuffle` / `SubmitReconstruct` 已解除 fail-closed——状态机
-/// 规范化语义（协议进度、相位/截止时间、全字段冻结集）由 canonical AIR
-/// 直接约束；deck/reconstruction 承诺**轮转**与实际密文的绑定属 native
-/// 验证 + 链上 EC_OP 批次通道（Plan D ④，残留信任见 README 信任模型）。
-/// `SubmitReveal`（betting-state turn 规则与盲注派生 opening 未设计）与
-/// `FoldWithProof` 维持拒绝。
+/// #22④/#22②：`SubmitShuffle` / `SubmitReconstruct` / `SubmitReveal` 已解除
+/// fail-closed——状态机规范化语义（协议进度、相位/截止时间、盲注开局/
+/// 位置规则、全字段冻结集）由 canonical AIR 直接约束；deck/reconstruction/
+/// reveal 承诺**轮转**与实际密文的绑定属 native 验证 + 链上 EC_OP 批次通道
+///（Plan D ④，残留信任见 README 信任模型）。`FoldWithProof` 维持拒绝。
 pub fn validate_direct_batch(witnesses: &[CanonicalTransitionWitness]) -> Result<(), String> {
     validate_batch(witnesses)?;
     if witnesses.iter().any(|witness| {
         witness.kind.carries_crypto_proof()
             && witness.kind != CanonicalTransitionKind::SubmitShuffle
             && witness.kind != CanonicalTransitionKind::SubmitReconstruct
+            && witness.kind != CanonicalTransitionKind::SubmitReveal
     }) {
         return Err(
             "canonical crypto transition is unavailable until its dedicated crypto AIR is composed"
@@ -984,6 +1010,208 @@ fn validate_shuffle_completion_opening(
         || post.deadline_ms != deadline_ms
     {
         return Err("final shuffle completion has invalid VM normalization header".into());
+    }
+    Ok(())
+}
+
+/// Canonical participating-seat scan: the first seat after `from` (circular,
+/// `max` seats) whose status is `Active`.  Mirrors the VM's
+/// `find_next_active_seat` at preflop hole-reveal completion, where every
+/// participant is still `Active` (no fold/all-in can exist before the first
+/// betting round).
+fn next_active_seat(seats: &[CanonicalSeat; MAX_CANONICAL_SEATS], from: u8, max: u8) -> Option<u8> {
+    for offset in 1..=usize::from(max) {
+        let index = (usize::from(from) + offset) % usize::from(max);
+        if seats[index].status == CanonicalSeatStatus::Active {
+            return Some(index as u8);
+        }
+    }
+    None
+}
+
+/// Canonical participating-seat scan (occupied, non-waiting).  Mirrors the
+/// VM's `find_next_participating_seat` used for SB/BB location.  At hole
+/// reveal completion every participant is still `Active`, so this matches
+/// `next_active_seat`; kept separate to mirror the VM call sites exactly.
+fn next_participating_seat(
+    seats: &[CanonicalSeat; MAX_CANONICAL_SEATS],
+    from: u8,
+    max: u8,
+) -> Option<u8> {
+    for offset in 1..=usize::from(max) {
+        let index = (usize::from(from) + offset) % usize::from(max);
+        if seats[index].status != CanonicalSeatStatus::Empty {
+            return Some(index as u8);
+        }
+    }
+    None
+}
+
+/// Validate the final-reveal-completion opening against the VM's
+/// `check_reveal_phase_complete` -> `post_blinds` + `start_betting_round(
+/// is_preflop=true)` normalization for the `DealHole` purpose.
+///
+/// Composed shape (everything else stays fail-closed with distinct errors):
+/// - every participant still `Active` (preflop deal: no fold/all-in yet);
+/// - blinds posted uncapped (`sb_amount`/`bb_amount` equal the authenticated
+///   rules values enforced at the batch binding; stacks stay positive so no
+///   blind-cap all-in flip occurs);
+/// - `ante_mode == NONE` (ante composition is a separate fail-closed edge);
+/// - the normal betting start (the all-in-runout branch of
+///   `start_betting_round` remains fail-closed).
+///
+/// The blind/ante values themselves are authenticated against the opaque
+/// `rules_commitment` by the shared rules-opening channel at the batch
+/// binding — the same companion statement that anchors the rake opening.
+fn validate_reveal_completion_opening(
+    pre: &CanonicalStateImage,
+    post: &CanonicalStateImage,
+    opening: &CanonicalProtocolCompletionOpening,
+) -> Result<(), String> {
+    if opening.kind != CanonicalProtocolCompletionKind::Reveal
+        || opening.completion_timestamp_ms == 0
+        || opening.pre_cards_dealt != 0
+        || opening.post_cards_dealt != 0
+        || opening.post_shuffle_pending_mask != 0
+        || opening.post_shuffle_completed_mask != 0
+        || opening.suspended_reveal_commitment != [0; 32]
+    {
+        return Err("final reveal completion has invalid kind/time/legacy fields".into());
+    }
+    // 端点承诺锚：完成提交轮转 reveal 承诺；deck/reconstruction 不变。
+    if opening.pre_reveal_commitment != pre.reveal_commitment
+        || opening.post_reveal_commitment != post.reveal_commitment
+        || opening.pre_deck_commitment != pre.deck_commitment
+        || opening.post_deck_commitment != post.deck_commitment
+        || opening.pre_reconstruction_commitment != pre.reconstruction_commitment
+        || opening.post_reconstruction_commitment != post.reconstruction_commitment
+    {
+        return Err("final reveal completion is detached from endpoint commitments".into());
+    }
+    // VM 头：Revealing(收集子标签 1, preflop) -> Betting(1, preflop)。
+    if pre.phase != CanonicalPhase::Revealing
+        || pre.phase_subtag != 1
+        || pre.street != 1
+        || pre.current_turn != NO_CANONICAL_SEAT
+        || pre.acted_mask != 0
+        || post.phase != CanonicalPhase::Betting
+        || post.phase_subtag != 1
+        || post.street != 1
+        || post.acted_mask != 0
+        || post.protocol_pending_mask != 0
+    {
+        return Err("final reveal completion has invalid VM normalization header".into());
+    }
+    let deadline_ms = opening
+        .completion_timestamp_ms
+        .checked_add(u64::from(pre.betting_timeout_ms))
+        .ok_or("final reveal betting deadline overflow")?;
+    if post.deadline_ms != deadline_ms {
+        return Err("final reveal completion has an invalid betting deadline".into());
+    }
+    // 参与者形状：全部 Active 且前后一致（无 fold/all-in 可能性）。
+    let mut participants: u16 = 0;
+    for (index, seat) in pre.seats.iter().enumerate() {
+        if seat.status == CanonicalSeatStatus::Active {
+            participants |= 1u16 << index;
+        }
+    }
+    if participants == 0 {
+        return Err("final reveal completion has no participants".into());
+    }
+    for index in 0..MAX_CANONICAL_SEATS {
+        if pre.seats[index].status != post.seats[index].status {
+            return Err("final reveal completion changed a seat status".into());
+        }
+        if pre.seats[index].bet != 0 {
+            return Err("final reveal completion has a pre-existing seat bet".into());
+        }
+    }
+    let is_heads_up = participants.count_ones() == 2;
+    if opening.is_heads_up != is_heads_up {
+        return Err("final reveal completion has an invalid heads-up flag".into());
+    }
+    // 盲注定位（镜像 post_blinds 的 find_next_participating_seat）。
+    let (sb_seat, bb_seat) = if is_heads_up {
+        (pre.button, u8::try_from(usize::from(pre.button)).ok().and_then(|_| {
+            next_participating_seat(&pre.seats, pre.button, pre.max_players)
+        }).unwrap_or(pre.button))
+    } else {
+        let sb = next_participating_seat(&pre.seats, pre.button, pre.max_players)
+            .ok_or("final reveal completion cannot locate the small blind")?;
+        let bb = next_participating_seat(&pre.seats, sb, pre.max_players)
+            .ok_or("final reveal completion cannot locate the big blind")?;
+        (sb, bb)
+    };
+    if opening.sb_seat != sb_seat || opening.bb_seat != bb_seat {
+        return Err("final reveal completion has invalid blind seats".into());
+    }
+    // 盲注面额纪律：无封顶（stack 保持为正 → 无 AllIn 翻转），SB ≤ BB。
+    let sb_amount = opening.sb_amount;
+    let bb_amount = opening.bb_amount;
+    if sb_amount == 0 || bb_amount == 0 || sb_amount > bb_amount {
+        return Err("final reveal completion has invalid blind amounts".into());
+    }
+    // UTG（镜像 start_betting_round：单挑 = button，否则 BB 后首个 Active）。
+    let expected_turn = if is_heads_up {
+        Some(pre.button)
+    } else {
+        next_active_seat(&post.seats, bb_seat, post.max_players)
+    };
+    if post.current_turn
+        != expected_turn.unwrap_or(NO_CANONICAL_SEAT)
+        || opening.post_current_turn != post.current_turn
+    {
+        return Err("final reveal completion has an invalid first-to-act seat".into());
+    }
+    // 下注价：current_bet = max(seat bets, BB) = BB；min_raise = BB。
+    if post.current_bet != bb_amount || post.min_raise != bb_amount {
+        return Err("final reveal completion has an invalid betting price".into());
+    }
+    // 逐座位资金移动：stack/bet/total_bet 与 SB/BB 扣款一致（ante=0）。
+    for index in 0..MAX_CANONICAL_SEATS {
+        let posted = if index == usize::from(sb_seat) {
+            sb_amount
+        } else if index == usize::from(bb_seat) {
+            bb_amount
+        } else {
+            0
+        };
+        let seat_pre = &pre.seats[index];
+        let seat_post = &post.seats[index];
+        if seat_post.bet != posted {
+            return Err("final reveal completion has an invalid seat bet".into());
+        }
+        let stack = seat_pre.stack.checked_sub(posted).ok_or(
+            "final reveal completion blinds exceed the seat stack",
+        )?;
+        if seat_post.stack != stack {
+            return Err("final reveal completion has an invalid seat stack".into());
+        }
+        if posted > 0 && seat_post.stack == 0 {
+            // 无封顶纪律：盲注后归零即 VM 的 AllIn 翻转，保持 fail-closed。
+            return Err("final reveal completion blinds cap the seat stack".into());
+        }
+        let total_bet = seat_pre.total_bet.checked_add(posted).ok_or(
+            "final reveal completion total bet overflow",
+        )?;
+        if seat_post.total_bet != total_bet {
+            return Err("final reveal completion has an invalid seat total bet".into());
+        }
+        // 其余座位字段不动。
+        if seat_post.acted != seat_pre.acted
+            || seat_post.pending_addon != seat_pre.pending_addon
+            || seat_post.time_bank_ms != seat_pre.time_bank_ms
+            || seat_post.identity_commitment != seat_pre.identity_commitment
+            || seat_post.key_commitment != seat_pre.key_commitment
+            || seat_post.hole_cards_commitment != seat_pre.hole_cards_commitment
+        {
+            return Err("final reveal completion changed unrelated seat material".into());
+        }
+    }
+    // 守恒：盲注只在 stack 与 bet 桶之间移动，pot/custody 不变。
+    if post.pot != pre.pot || post.chip_pool != pre.chip_pool {
+        return Err("final reveal completion moved custody buckets".into());
     }
     Ok(())
 }
@@ -1938,10 +2166,15 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
     }
     if !matches!(
         w.kind,
-        CanonicalTransitionKind::SubmitReconstruct | CanonicalTransitionKind::SubmitShuffle
+        CanonicalTransitionKind::SubmitReconstruct
+            | CanonicalTransitionKind::SubmitShuffle
+            | CanonicalTransitionKind::SubmitReveal
     ) && w.protocol_completion != CanonicalProtocolCompletionOpening::default()
     {
-        return Err("only submit_reconstruct/submit_shuffle may carry a protocol completion opening".into());
+        return Err(
+            "only submit_reconstruct/submit_shuffle/submit_reveal may carry a protocol completion opening"
+                .into(),
+        );
     }
     if w.kind != CanonicalTransitionKind::RevealTimeoutRakedAward
         && w.rake_opening != crate::canonical_rake_opening::CanonicalRakeOpening::ZERO
@@ -2758,7 +2991,10 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             if pre.phase != expected_phase {
                 return Err("crypto transition is outside its protocol phase".into());
             }
-            if pre.current_turn != NO_CANONICAL_SEAT || post.current_turn != NO_CANONICAL_SEAT {
+            // pre 端恒为 no-seat 哨兵；post 端由各分支约束（reconstruct/
+            // shuffle 完成保持 NO_SEAT，reveal 完成跳变为 UTG 座位，
+            // 非最终提交行在下方保持 NO_SEAT）。
+            if pre.current_turn != NO_CANONICAL_SEAT {
                 return Err("protocol transition must use the no-seat turn sentinel".into());
             }
             if w.action.amount != 0 || w.action.auxiliary != 0 {
@@ -2788,6 +3024,9 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                             &w.protocol_completion,
                         )?;
                     }
+                    CanonicalTransitionKind::SubmitReveal => {
+                        validate_reveal_completion_opening(pre, post, &w.protocol_completion)?;
+                    }
                     _ => {
                         return Err(
                             "final reveal submission requires the reveal-completion opening, whose betting-state turn rule is not enabled yet"
@@ -2795,6 +3034,8 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                         );
                     }
                 }
+                let is_reveal_completion =
+                    w.kind == CanonicalTransitionKind::SubmitReveal;
                 only_allowed_changes(pre, post, None, |expected, actual| {
                     expected.call_seq = actual.call_seq;
                     expected.phase = actual.phase;
@@ -2803,6 +3044,16 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                     expected.protocol_pending_mask = actual.protocol_pending_mask;
                     expected.deck_commitment = actual.deck_commitment;
                     expected.reconstruction_commitment = actual.reconstruction_commitment;
+                    if is_reveal_completion {
+                        // 盲注/下注开局字段——逐字段语义由
+                        // validate_reveal_completion_opening 承担。
+                        expected.reveal_commitment = actual.reveal_commitment;
+                        expected.current_turn = actual.current_turn;
+                        expected.current_bet = actual.current_bet;
+                        expected.min_raise = actual.min_raise;
+                        expected.acted_mask = actual.acted_mask;
+                        expected.seats = actual.seats;
+                    }
                 })?;
                 return Ok(());
             }
@@ -2814,6 +3065,7 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                 || post.street != pre.street
                 || post.deadline_ms != pre.deadline_ms
                 || post.protocol_pending_mask != remaining
+                || post.current_turn != NO_CANONICAL_SEAT
             {
                 return Err(
                     "non-final protocol submission has an invalid progress transition".into(),
@@ -2976,6 +3228,192 @@ mod tests {
         }
     }
 
+    /// 2 人 heads-up 形状的 preflop hole-reveal 完成行（SubmitReveal 最后
+    /// 一位提交）。基线锁定：组合前 validate 必须以 fail-closed 拒绝。
+    fn reveal_completion_witness() -> CanonicalTransitionWitness {
+        let mut pre = image();
+        pre.phase = CanonicalPhase::Revealing;
+        pre.phase_subtag = 1;
+        pre.street = 1;
+        pre.deadline_ms = 5_000;
+        pre.button = 0;
+        pre.max_players = 2;
+        pre.protocol_pending_mask = 0b01; // 最后一位待提交
+        pre.rules_commitment = [0x5A; 32];
+        pre.chip_pool = 2_000; // pot 0 + 两座位 (1000 stack)
+        for (index, seat) in pre.seats[..2].iter_mut().enumerate() {
+            *seat = CanonicalSeat {
+                status: CanonicalSeatStatus::Active,
+                acted: false,
+                stack: 1_000,
+                bet: 0,
+                total_bet: 0,
+                pending_addon: 0,
+                time_bank_ms: 0,
+                identity_commitment: [20 + index as u8; 32],
+                key_commitment: [30 + index as u8; 32],
+                hole_cards_commitment: [40 + index as u8; 32],
+            };
+        }
+        let timestamp = 9_000;
+        let mut post = pre.clone();
+        post.call_seq = 1;
+        post.phase = CanonicalPhase::Betting;
+        post.deadline_ms = timestamp + u64::from(pre.betting_timeout_ms);
+        post.protocol_pending_mask = 0;
+        post.reveal_commitment = [0x33; 32];
+        post.current_turn = 0; // heads-up: SB(button) 先行动
+        post.current_bet = 100; // big blind
+        post.min_raise = 100;
+        // 盲注：SB=button(座0) 出 50，BB(座1) 出 100
+        post.seats[0].stack = 950;
+        post.seats[0].bet = 50;
+        post.seats[0].total_bet = 50;
+        post.seats[1].stack = 900;
+        post.seats[1].bet = 100;
+        post.seats[1].total_bet = 100;
+        let mut witness = CanonicalTransitionWitness {
+            pre,
+            post,
+            kind: CanonicalTransitionKind::SubmitReveal,
+            actor: [80; 32],
+            action: CanonicalActionPayload {
+                seat: 0,
+                amount: 0,
+                auxiliary: 0,
+                flag: false,
+                proof_commitment: [81; 32],
+            },
+            round_advance: CanonicalRoundAdvanceOpening::default(),
+            protocol_completion: CanonicalProtocolCompletionOpening {
+                kind: CanonicalProtocolCompletionKind::Reveal,
+                completion_timestamp_ms: timestamp,
+                post_current_turn: 0,
+                sb_seat: 0,
+                bb_seat: 1,
+                sb_amount: 50,
+                bb_amount: 100,
+                is_heads_up: true,
+                pre_reveal_commitment: [3; 32],
+                post_reveal_commitment: [0x33; 32],
+                pre_deck_commitment: [2; 32],
+                post_deck_commitment: [2; 32],
+                pre_reconstruction_commitment: [4; 32],
+                post_reconstruction_commitment: [4; 32],
+                ..Default::default()
+            },
+            rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening {
+                small_blind: 50,
+                big_blind: 100,
+                ante_mode: 0,
+                ante_amount: 0,
+            },
+            transition_commitment: [0; 32],
+            nullifier: [0; 32],
+            deadline_height: 0,
+        };
+        witness.seal();
+        witness
+    }
+
+    /// RevealComplete：host 关系与直接准入均已解除 fail-closed（#22②
+    /// AIR 端到端 prove/verify 贯通后翻转，与 #22④ 次序一致）。
+    #[test]
+    fn reveal_completion_host_relation_and_fail_closed_admission() {
+        let witness = reveal_completion_witness();
+        validate_batch(&[witness.clone()])
+            .expect("legal reveal completion must pass the host relation");
+        validate_direct_batch(&[witness]).expect(
+            "direct admission must open once the reveal completion AIR e2e is green",
+        );
+    }
+
+    /// 非最终 reveal 提交行（还有其他 pending 位）保持原演进语义。
+    #[test]
+    fn non_final_reveal_submission_keeps_progress_semantics() {
+        let mut witness = reveal_completion_witness();
+        witness.pre.protocol_pending_mask = 0b11;
+        witness.post.protocol_pending_mask = 0b10; // 清提交者（座0）位
+        witness.post.phase = CanonicalPhase::Revealing;
+        witness.post.deadline_ms = witness.pre.deadline_ms;
+        witness.post.current_turn = NO_CANONICAL_SEAT;
+        witness.post.current_bet = 0;
+        witness.post.min_raise = 0;
+        witness.post.reveal_commitment = [0x44; 32];
+        witness.protocol_completion = CanonicalProtocolCompletionOpening::default();
+        witness.post.seats[0].stack = 1_000;
+        witness.post.seats[0].bet = 0;
+        witness.post.seats[0].total_bet = 0;
+        witness.post.seats[1].stack = 1_000;
+        witness.post.seats[1].bet = 0;
+        witness.post.seats[1].total_bet = 0;
+        witness.post.chip_pool = 2_000;
+        witness.seal();
+        validate_batch(&[witness]).expect("non-final reveal submit must stay valid");
+    }
+
+    /// 完成语义逐字段篡改负例：opening 声称的任何派生值与端点镜像
+    /// 不一致都必须拒绝。
+    #[test]
+    fn reveal_completion_tampering_is_rejected() {
+        let tamper = |mutate: &dyn Fn(&mut CanonicalTransitionWitness)| {
+            let mut witness = reveal_completion_witness();
+            mutate(&mut witness);
+            witness.seal();
+            witness
+        };
+        // UTG 声称值错位。
+        assert!(validate_batch(&[tamper(&|w| {
+            w.protocol_completion.post_current_turn = 1;
+        })])
+        .is_err());
+        // 盲注座位错位。
+        assert!(validate_batch(&[tamper(&|w| {
+            w.protocol_completion.sb_seat = 1;
+            w.protocol_completion.bb_seat = 0;
+        })])
+        .is_err());
+        // 盲注面额与资金移动不一致。
+        assert!(validate_batch(&[tamper(&|w| {
+            w.protocol_completion.sb_amount = 60;
+        })])
+        .is_err());
+        // 单挑标记错误。
+        assert!(validate_batch(&[tamper(&|w| {
+            w.protocol_completion.is_heads_up = false;
+        })])
+        .is_err());
+        // 下注价（current_bet = BB）篡改。
+        assert!(validate_batch(&[tamper(&|w| {
+            w.post.current_bet = 150;
+        })])
+        .is_err());
+        // deadline 重挂篡改。
+        assert!(validate_batch(&[tamper(&|w| {
+            w.post.deadline_ms += 1;
+        })])
+        .is_err());
+        // reveal 承诺锚脱离端点。
+        assert!(validate_batch(&[tamper(&|w| {
+            w.protocol_completion.post_reveal_commitment = [0x99; 32];
+        })])
+        .is_err());
+        // 憑空清掉 protocol_pending。
+        assert!(validate_batch(&[tamper(&|w| {
+            w.pre.protocol_pending_mask = 0b10;
+        })])
+        .is_err());
+        // 盲注封顶（stack 归零 → AllIn 翻转形状）保持 fail-closed。
+        assert!(validate_batch(&[tamper(&|w| {
+            w.post.seats[1].stack = 900;
+            w.pre.seats[1].stack = 100; // stack 100 < bb 100? 等于 → 归零
+            w.post.seats[1].stack = 0;
+            w.post.chip_pool = w.pre.chip_pool;
+        })])
+        .is_err());
+    }
+
     #[test]
     fn canonical_image_rejects_waiting_actor_or_deadline() {
         let mut value = image();
@@ -3031,6 +3469,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: CanonicalProtocolCompletionOpening::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -3088,6 +3527,7 @@ mod tests {
             round_advance: CanonicalRoundAdvanceOpening::default(),
             protocol_completion: CanonicalProtocolCompletionOpening::default(),
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -3164,8 +3604,10 @@ mod tests {
                 post_deck_commitment: [50; 32],
                 pre_reconstruction_commitment: [4; 32],
                 post_reconstruction_commitment: [51; 32],
+                ..Default::default()
             },
             rake_opening: crate::canonical_rake_opening::CanonicalRakeOpening::ZERO,
+            blind_opening: crate::canonical_rake_opening::CanonicalBlindOpening::ZERO,
             transition_commitment: [0; 32],
             nullifier: [0; 32],
             deadline_height: 0,
@@ -3230,7 +3672,6 @@ mod tests {
     fn vm_reconstruct_timeout_narrow_population_resets_before_accumulator_branch() {
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xA5; 20], 0),
-            "narrow-reconstruct-timeout".into(),
             [0; 20],
             2,
             50,
@@ -3291,7 +3732,6 @@ mod tests {
     fn vm_reveal_timeout_uses_assignment_union_before_preflop_reset() {
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xA6; 20], 0),
-            "narrow-reveal-timeout".into(),
             [0; 20],
             2,
             50,

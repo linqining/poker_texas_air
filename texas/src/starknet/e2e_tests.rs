@@ -30,7 +30,11 @@ fn game_layer_join(
     player: &ClientPlayer,
 ) {
     let agg_prev = game.key_manager.get_aggregated_pk();
-    let round = player.join_game_and_shuffle(&game.deck_encrypted, &agg_prev);
+    let round = player.join_game_and_shuffle(
+        &game.deck_encrypted,
+        &agg_prev,
+        crate::pokergame::random_user_permute(),
+    ).expect("simulated user join shuffle");
     let ms = &round.mask_and_shuffle_round;
     // 服务器侧验证（与 join_player_and_shuffle 相同的两步证明校验）
     let mut transcript = poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript::new_domain(
@@ -140,7 +144,7 @@ fn play_full_hand_artifacts(
         (p1, 1000u64, zpk1, None, proof1),
         (p2, 1000u64, zpk2, None, proof2),
     ];
-    let mut mirror = TableMirror::new(1, "e2e", creator, 4, 10, 20, creator);
+    let mut mirror = TableMirror::new(1, creator, 4, 10, 20, creator);
     mirror
         .begin_reveal_hand(
             super::mirror::conv::ciphertexts(&game_deck).expect("deck bridge"),
@@ -354,7 +358,7 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
         (p1, 1000u64, zpk1, None, proof1),
         (p2, 1000u64, zpk2, None, proof2),
     ];
-    let mut mirror = TableMirror::new(1, "e2e-prefix", creator, 4, 10, 20, creator);
+    let mut mirror = TableMirror::new(1, creator, 4, 10, 20, creator);
     mirror
         .begin_reveal_hand(super::mirror::conv::ciphertexts(&game_deck).unwrap(), &plan, 0, 1)
         .expect("inject");
@@ -466,7 +470,9 @@ async fn live_flow_assignments_match_mirror_targets() {
         -> (PkProofJson, MaskAndShuffleRoundJson, String)
     {
         use serde_json::json;
-        let round = player.join_game_and_shuffle(deck, agg_pk);
+        let round = player
+            .join_game_and_shuffle(deck, agg_pk, crate::pokergame::random_user_permute())
+            .expect("simulated user join shuffle");
         let ms = &round.mask_and_shuffle_round;
         let ct_json = |ct: &poker_protocol::crypto::ElGamalCiphertext| {
             json!({"c1_hex": ec_hex(&ct.c1), "c2_hex": ec_hex(&ct.c2)})
@@ -558,7 +564,9 @@ async fn live_flow_assignments_match_mirror_targets() {
             let agg = poker_protocol::crypto::EcPoint::from(
                 table.mental_poker_game.key_manager.get_aggregated_pk(),
             );
-            let round = player.shuffle(&deck, &agg);
+            let round = player
+                .shuffle(&deck, &agg, crate::pokergame::random_user_permute())
+                .expect("simulated user shuffle");
             let out_json: Vec<ElGamalCiphertextJson> = round
                 .output_cards
                 .iter()
@@ -709,7 +717,11 @@ fn e2e_mixed_join_paths_materializes() {
     // 全部卡 materialize 失败（本测试修复前的失败形态）。
     let agg = game.key_manager.get_aggregated_pk();
     let curr_share_pk = agg - c2.pk;
-    let join_round = c2.join_game_and_shuffle(&game.deck_encrypted, &curr_share_pk);
+    let join_round = c2.join_game_and_shuffle(
+        &game.deck_encrypted,
+        &curr_share_pk,
+        crate::pokergame::random_user_permute(),
+    ).expect("simulated user join shuffle");
     let ms = &join_round.mask_and_shuffle_round;
     {
         let input_cards: Vec<ZgCt> = game.deck_encrypted.clone();
@@ -1187,7 +1199,6 @@ mod runtime_authority_e2e {
         //     经 submit_unsigned 放行，此处直接模拟该路径）----
         let table = poker_l1::contracts::texas_poker::types::TexasPokerTable::new(
             ObjectID::new([0x5A; 20], 77),
-            "rt-e2e".to_string(),
             creator.address,
             4,
             10,
@@ -1204,7 +1215,6 @@ mod runtime_authority_e2e {
             now,
             &selectors::create_table(),
             &borsh::to_vec(&CreateTableArgs {
-                name: "rt-e2e".to_string(),
                 max_players: 4,
                 small_blind: 10,
                 big_blind: 20,

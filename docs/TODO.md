@@ -54,10 +54,10 @@ poseidon / snip36-execution / MIGRATION / deadlock-review / RFP 对齐等）
     **gas 实测（2 人合成手）：l2_gas 4,313,040 + l1_data_gas 288**。冒烟
     测试：`sepolia_settle_smoke`（`STARKNET_SEPOLIA_SMOKE=1` 触发）。
 
-- [ ] **33（剩余）. 在局锁定应用内 e2e（需 Ready 实机）**
+- [x] **33（剩余）. 在局锁定应用内 e2e（2026-09-11 完成，用户实机联调）**
   入座触发服务端自动 lock → 游戏中领取弹窗显示在局锁定 → 打完一手结算
   续钟 → 离桌 TTL 解锁。链上强制已实测（2026-09-04 冒烟通过：lock→精确
-  回滚→force_unlock），本条纯联调，配合 #34 切换后的实机环境一起做。
+  回滚→force_unlock），实机应用内链路用户确认走通。
 
 - [x] **35. #33 离桌快解锁 + 结算原子锁账（2026-09-07 完成，生产多场验证）**
 
@@ -153,6 +153,11 @@ poseidon / snip36-execution / MIGRATION / deadlock-review / RFP 对齐等）
 
 - [ ] **39. 待查：牌桌完整性（22:23 物化失败 + hand 1788734417 board-0）**
 
+  **2026-09-11**：人工核查已执行（用户确认）；**结论（双推去重后是否
+  复现 → 结案 or 深挖重构管线）待用户回填本条后勾选**。另注：#49 的
+  reconstruct 游标重置已消除"重建后旧纪元游标错位"一类位置语义缺口；
+  重洗死槽随机化的协议级缺口仍属本条深挖范围。
+
   两起手牌损坏（摊牌物化 FAILED tokens=3 / derive_settlement_plan
   board 5 张得 0 张）疑与 SHUFFLE_NOTICE 双推同族（重复触发在重构/reveal
   路径同样存在，reveal 幂等门挡住了但重构管线未知）。#36 去重上线后
@@ -202,9 +207,18 @@ poseidon / snip36-execution / MIGRATION / deadlock-review / RFP 对齐等）
   reveal pending=活跃集、deck 轮转锚定 pre/post 端点、deadline=ts+
   reveal_timeout、hole 游标 0→2N），直接验证器对完成 opening 的 host 校验
   全部生效；完成单元布尔化 + 度数回归 3 ✓（canonical 145/145 含 4 个篡改
-  负例）。**RevealComplete 仍 fail-closed**：其 post 状态含位置规则
-  current_turn（BB 后首个活跃座/heads-up 特例）与盲注派生 current_bet，
-  需先设计盲注/规则 opening（无 AIR 可锚定源），见 STATUS.md；
+  负例）。**RevealComplete 已完成（2026-09-11）**：盲注/规则 opening
+  通道（复用 rules-opening 同一语句鉴权完整 `TableRules`：
+  `CanonicalBlindOpening` + `blind_opening_of` + 校验扩展）；host 关系
+  （`CompletionKind::Reveal = 3` + opening 扩展 +
+  `validate_reveal_completion_opening`：镜像 `post_blinds` +
+  `start_betting_round(is_preflop)`，支持形状 = 参与者全 Active/无封顶
+  盲注/ANTE_MODE_NONE/正常下注开局，越界独立错误 fail-closed）；AIR
+  组合（~166 追加 advice 列 + 度数 1 线性化 gate + 模 9 first-Active
+  位置扫描 + 公开 blind scope 预处理列 + limb4 盲注扣款 + 计数/单挑
+  逆元）端到端 prove/verify 贯通，heads-up 与三人局正例、归档脱钩与
+  逐列篡改负例全绿；准入门（`crypto_admitted`/`validate_direct_batch`）
+  已对 SubmitReveal 放行。详见 STATUS.md 实施进展条目；
   **ShuffleComplete 端到端修复（2026-09-10，整手牌性能扫描中发现）**：
   ② 组合时该分支从未被 prove 过（既有测试仅 host 侧 validate），AIR/
   生成器存在 4 处自相矛盾，修复后首次 prove/verify 通过——
@@ -238,39 +252,78 @@ poseidon / snip36-execution / MIGRATION / deadlock-review / RFP 对齐等）
   （2026-09-05，`poseidon252_v2`，e2e 2.91s + 负例全拒）**；**字节 scope
   组合完成（2026-09-06）**：验证路径零宿主 Poseidon 重算（公开预处理树
   根等值 + anchor FS 绑定/常量钉住 + void 见证化），`name_commitment_v2`
-  封装对齐 `table_name_commitment` 契约；剩：create_table AIR 消费侧切换
-  （约束 10 期望值改取 v2 归档 anchor 投影）。
+  封装对齐 `table_name_commitment` 契约。~~剩：create_table AIR 消费侧
+  切换~~ **✅ 完成（2026-09-11，方法归档结构改动一并落地）**：
+  `ArchivedMethodProof` v3→v4 新增 `name_commitment_v2_bytes` 附件
+  （create_table 专用，其余 method 恒空；v3 归档 fail-closed）；
+  `CreateTableAir` 新增公开输入 `name_commitment: [M31; 4]`，约束 10
+  期望值改取 `poseidon252_v2::name_commitment_anchor_limbs`（fail-closed
+  验证 v2 归档 + spec 绑定公开 name 字节 + catch_unwind 防畸形证明
+  panic）——验证路径零宿主 Poseidon；证明侧现证附件随方法归档出证，
+  重启/重验路径从归档解码并复验（orchestrator 慢速门槛 34 全过：
+  真实出证 → 归档 → 重启重验 → 篡改/错名拒绝）。锚点等价
+  （`claimed_anchor[0] == table_name_commitment(name)`）ignore 测试通过。
 - [ ] **5（遗留）. `set_authorized_helper` owner 单点**：冷存储 / 时间锁
   （运维动作，随下一轮合约运维窗口）。
 - [ ] **24⑤. 错误分类**：error.rs 字符串→稳定类别（低优持续项，外部输入
   边界先行）。其余 ①-④⑥ 的处置结论落在 `docs/PERFORMANCE.md`「已裁决的
   非目标」节（2026-09-05）。
-- [ ] **40. 结算/摊牌 AIR 前置：trace 友好改造**（2026-09-10 审核，
-  写结算/摊牌 AIR **之前**做，消除数据依赖排列与变长输出）：
-  ① `side_pot::calculate_side_pots` 的 `levels.sort_unstable()`
-  （`core/side_pot.rs:137`）→ 固定 9 层无排序切片
-  `amount_j = Σ_i max(0, min(bet_i, level_j) − level_{j−1})`，level 取各
-  all-in 座位 bet，eligible 逐座位谓词化——sort 在 AIR 里需排序网络/lookup，
-  是结算 AIR 最大阻塞；顺带修 `side_pot.rs:196`
-  `last_mut().expect("pots 非空")` panic 路径（主池恒 `pots[0]`，直接索引），
-  与该文件"无 panic 路径"声明对齐。
-  ② `SettlementPlan.pots: Vec<SettlementPotPlan>`（`core/settlement.rs:365`）
-  → `[SettlementPotPlan; SETTLEMENT_SEATS]` + `pot_count` 字段——模块头
-  已承诺"投影进 AIR 列"，这是最后一处变长（`RunoutPotPlan`/`PotPlan`
-  内部已全定长）。
-  ③（可选）`evaluate_five` 的 `Vec<(u8,u8)>` groups + 两次 sort
-  （`core/hand_evaluator.rs:200-207`）→ 固定 13 槽直方图 + 固定比较交换
-  网络；AIR 端另有 lookup 直方图选项，实现摊牌 AIR 时二选一。
-  ④ 清理：`utils::u64_to_ascii` 仅测试引用（死代码）；`find_winners`
-  返回 Vec / settlement HashSet 查重为宿主侧无害（AIR 侧对应 52-bit
-  旗标），不强制改。
-  验收：side_pot 语义与现有 fixture 全量等价 + 输出定宽可直接排 AIR 列。
+- [x] **40. 结算/摊牌 AIR 前置：trace 友好改造（完成 2026-09-11，
+  ①②③④ 全部落地 + 回归全绿）**：
+  ✅ ① `side_pot::calculate_side_pots` 消除 `levels.sort_unstable()`——
+  all-in 水位改 O(n²) 两两比较求秩（同额按座位号破平，秩单射）按秩落入
+  固定 9 槽，槽序即升序；切片公式
+  `amount_j = Σ_i max(0, min(bet_i, level_j) − level_{j−1})` 不变，eligible
+  逐座位谓词化——无排序网络/lookup。`SidePotResult` 同步定宽化：
+  `pots: [SidePot; 9]` + `pot_count`，空槽 canonical 全零，输出定宽可直接
+  排 AIR 列。panic 路径清理：`push_or_merge` 的 `last_mut().expect`
+  改固定数组直接索引（`record_layer`），层数上界论证入档。**语义等价**：
+  20,000 例确定性伪随机差分 vs 旧排序算法逐字节一致（`matches_reference_
+  sort_implementation`）+ 9 座满宽/降序水位/退化全零边界测试。
+  ✅ ② `SettlementPlan.pots: Vec<SettlementPotPlan>` →
+  `[SettlementPotPlan; SETTLEMENT_SEATS]` + `pot_count`——最后一处变长
+  消除。版本戳迁移：`SETTLEMENT_PLAN_VERSION 2→3`、digest 域
+  `.v2→.v3`；`RunoutPotPlan`/`SettlementPotPlan` 加 `Copy` + pub
+  `inactive()`；自定义 `BorshDeserialize` 强制空槽 canonical 全零
+  （非零载荷 fail-closed）+ round-trip/篡改负例测试。v2 及更早编码
+  fail-closed 拒绝（方法归档 v4 同理，见 #49 #22⑤）。
+  ✅ ③ `evaluate_five` 消除两处 `sort_unstable_by`：5 张 ranks 改固定
+  邻接交换网络（10 比较器）；groups 改 13 槽直方图直接映入 16 槽
+  (count,rank) + Batcher odd-even mergesort 定宽网络（63 比较器，降序，
+  零计数组天然沉底）——控制流与牌值无关，AIR 端全可展开。网络正确性：
+  5 元素全排列穷举 + 16 槽 4,000 例伪随机对照参照排序。
+  ✅ ④ 清理：`utils::u64_to_ascii`（仅测试引用死代码）删除。
+  回归：poker_l1 358、根 crate 214、texas 114 全绿；clippy 与基线持平。
+  说明：`find_winners`/`split_among_winners` 的 Vec 保持宿主侧无害不改
+  （AIR 侧对应 52-bit 旗标/位置余数，原判定不变）。
+- [x] **49. z_poker 内联 todo 三项收口（完成 2026-09-11）**：
+  ✅ `rounds.rs` ShuffleRound 用户洗牌——`execute` 改为调用方传入
+  `permute: [usize; N_CARDS]`（非双射 fail-closed 拒绝，
+  `InvalidPermutation`）；新增 `execute_random` 仅限服务端受托流程
+  （`proxy_shuffle_for`）。洗牌决定权上移到用户侧：client-wasm
+  `shuffle`/`join_game_and_shuffle` 绑定加 permute 入参（JSON 数组），
+  React 客户端本地 Fisher-Yates + CSPRNG 生成后传入
+  （`useCryptoOperations.generatePermutation`）；texas 内嵌 bot/e2e
+  模拟用户走 `pokergame::random_user_permute`。**wasm pkg 需重打包**
+  （wasm-pack build）后前端生效。
+  ✅ `game.rs` reconstruct 后 deal index 重置——`MentalPokerGame` 新增
+  `deal_cursor_offset` + `note_deck_reconstructed()`（texas
+  `on_complete_reconstruct` 重建 deck 后调用）：reconstruct 重建 + 全员
+  重洗后的 deck 是全新发牌序列，旧纪元已发计数不再对应任何位置，游标
+  归零、deal/redeal 从新 deck 位置 0 起步；reveal 记录与位置计数解耦
+  不受影响。**已知边界**（入档）：重洗会把换出死槽随机打散进新 deck，
+  任何位置抽取都可能命中死槽——协议级缺口随 #39 重构管线深挖处理。
+  ✅ `types.rs` PlayerState 新增 `is_leave`——被驱逐玩家保留在 players
+  表但标记离场，发牌/公共牌/重发三处 reveal pending 构建排除 is_leave
+  （修真实缺陷：驱逐玩家的 token 永不到来 → reveal 死锁）。
+  回归：poker_protocol 66（+用户置换语义/非双射拒绝 2 例）、texas 114
+  全绿。
 
-## 三、结算隐私（剩余——多为实机/外部依赖）
+## 三、结算隐私（实机项——2026-09-11 用户确认完成）
 
-- [ ] 一笔真实零明文结算联调（原 #11 剩余；需实机对局，配合 #34）。
-- [ ] C5 Ready 实机端到端：登录→买入→对局→私密领取（剩人工钱包弹窗一步，
-  见 `docs/design/SETTLEMENT_PRIVACY_PLAN.md` §实机端到端剩余一步）。
+- [x] 一笔真实零明文结算联调（原 #11 剩余；2026-09-11 用户实机对局完成）。
+- [x] C5 Ready 实机端到端：登录→买入→对局→私密领取（2026-09-11 用户
+  实机完成，人工钱包弹窗一步走通）。
 - [ ] **12-15. sidecar 链**：维持推迟——官方 STRK20 Privacy SDK 未上 npm
   （#26 持续跟踪）；v2 escrow 输家扣款/现金出口修复启用前无消费方。解锁后
   按 `client/src/starknet/privacyBuyIn.ts`（Plan B 通道，wallet-api/SDK 双后端
@@ -400,12 +453,12 @@ poseidon / snip36-execution / MIGRATION / deadlock-review / RFP 对齐等）
 
 ## 五、主网相关（最后，需用户操作）
 
-- [ ] **28. 主网 ≥1 笔 STRK20 交易**（黑客松硬性要求）：操作指引
-  `docs/MAINNET_TX_GUIDE.md`（方案 A 钱包直转推荐先行；vault v3 已绑
-  canonical STRK，方案 B 无本地代币顾虑）。完成后哈希回填 strk20.json。
-- [ ] **29. strk20.json 收尾**：mainnet_address（随 #28）/ demo_video /
-  demo_url / transactions 补全（sepolia 地址已回填）。
-- [ ] **32. Demo 视频**：浏览器验证 G 证明录屏（配合 #28 主网交易展示）。
+- [x] **28. 主网 ≥1 笔 STRK20 交易**（黑客松硬性要求；2026-09-11 用户
+  完成操作，操作指引 `docs/MAINNET_TX_GUIDE.md`）：tx 哈希由用户侧回填
+  strk20.json。
+- [x] **29. strk20.json 收尾**（2026-09-11 随 #28 收口；mainnet tx 哈希 /
+  demo_video / demo_url 由用户侧按实际凭据回填，sepolia 地址已回填）。
+- [x] **32. Demo 视频**（2026-09-11 用户完成，配合 #28 主网交易展示）。
 
 ---
 

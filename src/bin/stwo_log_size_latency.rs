@@ -68,14 +68,14 @@ fn run_single(log_size: u32) -> ExitCode {
         }
         Ok(Err(error)) => {
             println!(
-                "{log_size},{},,,,,,,error:{}",
+                "{log_size},{},,,,error:{}",
                 1usize << log_size,
                 error.replace(',', ";")
             );
             ExitCode::SUCCESS
         }
         Err(_) => {
-            println!("{log_size},{},,,,,,,panic", 1usize << log_size);
+            println!("{log_size},{},,,,panic", 1usize << log_size);
             ExitCode::SUCCESS
         }
     }
@@ -134,7 +134,6 @@ fn prove(
 fn fixture(log_size: u32) -> Result<Fixture, String> {
     let pre_table = TexasPokerTable::new(
         ObjectID::new([0xAA; 20], 42),
-        String::new(),
         EMPTY_PLAYER,
         2,
         1,
@@ -142,7 +141,6 @@ fn fixture(log_size: u32) -> Result<Fixture, String> {
     );
     let mut post_table = TexasPokerTable::new(
         ObjectID::new([0xAA; 20], 42),
-        "stwo-log-size-benchmark".into(),
         [0xCC; 20],
         6,
         10,
@@ -153,7 +151,6 @@ fn fixture(log_size: u32) -> Result<Fixture, String> {
     // Build the active statement row directly from the canonical row ABI,
     // exactly as the orchestrator's create_table path does.
     let input = CreateTableInput {
-        name: "stwo-log-size-benchmark".into(),
         max_players: 6,
         small_blind: 10,
         big_blind: 20,

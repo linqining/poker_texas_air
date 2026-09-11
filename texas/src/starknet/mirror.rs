@@ -64,7 +64,6 @@ impl TableMirror {
     /// 建桌。`table_id_seed` 用于派生确定性的镜像对象 ID。
     pub fn new(
         table_id_seed: u64,
-        name: &str,
         creator: poker_l1::Address,
         max_players: u8,
         small_blind: u64,
@@ -73,7 +72,6 @@ impl TableMirror {
     ) -> Self {
         let table = TexasPokerTable::new(
             ObjectID::new([0x5A; 20], table_id_seed),
-            name.to_string(),
             creator,
             max_players,
             small_blind,
@@ -544,7 +542,6 @@ pub(crate) fn mirror_bootstrap(
     let bb = start.small_blind.saturating_mul(2);
     let mut mirror = TableMirror::new(
         u64::from(table_id),
-        "table",
         [0xC0; 20],
         9,
         start.small_blind,

@@ -51,6 +51,41 @@ impl CanonicalRakeOpening {
     pub const PERCENTAGE_MODE: u8 = 1;
 }
 
+/// The authenticated blind/ante projection of one rules opening (#22②
+/// RevealComplete 前置：盲注 opening).
+///
+/// 与 [`CanonicalRakeOpening`] 同源——两者都是同一条 rules-hash 语句的
+/// 投影，share 一个 `ArchivedCanonicalRulesHashProof`，不需要独立证明。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize)]
+pub struct CanonicalBlindOpening {
+    pub small_blind: u64,
+    pub big_blind: u64,
+    /// `ANTE_MODE_NONE` (0) / `ANTE_MODE_NORMAL` (1) / `ANTE_MODE_BBA` (2).
+    pub ante_mode: u8,
+    pub ante_amount: u64,
+}
+
+impl CanonicalBlindOpening {
+    /// Canonical zero opening (ante-less, blind-less placeholder).
+    pub const ZERO: Self = Self {
+        small_blind: 0,
+        big_blind: 0,
+        ante_mode: 0,
+        ante_amount: 0,
+    };
+}
+
+/// Project the blind/ante quadruple out of a full rules value.
+#[must_use]
+pub fn blind_opening_of(rules: &TableRules) -> CanonicalBlindOpening {
+    CanonicalBlindOpening {
+        small_blind: rules.small_blind,
+        big_blind: rules.big_blind,
+        ante_mode: rules.ante_mode,
+        ante_amount: rules.ante_amount,
+    }
+}
+
 /// One BLAKE3 statement authenticating the complete rules byte string.
 #[derive(Debug, Clone, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct ArchivedCanonicalRulesHashProof {
@@ -169,6 +204,24 @@ pub fn validate_rules_opening(rules: &TableRules) -> TexasAirResult<()> {
     {
         return Err(TexasAirError::SpecViolation(
             "canonical rules opening carries an out-of-range rake configuration".into(),
+        ));
+    }
+    // #22② 盲注 opening：镜像 VM `TableRules::validate_canonical` 的
+    // 盲注/ante 不变量，防止已验证 opening 把越界配置带进完成组合的
+    // current_bet / min_raise / 盲注扣款算术。
+    if rules.big_blind == 0 || rules.small_blind > rules.big_blind {
+        return Err(TexasAirError::SpecViolation(
+            "canonical rules opening carries an out-of-range blind configuration".into(),
+        ));
+    }
+    if !matches!(rules.ante_mode, 0 | 1 | 2) {
+        return Err(TexasAirError::SpecViolation(
+            "canonical rules opening carries an unknown ante mode".into(),
+        ));
+    }
+    if rules.ante_mode == 0 && rules.ante_amount != 0 {
+        return Err(TexasAirError::SpecViolation(
+            "canonical rules opening carries ante amount without ante mode".into(),
         ));
     }
     Ok(())

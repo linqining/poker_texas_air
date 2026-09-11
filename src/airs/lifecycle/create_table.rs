@@ -5,12 +5,14 @@
 //!
 //! ## 业务规约
 //!
-//! 输入 `CreateTableArgs { name, max_players, small_blind, big_blind, rit_mode }`：
+//! 输入 `CreateTableArgs { max_players, small_blind, big_blind, rit_mode }`：
 //! 1. `max_players ∈ [2, 9]`
 //! 2. `big_blind > 0`
 //! 3. `small_blind <= big_blind`
 //! 4. `rit_mode ∈ { RIT_MODE_DISABLED, RIT_MODE_TWICE }`（Run It Twice 桌面
 //!    策略，缺省 DISABLED；`MAX_RUNOUTS = 2`，TWICE 在 contested all-in 时双跑）
+//!
+//! 展示名非共识（v34 起出热状态），不进入本 AIR 的公开输入与约束。
 //!
 //! 状态变更：
 //! - `table_id` 保持不变
@@ -21,9 +23,8 @@
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个（见 [`crate::airs::common`]）
-//! - 业务列 20 个：
+//! - 业务列 16 个：
 //!   - `INPUT_MAX_PLAYERS` / `INPUT_SMALL_BLIND_BASE[4]` / `INPUT_BIG_BLIND_BASE[4]`
-//!   - `INPUT_NAME_HASH_BASE[4]`（Poseidon252 of name string）
 //!   - `OUTPUT_POT_BASE[4]` / `OUTPUT_BUTTON` / `OUTPUT_ROUND_STATE`
 //!   - `INPUT_RIT_MODE`
 //!
@@ -61,25 +62,21 @@ pub mod cols {
     pub const INPUT_SMALL_BLIND_BASE: usize = COMMON_NUM_COLUMNS + 1;
     /// `INPUT_BIG_BLIND` 起始列索引（4 个 M31 limb）。
     pub const INPUT_BIG_BLIND_BASE: usize = COMMON_NUM_COLUMNS + 5;
-    /// `INPUT_NAME_HASH` 起始列索引（4 个 M31 limb，Poseidon252(name)）。
-    pub const INPUT_NAME_HASH_BASE: usize = COMMON_NUM_COLUMNS + 9;
     /// `OUTPUT_POT` 起始列索引（4 个 M31 limb）。
-    pub const OUTPUT_POT_BASE: usize = COMMON_NUM_COLUMNS + 13;
+    pub const OUTPUT_POT_BASE: usize = COMMON_NUM_COLUMNS + 9;
     /// `OUTPUT_BUTTON` 列索引。
-    pub const OUTPUT_BUTTON: usize = COMMON_NUM_COLUMNS + 17;
+    pub const OUTPUT_BUTTON: usize = COMMON_NUM_COLUMNS + 13;
     /// `OUTPUT_ROUND_STATE` 列索引。
-    pub const OUTPUT_ROUND_STATE: usize = COMMON_NUM_COLUMNS + 18;
+    pub const OUTPUT_ROUND_STATE: usize = COMMON_NUM_COLUMNS + 14;
     /// `INPUT_RIT_MODE` 列索引。
-    pub const INPUT_RIT_MODE: usize = COMMON_NUM_COLUMNS + 19;
+    pub const INPUT_RIT_MODE: usize = COMMON_NUM_COLUMNS + 15;
     /// `create_table` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 20;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 16;
 }
 
 /// `create_table` AIR 输入参数。
 #[derive(Debug, Clone)]
 pub struct CreateTableInput {
-    /// 桌台名称。
-    pub name: String,
     /// 最大玩家数（2..=9）。
     pub max_players: u8,
     /// 小盲注。
@@ -167,10 +164,6 @@ impl FrameworkEval for CreateTableAir {
         let input_max_players = eval.next_trace_mask();
         let input_small_blind: Vec<_> = (0..4).map(|_| eval.next_trace_mask()).collect();
         let input_big_blind: Vec<_> = (0..4).map(|_| eval.next_trace_mask()).collect();
-        let input_name_hash_0 = eval.next_trace_mask();
-        let input_name_hash_1 = eval.next_trace_mask();
-        let input_name_hash_2 = eval.next_trace_mask();
-        let input_name_hash_3 = eval.next_trace_mask();
         let output_pot_0 = eval.next_trace_mask();
         let output_pot_1 = eval.next_trace_mask();
         let output_pot_2 = eval.next_trace_mask();
@@ -237,23 +230,8 @@ impl FrameworkEval for CreateTableAir {
 
         // 9. post_version == pre_version + 1 已由 CommonConstraints 完整约束。
 
-        // 10. The name commitment must match the verifier-reconstructed public input.
-        // The full name remains in the canonical post-state preimage; this projection prevents
-        // the trace columns from becoming free witnesses.
-        let expected_name_hash =
-            field_to_m31_limbs(crate::state_root::table_name_commitment(&self.input.name));
-        for (actual, expected) in [
-            input_name_hash_0.clone(),
-            input_name_hash_1.clone(),
-            input_name_hash_2.clone(),
-            input_name_hash_3.clone(),
-        ]
-        .into_iter()
-        .zip(expected_name_hash)
-        {
-            let expected: E::F = expected.into();
-            eval.add_constraint(is_active.clone() * (actual - expected));
-        }
+        // 展示名非共识（v34 起出热状态），本 AIR 不再设置名字哈希列/约束；
+        // 名字承诺 AIR 消费侧（#22⑤ 约束 10）随 v2 归档机制一并移除。
 
         // 11. state_root 的 full-width preimage/hash 自洽目前由生产 host verifier
         //     检查并混入 transcript；本 AIR 只约束域分隔 M31 投影，未嵌入 Poseidon AIR。
@@ -275,8 +253,6 @@ pub struct CreateTableRow {
     pub input_small_blind: [M31; 4],
     /// `INPUT_BIG_BLIND` 业务列（4 个 M31 limb）。
     pub input_big_blind: [M31; 4],
-    /// `INPUT_NAME_HASH` 业务列（4 个 M31 limb，Poseidon252(name)）。
-    pub input_name_hash: [M31; 4],
     /// `OUTPUT_POT` 业务列（4 个 M31 limb）。
     pub output_pot: [M31; 4],
     /// `OUTPUT_BUTTON` 业务列。
@@ -300,9 +276,6 @@ impl CreateTableRow {
         pre_version: u64,
         post_version: u64,
     ) -> Self {
-        let name_hash_m31 =
-            field_to_m31_limbs(crate::state_root::table_name_commitment(&input.name));
-
         Self {
             common: CommonRow::active(
                 MethodKind::CreateTable,
@@ -323,7 +296,6 @@ impl CreateTableRow {
             input_max_players: u8_to_m31(input.max_players),
             input_small_blind: u64_to_m31_limbs(input.small_blind),
             input_big_blind: u64_to_m31_limbs(input.big_blind),
-            input_name_hash: name_hash_m31,
             output_pot: [ZERO; 4],
             output_button: ZERO,
             output_round_state: ZERO, // ROUND_WAITING = 0
@@ -339,7 +311,6 @@ impl CreateTableRow {
             input_max_players: ZERO,
             input_small_blind: [ZERO; 4],
             input_big_blind: [ZERO; 4],
-            input_name_hash: [ZERO; 4],
             output_pot: [ZERO; 4],
             output_button: ZERO,
             output_round_state: ZERO,
@@ -347,14 +318,13 @@ impl CreateTableRow {
         }
     }
 
-    /// 转为完整列向量（37 通用 + 20 业务 = 57 列）。
+    /// 转为完整列向量（37 通用 + 16 业务 = 53 列）。
     #[must_use]
     pub fn to_vec(&self) -> Vec<M31> {
         let mut v = self.common.to_vec();
         v.push(self.input_max_players);
         v.extend_from_slice(&self.input_small_blind);
         v.extend_from_slice(&self.input_big_blind);
-        v.extend_from_slice(&self.input_name_hash);
         v.extend_from_slice(&self.output_pot);
         v.push(self.output_button);
         v.push(self.output_round_state);
@@ -407,7 +377,7 @@ pub fn validate_public_inputs(
         ));
     }
 
-    let canonical_pre = TexasPokerTable::new(pre.id, String::new(), EMPTY_PLAYER, 2, 1, 1);
+    let canonical_pre = TexasPokerTable::new(pre.id, EMPTY_PLAYER, 2, 1, 1);
     if pre != canonical_pre {
         return Err(TexasAirError::SpecViolation(
             "create_table: canonical first-call placeholder mismatch".into(),
@@ -440,7 +410,6 @@ pub fn validate_public_inputs(
 
     let mut expected_post = TexasPokerTable::new(
         pre.id,
-        air.input.name.clone(),
         post.creator,
         air.input.max_players,
         air.input.small_blind,
@@ -493,9 +462,8 @@ mod tests {
         TexasPokerTable,
     ) {
         let id = ObjectID::new([0xA1; 20], 42);
-        let pre = TexasPokerTable::new(id, String::new(), EMPTY_PLAYER, 2, 1, 1);
+        let pre = TexasPokerTable::new(id, EMPTY_PLAYER, 2, 1, 1);
         let input = CreateTableInput {
-            name: "canonical-create".into(),
             max_players: 6,
             small_blind: 10,
             big_blind: 20,
@@ -503,7 +471,6 @@ mod tests {
         };
         let mut post = TexasPokerTable::new(
             id,
-            input.name.clone(),
             [0xC1; 20],
             input.max_players,
             input.small_blind,
@@ -614,7 +581,6 @@ mod tests {
     #[test]
     fn public_input_validation_rejects_table_reinitialisation() {
         let (air, _, mut pre, post) = canonical_transition();
-        pre.name = "already-created".into();
         pre.creator = [0xA5; 20];
         let mut public_inputs = TexasPublicInputs::from_tables(
             &pre,
@@ -646,7 +612,8 @@ mod tests {
     #[test]
     fn public_input_validation_rejects_post_state_unrelated_to_air_input() {
         let (air, _, pre, mut post) = canonical_transition();
-        post.name = "different-name".into();
+        // 名字出共识后，post 的业务篡改以 pot 标记（create 后 pot 必须为 0）。
+        post.pot = 123;
         let mut public_inputs = TexasPublicInputs::from_tables(
             &pre,
             &post,
@@ -677,7 +644,6 @@ mod tests {
     #[test]
     fn test_create_table_row_active_columns() {
         let input = CreateTableInput {
-            name: "test".to_string(),
             max_players: 6,
             small_blind: 10,
             big_blind: 20,
@@ -702,21 +668,9 @@ mod tests {
         assert_eq!(v[cols::INPUT_MAX_PLAYERS], M31::from(6u32));
         assert_eq!(v[cols::INPUT_SMALL_BLIND_BASE], M31::from(10u32));
         assert_eq!(v[cols::INPUT_BIG_BLIND_BASE], M31::from(20u32));
-        assert_eq!(
-            row.input_name_hash,
-            field_to_m31_limbs(crate::state_root::table_name_commitment("test"))
-        );
         assert_eq!(v[cols::OUTPUT_BUTTON], ZERO);
         assert_eq!(v[cols::OUTPUT_ROUND_STATE], ZERO);
         assert_eq!(v[cols::INPUT_RIT_MODE], M31::from(1u32));
-    }
-
-    #[test]
-    fn table_name_projection_is_not_a_constant_placeholder() {
-        let alpha = field_to_m31_limbs(crate::state_root::table_name_commitment("alpha"));
-        let beta = field_to_m31_limbs(crate::state_root::table_name_commitment("beta"));
-        assert_ne!(alpha, [ZERO; 4]);
-        assert_ne!(alpha, beta);
     }
 
     #[test]
@@ -732,8 +686,8 @@ mod tests {
 
     #[test]
     fn test_num_columns_consistency() {
-        // 通用 37 + 业务 20 = 57
-        assert_eq!(cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 20);
+        // 通用 37 + 业务 16 = 53
+        assert_eq!(cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 16);
         assert_eq!(CreateTableAir::num_columns(), cols::NUM_COLUMNS);
     }
 }

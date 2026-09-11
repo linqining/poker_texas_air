@@ -81,12 +81,11 @@ pub const POT_TYPE_SIDE: u8 = 1;
 pub enum TexasPokerEvent {
     // ========== 1. 牌桌生命周期 ==========
     /// 牌桌创建成功（`create_table` 完成时发出，本组事件中的第一个）。
+    ///
+    /// v34 起不再携带展示名承诺：名字非共识，由非共识 metadata 对象承载。
     TableCreated {
         /// 牌桌对象 ID。
         table_id: ObjectID,
-        /// 牌桌展示名称的 blake2b-256 承诺（定宽化；展示名本体
-        /// 由非共识的 metadata 对象承载）。
-        name_commitment: [u8; 32],
     },
     /// 玩家入座（`join_table` 成功时发出；买入从 chip_pool 锁定到座位 stack）。
     PlayerJoined {
@@ -639,7 +638,6 @@ mod tests {
     fn test_event_borsh_roundtrip_table_created() {
         let evt = TexasPokerEvent::TableCreated {
             table_id: dummy_table_id(),
-            name_commitment: [7u8; 32],
         };
         let bytes = borsh::to_vec(&evt).unwrap();
         let recovered: TexasPokerEvent = borsh::from_slice(&bytes).unwrap();
@@ -723,7 +721,6 @@ mod tests {
             &mut events,
             TexasPokerEvent::TableCreated {
                 table_id: dummy_table_id(),
-                name_commitment: [1u8; 32],
             },
         );
         emit_event(
@@ -779,7 +776,6 @@ mod tests {
         let samples: Vec<TexasPokerEvent> = vec![
             TexasPokerEvent::TableCreated {
                 table_id,
-                name_commitment: [9u8; 32],
             },
             TexasPokerEvent::PlayerJoined {
                 table_id,

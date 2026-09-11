@@ -12,7 +12,7 @@
 use std::time::Instant;
 
 use poker_l1::contracts::texas_poker::types::TableRules;
-use poker_texas_air::canonical_rake_opening::CanonicalRakeOpening;
+use poker_texas_air::canonical_rake_opening::{CanonicalBlindOpening, CanonicalRakeOpening};
 use poker_texas_air::texas_canonical::{
     CanonicalActionPayload, CanonicalPhase, CanonicalRoundAdvanceOpening, CanonicalSeat,
     CanonicalSeatStatus, CanonicalStateImage, CanonicalTransitionKind, CanonicalTransitionWitness,
@@ -87,6 +87,7 @@ fn witness(
         round_advance: CanonicalRoundAdvanceOpening::default(),
         protocol_completion: Default::default(),
         rake_opening: CanonicalRakeOpening::ZERO,
+        blind_opening: CanonicalBlindOpening::ZERO,
         transition_commitment: [0; 32],
         nullifier: [0; 32],
         deadline_height: 0,

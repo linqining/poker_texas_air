@@ -74,7 +74,10 @@ fn submit_real_shuffle(table: &mut Table, player: &Player) {
     let mut transcript = PoseidonFeltTranscript::new_domain(
         poker_protocol::transcript_domains::SHUFFLE_V2_POSEIDON,
     );
-    let round = ShuffleRound::execute(&deck, &agg_pk, &mut transcript, &mut OsRng);
+    // 测试为服务端视角：代理/自随机洗牌（玩家洗牌走客户端传入置换）。
+    let round =
+        ShuffleRound::execute_random(&deck, &agg_pk, &mut transcript, &mut OsRng)
+            .expect("random shuffle round");
     table
         .mental_poker_game
         .submit_shuffle(&player.pk_hex, round)

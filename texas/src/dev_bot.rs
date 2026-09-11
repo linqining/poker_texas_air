@@ -156,7 +156,9 @@ pub async fn start_bot(
             .ok_or("aggregate pk")?
     };
 
-    let round = player.join_game_and_shuffle(&deck_cts, &agg_pk);
+    let round = player
+        .join_game_and_shuffle(&deck_cts, &agg_pk, crate::pokergame::random_user_permute())
+        .expect("bot join shuffle");
     let mask_and_shuffle: MaskAndShuffleRoundJson = {
         let ms = &round.mask_and_shuffle_round;
         serde_json::from_value(json!({
@@ -292,7 +294,13 @@ pub async fn start_bot(
                 let submit = if needs_join_layer {
                     let own_pk = player.pk;
                     let curr_share_pk = agg - own_pk;
-                    let join_round = player.join_game_and_shuffle(&deck_cts, &curr_share_pk);
+                    let join_round = player
+                        .join_game_and_shuffle(
+                            &deck_cts,
+                            &curr_share_pk,
+                            crate::pokergame::random_user_permute(),
+                        )
+                        .expect("bot join shuffle");
                     let ms = &join_round.mask_and_shuffle_round;
                     let remask_json = serde_json::json!({
                         "per_card_commitments_hex": ms.remask_proof.per_card_commitments.iter()
@@ -322,7 +330,9 @@ pub async fn start_bot(
                         }))
                         .await
                 } else {
-                    let round = player.shuffle(&deck_cts, &agg);
+                    let round = player
+                        .shuffle(&deck_cts, &agg, crate::pokergame::random_user_permute())
+                        .expect("bot shuffle");
                     let out_json: Vec<ElGamalCiphertextJson> = round.output_cards.iter()
                         .map(|ct| ElGamalCiphertextJson::from_ciphertext(ct)).collect();
                     let proof_value = shuffle_proof_json(&round.proof);

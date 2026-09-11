@@ -187,24 +187,21 @@ fn evaluate_five(cards: &[Card; 5]) -> HandRank {
         && c2.suit() == c3.suit()
         && c3.suit() == c4.suit();
 
-    // 3. 点数降序排序
+    // 3. 点数降序排序——固定邻接交换网络（10 比较器，控制流与牌值无关）。
     let mut ranks = [c0.rank(), c1.rank(), c2.rank(), c3.rank(), c4.rank()];
-    ranks.sort_unstable_by(|a, b| b.cmp(a));
+    sort_five_desc(&mut ranks);
 
     // 4. 顺子检测（返回顺子最高点数）
     let straight = straight_high(&ranks);
 
-    // 5. 相同点数组（按 count 降序、rank 降序）。
-    // 末尾用 (0,0) 填充到至少 5 个元素，保证后续 groups[1..4] 访问安全
-    //（0 值的 count=0，不会匹配任何牌型条件，仅占位）。
-    let mut groups: Vec<(u8, u8)> = (0..13u8)
-        .map(|i| (counts[i as usize], i + 2))
-        .filter(|(c, _)| *c > 0)
-        .collect();
-    groups.sort_unstable_by(|a, b| b.cmp(a));
-    while groups.len() < 5 {
-        groups.push((0, 0));
+    // 5. 相同点数组：13 槽直方图直接映入 16 槽 (count, rank) 组，Batcher
+    //    odd-even 定宽网络降序（零计数组 count=0 天然沉底；条件分支只读
+    //    前 5 槽且均由 count 谓词把守，等价旧"过滤 + 排序 + (0,0) 填充"）。
+    let mut groups = [(0u8, 0u8); 16];
+    for (slot, &count) in counts.iter().enumerate() {
+        groups[slot] = (count, slot as u8 + 2);
     }
+    sort_groups_desc(&mut groups);
 
     // 6. 优先级判断（从高到低）
 
@@ -266,6 +263,55 @@ fn evaluate_five(cards: &[Card; 5]) -> HandRank {
     HandRank::new(HIGH_CARD, &ranks)
 }
 
+/// 5 元素降序固定比较交换网络（邻接插入序，10 比较器）。
+///
+/// 控制流与牌值无关：索引序列恒定，AIR 端即 10 个定界 min/max/交换门
+/// （#40③：替代 `sort_unstable_by`）。
+fn sort_five_desc(ranks: &mut [u8; 5]) {
+    for j in 1..5 {
+        for i in (0..j).rev() {
+            if ranks[i] < ranks[i + 1] {
+                ranks.swap(i, i + 1);
+            }
+        }
+    }
+}
+
+/// 16 槽 (count, rank) 组降序固定网络：Batcher odd-even mergesort
+/// （63 比较器，n=16 恒定，无数据依赖控制流；#40③）。
+///
+/// 比较器语义：前项 < 后项则交换 → 大者落低位索引 = 降序输出。
+fn sort_groups_desc(groups: &mut [(u8, u8); 16]) {
+    sort_network_range(groups, 0, 16);
+}
+
+fn sort_network_range(a: &mut [(u8, u8); 16], lo: usize, n: usize) {
+    if n <= 1 {
+        return;
+    }
+    let mid = n / 2;
+    sort_network_range(a, lo, mid);
+    sort_network_range(a, lo + mid, mid);
+    odd_even_merge(a, lo, n, 1);
+}
+
+fn odd_even_merge(a: &mut [(u8, u8); 16], lo: usize, n: usize, r: usize) {
+    let step = r * 2;
+    if step < n {
+        odd_even_merge(a, lo, n, step);
+        odd_even_merge(a, lo + r, n, step);
+        let mut i = lo + r;
+        while i + r < lo + n {
+            if a[i] < a[i + r] {
+                a.swap(i, i + r);
+            }
+            i += step;
+        }
+    } else if a[lo] < a[lo + r] {
+        a.swap(lo, lo + r);
+    }
+}
+
 /// 检测顺子，返回最高点数（A-2-3-4-5 wheel 返回 5）。非顺子返回 None。
 fn straight_high(ranks_desc: &[u8; 5]) -> Option<u8> {
     // wheel: A-2-3-4-5（排序后 [14,5,4,3,2]）
@@ -312,6 +358,61 @@ mod tests {
 
     fn card(suit: u8, rank: u8) -> Card {
         Card::new(suit, rank)
+    }
+
+    // ---- 固定比较交换网络正确性（#40③） ----
+
+    #[test]
+    fn five_element_network_sorts_desc_exhaustively() {
+        // 1..=5 全排列（120 个）+ 含重复的边界模式，与参照排序逐一对比。
+        let mut perm = [1u8, 2, 3, 4, 5];
+        for _ in 0..120 {
+            let mut got = perm;
+            sort_five_desc(&mut got);
+            let mut want = perm;
+            want.sort_unstable_by(|a, b| b.cmp(a));
+            assert_eq!(got, want, "divergence on permutation {perm:?}");
+            // 下一个排列（字典序 next_permutation）。
+            let pivot = (0..4).rev().find(|&i| perm[i] < perm[i + 1]);
+            let Some(pivot) = pivot else { break };
+            let succ = (pivot + 1..5).rev().find(|&i| perm[i] > perm[pivot]).unwrap();
+            perm.swap(pivot, succ);
+            perm[pivot + 1..].reverse();
+        }
+        for seed in 0..64u8 {
+            let mut got = [seed.wrapping_mul(7), seed.wrapping_mul(3), seed / 2, seed % 5, seed];
+            sort_five_desc(&mut got);
+            let mut want = got;
+            want.sort_unstable_by(|a, b| b.cmp(a));
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn sixteen_slot_network_matches_reference_sort() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut check = |groups: [(u8, u8); 16]| {
+            let mut got = groups;
+            sort_groups_desc(&mut got);
+            let mut want = groups.to_vec();
+            want.sort_unstable_by(|a, b| b.cmp(a));
+            assert_eq!(got.to_vec(), want, "divergence on {groups:?}");
+        };
+        for _ in 0..4_000 {
+            check((0..16).map(|_| (next() as u8 % 5, (next() as u8 % 13) + 2)).collect::<Vec<_>>().try_into().unwrap());
+        }
+        // 结构化边界：全同、全零、直方图真实形态（5 张牌 counts ≤ 5）。
+        check([(&1u8, &2u8); 16].map(|(c, r)| (*c, *r)));
+        check([(0u8, 0u8); 16]);
+        check(std::array::from_fn(|slot| {
+            if slot < 13 { (1, slot as u8 + 2) } else { (0, 0) }
+        }));
     }
 
     fn make_seven(cards: [Card; 7]) -> Vec<Card> {

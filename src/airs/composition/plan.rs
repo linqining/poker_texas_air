@@ -1331,7 +1331,6 @@ mod tests {
     fn table() -> TexasPokerTable {
         let mut table = TexasPokerTable::new(
             ObjectID::new([0x11; 20], 7),
-            "composition".into(),
             [0x22; 20],
             2,
             50,
