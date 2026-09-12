@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="资金守恒、托管账与对账、REAL 发行与销毁边界。">
+<title>托管边界 - ZChain Poker</title>
+<link rel="stylesheet" href="/assets/css/main.css">
+<link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+</head>
+<body class="docs-body">
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand">
+      <a href="/" class="brand-link"><img src="/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a>
+    </p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list"><li><a href="/">首页</a></li><li><a href="/product/">产品</a></li><li><a href="/technology/">技术</a></li><li><a href="/proofs/">证明</a></li><li><a href="/explorer/">浏览器</a></li><li><a href="/developers/">开发者</a></li><li><a href="/docs/">文档</a></li><li><a href="/roadmap/">路线图</a></li><li><a href="/security/">安全</a></li><li><a href="/transparency/">透明度</a></li><li><a href="/community/">社区</a></li><li><a href="/legal/">法务</a></li><li><a href="/status/">状态</a></li></ul></nav>
+  </div>
+  <div class="env-strip" role="note" aria-label="网络环境与最终性说明"><span class="chip chip-net">devnet &#183; zchain-poker-devnet</span><span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span><details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary><div class="fin-legend-body">四种状态来自技术方案 &#167;5.1。v1 当前实际达到 <strong>soft accepted</strong>（桌级软确认）与 <strong>proven</strong>（批次证明）；BFT ordered 与 finalized/claimable 属于 v1.5 / Phase 2 路线图，尚未上线。软确认不代表最终确认，也不能单独授权 REAL 提现。</div></details></div>
+</header>
+<div class="wrap docs-layout">
+  <nav class="docs-side" aria-label="文档目录"><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/getting-started/">快速开始</a></p><ul><li><a href="/docs/getting-started/">快速开始</a></li><li><a href="/docs/getting-started/play/">PLAY 试玩与网络配置</a></li><li><a href="/docs/getting-started/quickstart/">15 分钟 quickstart</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/concepts/">核心概念</a></p><ul><li><a href="/docs/concepts/">核心概念</a></li><li><a href="/docs/concepts/finality/">四阶段最终性</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/protocol/">协议规范</a></p><ul><li><a href="/docs/protocol/">协议规范</a></li><li><a href="/docs/protocol/abi/">ABI 摘要（v1.2.x）</a></li><li><a href="/docs/protocol/operations/">Operation 与软确认帧</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/architecture/">系统架构</a></p><ul><li><a href="/docs/architecture/">系统架构</a></li><li><a href="/docs/architecture/pipeline/">证明管道与水位</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/developers/">开发者指南</a></p><ul><li><a href="/docs/developers/">开发者指南</a></li><li><a href="/docs/developers/errors/">错误码与重试</a></li><li><a href="/docs/developers/rpc/">RPC 与事件</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/validators/">验证者指南</a></p><ul><li><a href="/docs/validators/">验证者指南</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/operators/">运营方指南</a></p><ul><li><a href="/docs/operators/">运营方指南</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/proofs/">证明系统</a></p><ul><li><a href="/docs/proofs/">证明系统</a></li><li><a href="/docs/proofs/texas-air/">Texas AIR 与公开输入</a></li><li><a href="/docs/proofs/verify/">验证器与审计导出</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/security/">安全</a></p><ul><li><a href="/docs/security/">安全</a></li><li><a href="/docs/security/disclosure/">漏洞披露</a></li><li><a href="/docs/security/threat-model/">威胁模型</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/economics/">经济模型</a></p><ul><li><a href="/docs/economics/">经济模型</a></li><li><a href="/docs/economics/custody/" class="active">托管边界</a></li><li><a href="/docs/economics/rake/">rake 公式与分账</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/api-reference/">API 参考</a></p><ul><li><a href="/docs/api-reference/">API 参考</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/changelog/">变更日志</a></p><ul><li><a href="/docs/changelog/">变更日志</a></li><li><a href="/docs/changelog/versioning/">版本说明：latest 与 next</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/legal/">法务与合规</a></p><ul><li><a href="/docs/legal/">法务与合规（文档版）</a></li></ul></div></nav>
+  <main id="main" class="docs-main">
+    <div class="page-head">
+      <p class="docs-kicker">ZChain Poker 文档 &#183; docs v1.3.0-alpha (ABI v1.2.2)</p>
+      <h1 class="page-title">托管边界</h1>
+      <nav class="breadcrumb" aria-label="面包屑"><a href="/docs/">文档</a><span aria-hidden="true">/</span><a href="/docs/economics/">经济模型</a><span aria-hidden="true">/</span><span aria-current="page">托管边界</span></nav>
+      <p class="page-lead">守恒恒等式约束链内；托管边界约束链外。两者不能混淆。</p>
+    </div>
+    
+    <div class="page-body">
+<h2 id="两层守恒">两层守恒</h2>
+<strong>链内（密码学/校验约束）</strong>：
+<pre><code>Σinputs == Σpayouts + Σrake_notes == plan.gross_pot == record.pot
+        == 已证明终态镜像 pot（字节级，偏移 74）</code></pre>
+<strong>链外（托管纪律约束，v1 无密码学保证）</strong>：
+<pre><code>托管外部资产余额 == 已发行 REAL − 已销毁 REAL + 待结算流水    # 由对账验证</code></pre>
+<p>链内守恒被协议强制（fail-closed）；链外守恒只由托管方纪律 + 对账报告支撑——这就是托管模式的风险边界，Phase 2 的 Vault root 与独立 verifier 才把它升级为外部可验证。</p>
+<h2 id="托管账-m7-vault-rs">托管账（M7，vault.rs）</h2>
+<table><thead><tr><th>能力</th><th>状态</th></tr></thead><tbody><tr><td>托管账记账（按资产类隔离）</td><td>完成</td></tr><tr><td>充值幂等（<code>deposit_id</code>，校验失败不烧键）</td><td>完成</td></tr><tr><td>提现申请 + finality 双重门槛（REAL）</td><td>完成</td></tr><tr><td>provenance 查询（<code>note_origins</code>，消费后保留）</td><td>完成</td></tr><tr><td>账实对账 + 差异处理</td><td>完成</td></tr><tr><td>链上侧接线（Starknet 收款/打款通道）</td><td>&lt;strong&gt;未完成&lt;/strong&gt;</td></tr></tbody></table>
+<h2 id="real-发行与销毁">REAL 发行与销毁</h2>
+<ul class="ul-list"><li class="li">发行：充值确认后按托管入账发行 REAL note；v1 阶段 REAL 不对公众开放（发行受白名单/限额控制，MVP 起）。</li><li class="li">销毁：提现销毁（nullifier 消耗）后托管打款；provenance 保留供打款侧核对。</li><li class="li">隔离：REAL/PLAY 不可互转、不可混树（AIR 层不变量）；对外报表分开列示。</li></ul>
+<h2 id="风险说明">风险说明</h2>
+<ol class="ol-list"><li class="li">托管方偿付能力不由链内守恒决定——用户对托管方的债权以托管账与对账报告为准。</li><li class="li">提现延迟来源：finality 门槛、人工审核、托管打款流程、监管要求。</li><li class="li">非零对账差异即事件：暂停打款、定位、出带事件链接的报告（运营方义务，见&lt;a href="/docs/operators/"&gt;运营方指南&lt;/a&gt;）。</li></ol>
+    </div>
+    <p class="docs-footer-note">docs v1.3.0-alpha (ABI v1.2.2) &#183; <code>latest</code> 指向已发布 release，草案进入 <code>next</code>；见<a href="/docs/changelog/versioning/">版本说明</a>。</p>
+  </main>
+</div>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> ZChain Poker</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div><div class="footer-links"><h2 class="footer-h">站点</h2><a href="/product/">产品</a><a href="/technology/">技术</a><a href="/proofs/">证明</a><a href="/explorer/">浏览器</a><a href="/developers/">开发者</a><a href="/docs/">文档</a><a href="/roadmap/">路线图</a><a href="/security/">安全</a><a href="/transparency/">透明度</a><a href="/community/">社区</a><a href="/legal/">法务</a><a href="/status/">状态</a></div><div class="footer-meta"><h2 class="footer-h">版本与仓库</h2><p>docs v1.3.0-alpha (ABI v1.2.2)</p><p><a href="https://zchain.example/repo" rel="noopener">代码仓库（占位地址）</a></p><p>上线前域名 https://zchain.example 为占位（plan &#167;6.1）。</p><p>&#169; 2026 ZChain Poker 项目（工作名）</p></div></div></footer>
+</body>
+</html>

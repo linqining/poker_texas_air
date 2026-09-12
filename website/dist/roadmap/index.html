@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="ZChain Poker（工作名）：面向扑克场景的专用 Appchain。当前为 devnet 托管网络；PLAY 用于测试与娱乐，REAL 为托管映射。">
+<title>路线图 - ZChain Poker</title>
+<link rel="stylesheet" href="/assets/css/main.css">
+<link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand">
+      <a href="/" class="brand-link"><img src="/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a>
+    </p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list"><li><a href="/">首页</a></li><li><a href="/product/">产品</a></li><li><a href="/technology/">技术</a></li><li><a href="/proofs/">证明</a></li><li><a href="/explorer/">浏览器</a></li><li><a href="/developers/">开发者</a></li><li><a href="/docs/">文档</a></li><li><a href="/roadmap/" class="active">路线图</a></li><li><a href="/security/">安全</a></li><li><a href="/transparency/">透明度</a></li><li><a href="/community/">社区</a></li><li><a href="/legal/">法务</a></li><li><a href="/status/">状态</a></li></ul></nav>
+  </div>
+  <div class="env-strip" role="note" aria-label="网络环境与最终性说明"><span class="chip chip-net">devnet &#183; zchain-poker-devnet</span><span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span><details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary><div class="fin-legend-body">四种状态来自技术方案 &#167;5.1。v1 当前实际达到 <strong>soft accepted</strong>（桌级软确认）与 <strong>proven</strong>（批次证明）；BFT ordered 与 finalized/claimable 属于 v1.5 / Phase 2 路线图，尚未上线。软确认不代表最终确认，也不能单独授权 REAL 提现。</div></details></div>
+</header>
+<main id="main" class="wrap page">
+  <div class="page-head">
+    <h1 class="page-title">路线图</h1>
+    
+    <p class="page-lead">Phase 0 已完成，Phase 1 进行中；v1.5 / Phase 2 / Phase 3 未开始。未上线的能力不在本页宣称可用。</p>
+  </div>
+  
+  <div class="page-body">
+<h2 id="当前状态-2026-09-12">当前状态（2026-09-12）</h2>
+<h3 id="phase-0-已完成">Phase 0 —— 已完成</h3>
+<ul class="ul-list"><li class="li task task-done">统一结算核心 <code>poker-settlement-core</code>（SettlementPlan / SidePot / RunoutSchedule / PayoutVector / rake / SettlementPlanDigest，域标签冻结）</li><li class="li task task-done">§5.2 P0 八项全部关闭（结算单一事实源、pot 派生、REAL 真证明、原子提交、连续水位、哈希/顺序统一、输出完整绑定、共识校验）</li><li class="li task task-done">连续证明水位（缺口集实现，只推进最大连续前缀）</li><li class="li task task-done">ABI 冻结（v1.2.x：批次根 §7 Poseidon 域标签 + golden vector、attestation v2.1、提现 finality 门槛 §9）</li></ul>
+<h3 id="phase-1-mvp-进行中">Phase 1（MVP）—— 进行中 🚧</h3>
+<ul class="ul-list"><li class="li task task-done">单 Sequencer（软确认链 / WAL 原子提交 / 限流 / 重放）</li><li class="li task task-done">真实 stwo 证明（canonical AIR，E2E 一手真实出证 + 深度篡改负例）</li><li class="li task task-done">3/4 节点组网验收（全收敛 skew=0；4 节点 kill-one 容错；重启追块）</li><li class="li task task-done">E2E 完整一手（3 人 REAL 桌：盲注镜像 → raise/all-in/fold/call → 收池 → 守恒恒等式成立）</li><li class="li task task-open">ForceInclude（M3-ACC-6：inclusion deadline 内未包含可强制包含）</li><li class="li task task-open">BFT checkpoint（属 v1.5 范围，本 Phase 只要求入口预留）</li><li class="li task task-open">链上出入金收尾（链上侧已接线：VaultProvider trait + Mock/Starknet 双实现、存款幂等桥、提现 finality 执行、自动对账告警；剩余为线上桥校准，待真实 Starknet 环境）</li><li class="li task task-open">watcher 证据独立化（M3-ACC-7 部分完成：分叉检测已有，三者一致性独立进程待做）</li></ul>
+<h3 id="钱包与产品化-plan-6-m6-v1-3-已交付">钱包与产品化（plan §6 / M6，v1.3 已交付）</h3>
+<ul class="ul-list"><li class="li task task-done">wallet-core 九模块 + CLI 钱包 + Extension 0.1（MV3 + wallet-core WASM + <code>zchain_*</code> provider，真实浏览器 E2E；M6-ACC-1 浏览器吞吐 PASS）</li><li class="li task task-done">连接协议适配器：EIP-1193 只读白名单 / WalletConnect v2 namespace 映射 / Starknet SNIP-12 授权委托（79 用例钉住红线；真机矩阵归发布前置清单）</li><li class="li task task-done">官网 13 路由 + 文档站 28 页 + media-kit v0.1（devnet 静态交付；TLS/CDN/portal 后端/release 自动化为发布前置，见状态页披露）</li><li class="li task task-done">验收扫描：禁用词 0 命中、内链 0 断链、a11y 全过（<code>website/ACCEPTANCE.md</code>）</li></ul>
+<h3 id="v1-5-未开始">v1.5 —— 未开始</h3>
+<ul class="ul-list"><li class="li task task-open">4–7 validator HotStuff-2/Jolteon checkpoint、阈值 BLS</li><li class="li task task-open">DA 层、bond/slash</li><li class="li task task-open">抗审查演练（审查交易在 2 个 checkpoint 内强制包含）</li></ul>
+<h3 id="phase-2-未开始">Phase 2 —— 未开始</h3>
+<ul class="ul-list"><li class="li task task-open">Starknet Vault verifier、withdrawal root</li><li class="li task task-open">挑战/退出协议、permissionless claim</li><li class="li task task-open">储备证明类能力（外部可独立验证偿付；术语使用受&lt;a href="/transparency/"&gt;透明度页&lt;/a&gt;边界约束）</li></ul>
+<h3 id="phase-3-未开始">Phase 3 —— 未开始</h3>
+<ul class="ul-list"><li class="li task task-open">table sharding、Narwhal 风格 mempool、多运营方、B2B SLA</li></ul>
+<h2 id="区块浏览器开发计划">区块浏览器开发计划</h2>
+<p>explorer 当前为&lt;strong&gt;接口就绪的静态层&lt;/strong&gt;（SAMPLE DATA 全标注）。开发按四个阶段推进；未上线能力不在页面宣称可用。</p>
+<h3 id="e0-静态层-已完成">E0 —— 静态层（已完成）</h3>
+<ul class="ul-list"><li class="li task task-done">页面结构与数据口径定义：四态确认层级、PLAY/REAL 标识、失败原因与水位缺口如实展示</li><li class="li task task-done">SAMPLE DATA 静态层上线（<code>/explorer/</code>，已标注非实时）</li></ul>
+<h3 id="e1-只读实时网关-对应发布前置-a3">E1 —— 只读实时网关（对应发布前置 A3）</h3>
+<ul class="ul-list"><li class="li task task-open">只读 JSON 网关代理既有节点 RPC：<code>get_block</code> / <code>get_block_count</code> / <code>get_tx</code> / <code>get_metrics</code>（缓存 + 限流，§6.2）</li><li class="li task task-open">explorer 块列表 / 块计数 / proven watermark 接实时数据，移除 SAMPLE DATA 标注</li><li class="li task task-open">验收：devnet 多节点起网后，explorer 显示真实高度与块，数据与节点 <code>get_metrics</code> 一致</li></ul>
+<h3 id="e2-appchain-领域查询">E2 —— appchain 领域查询</h3>
+<ul class="ul-list"><li class="li task task-open">新增域查询 RPC：<code>get_settlement</code>（按 table_id / hand_binding 查结算记录、payout_root、rake、层级）、<code>get_proven_watermark</code>（水位 + 缺口集）、批次根与 proof 归档检索（按 binding/digest 下载）</li><li class="li task task-open">indexer 持久化（archive 节点），支持分页、时间窗、按桌/按手检索与软确认链帧查询</li><li class="li task task-open">验收：E2E 一手可在 explorer 全链路检得（块 → op → settlement → payout_root → proof 归档下载）</li></ul>
+<h3 id="e3-proof-portal-本地复验闭环-web-acc-4">E3 —— proof portal 本地复验闭环（WEB-ACC-4）</h3>
+<ul class="ul-list"><li class="li task task-open">explorer settlement 一键跳转 <code>/proofs/</code>，输入 digest/hand id 由浏览器本地验证，显示 verifier 版本、proof digest 与验证耗时（§6.2）</li><li class="li task task-open">v1 复验面 = wallet-core wasm 结算关系验证（与 M6-ACC-1 同口径）；stwo-wasm 完整 STARK 浏览器验证列入发布前置 C 组</li></ul>
+<h3 id="e4-checkpoint-与-rake-审计视图-v1-5-联动">E4 —— checkpoint 与 rake 审计视图（v1.5 联动）</h3>
+<ul class="ul-list"><li class="li task task-open">BFT checkpoint 上线后补 ordered / finalized 两态真实来源（此前该两级显示"未上线"）</li><li class="li task task-open">rake 累计视图与独立审计导出工具联动（M5-ACC-3）</li></ul>
+<h2 id="发布节奏-plan-6-7">发布节奏（plan §6.7）</h2>
+<table><thead><tr><th>阶段</th><th>对外内容</th><th>资金范围</th><th>退出条件</th><th>状态</th></tr></thead><tbody><tr><td>Devnet</td><td>开源代码、quickstart、模拟牌局</td><td>仅 PLAY</td><td>smoke test 与文档可复现</td><td><strong>当前</strong></td></tr><tr><td>Testnet</td><td>faucet、explorer、proof portal、漏洞赏金</td><td>PLAY；REAL 关闭</td><td>P0/P1 安全项关闭、事故演练通过</td><td>未开始</td></tr><tr><td>MVP</td><td>受控 PLAY + 小规模 REAL 内测、透明度报告</td><td>REAL 白名单/限额</td><td>账实对账、提现 SLA、runbook</td><td>未开始</td></tr><tr><td>BFT preview</td><td>validator 招募、checkpoint、DA、ForceInclude 演示</td><td>REAL 仍受限</td><td>4–7 validator 容错与审查演练</td><td>未开始</td></tr><tr><td>Mainnet candidate</td><td>第三方审计、公开 release、迁移手册</td><td>按地区与合规策略</td><td>全部主网门槛与回滚演练</td><td>未开始</td></tr></tbody></table>
+<h2 id="承诺边界">承诺边界</h2>
+<p>在 Phase 1.5 与 Phase 2 完成前，本项目不对外宣称抗审查最终性、无信任提现或"REAL 结算由链上合约独立保证"。当前 v1 是托管式网络：软确认只代表运营方承诺；REAL 提现要求 proven 水位 + 批次根双重 finality，且仍走运营方托管打款流程。</p>
+<p>已知遗留（如实披露）：</p>
+<ul class="ul-list"><li class="li">rake 口径已统一（BLOCKERS B9 已关闭）：<code>rake_base()</code> = contested 层 gross 之和、uncalled 返还不计费（ABI v1.2.2，含 uncalled 手 e2e 正例）；遗留仅个别边界终局形态（如 raked-sole-survivor）仍 fail-closed 拒绝。</li><li class="li">Revealing→Betting 洗牌/发牌续链属上游路线；当前一手证明自 hand-start 镜像起。</li><li class="li">单 Sequencer 停机 = 全场停摆（v1 已知边界，watcher + 告警缓解）。</li></ul>
+  </div>
+</main>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> ZChain Poker</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div><div class="footer-links"><h2 class="footer-h">站点</h2><a href="/product/">产品</a><a href="/technology/">技术</a><a href="/proofs/">证明</a><a href="/explorer/">浏览器</a><a href="/developers/">开发者</a><a href="/docs/">文档</a><a href="/roadmap/">路线图</a><a href="/security/">安全</a><a href="/transparency/">透明度</a><a href="/community/">社区</a><a href="/legal/">法务</a><a href="/status/">状态</a></div><div class="footer-meta"><h2 class="footer-h">版本与仓库</h2><p>site v0.1.0 (media-kit v0.1) &#183; docs v1.3.0-alpha (ABI v1.2.2)</p><p><a href="https://zchain.example/repo" rel="noopener">代码仓库（占位地址）</a></p><p>上线前域名 https://zchain.example 为占位（plan &#167;6.1）。</p><p>&#169; 2026 ZChain Poker 项目（工作名）</p></div></div></footer>
+</body>
+</html>

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="ZChain Poker（工作名）：面向扑克场景的专用 Appchain。当前为 devnet 托管网络；PLAY 用于测试与娱乐，REAL 为托管映射。">
+<title>服务状态 - ZChain Poker</title>
+<link rel="stylesheet" href="/assets/css/main.css">
+<link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand">
+      <a href="/" class="brand-link"><img src="/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a>
+    </p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list"><li><a href="/">首页</a></li><li><a href="/product/">产品</a></li><li><a href="/technology/">技术</a></li><li><a href="/proofs/">证明</a></li><li><a href="/explorer/">浏览器</a></li><li><a href="/developers/">开发者</a></li><li><a href="/docs/">文档</a></li><li><a href="/roadmap/">路线图</a></li><li><a href="/security/">安全</a></li><li><a href="/transparency/">透明度</a></li><li><a href="/community/">社区</a></li><li><a href="/legal/">法务</a></li><li><a href="/status/" class="active">状态</a></li></ul></nav>
+  </div>
+  <div class="env-strip" role="note" aria-label="网络环境与最终性说明"><span class="chip chip-net">devnet &#183; zchain-poker-devnet</span><span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span><details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary><div class="fin-legend-body">四种状态来自技术方案 &#167;5.1。v1 当前实际达到 <strong>soft accepted</strong>（桌级软确认）与 <strong>proven</strong>（批次证明）；BFT ordered 与 finalized/claimable 属于 v1.5 / Phase 2 路线图，尚未上线。软确认不代表最终确认，也不能单独授权 REAL 提现。</div></details></div>
+</header>
+<main id="main" class="wrap page">
+  <div class="page-head">
+    <h1 class="page-title">服务状态</h1>
+    
+    <p class="page-lead">Sequencer、prover、RPC、relay 与提现服务的状态。v1 为静态层 + 示例数据。</p>
+  </div>
+  <div class="banner banner-sample"><span class="banner-tag">SAMPLE DATA / devnet</span><p>本页为<strong>接口就绪的静态层</strong>，全部数据为 <strong>SAMPLE DATA / devnet</strong> 示例，非实时、非承诺。生产数据将由独立的 portal 服务（explorer / status / transparency / proof portal）提供；本站只定义页面结构与数据口径。</p></div>
+  <div class="page-body">
+<h2 id="组件状态-sample-data-devnet">组件状态（SAMPLE DATA / devnet）</h2>
+<table><thead><tr><th>组件</th><th>状态</th><th>说明</th></tr></thead><tbody><tr><td>Sequencer（软确认链）</td><td><span class="st st-ok">operational</span></td><td>出块正常，软确认 p99 3.5ms（压测口径）</td></tr><tr><td>Prover（证明管道）</td><td><span class="st st-ok">operational</span></td><td>proven watermark 连续推进</td></tr><tr><td>RPC（devnet）</td><td><span class="st st-ok">operational</span></td><td>JSON-RPC over TCP；公共网关待上线</td></tr><tr><td>Relay（SeenReceipt）</td><td><span class="st st-bad">not deployed</span></td><td>抗审查 relay 属 v1.5，未部署</td></tr><tr><td>提现服务（托管打款）</td><td><span class="st st-warn">degraded</span></td><td>示例：人工审核排队，SLA 见透明度报告</td></tr><tr><td>BFT checkpoint</td><td><span class="st st-bad">not deployed</span></td><td>v1.5 路线</td></tr></tbody></table>
+<h2 id="指标-sample-data-90-天窗口">指标（SAMPLE DATA，90 天窗口）</h2>
+<table><thead><tr><th>指标</th><th>当值</th></tr></thead><tbody><tr><td>Sequencer uptime</td><td>99.2%</td></tr><tr><td>RPC 错误率</td><td>0.3%</td></tr><tr><td>手结束 → proof-ready</td><td>p50 41s / p95 96s（示例，开发机口径）</td></tr><tr><td>seen-to-include（relay）</td><td>不可用（relay 未部署）</td></tr></tbody></table>
+<h2 id="事故记录-结构模板">事故记录（结构模板）</h2>
+<p>事故期间停止营销内容，本页优先更新。每条事故记录包含：<strong>影响范围</strong>（受影响
+组件）、影响描述、开始时间、恢复进度与复盘链接。</p>
+<table><thead><tr><th>日期</th><th>影响范围</th><th>影响</th><th>开始时间 (UTC)</th><th>恢复</th><th>复盘</th></tr></thead><tbody><tr><td>2026-08-30</td><td>RPC（devnet）</td><td>RPC 短暂不可用（约 12 分钟），出块与结算未受影响</td><td>03:14</td><td>03:26</td><td>链接待附</td></tr><tr><td>（示例行，无真实事故）</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr></tbody></table>
+<h2 id="关于本页">关于本页</h2>
+<ul class="ul-list"><li class="li">v1 没有独立 status 后端：本页是&lt;strong&gt;接口就绪的静态层&lt;/strong&gt;，页面结构与指标口径已定义；生产状态数据将由 status 服务提供（组件心跳、水位、事故流）。</li><li class="li">状态能力验收（WEB-ACC-6，模拟 Sequencer/prover/RPC/relay 故障并显示影响与恢复记录）：&lt;strong&gt;静态层故障注入演练已可本机复现&lt;/strong&gt;——<code>website/tools/status_fault_drill.py</code> 对本页组件状态做 4 个故障变体（sequencer down / prover 积压 / RPC 降级 / 提现延迟）注入、构建并断言渲染结果（受影响组件标记、影响范围文案、含影响范围/恢复字段的事故记录区），演练全程保持 SAMPLE DATA 标注；&lt;strong&gt;线上真实监控注入仍待 status 后端服务&lt;/strong&gt;。</li><li class="li">网络环境：devnet（zchain-poker-devnet）。所有数据为示例，非实时。</li></ul>
+  </div>
+</main>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> ZChain Poker</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div><div class="footer-links"><h2 class="footer-h">站点</h2><a href="/product/">产品</a><a href="/technology/">技术</a><a href="/proofs/">证明</a><a href="/explorer/">浏览器</a><a href="/developers/">开发者</a><a href="/docs/">文档</a><a href="/roadmap/">路线图</a><a href="/security/">安全</a><a href="/transparency/">透明度</a><a href="/community/">社区</a><a href="/legal/">法务</a><a href="/status/">状态</a></div><div class="footer-meta"><h2 class="footer-h">版本与仓库</h2><p>site v0.1.0 (media-kit v0.1) &#183; docs v1.3.0-alpha (ABI v1.2.2)</p><p><a href="https://zchain.example/repo" rel="noopener">代码仓库（占位地址）</a></p><p>上线前域名 https://zchain.example 为占位（plan &#167;6.1）。</p><p>&#169; 2026 ZChain Poker 项目（工作名）</p></div></div></footer>
+</body>
+</html>

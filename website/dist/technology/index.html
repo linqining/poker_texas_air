@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="ZChain Poker（工作名）：面向扑克场景的专用 Appchain。当前为 devnet 托管网络；PLAY 用于测试与娱乐，REAL 为托管映射。">
+<title>技术 - ZChain Poker</title>
+<link rel="stylesheet" href="/assets/css/main.css">
+<link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand">
+      <a href="/" class="brand-link"><img src="/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a>
+    </p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list"><li><a href="/">首页</a></li><li><a href="/product/">产品</a></li><li><a href="/technology/" class="active">技术</a></li><li><a href="/proofs/">证明</a></li><li><a href="/explorer/">浏览器</a></li><li><a href="/developers/">开发者</a></li><li><a href="/docs/">文档</a></li><li><a href="/roadmap/">路线图</a></li><li><a href="/security/">安全</a></li><li><a href="/transparency/">透明度</a></li><li><a href="/community/">社区</a></li><li><a href="/legal/">法务</a></li><li><a href="/status/">状态</a></li></ul></nav>
+  </div>
+  <div class="env-strip" role="note" aria-label="网络环境与最终性说明"><span class="chip chip-net">devnet &#183; zchain-poker-devnet</span><span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span><details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary><div class="fin-legend-body">四种状态来自技术方案 &#167;5.1。v1 当前实际达到 <strong>soft accepted</strong>（桌级软确认）与 <strong>proven</strong>（批次证明）；BFT ordered 与 finalized/claimable 属于 v1.5 / Phase 2 路线图，尚未上线。软确认不代表最终确认，也不能单独授权 REAL 提现。</div></details></div>
+</header>
+<main id="main" class="wrap page">
+  <div class="page-head">
+    <h1 class="page-title">技术</h1>
+    
+    <p class="page-lead">Appchain、Note 账本、Texas AIR 证明、Sequencer 与 BFT 路线。v1 为单 Sequencer 托管网络。</p>
+  </div>
+  
+  <div class="page-body">
+<h2 id="总体架构">总体架构</h2>
+<pre><code>┌─ ZChain Poker Appchain ─────────────────────────────────┐
+│  Sequencer：软确认链 / 查重 / 桌准入 / 限流 / WAL         │
+│      ↓                                                   │
+│  Note 账本：承诺树(Poseidon, 深32) + nullifier 集          │
+│      + 资产类隔离（REAL/PLAY 不可互转、不可混树）            │
+│      ↓                                                   │
+│  结算核心：poker-settlement-core（单一事实源）              │
+│      SettlementPlan / SidePot / PayoutVector / rake      │
+│      ↓                                                   │
+│  证明管道：批次 / 降级 / 背压 / 连续水位                    │
+│      ↓                                                   │
+│  费率模块：策略注册表 ZERO | FIXED_RAKE + 分账 + 审计       │
+└─────────────────────────────────────────────────────────┘
+外部：Starknet（v1 仅预留收款通道；Phase 2 锚定层候选）</code></pre>
+<p>链内无 gas：游戏操作免 gas，收入来自 rake；费率是状态机里的数据（策略注册表），不是协议参数。</p>
+<h2 id="note-账本">Note 账本</h2>
+<ul class="ul-list"><li class="li">note = <code>asset_class(REAL|PLAY)</code> + 面额(u64) + owner(secp256k1 压缩公钥) + nonce + 可选 table_id。</li><li class="li">承诺树：Poseidon 深度 32 Merkle；nullifier 集按插入序确定性折叠。</li><li class="li">花费需要 owner ECDSA 签名，<code>spend_digest</code> 绑定 commitment、nullifier、scope 与 effect——sequencer 无法把授权改打给别人。</li><li class="li">资产类隔离是 AIR 层不变量，不只是业务层校验。</li></ul>
+<h2 id="texas-air-与证明管道">Texas AIR 与证明管道</h2>
+<ul class="ul-list"><li class="li">证明系统：Texas canonical AIR（手写约束），stwo 2.3 circle-STARK，Stark curve；适配器 crate <code>poker-appchain-texasair</code> 走 <code>verify_canonical_tagged_proof</code> 完整 STARK 验证。</li><li class="li">一手证明自 hand-start 镜像起，盲注面额由 custody 恒等式覆盖；批次归档绑定 table、pre/post 状态根与逐字节 pot 镜像（偏移 74）。</li><li class="li">管道：批次构建、失败退避重试、背压；<code>mark_proven</code> 只推进最大连续前缀（缺口不推进水位）。</li><li class="li">REAL 三层门：引擎层 / 管道准入层 / 批次水位层，全部默认收紧（详见 &lt;a href="/docs/protocol/abi/"&gt;ABI §8&lt;/a&gt;）。</li></ul>
+<h2 id="sequencer-与软确认">Sequencer 与软确认</h2>
+<ul class="ul-list"><li class="li">软确认帧 <code>SoftConfirmFrame</code> 链式哈希 + ed25519 签名；WAL append + 真 fsync 原子提交，失败零状态变更。</li><li class="li">操作集封闭为 7 个（OpenTable / CloseTable / Deposit / WithdrawRequest / Transfer / BuyIn / Settle），新操作 = 协议版本升级。</li><li class="li">状态根由 Poseidon 折叠（树根、nullifier 根、注册表根、桌折叠、seq、spent_count、proven_watermark）。</li></ul>
+<h2 id="共识路线-如实标注">共识路线（如实标注）</h2>
+<table><thead><tr><th>阶段</th><th>内容</th><th>状态</th></tr></thead><tbody><tr><td>v1</td><td>单 Sequencer + watcher 分叉检测</td><td><strong>进行中</strong>（核心已验证；ForceInclude 未完成）</td></tr><tr><td>v1.5</td><td>4–7 validator HotStuff-2/Jolteon checkpoint、阈值 BLS、DA、bond/slash</td><td>未开始</td></tr><tr><td>v2</td><td>Starknet Vault verifier、withdrawal root、挑战/退出协议</td><td>未开始</td></tr><tr><td>v3</td><td>table sharding、Narwhal 风格 mempool、多运营方</td><td>未开始</td></tr></tbody></table>
+<p>多节点现状：<code>scripts/multi_node_e2e.sh</code> 已验证 3/4 节点全收敛（skew=0）、4 节点 kill-one 容错（quorum(4)=3）与重启追块。这是组网验收，不等于 BFT checkpoint 上线。</p>
+<div class="notice">
+<p>在 v1.5 与 Phase 2 完成前，本项目不宣称抗审查最终性、无信任提现或"REAL 结算由链上合约独立保证"。当前活性与提现依赖运营方，风险已在<a href="/security/">安全页</a>与<a href="/legal/">法务页</a>披露。</p>
+</div>
+<p>深入阅读：&lt;a href="/docs/architecture/"&gt;系统架构文档&lt;/a&gt;、&lt;a href="/docs/protocol/abi/"&gt;ABI 规范&lt;/a&gt;、&lt;a href="/docs/proofs/"&gt;证明系统&lt;/a&gt;。</p>
+  </div>
+</main>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> ZChain Poker</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div><div class="footer-links"><h2 class="footer-h">站点</h2><a href="/product/">产品</a><a href="/technology/">技术</a><a href="/proofs/">证明</a><a href="/explorer/">浏览器</a><a href="/developers/">开发者</a><a href="/docs/">文档</a><a href="/roadmap/">路线图</a><a href="/security/">安全</a><a href="/transparency/">透明度</a><a href="/community/">社区</a><a href="/legal/">法务</a><a href="/status/">状态</a></div><div class="footer-meta"><h2 class="footer-h">版本与仓库</h2><p>site v0.1.0 (media-kit v0.1) &#183; docs v1.3.0-alpha (ABI v1.2.2)</p><p><a href="https://zchain.example/repo" rel="noopener">代码仓库（占位地址）</a></p><p>上线前域名 https://zchain.example 为占位（plan &#167;6.1）。</p><p>&#169; 2026 ZChain Poker 项目（工作名）</p></div></div></footer>
+</body>
+</html>

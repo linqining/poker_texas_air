@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="soft accepted / BFT ordered / proven / finalized-claimable 的精确含义与提现门槛。">
+<title>四阶段最终性 - ZChain Poker</title>
+<link rel="stylesheet" href="/assets/css/main.css">
+<link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+</head>
+<body class="docs-body">
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand">
+      <a href="/" class="brand-link"><img src="/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a>
+    </p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list"><li><a href="/">首页</a></li><li><a href="/product/">产品</a></li><li><a href="/technology/">技术</a></li><li><a href="/proofs/">证明</a></li><li><a href="/explorer/">浏览器</a></li><li><a href="/developers/">开发者</a></li><li><a href="/docs/">文档</a></li><li><a href="/roadmap/">路线图</a></li><li><a href="/security/">安全</a></li><li><a href="/transparency/">透明度</a></li><li><a href="/community/">社区</a></li><li><a href="/legal/">法务</a></li><li><a href="/status/">状态</a></li></ul></nav>
+  </div>
+  <div class="env-strip" role="note" aria-label="网络环境与最终性说明"><span class="chip chip-net">devnet &#183; zchain-poker-devnet</span><span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span><details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary><div class="fin-legend-body">四种状态来自技术方案 &#167;5.1。v1 当前实际达到 <strong>soft accepted</strong>（桌级软确认）与 <strong>proven</strong>（批次证明）；BFT ordered 与 finalized/claimable 属于 v1.5 / Phase 2 路线图，尚未上线。软确认不代表最终确认，也不能单独授权 REAL 提现。</div></details></div>
+</header>
+<div class="wrap docs-layout">
+  <nav class="docs-side" aria-label="文档目录"><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/getting-started/">快速开始</a></p><ul><li><a href="/docs/getting-started/">快速开始</a></li><li><a href="/docs/getting-started/play/">PLAY 试玩与网络配置</a></li><li><a href="/docs/getting-started/quickstart/">15 分钟 quickstart</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/concepts/">核心概念</a></p><ul><li><a href="/docs/concepts/">核心概念</a></li><li><a href="/docs/concepts/finality/" class="active">四阶段最终性</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/protocol/">协议规范</a></p><ul><li><a href="/docs/protocol/">协议规范</a></li><li><a href="/docs/protocol/abi/">ABI 摘要（v1.2.x）</a></li><li><a href="/docs/protocol/operations/">Operation 与软确认帧</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/architecture/">系统架构</a></p><ul><li><a href="/docs/architecture/">系统架构</a></li><li><a href="/docs/architecture/pipeline/">证明管道与水位</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/developers/">开发者指南</a></p><ul><li><a href="/docs/developers/">开发者指南</a></li><li><a href="/docs/developers/errors/">错误码与重试</a></li><li><a href="/docs/developers/rpc/">RPC 与事件</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/validators/">验证者指南</a></p><ul><li><a href="/docs/validators/">验证者指南</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/operators/">运营方指南</a></p><ul><li><a href="/docs/operators/">运营方指南</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/proofs/">证明系统</a></p><ul><li><a href="/docs/proofs/">证明系统</a></li><li><a href="/docs/proofs/texas-air/">Texas AIR 与公开输入</a></li><li><a href="/docs/proofs/verify/">验证器与审计导出</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/security/">安全</a></p><ul><li><a href="/docs/security/">安全</a></li><li><a href="/docs/security/disclosure/">漏洞披露</a></li><li><a href="/docs/security/threat-model/">威胁模型</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/economics/">经济模型</a></p><ul><li><a href="/docs/economics/">经济模型</a></li><li><a href="/docs/economics/custody/">托管边界</a></li><li><a href="/docs/economics/rake/">rake 公式与分账</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/api-reference/">API 参考</a></p><ul><li><a href="/docs/api-reference/">API 参考</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/changelog/">变更日志</a></p><ul><li><a href="/docs/changelog/">变更日志</a></li><li><a href="/docs/changelog/versioning/">版本说明：latest 与 next</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/legal/">法务与合规</a></p><ul><li><a href="/docs/legal/">法务与合规（文档版）</a></li></ul></div></nav>
+  <main id="main" class="docs-main">
+    <div class="page-head">
+      <p class="docs-kicker">ZChain Poker 文档 &#183; docs v1.3.0-alpha (ABI v1.2.2)</p>
+      <h1 class="page-title">四阶段最终性</h1>
+      <nav class="breadcrumb" aria-label="面包屑"><a href="/docs/">文档</a><span aria-hidden="true">/</span><a href="/docs/concepts/">核心概念</a><span aria-hidden="true">/</span><span aria-current="page">四阶段最终性</span></nav>
+      <p class="page-lead">软确认不是最终确认。最终性按四级标注，REAL 提现有双重门槛。</p>
+    </div>
+    
+    <div class="page-body">
+<h2 id="状态机">状态机</h2>
+<pre><code>soft accepted ──(BFT, v1.5)──▶ BFT ordered ──(STARK verify)──▶ proven ──(finality gate)──▶ finalized/claimable</code></pre>
+<h3 id="soft-accepted">soft accepted</h3>
+<p>Sequencer 把操作写入软确认链（<code>SoftConfirmFrame</code>，ed25519 签名 + 哈希链）。毫秒级反馈，仅代表&lt;strong&gt;运营方承诺&lt;/strong&gt;。WAL append + fsync 原子提交：WAL 失败则零状态变更。</p>
+<h3 id="bft-ordered">BFT ordered</h3>
+<p>v1.5 引入 4–7 validator 对批次根/提款根/状态根做最终确认。当前不存在——每页页眉的最终性图例已注明。</p>
+<h3 id="proven">proven</h3>
+<p>证明管道按批次出证，<code>verify</code> 走真实 STARK 验证路径后，<code>mark_proven</code> 只推进&lt;strong&gt;最大连续前缀&lt;/strong&gt;：证明乱序、失败、worker 崩溃都不会错误推进水位（M4-ACC-6）。</p>
+<h3 id="finalized-claimable-real-提现门槛-abi-9">finalized/claimable（REAL 提现门槛，ABI §9）</h3>
+<p>REAL note 提现申请要求来源 op 同时满足：</p>
+<ol class="ol-list"><li class="li"><code>proven_watermark &gt;= op_index</code>（连续前缀语义 = 该 op 已证明）；</li><li class="li">批次根证据覆盖该 op（<code>batch_covered_through = Some(t)</code>，<code>t &gt;= op</code>；<code>None</code> 一律拒绝——op 0 与"尚无批次根"在裸数值下不可区分，用 Option 存在性判定）。</li></ol>
+<p>不满足即 <code>WithdrawalNotFinalized { op_index, watermark }</code>，计 <code>withdrawal_finality_rejected_total</code>。幂等语义：已受理的同 id 同载荷重复申请返回既有条目。</p>
+<p>PLAY note 豁免双重门槛（软确认即可提）。<code>withdrawal_requires_finality = false</code> 为显式 opt-out，&lt;strong&gt;仅限测试/开发，禁止生产配置&lt;/strong&gt;。</p>
+<h2 id="provenance">provenance</h2>
+<p><code>LedgerState.note_origins</code> 记录每个 note 承诺的铸出 op，消费后不删除（提现销毁后托管打款侧仍可查；WAL 重放重建）。账本外 note 没有 provenance，无法构造门槛证据。</p>
+    </div>
+    <p class="docs-footer-note">docs v1.3.0-alpha (ABI v1.2.2) &#183; <code>latest</code> 指向已发布 release，草案进入 <code>next</code>；见<a href="/docs/changelog/versioning/">版本说明</a>。</p>
+  </main>
+</div>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> ZChain Poker</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div><div class="footer-links"><h2 class="footer-h">站点</h2><a href="/product/">产品</a><a href="/technology/">技术</a><a href="/proofs/">证明</a><a href="/explorer/">浏览器</a><a href="/developers/">开发者</a><a href="/docs/">文档</a><a href="/roadmap/">路线图</a><a href="/security/">安全</a><a href="/transparency/">透明度</a><a href="/community/">社区</a><a href="/legal/">法务</a><a href="/status/">状态</a></div><div class="footer-meta"><h2 class="footer-h">版本与仓库</h2><p>docs v1.3.0-alpha (ABI v1.2.2)</p><p><a href="https://zchain.example/repo" rel="noopener">代码仓库（占位地址）</a></p><p>上线前域名 https://zchain.example 为占位（plan &#167;6.1）。</p><p>&#169; 2026 ZChain Poker 项目（工作名）</p></div></div></footer>
+</body>
+</html>

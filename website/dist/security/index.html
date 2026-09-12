@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="ZChain Poker（工作名）：面向扑克场景的专用 Appchain。当前为 devnet 托管网络；PLAY 用于测试与娱乐，REAL 为托管映射。">
+<title>安全 - ZChain Poker</title>
+<link rel="stylesheet" href="/assets/css/main.css">
+<link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand">
+      <a href="/" class="brand-link"><img src="/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a>
+    </p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list"><li><a href="/">首页</a></li><li><a href="/product/">产品</a></li><li><a href="/technology/">技术</a></li><li><a href="/proofs/">证明</a></li><li><a href="/explorer/">浏览器</a></li><li><a href="/developers/">开发者</a></li><li><a href="/docs/">文档</a></li><li><a href="/roadmap/">路线图</a></li><li><a href="/security/" class="active">安全</a></li><li><a href="/transparency/">透明度</a></li><li><a href="/community/">社区</a></li><li><a href="/legal/">法务</a></li><li><a href="/status/">状态</a></li></ul></nav>
+  </div>
+  <div class="env-strip" role="note" aria-label="网络环境与最终性说明"><span class="chip chip-net">devnet &#183; zchain-poker-devnet</span><span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span><details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary><div class="fin-legend-body">四种状态来自技术方案 &#167;5.1。v1 当前实际达到 <strong>soft accepted</strong>（桌级软确认）与 <strong>proven</strong>（批次证明）；BFT ordered 与 finalized/claimable 属于 v1.5 / Phase 2 路线图，尚未上线。软确认不代表最终确认，也不能单独授权 REAL 提现。</div></details></div>
+</header>
+<main id="main" class="wrap page">
+  <div class="page-head">
+    <h1 class="page-title">安全</h1>
+    
+    <p class="page-lead">威胁模型摘要、审计状态（如实：未做第三方审计）、漏洞披露流程与 SLA 承诺。</p>
+  </div>
+  
+  <div class="page-body">
+<h2 id="当前安全状态-如实公开">当前安全状态（如实公开）</h2>
+<table><thead><tr><th>项</th><th>状态</th></tr></thead><tbody><tr><td>第三方审计</td><td>&lt;strong&gt;未做&lt;/strong&gt;。没有任何已完成的第三方审计报告；上线前（Mainnet candidate 阶段）才会安排</td></tr><tr><td>内部安全回归</td><td>6 类攻击回归矩阵 + watcher 分叉检测 + 负例深度（Fiat–Shamir 流/状态镜像字节翻转/坏签名等均被拒绝）</td></tr><tr><td>P0 安全修复</td><td>§5.2 八项已全部关闭（2026-09-12，见&lt;a href="/roadmap/"&gt;路线图&lt;/a&gt;）</td></tr><tr><td>已知缺口</td><td>ForceInclude / BFT / 链上出入金未完成；单 Sequencer 活性依赖运营方</td></tr></tbody></table>
+<p>审计不等于无漏洞保证。未来发布审计报告时，将注明范围、commit、未修复问题、审计日期与不覆盖的组件。</p>
+<h2 id="威胁模型摘要-v1">威胁模型摘要（v1）</h2>
+<h3 id="托管边界">托管边界</h3>
+<p>v1 是托管式网络：链内筹码（尤其 REAL）是运营方负债的映射。守住资金边界的机制：</p>
+<ul class="ul-list"><li class="li"><strong>守恒恒等式</strong>：<code>Σinputs == Σpayouts + Σrake</code>，且 <code>plan.gross_pot == record.pot == Σinputs == 已证明终态镜像 pot</code>（字节级绑定，状态镜像偏移 74）。</li><li class="li"><strong>签名绑定精确赔付</strong>：<code>spend_digest = blake2s(DOMAIN, commitment, nullifier, scope, effect)</code>，effect 含 payout_root——sequencer 无法把授权改打给别人。</li><li class="li"><strong>策略冻结</strong>：费率在开桌时绑定注册表，无更新路径；<code>record.policy_commitment</code> 必须匹配。</li></ul>
+<h3 id="real-三层门-默认收紧-拒绝路径唯一">REAL 三层门（默认收紧，拒绝路径唯一）</h3>
+<ol class="ol-list"><li class="li"><strong>引擎层</strong>：host 签名引擎对 REAL 一律返回 <code>RealRequiresStarkProof</code>。</li><li class="li"><strong>管道提交层</strong>：REAL 要求 texas-air 引擎 + 钉扎 verifier key + 携带 hand_proof，否则任务不进队列。</li><li class="li"><strong>批次水位层</strong>：出队前复查允许集与钉扎；违反则 completion 原地保留、水位不推进。</li></ol>
+<p>默认 <code>StarkRequired</code> + 未注入 verifier key = REAL 结算全部拒绝（fail-closed）。</p>
+<h3 id="watcher">watcher</h3>
+<p>watcher 对软确认链做独立分叉检测；sequencer 停机、双签、状态根冲突按 M3-ACC-7 路线生成证据（部分完成，见路线图）。</p>
+<h3 id="单点活性">单点活性</h3>
+<p>单 Sequencer 停机 = 全场停摆。v1 的缓解是 WAL 原子提交、告警与 runbook；结构性缓解（BFT、DA、ForceInclude）在 v1.5。这是明示风险，不是隐藏项。</p>
+<h2 id="漏洞披露">漏洞披露</h2>
+<table><thead><tr><th>项</th><th>内容</th></tr></thead><tbody><tr><td>报告邮箱</td><td>security@zchain.example（占位，上线前启用并公布）</td></tr><tr><td>PGP</td><td>占位：指纹与公钥将在邮箱启用时同步公布；公布前可用 <code>#security</code> 频道私信联系</td></tr><tr><td>请勿</td><td>在公开频道/issue 发布未修复漏洞细节</td></tr><tr><td>报告内容</td><td>影响描述、复现步骤、受影响版本/commit、（可选）修复建议</td></tr></tbody></table>
+<h3 id="响应-sla-承诺-自报告接收起">响应 SLA 承诺（自报告接收起）</h3>
+<table><thead><tr><th>阶段</th><th>承诺</th></tr></thead><tbody><tr><td>确认收到</td><td>≤ 2 个工作日</td></tr><tr><td>初步评估（严重度分级）</td><td>≤ 5 个工作日</td></tr><tr><td>严重（critical）修复或缓解</td><td>≤ 30 天，期间可发布临时缓解</td></tr><tr><td>高/中/低</td><td>≤ 90 天按严重度排期</td></tr><tr><td>公告</td><td>修复发布后同步安全公告，归档于本页</td></tr></tbody></table>
+<p>严重度按 CVSS 类似口径由运营方与报告者协商；有争议时可要求第三方复核。项目当前不设赏金池；testnet 阶段引入漏洞赏金（见&lt;a href="/roadmap/"&gt;发布节奏&lt;/a&gt;）。</p>
+<h2 id="暂停与恢复">暂停与恢复</h2>
+<p>v1 运营方保留紧急暂停出入金与结算受理的能力（托管网络的现实边界）。暂停期间：停发营销内容，优先公告影响范围、用户操作建议与修复时间线；恢复后发布事故复盘。相关义务见&lt;a href="/legal/"&gt;服务条款&lt;/a&gt;。</p>
+<p>深入阅读：&lt;a href="/docs/security/threat-model/"&gt;威胁模型全文&lt;/a&gt;、&lt;a href="/docs/security/disclosure/"&gt;披露流程细节&lt;/a&gt;。</p>
+  </div>
+</main>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> ZChain Poker</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div><div class="footer-links"><h2 class="footer-h">站点</h2><a href="/product/">产品</a><a href="/technology/">技术</a><a href="/proofs/">证明</a><a href="/explorer/">浏览器</a><a href="/developers/">开发者</a><a href="/docs/">文档</a><a href="/roadmap/">路线图</a><a href="/security/">安全</a><a href="/transparency/">透明度</a><a href="/community/">社区</a><a href="/legal/">法务</a><a href="/status/">状态</a></div><div class="footer-meta"><h2 class="footer-h">版本与仓库</h2><p>site v0.1.0 (media-kit v0.1) &#183; docs v1.3.0-alpha (ABI v1.2.2)</p><p><a href="https://zchain.example/repo" rel="noopener">代码仓库（占位地址）</a></p><p>上线前域名 https://zchain.example 为占位（plan &#167;6.1）。</p><p>&#169; 2026 ZChain Poker 项目（工作名）</p></div></div></footer>
+</body>
+</html>

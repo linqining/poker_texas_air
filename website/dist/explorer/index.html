@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="ZChain Poker（工作名）：面向扑克场景的专用 Appchain。当前为 devnet 托管网络；PLAY 用于测试与娱乐，REAL 为托管映射。">
+<title>区块浏览器 - ZChain Poker</title>
+<link rel="stylesheet" href="/assets/css/main.css">
+<link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand">
+      <a href="/" class="brand-link"><img src="/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a>
+    </p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list"><li><a href="/">首页</a></li><li><a href="/product/">产品</a></li><li><a href="/technology/">技术</a></li><li><a href="/proofs/">证明</a></li><li><a href="/explorer/" class="active">浏览器</a></li><li><a href="/developers/">开发者</a></li><li><a href="/docs/">文档</a></li><li><a href="/roadmap/">路线图</a></li><li><a href="/security/">安全</a></li><li><a href="/transparency/">透明度</a></li><li><a href="/community/">社区</a></li><li><a href="/legal/">法务</a></li><li><a href="/status/">状态</a></li></ul></nav>
+  </div>
+  <div class="env-strip" role="note" aria-label="网络环境与最终性说明"><span class="chip chip-net">devnet &#183; zchain-poker-devnet</span><span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span><details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary><div class="fin-legend-body">四种状态来自技术方案 &#167;5.1。v1 当前实际达到 <strong>soft accepted</strong>（桌级软确认）与 <strong>proven</strong>（批次证明）；BFT ordered 与 finalized/claimable 属于 v1.5 / Phase 2 路线图，尚未上线。软确认不代表最终确认，也不能单独授权 REAL 提现。</div></details></div>
+</header>
+<main id="main" class="wrap page">
+  <div class="page-head">
+    <h1 class="page-title">区块浏览器</h1>
+    
+    <p class="page-lead">交易、手、结算、rake 与 checkpoint 查询。所有数据标注确认层级。</p>
+  </div>
+  <div class="banner banner-sample"><span class="banner-tag">SAMPLE DATA / devnet</span><p>本页为<strong>接口就绪的静态层</strong>，全部数据为 <strong>SAMPLE DATA / devnet</strong> 示例，非实时、非承诺。生产数据将由独立的 portal 服务（explorer / status / transparency / proof portal）提供；本站只定义页面结构与数据口径。</p></div>
+  <div class="page-body">
+<h2 id="数据来源与确认层级">数据来源与确认层级</h2>
+<p>explorer 的每条记录都标注来源层级：<span class="st st-info">soft accepted</span>（软确认）→ <span class="st st-muted">BFT ordered</span>（未上线）→ <span class="st st-ok">proven</span>（已证明）→ <span class="st st-warn">finalized/claimable</span>。v1 阶段实际出现 soft accepted 与 proven 两级；失败原因与水位缺口也会如实展示，不做隐藏。</p>
+<h2 id="最近的块-sample-data-devnet">最近的块（SAMPLE DATA / devnet）</h2>
+<table><thead><tr><th>高度</th><th>时间 (UTC)</th><th>操作数</th><th>状态根</th><th>层级</th></tr></thead><tbody><tr><td>18204</td><td>2026-09-12 08:31:04</td><td>12</td><td>0x9a3f…c21e</td><td><span class="st st-ok">proven</span></td></tr><tr><td>18203</td><td>2026-09-12 08:30:52</td><td>7</td><td>0x51bd…07aa</td><td><span class="st st-info">soft accepted</span></td></tr><tr><td>18202</td><td>2026-09-12 08:30:41</td><td>9</td><td>0xe4c2…8f10</td><td><span class="st st-ok">proven</span></td></tr></tbody></table>
+<h2 id="手牌与结算-sample-data-devnet">手牌与结算（SAMPLE DATA / devnet）</h2>
+<table><thead><tr><th>hand id</th><th>桌</th><th>pot</th><th>rake</th><th>payout root</th><th>结算层级</th><th>proof</th></tr></thead><tbody><tr><td>1042</td><td>7</td><td>1,840</td><td>92</td><td>0x77ab…39d1</td><td><span class="st st-ok">proven</span></td><td>&lt;a href="/proofs/"&gt;下载 / 验证&lt;/a&gt;</td></tr><tr><td>1041</td><td>7</td><td>620</td><td>31</td><td>0x0cdd…a2f4</td><td><span class="st st-ok">proven</span></td><td>&lt;a href="/proofs/"&gt;下载 / 验证&lt;/a&gt;</td></tr><tr><td>1040</td><td>3</td><td>0</td><td>0</td><td>0x51bd…07aa</td><td><span class="st st-info">soft accepted</span></td><td>待批次出证</td></tr></tbody></table>
+<p>rake 口径说明：<code>FIXED_RAKE</code> 策略下 <code>rake = min(floor(rake_base × rate_bps / 10000), cap)</code>，<code>rake_base</code> = contested 层 gross 之和——uncalled 返还与 sole-survivor 层不计费（BLOCKERS B9 已统一为 contested-only 口径，ABI v1.2.2；&lt;a href="/docs/economics/rake/"&gt;经济模型文档&lt;/a&gt;有详细说明）。</p>
+<h2 id="checkpoint-水位-sample-data-devnet">Checkpoint / 水位（SAMPLE DATA / devnet）</h2>
+<table><thead><tr><th>项</th><th>值</th></tr></thead><tbody><tr><td>proven watermark</td><td>18196 / 18204（缺口：无）</td></tr><tr><td>最新批次根</td><td>0x00f6fae93ff03c440c1136a5d8b5eab742f07c268c52536d4932ce4171933c52</td></tr><tr><td>BFT checkpoint</td><td>未上线（v1.5）</td></tr><tr><td>批次大小</td><td>32 ops / 批（示例配置）</td></tr></tbody></table>
+<h2 id="关于本页">关于本页</h2>
+<ul class="ul-list"><li class="li">本页是&lt;strong&gt;接口就绪的静态层&lt;/strong&gt;：页面结构与数据口径已定义，数据全部为示例。生产 explorer 由独立服务提供（区块/交易/手/结算/rake 查询、proof 下载、confirmation 层级与失败原因展示）。</li><li class="li">任意 settlement 都将可跳转 proof portal 由浏览器本地复验（WEB-ACC-4，待 portal 服务）。</li><li class="li">浏览器分阶段开发计划（实时网关 → 领域查询 → proof 复验闭环）见&lt;a href="/roadmap/"&gt;路线图&lt;/a&gt;。</li></ul>
+  </div>
+</main>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> ZChain Poker</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div><div class="footer-links"><h2 class="footer-h">站点</h2><a href="/product/">产品</a><a href="/technology/">技术</a><a href="/proofs/">证明</a><a href="/explorer/">浏览器</a><a href="/developers/">开发者</a><a href="/docs/">文档</a><a href="/roadmap/">路线图</a><a href="/security/">安全</a><a href="/transparency/">透明度</a><a href="/community/">社区</a><a href="/legal/">法务</a><a href="/status/">状态</a></div><div class="footer-meta"><h2 class="footer-h">版本与仓库</h2><p>site v0.1.0 (media-kit v0.1) &#183; docs v1.3.0-alpha (ABI v1.2.2)</p><p><a href="https://zchain.example/repo" rel="noopener">代码仓库（占位地址）</a></p><p>上线前域名 https://zchain.example 为占位（plan &#167;6.1）。</p><p>&#169; 2026 ZChain Poker 项目（工作名）</p></div></div></footer>
+</body>
+</html>

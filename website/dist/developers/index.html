@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="ZChain Poker（工作名）：面向扑克场景的专用 Appchain。当前为 devnet 托管网络；PLAY 用于测试与娱乐，REAL 为托管映射。">
+<title>开发者 - ZChain Poker</title>
+<link rel="stylesheet" href="/assets/css/main.css">
+<link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand">
+      <a href="/" class="brand-link"><img src="/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a>
+    </p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list"><li><a href="/">首页</a></li><li><a href="/product/">产品</a></li><li><a href="/technology/">技术</a></li><li><a href="/proofs/">证明</a></li><li><a href="/explorer/">浏览器</a></li><li><a href="/developers/" class="active">开发者</a></li><li><a href="/docs/">文档</a></li><li><a href="/roadmap/">路线图</a></li><li><a href="/security/">安全</a></li><li><a href="/transparency/">透明度</a></li><li><a href="/community/">社区</a></li><li><a href="/legal/">法务</a></li><li><a href="/status/">状态</a></li></ul></nav>
+  </div>
+  <div class="env-strip" role="note" aria-label="网络环境与最终性说明"><span class="chip chip-net">devnet &#183; zchain-poker-devnet</span><span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span><details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary><div class="fin-legend-body">四种状态来自技术方案 &#167;5.1。v1 当前实际达到 <strong>soft accepted</strong>（桌级软确认）与 <strong>proven</strong>（批次证明）；BFT ordered 与 finalized/claimable 属于 v1.5 / Phase 2 路线图，尚未上线。软确认不代表最终确认，也不能单独授权 REAL 提现。</div></details></div>
+</header>
+<main id="main" class="wrap page">
+  <div class="page-head">
+    <h1 class="page-title">开发者</h1>
+    
+    <p class="page-lead">SDK、RPC、ABI、运行节点与示例。从零到验证一手牌的完整入口。</p>
+  </div>
+  
+  <div class="page-body">
+<h2 id="从这里开始">从这里开始</h2>
+<ol class="ol-list"><li class="li">&lt;a href="/docs/getting-started/quickstart/"&gt;15 分钟 quickstart&lt;/a&gt;：克隆仓库 → 构建 → 起 3 节点 devnet → 跑一手带真实证明的完整牌局。</li><li class="li">阅读&lt;a href="/docs/protocol/abi/"&gt;协议 ABI 规范&lt;/a&gt;（wire format 唯一事实源）。</li><li class="li">浏览&lt;a href="/docs/developers/rpc/"&gt;RPC 与事件参考&lt;/a&gt;、&lt;a href="/docs/developers/errors/"&gt;错误码与重试语义&lt;/a&gt;。</li></ol>
+<h2 id="代码仓库">代码仓库</h2>
+<table><thead><tr><th>入口</th><th>说明</th></tr></thead><tbody><tr><td>&lt;a href="https://zchain.example/repo" rel="noopener"&gt;主仓库（占位地址）&lt;/a&gt;</td><td>workspace：poker-appchain、poker-settlement-core、poker-appchain-texasair、poker_l1 等</td></tr><tr><td>构建</td><td><code>cargo build --release --bin zchain</code>（toolchain：nightly-2026-04-15，见 rust-toolchain.toml）</td></tr><tr><td>发布纪律</td><td>每个 release 对应 docs tag、ABI 版本、genesis/config hash、SHA-256 与 SBOM（WEB-ACC-5，待发布流水线）</td></tr></tbody></table>
+<h2 id="rpc-devnet-示例-静态样例">RPC（devnet 示例，静态样例）</h2>
+<p>JSON-RPC over TCP（newline-delimited）。以下为响应形状示例：</p>
+<pre><code class="language-json">{"id": 1, "result": {"block_count": 18204}}
+{"id": 2, "result": {"watermark": {"proven_through": 18196, "batch_root": "0x00f6fae9…"}}}</code></pre>
+<p>自动生成的 OpenAPI/RPC/ABI 参考页（含正例、负例、错误码、幂等与重试语义）见 &lt;a href="/docs/api-reference/"&gt;api-reference 文档板块&lt;/a&gt;——该板块当前为手工参考层，自动生成流水线待接入。</p>
+<h2 id="sdk-与工具">SDK 与工具</h2>
+<table><thead><tr><th>组件</th><th>状态</th></tr></thead><tbody><tr><td>zchain 节点二进制（keygen / node / RPC）</td><td>可用（devnet）</td></tr><tr><td>poker-appchain 结算库（Rust）</td><td>可用</td></tr><tr><td>poker-appchain-texasair 证明适配器</td><td>可用（真实 stwo 出证/验证）</td></tr><tr><td>poker-wallet（钱包核心 CLI）</td><td>由并行工作提供（证明验证命令见&lt;a href="/proofs/"&gt;证明页&lt;/a&gt;）</td></tr><tr><td>浏览器 WASM verifier / 钱包插件</td><td>规划中（plan §6.12）</td></tr></tbody></table>
+<h2 id="限流与配额">限流与配额</h2>
+<p>公共 RPC 网关、API key、webhook 与 SLA 档位属于 Developer portal 服务，当前未上线；本地 devnet 无限流。破坏性变更会通过 changelog 与 <code>#developers</code> 频道提前通告（协议升级 = 新操作变体/域标签版本化，不做运行时扩展）。</p>
+  </div>
+</main>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> ZChain Poker</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div><div class="footer-links"><h2 class="footer-h">站点</h2><a href="/product/">产品</a><a href="/technology/">技术</a><a href="/proofs/">证明</a><a href="/explorer/">浏览器</a><a href="/developers/">开发者</a><a href="/docs/">文档</a><a href="/roadmap/">路线图</a><a href="/security/">安全</a><a href="/transparency/">透明度</a><a href="/community/">社区</a><a href="/legal/">法务</a><a href="/status/">状态</a></div><div class="footer-meta"><h2 class="footer-h">版本与仓库</h2><p>site v0.1.0 (media-kit v0.1) &#183; docs v1.3.0-alpha (ABI v1.2.2)</p><p><a href="https://zchain.example/repo" rel="noopener">代码仓库（占位地址）</a></p><p>上线前域名 https://zchain.example 为占位（plan &#167;6.1）。</p><p>&#169; 2026 ZChain Poker 项目（工作名）</p></div></div></footer>
+</body>
+</html>

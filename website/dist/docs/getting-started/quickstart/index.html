@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="克隆、构建、起 3 节点 devnet、完成一手带真实证明的牌局并验证。">
+<title>15 分钟 quickstart - ZChain Poker</title>
+<link rel="stylesheet" href="/assets/css/main.css">
+<link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+</head>
+<body class="docs-body">
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand">
+      <a href="/" class="brand-link"><img src="/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a>
+    </p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list"><li><a href="/">首页</a></li><li><a href="/product/">产品</a></li><li><a href="/technology/">技术</a></li><li><a href="/proofs/">证明</a></li><li><a href="/explorer/">浏览器</a></li><li><a href="/developers/">开发者</a></li><li><a href="/docs/">文档</a></li><li><a href="/roadmap/">路线图</a></li><li><a href="/security/">安全</a></li><li><a href="/transparency/">透明度</a></li><li><a href="/community/">社区</a></li><li><a href="/legal/">法务</a></li><li><a href="/status/">状态</a></li></ul></nav>
+  </div>
+  <div class="env-strip" role="note" aria-label="网络环境与最终性说明"><span class="chip chip-net">devnet &#183; zchain-poker-devnet</span><span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span><details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary><div class="fin-legend-body">四种状态来自技术方案 &#167;5.1。v1 当前实际达到 <strong>soft accepted</strong>（桌级软确认）与 <strong>proven</strong>（批次证明）；BFT ordered 与 finalized/claimable 属于 v1.5 / Phase 2 路线图，尚未上线。软确认不代表最终确认，也不能单独授权 REAL 提现。</div></details></div>
+</header>
+<div class="wrap docs-layout">
+  <nav class="docs-side" aria-label="文档目录"><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/getting-started/">快速开始</a></p><ul><li><a href="/docs/getting-started/">快速开始</a></li><li><a href="/docs/getting-started/play/">PLAY 试玩与网络配置</a></li><li><a href="/docs/getting-started/quickstart/" class="active">15 分钟 quickstart</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/concepts/">核心概念</a></p><ul><li><a href="/docs/concepts/">核心概念</a></li><li><a href="/docs/concepts/finality/">四阶段最终性</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/protocol/">协议规范</a></p><ul><li><a href="/docs/protocol/">协议规范</a></li><li><a href="/docs/protocol/abi/">ABI 摘要（v1.2.x）</a></li><li><a href="/docs/protocol/operations/">Operation 与软确认帧</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/architecture/">系统架构</a></p><ul><li><a href="/docs/architecture/">系统架构</a></li><li><a href="/docs/architecture/pipeline/">证明管道与水位</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/developers/">开发者指南</a></p><ul><li><a href="/docs/developers/">开发者指南</a></li><li><a href="/docs/developers/errors/">错误码与重试</a></li><li><a href="/docs/developers/rpc/">RPC 与事件</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/validators/">验证者指南</a></p><ul><li><a href="/docs/validators/">验证者指南</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/operators/">运营方指南</a></p><ul><li><a href="/docs/operators/">运营方指南</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/proofs/">证明系统</a></p><ul><li><a href="/docs/proofs/">证明系统</a></li><li><a href="/docs/proofs/texas-air/">Texas AIR 与公开输入</a></li><li><a href="/docs/proofs/verify/">验证器与审计导出</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/security/">安全</a></p><ul><li><a href="/docs/security/">安全</a></li><li><a href="/docs/security/disclosure/">漏洞披露</a></li><li><a href="/docs/security/threat-model/">威胁模型</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/economics/">经济模型</a></p><ul><li><a href="/docs/economics/">经济模型</a></li><li><a href="/docs/economics/custody/">托管边界</a></li><li><a href="/docs/economics/rake/">rake 公式与分账</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/api-reference/">API 参考</a></p><ul><li><a href="/docs/api-reference/">API 参考</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/changelog/">变更日志</a></p><ul><li><a href="/docs/changelog/">变更日志</a></li><li><a href="/docs/changelog/versioning/">版本说明：latest 与 next</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/legal/">法务与合规</a></p><ul><li><a href="/docs/legal/">法务与合规（文档版）</a></li></ul></div></nav>
+  <main id="main" class="docs-main">
+    <div class="page-head">
+      <p class="docs-kicker">ZChain Poker 文档 &#183; docs v1.3.0-alpha (ABI v1.2.2)</p>
+      <h1 class="page-title">15 分钟 quickstart</h1>
+      <nav class="breadcrumb" aria-label="面包屑"><a href="/docs/">文档</a><span aria-hidden="true">/</span><a href="/docs/getting-started/">快速开始</a><span aria-hidden="true">/</span><span aria-current="page">15 分钟 quickstart</span></nav>
+      <p class="page-lead">目标：在干净环境 15 分钟内启动 devnet，并用真实 stwo 证明完成与验证一手 PLAY 牌局。</p>
+    </div>
+    
+    <div class="page-body">
+<h2 id="0-前置-约-3-分钟">0. 前置（约 3 分钟）</h2>
+<pre><code class="language-console"># Rust（rustup 会按 rust-toolchain.toml 自动装 nightly-2026-04-15）
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustc --version          # 应显示 nightly-2026-04-15
+git --version</code></pre>
+<h2 id="1-克隆与构建-约-4-分钟">1. 克隆与构建（约 4 分钟）</h2>
+<pre><code class="language-console">git clone &lt;公开仓库地址，上线前固定&gt; zchain &amp;&amp; cd zchain
+cargo build --release --bin zchain</code></pre>
+<p>构建产物：<code>target/release/zchain</code>。首次构建需编译 stwo，耗时取决于机器。</p>
+<h2 id="2-启动-3-节点-devnet-约-3-分钟">2. 启动 3 节点 devnet（约 3 分钟）</h2>
+<pre><code class="language-console"># 起 3 个 validator，全互联 TCP P2P，验证出块与高度收敛
+scripts/multi_node_e2e.sh 3</code></pre>
+<p>预期输出（节选）：</p>
+<pre><code class="language-text">=== multi-node e2e: N=3 validators, workdir /tmp/zchain_multi_e2e_XXXXXX ===
+[node-1] commit_round=1 height=1
+[node-2] commit_round=1 height=1
+[node-3] commit_round=1 height=1
+=== OK: 3/3 validators committed, heights converged (skew=0) ===</code></pre>
+<p>脚本验收标准：全部 N 个节点出块（日志含 <code>commit_round=</code>），RPC 高度收敛（允许 ±1 在途偏差）。4 节点容错可跑 <code>scripts/scenario_kill_one_of_four.sh</code>（quorum(4)=3）；重启追块可跑 <code>scripts/scenario_restart_catchup.sh</code>。</p>
+<p>说明：<code>multi_node_e2e.sh</code> 默认使用 <code>./target/debug/zchain</code>，可用 <code>ZCHAIN_BIN=./target/release/zchain scripts/multi_node_e2e.sh 3</code> 指定 release 二进制。</p>
+<h2 id="3-完成一手-带真实证明-约-4-分钟">3. 完成一手（带真实证明，约 4 分钟）</h2>
+<p>当前 devnet 的完整一手（盲注 → 下注 → 结算 → 出证）由 E2E 测试与单桌压测程序承载：</p>
+<pre><code class="language-console"># 单桌演示：批量跑桌与结算（64 桌 × 50 手的入口同款）
+cargo run -p poker-appchain --release --bin loadtest
+
+# 完整一手 E2E：3 人 REAL 桌，单 canonical batch 真实 stwo 出证
+cargo test -p poker-appchain-texasair --release -- e2e_full_hand --nocapture</code></pre>
+<p>预期输出（节选）：</p>
+<pre><code class="language-text">[loadtest] 64 tables x 50 hands ... 3200 settlements / 16064 ops OK
+[loadtest] buy-in soft confirm p50=2.1ms p99=3.5ms (budget 100ms)
+
+[e2e_full_hand] 3 players, hand_start mirror injected
+[e2e_full_hand] deal -&gt; raise -&gt; all-in -&gt; fold -&gt; call -&gt; settle
+[e2e_full_hand] conservation: sum(inputs) == sum(payouts) + rake == gross_pot  OK
+[e2e_full_hand] stwo proof: verified (canonical tagged batch)  OK</code></pre>
+<code>wallet-core</code> CLI（并行工作提供）上线后，本步骤替换为面向玩家的逐操作命令：创建 PLAY note → buy-in → 下注 → 读取 SettlementPlan → 本地验证。当前先以上述测试命令演示同等链路，CLI 命令以 <code> poker-wallet</code> crate 发布为准（证明验证命令见<a href="/proofs/">官网证明页</a>）。
+<h2 id="4-验证-约-1-分钟">4. 验证（约 1 分钟）</h2>
+<pre><code class="language-console"># 证明验证路径（适配器 crate 自带负例回归）
+cargo test -p poker-appchain-texasair --release
+# 钱包侧 CLI（wallet-core 提供后可用）
+cargo run -p poker-wallet --release -- verify proof.json</code></pre>
+<p>验证器信息：canonical tagged AIR，stwo 2.3，verifier 版本占位 <code>texas-air-v2</code>。</p>
+<h2 id="下一步">下一步</h2>
+<ul class="ul-list"><li class="li">概念：&lt;a href="/docs/concepts/"&gt;Note、nullifier、最终性&lt;/a&gt;</li><li class="li">协议：&lt;a href="/docs/protocol/abi/"&gt;ABI 规范&lt;/a&gt;</li><li class="li">证明：&lt;a href="/docs/proofs/"&gt;Texas AIR 与公开输入&lt;/a&gt;</li></ul>
+<p>示例全程只使用 PLAY 或测试密钥，不得默认使用 REAL 或真实外部地址。</p>
+    </div>
+    <p class="docs-footer-note">docs v1.3.0-alpha (ABI v1.2.2) &#183; <code>latest</code> 指向已发布 release，草案进入 <code>next</code>；见<a href="/docs/changelog/versioning/">版本说明</a>。</p>
+  </main>
+</div>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> ZChain Poker</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div><div class="footer-links"><h2 class="footer-h">站点</h2><a href="/product/">产品</a><a href="/technology/">技术</a><a href="/proofs/">证明</a><a href="/explorer/">浏览器</a><a href="/developers/">开发者</a><a href="/docs/">文档</a><a href="/roadmap/">路线图</a><a href="/security/">安全</a><a href="/transparency/">透明度</a><a href="/community/">社区</a><a href="/legal/">法务</a><a href="/status/">状态</a></div><div class="footer-meta"><h2 class="footer-h">版本与仓库</h2><p>docs v1.3.0-alpha (ABI v1.2.2)</p><p><a href="https://zchain.example/repo" rel="noopener">代码仓库（占位地址）</a></p><p>上线前域名 https://zchain.example 为占位（plan &#167;6.1）。</p><p>&#169; 2026 ZChain Poker 项目（工作名）</p></div></div></footer>
+</body>
+</html>

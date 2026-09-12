@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="poker-appchain ABI v1.2 系列导读：编码原语、Note、FeePolicy、结算记录三根、批次根、attestation v2.1、提现 finality。">
+<title>ABI 摘要（v1.2.x） - ZChain Poker</title>
+<link rel="stylesheet" href="/assets/css/main.css">
+<link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+</head>
+<body class="docs-body">
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand">
+      <a href="/" class="brand-link"><img src="/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a>
+    </p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list"><li><a href="/">首页</a></li><li><a href="/product/">产品</a></li><li><a href="/technology/">技术</a></li><li><a href="/proofs/">证明</a></li><li><a href="/explorer/">浏览器</a></li><li><a href="/developers/">开发者</a></li><li><a href="/docs/">文档</a></li><li><a href="/roadmap/">路线图</a></li><li><a href="/security/">安全</a></li><li><a href="/transparency/">透明度</a></li><li><a href="/community/">社区</a></li><li><a href="/legal/">法务</a></li><li><a href="/status/">状态</a></li></ul></nav>
+  </div>
+  <div class="env-strip" role="note" aria-label="网络环境与最终性说明"><span class="chip chip-net">devnet &#183; zchain-poker-devnet</span><span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span><details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary><div class="fin-legend-body">四种状态来自技术方案 &#167;5.1。v1 当前实际达到 <strong>soft accepted</strong>（桌级软确认）与 <strong>proven</strong>（批次证明）；BFT ordered 与 finalized/claimable 属于 v1.5 / Phase 2 路线图，尚未上线。软确认不代表最终确认，也不能单独授权 REAL 提现。</div></details></div>
+</header>
+<div class="wrap docs-layout">
+  <nav class="docs-side" aria-label="文档目录"><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/getting-started/">快速开始</a></p><ul><li><a href="/docs/getting-started/">快速开始</a></li><li><a href="/docs/getting-started/play/">PLAY 试玩与网络配置</a></li><li><a href="/docs/getting-started/quickstart/">15 分钟 quickstart</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/concepts/">核心概念</a></p><ul><li><a href="/docs/concepts/">核心概念</a></li><li><a href="/docs/concepts/finality/">四阶段最终性</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/protocol/">协议规范</a></p><ul><li><a href="/docs/protocol/">协议规范</a></li><li><a href="/docs/protocol/abi/" class="active">ABI 摘要（v1.2.x）</a></li><li><a href="/docs/protocol/operations/">Operation 与软确认帧</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/architecture/">系统架构</a></p><ul><li><a href="/docs/architecture/">系统架构</a></li><li><a href="/docs/architecture/pipeline/">证明管道与水位</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/developers/">开发者指南</a></p><ul><li><a href="/docs/developers/">开发者指南</a></li><li><a href="/docs/developers/errors/">错误码与重试</a></li><li><a href="/docs/developers/rpc/">RPC 与事件</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/validators/">验证者指南</a></p><ul><li><a href="/docs/validators/">验证者指南</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/operators/">运营方指南</a></p><ul><li><a href="/docs/operators/">运营方指南</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/proofs/">证明系统</a></p><ul><li><a href="/docs/proofs/">证明系统</a></li><li><a href="/docs/proofs/texas-air/">Texas AIR 与公开输入</a></li><li><a href="/docs/proofs/verify/">验证器与审计导出</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/security/">安全</a></p><ul><li><a href="/docs/security/">安全</a></li><li><a href="/docs/security/disclosure/">漏洞披露</a></li><li><a href="/docs/security/threat-model/">威胁模型</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/economics/">经济模型</a></p><ul><li><a href="/docs/economics/">经济模型</a></li><li><a href="/docs/economics/custody/">托管边界</a></li><li><a href="/docs/economics/rake/">rake 公式与分账</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/api-reference/">API 参考</a></p><ul><li><a href="/docs/api-reference/">API 参考</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/changelog/">变更日志</a></p><ul><li><a href="/docs/changelog/">变更日志</a></li><li><a href="/docs/changelog/versioning/">版本说明：latest 与 next</a></li></ul></div><div class="docs-side-group"><p class="docs-side-h"><a href="/docs/legal/">法务与合规</a></p><ul><li><a href="/docs/legal/">法务与合规（文档版）</a></li></ul></div></nav>
+  <main id="main" class="docs-main">
+    <div class="page-head">
+      <p class="docs-kicker">ZChain Poker 文档 &#183; docs v1.3.0-alpha (ABI v1.2.2)</p>
+      <h1 class="page-title">ABI 摘要（v1.2.x）</h1>
+      <nav class="breadcrumb" aria-label="面包屑"><a href="/docs/">文档</a><span aria-hidden="true">/</span><a href="/docs/protocol/">协议规范</a><span aria-hidden="true">/</span><span aria-current="page">ABI 摘要（v1.2.x）</span></nav>
+      <p class="page-lead">摘要与导读；wire format 唯一事实源见 poker-appchain/docs/ABI.md（源文件随仓库发布）。</p>
+    </div>
+    
+    <div class="page-body">
+<blockquote>源文件：&lt;code&gt;poker-appchain/docs/ABI.md&lt;/code&gt;（v1.2，2026-09-12；v1.2.1 追加 §8/§9）。本页为提炼摘要，字段以源文件为准。</blockquote>
+<h2 id="1-编码原语">1. 编码原语</h2>
+<ul class="ul-list"><li class="li">哈希：<code>poseidon_hash_many</code>（多元素）；<code>blake2s-256</code>（字节摘要）；结算结构根用 <code>blake2b-256 + 域标签</code>。</li><li class="li">32B → 域：hi/lo 无损拆分为两个 felt；felt → 32B 走裸 <code>to_bytes_be</code>（只接受 &lt; p 的字节，fail-closed）。</li><li class="li">域标签：<code>poseidon(hi, lo)</code>，hi/lo = blake2s32(domain_utf8)。历史教训：禁止 <code>byte0 &amp; 0x03</code> 掩码（域元素可达 2^251，掩码丢位）。</li></ul>
+<h2 id="2-note">2. Note</h2>
+<p><code>asset_class(u8: 1=REAL, 2=PLAY)</code>、<code>amount(u64&gt;0)</code>、<code>owner(33B secp256k1 压缩公钥)</code>、<code>nonce(32B)</code>、<code>table_id(Option&lt;u64&gt;)</code>。承诺树为深度 32 Poseidon Merkle；nullifier 集按插入序确定性折叠；零值与全零 nullifier 拒绝。</p>
+<h2 id="3-feepolicy">3. FeePolicy</h2>
+<pre><code>enum FeePolicy { Zero, FixedRake { rate_bps ≤ 10000, cap(0=无封顶), split } }
+rake_of(pot) = min(pot * rate_bps / 10000, cap)   // 向下取整；Zero 恒 0
+split_of(t)  = (t * treasury_bps / 10000, 余数)     // 零头归 operator</code></pre>
+<p>开桌绑定、无更新路径；rake_mode 判别值对齐主仓库 <code>canonical_rake_opening</code>（NONE=0 / PERCENTAGE=1）。</p>
+<h2 id="4-结算记录与三个结构根">4. 结算记录与三个结构根</h2>
+<p><code>SettlementRecord</code> v1.2 携带 <code>plan: SettlementPlan</code>（poker-settlement-core，结算语义单一事实源）。三个 32B 根把结算从已验证状态派生并完整绑定输出：</p>
+<table><thead><tr><th>根</th><th>算法</th><th>域标签</th></tr></thead><tbody><tr><td><code>plan_digest</code></td><td>blake2b-256(DOMAIN ‖ borsh(SettlementPlan))</td><td><code>zchain.texas_poker.settlement_plan.v2</code></td></tr><tr><td><code>payout_root</code></td><td>RFC 6962 风格树（叶 <code>H(0x00‖leaf)</code>、内部 <code>H(0x01‖l‖r)</code>，整体前缀域标签；不平衡补空叶哈希到 2 的幂）</td><td><code>zchain.settlement.payout_root.v1</code></td></tr><tr><td><code>side_pot_root</code></td><td>blake2b-256(DOMAIN ‖ borsh(plan.pots))</td><td><code>zchain.settlement.side_pot_root.v1</code></td></tr></tbody></table>
+<p><code>PayoutLeaf</code> 五元组 <code>{asset_class, amount, owner, table_id, pot_index, runout_index}</code>——赔付完整绑定（P0-7）。玩家 ECDSA 签名覆盖 <code>settle_effect</code>（含 payout_root），sequencer 无法改打给别人。</p>
+<p>校验关系共 11 条、全部 fail-closed、顺序即实现，核心几条：</p>
+<ul class="ul-list"><li class="li"><code>plan.validate</code> 通过后，<code>plan.gross_pot == record.pot</code>（pot 从已验证计划派生，不再独立可信）；</li><li class="li"><code>Σinputs == plan.gross_pot</code>；输出同类非零，payouts 与 plan 投影一一对应（<code>(pot_index, runout_index, seat, amount)</code> 规范序）；</li><li class="li"><code>rake.total == plan.rake == policy.rake_of(pot)</code>（pot = rake 计费基数 = contested 层 gross 之和，uncalled 返还不计入）且 <code>policy_commitment</code> 匹配注册表；</li><li class="li">守恒 <code>Σinputs == Σpayouts + Σrake_notes</code>；分账数额与收款人匹配；</li><li class="li"><code>hand_proof</code> 存在时：scope v2 镜像校验 + 终态承诺/pre/post 状态根一致 + pot 逐字节绑定（<code>post_state_image_bytes</code> 偏移 74 的 8B LE）+ rake opening 与 <code>min(floor(pot·bps/10⁴), cap, pot)</code> 一致；完整 STARK 验证由 <code>TexasAirEngine::verify_canonical_tagged_proof</code> 执行。</li></ul>
+<p>计费口径（BLOCKERS B9 已统一，ABI v1.2.2）：<code>rake_base()</code> = contested 层 gross 之和，uncalled 返还/sole-survivor 层不计费且强制该层 rake 为 0；poker_l1 与 appchain 为同一口径，含 uncalled 手 e2e 正例。个别边界终局形态（如 raked-sole-survivor）仍 fail-closed 拒绝。</p>
+<h3 id="scope-v2-texasarchivescope">scope v2（TexasArchiveScope）</h3>
+<p>borsh 字段序与 canonical 归档公开字段逐字段一致：<code>log_size/num_columns/table_id/hand 与 call_seq 边界/transition 元数据/batch_digest/pre-post 各承诺与根/状态镜像字节/range_claimed_sum/rake_opening/blind_opening</code>。状态镜像为 1,680B 定宽 borsh，<code>pot</code> @ 偏移 74、<code>chip_pool</code> @ 66。完整字段表见&lt;a href="/docs/proofs/texas-air/"&gt;证明系统·公开输入&lt;/a&gt;。</p>
+<h2 id="7-批次根-batchroot">7. 批次根 BatchRoot</h2>
+<p>哈希统一为 Poseidon（域标签 <code>poker-appchain.batch_root.v1</code>；历史 blake2s 实现已废弃）。批内结算按帧序排列：</p>
+<pre><code>fold_0 = 0
+fold_i = poseidon_hash_many([fold_{i-1}, hi_i, lo_i])   // binding 32B hi/lo 拆分
+batch_root = felt_to_bytes32(poseidon_hash_many([D, fold_n]))
+D = poseidon(blake2s32("poker-appchain.batch_root.v1") 拆分)</code></pre>
+<p>golden vector（冻结）：bindings <code>[0xAA;32], [0xBB;32]</code> → <code>batch_root = 00f6fae93ff03c440c1136a5d8b5eab742f07c268c52536d4932ce4171933c52</code>。空批次不产生批次根。</p>
+<h2 id="8-real-出证策略与-attestation-v2-1">8. REAL 出证策略与 attestation v2.1</h2>
+<p><code>RealSettlementPolicy</code>：<code>Disabled | HostAttestation | StarkRequired</code>，&lt;strong&gt;默认 StarkRequired（fail-closed）&lt;/strong&gt;；StarkRequired 必须钉 verifier key，未钉 = REAL 结算全部拒绝。</p>
+<p>三层门（默认收紧）：引擎层（host 引擎对 REAL 一律拒）→ 管道提交层（texas-air 前缀 + 钉扎 + hand_proof，不满足不进队列）→ 批次水位层（出队前复查，违反则 completion 原地保留、水位不推进）。</p>
+<p>attestation v2.1（payload 定长 192B）：<code>post_state_commitment(32) ‖ post_state_root(32) ‖ pre_state_root(32) ‖ plan_digest(32) ‖ ed25519 签名(64)</code>，消息域 <code>poker-appchain.texas-air-v2</code>。覆盖四要素：verifier key、引擎版本、pre/post 状态根、已验证计划摘要。</p>
+<h2 id="9-提现-finality-门槛">9. 提现 finality 门槛</h2>
+<p>REAL 提现要求：<code>proven_watermark &gt;= op_index</code> &lt;strong&gt;且&lt;/strong&gt; 批次根覆盖该 op（<code>Option</code> 存在性判定，<code>None</code> 一律拒绝）。PLAY 豁免。<code>without_finality_gate</code> 仅限测试。详见&lt;a href="/docs/concepts/finality/"&gt;四阶段最终性&lt;/a&gt;。</p>
+<h2 id="10-指标">10. 指标</h2>
+<p><code>real_settlement_rejected_total</code>（REAL 出证三层拒绝合计）、<code>withdrawal_finality_rejected_total</code>（提现未达门槛）。</p>
+    </div>
+    <p class="docs-footer-note">docs v1.3.0-alpha (ABI v1.2.2) &#183; <code>latest</code> 指向已发布 release，草案进入 <code>next</code>；见<a href="/docs/changelog/versioning/">版本说明</a>。</p>
+  </main>
+</div>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> ZChain Poker</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div><div class="footer-links"><h2 class="footer-h">站点</h2><a href="/product/">产品</a><a href="/technology/">技术</a><a href="/proofs/">证明</a><a href="/explorer/">浏览器</a><a href="/developers/">开发者</a><a href="/docs/">文档</a><a href="/roadmap/">路线图</a><a href="/security/">安全</a><a href="/transparency/">透明度</a><a href="/community/">社区</a><a href="/legal/">法务</a><a href="/status/">状态</a></div><div class="footer-meta"><h2 class="footer-h">版本与仓库</h2><p>docs v1.3.0-alpha (ABI v1.2.2)</p><p><a href="https://zchain.example/repo" rel="noopener">代码仓库（占位地址）</a></p><p>上线前域名 https://zchain.example 为占位（plan &#167;6.1）。</p><p>&#169; 2026 ZChain Poker 项目（工作名）</p></div></div></footer>
+</body>
+</html>

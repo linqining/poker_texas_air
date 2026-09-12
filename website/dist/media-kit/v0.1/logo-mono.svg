@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ZChain Poker logo (mono)">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="currentColor" stroke-width="3"/>
+  <path d="M17 21 H45 L24 43 H47" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="42" y="8" width="9" height="9" rx="1.5" transform="rotate(45 46.5 12.5)" fill="currentColor"/>
+</svg>

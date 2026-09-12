@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="ZChain Poker（工作名）：面向扑克场景的专用 Appchain。当前为 devnet 托管网络；PLAY 用于测试与娱乐，REAL 为托管映射。">
+<title>证明公平 - ZChain Poker</title>
+<link rel="stylesheet" href="/assets/css/main.css">
+<link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand">
+      <a href="/" class="brand-link"><img src="/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a>
+    </p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list"><li><a href="/">首页</a></li><li><a href="/product/">产品</a></li><li><a href="/technology/">技术</a></li><li><a href="/proofs/" class="active">证明</a></li><li><a href="/explorer/">浏览器</a></li><li><a href="/developers/">开发者</a></li><li><a href="/docs/">文档</a></li><li><a href="/roadmap/">路线图</a></li><li><a href="/security/">安全</a></li><li><a href="/transparency/">透明度</a></li><li><a href="/community/">社区</a></li><li><a href="/legal/">法务</a></li><li><a href="/status/">状态</a></li></ul></nav>
+  </div>
+  <div class="env-strip" role="note" aria-label="网络环境与最终性说明"><span class="chip chip-net">devnet &#183; zchain-poker-devnet</span><span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span><details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary><div class="fin-legend-body">四种状态来自技术方案 &#167;5.1。v1 当前实际达到 <strong>soft accepted</strong>（桌级软确认）与 <strong>proven</strong>（批次证明）；BFT ordered 与 finalized/claimable 属于 v1.5 / Phase 2 路线图，尚未上线。软确认不代表最终确认，也不能单独授权 REAL 提现。</div></details></div>
+</header>
+<main id="main" class="wrap page">
+  <div class="page-head">
+    <h1 class="page-title">证明公平</h1>
+    
+    <p class="page-lead">手牌证明、结算证明与独立验证入口。验证不依赖运营方私有服务。</p>
+  </div>
+  <div class="banner banner-sample"><span class="banner-tag">SAMPLE DATA / devnet</span><p>本页为<strong>接口就绪的静态层</strong>，全部数据为 <strong>SAMPLE DATA / devnet</strong> 示例，非实时、非承诺。生产数据将由独立的 portal 服务（explorer / status / transparency / proof portal）提供；本站只定义页面结构与数据口径。</p></div>
+  <div class="page-body">
+<h2 id="浏览器验证-proof-portal-接口就绪">浏览器验证（proof portal，接口就绪）</h2>
+<p>v1 无 portal 后端。以下表单为接口就绪的静态层：生产环境将由独立的 proof portal 服务提供查询与浏览器本地验证（WebAssembly verifier），并显示 verifier 版本、proof digest 与验证耗时。</p>
+<form class="card" action="#" method="get" onsubmit="return false;">
+  <p><label for="hand-id">hand id 或 proof digest</label></p>
+  <p><input id="hand-id" name="hand_id" type="text" placeholder="例如：0x00f6fae93ff03c440c1136a5d8b5eab742f07c268c52536d4932ce4171933c52" style="width:100%;max-width:560px;background:#0d1710;color:#e9f2ec;border:1px solid #2a4233;border-radius:8px;padding:9px 12px;"></p>
+  <p><button type="submit" disabled style="opacity:0.6;border-radius:8px;padding:8px 16px;">验证（portal 服务上线后开放）</button></p>
+  <p class="kv">当前状态：v1 静态层 &#183; SAMPLE DATA / devnet &#183; 查询接口待 portal 服务</p>
+</form>
+<h2 id="独立验证命令-现在可用">独立验证命令（现在可用）</h2>
+<p>不依赖任何网页或运营方服务，直接用钱包 crate 的 CLI 验证证明文件（<code>poker-wallet</code> crate 由并行工作提供，命令以该接口为准）：</p>
+<pre><code class="language-console"># 验证一手牌的归档证明（proof.json 由 explorer/portal 下载或自节点导出）
+cargo run -p poker-wallet --release -- verify proof.json
+
+# 完整 STARK 验证路径（适配器 crate，开发/审计用）
+cargo test -p poker-appchain-texasair --release</code></pre>
+<ul class="ul-list"><li class="li">verifier 版本（占位）：<code>texas-air-v2</code>；证明系统：stwo 2.3（circle-STARK，Stark curve）。</li><li class="li">证明覆盖：canonical tagged AIR（29 选择子、状态镜像链、nullifier），批次绑定 table_id、pre/post 状态根、逐字节 pot 镜像。</li><li class="li">负例保证：垃圾 STARK 字节、承诺不一致、桌不一致、缺绑定、坏签名、Fiat–Shamir 流篡改、状态镜像字节翻转均被验证器拒绝。</li></ul>
+<h2 id="公开输入-scope-v2-摘要">公开输入（scope v2 摘要）</h2>
+<p>归档 scope 与 canonical AIR 公开字段逐字段一致，关键字段：</p>
+<table><thead><tr><th>字段</th><th>说明</th></tr></thead><tbody><tr><td><code>table_id</code></td><td>桌标识，与结算记录一致</td></tr><tr><td><code>first/last_hand_id</code>、<code>first/last_call_seq</code></td><td>手牌与调用序列边界</td></tr><tr><td><code>transition_count</code></td><td>状态转移数（&gt; 0）</td></tr><tr><td><code>batch_digest</code></td><td>批次摘要</td></tr><tr><td><code>pre/post_state_commitment</code></td><td>首/终态承诺</td></tr><tr><td><code>pre/post_state_root</code></td><td>首/终态 SMT 根</td></tr><tr><td><code>pre/post_lifecycle / overlay / settlement / custody</code></td><td>各子状态根</td></tr><tr><td><code>pre/post_state_image_bytes</code></td><td>定宽状态镜像（1680B，pot @ 偏移 74）</td></tr><tr><td><code>rake_opening</code> / <code>blind_opening</code></td><td>费率与盲注开口</td></tr></tbody></table>
+<p>完整字段表见&lt;a href="/docs/proofs/texas-air/"&gt;证明系统文档&lt;/a&gt;。</p>
+<h2 id="示例-一批次的验证结果-sample-data">示例：一批次的验证结果（SAMPLE DATA）</h2>
+<table><thead><tr><th>项</th><th>值</th></tr></thead><tbody><tr><td>hand_id</td><td>42（示例）</td></tr><tr><td>verifier 版本</td><td>texas-air-v2（占位）</td></tr><tr><td>引擎</td><td>poker-appchain-texasair / stwo 2.3</td></tr><tr><td>结果</td><td>PASS（示例数据，非真实出证）</td></tr><tr><td>验证耗时</td><td>约 1–3 s / 批次（开发机参考值，非承诺指标）</td></tr></tbody></table>
+<div class="notice">
+<p>当前 devnet 的真实出证记录可通过仓库内 E2E 测试复现：<code>cargo test -p poker-appchain-texasair --release</code>（3 人 REAL 桌完整一手，单 canonical batch 真实 stwo 出证）。审计导出工具的说明见<a href="/docs/proofs/verify/">验证器与审计导出</a>。</p>
+</div>
+  </div>
+</main>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> ZChain Poker</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div><div class="footer-links"><h2 class="footer-h">站点</h2><a href="/product/">产品</a><a href="/technology/">技术</a><a href="/proofs/">证明</a><a href="/explorer/">浏览器</a><a href="/developers/">开发者</a><a href="/docs/">文档</a><a href="/roadmap/">路线图</a><a href="/security/">安全</a><a href="/transparency/">透明度</a><a href="/community/">社区</a><a href="/legal/">法务</a><a href="/status/">状态</a></div><div class="footer-meta"><h2 class="footer-h">版本与仓库</h2><p>site v0.1.0 (media-kit v0.1) &#183; docs v1.3.0-alpha (ABI v1.2.2)</p><p><a href="https://zchain.example/repo" rel="noopener">代码仓库（占位地址）</a></p><p>上线前域名 https://zchain.example 为占位（plan &#167;6.1）。</p><p>&#169; 2026 ZChain Poker 项目（工作名）</p></div></div></footer>
+</body>
+</html>
