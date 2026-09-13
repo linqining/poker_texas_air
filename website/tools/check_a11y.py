@@ -32,10 +32,10 @@ ID_RE = re.compile(r"""id\s*=\s*["']([^"']+)["']""", re.I)
 
 # 官网调色板（与 assets/css/main.css :root 及 media-kit/v0.1/colors.md 同源）
 PALETTE = {
-    "bg": "#0b120e", "bg-soft": "#0f1a13", "surface": "#142019",
-    "text": "#e9f2ec", "muted": "#aec4b8", "felt": "#46c78e",
-    "play": "#6fb2ff", "real": "#f0b64a", "danger": "#ff8b7a",
-    "nav-active-text": "#07130c",
+    "bg": "#070d0a", "bg-soft": "#0b1410", "surface": "#101c15",
+    "text": "#f0f7f1", "muted": "#abc3b6", "felt": "#37e39c",
+    "play": "#66c4ff", "real": "#ffc75a", "danger": "#ff9483",
+    "nav-active-text": "#05130c",
 }
 CONTRAST_PAIRS = [
     ("text on bg", "text", "bg"),

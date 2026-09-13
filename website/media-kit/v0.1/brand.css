@@ -1,21 +1,22 @@
-/* ZChain Poker 品牌变量 v0.1 —— 与 website/assets/css/main.css :root 同源 */
+/* ZChain Poker 品牌变量 v0.1 —— 与 website/assets/css/main.css :root 同源（青黑毡布 v3） */
 :root {
-  --bg: #0b120e;
-  --bg-soft: #0f1a13;
-  --surface: #142019;
-  --surface-2: #18261e;
-  --border: #2a4233;
-  --border-soft: #1e3126;
-  --text: #e9f2ec;
-  --muted: #aec4b8;
-  --felt: #46c78e;
-  --felt-deep: #1f7a4d;
-  --felt-dim: #175239;
-  --play: #6fb2ff;
-  --play-deep: #123f66;
-  --real: #f0b64a;
-  --real-deep: #6e4a10;
+  --bg: #070d0a;
+  --bg-soft: #0b1410;
+  --surface: #101c15;
+  --surface-2: #152418;
+  --border: #2a4a37;
+  --border-soft: #1d3326;
+  --text: #f0f7f1;
+  --muted: #abc3b6;
+  --felt: #37e39c;
+  --felt-deep: #1a8a58;
+  --felt-dim: #14593a;
+  --play: #66c4ff;
+  --play-deep: #14486f;
+  --real: #ffc75a;
+  --real-deep: #7a5410;
   --real-orange: #e2933b;
-  --danger: #ff8b7a;
-  --code-bg: #0d1710;
+  --danger: #ff9483;
+  --code-bg: #0a120d;
+  --nav-active-text: #05130c;
 }

@@ -6,36 +6,58 @@ lead: ZChain Poker（工作名）——面向扑克场景的专用 Appchain。�
 ---
 
 <div class="hero">
-  <p class="tagline-en">Every hand. A verifiable settlement.</p>
-  <h2>让每一手牌，都有可验证的结算记录。</h2>
-  <p>ZChain Poker 是面向扑克场景的专用 Appchain：快速确认牌局操作，用可验证证明约束结算与 rake，并把最终资金释放交给明确的 Vault 与退出协议。</p>
-  <div class="cta-row">
-    <a class="btn btn-play" href="/product/">立即试玩 PLAY</a>
-    <a class="btn btn-ghost" href="/docs/">阅读技术文档</a>
-    <a class="btn btn-ghost" href="/proofs/">验证一手牌</a>
-    <a class="btn btn-real" href="/status/">Network Status</a>
+  <div class="hero-grid">
+    <div class="hero-copy">
+      <p class="tagline-en">Every hand. A verifiable settlement.</p>
+      <h1>让每一手牌，都有可验证的结算记录。</h1>
+      <p>ZChain Poker 是面向扑克场景的专用 Appchain：快速确认牌局操作，用可验证证明约束结算与 rake，并把最终资金释放交给明确的 Vault 与退出协议。</p>
+      <div class="cta-row">
+        <a class="btn btn-play" href="/product/">立即试玩 PLAY</a>
+        <a class="btn btn-ghost" href="/docs/">阅读技术文档</a>
+        <a class="btn btn-ghost" href="/proofs/">验证一手牌</a>
+        <a class="btn btn-real" href="/status/">Network Status</a>
+      </div>
+    </div>
+    <div class="hero-visual" aria-hidden="true">
+      <div class="felt-oval"></div>
+      <div class="pcard pcard-1"><span class="pc-rank">Q</span><span class="pc-suit">♣</span><span class="pc-foot">Q♣</span></div>
+      <div class="pcard pcard-2 pcard-red"><span class="pc-rank">K</span><span class="pc-suit">♥</span><span class="pc-foot">K♥</span></div>
+      <div class="pcard pcard-3"><span class="pc-rank">A</span><span class="pc-suit">♠</span><span class="pc-foot">A♠</span></div>
+      <div class="hero-chips">
+        <span class="chip chip-net">devnet</span>
+        <span class="st st-ok">soft accepted</span>
+        <span class="st st-ok">proven</span>
+      </div>
+    </div>
   </div>
+</div>
+
+<div class="stat-band">
+  <div class="stat"><span class="stat-num">2.1 ms</span><span class="stat-label">软确认 p50（门槛 100ms）</span></div>
+  <div class="stat"><span class="stat-num">3,200</span><span class="stat-label">压测结算（64 桌 × 50 手）</span></div>
+  <div class="stat"><span class="stat-num">16,064</span><span class="stat-label">压测牌局操作</span></div>
+  <div class="stat"><span class="stat-num">2,350+</span><span class="stat-label">工作区测试通过</span></div>
 </div>
 
 <div class="entry-grid">
   <div class="card card-play">
     <p class="card-kicker">01 / PLAY NOW</p>
-    <h3>立即试玩</h3>
+    <h2>立即试玩</h2>
     <p>只进入 PLAY 测试/娱乐环境，不涉及真实资金，也不默认触发充值。devnet 环境由本地 devnet 配置启动，入口见<a href="/product/">产品页</a>与<a href="/docs/getting-started/quickstart/">15 分钟 quickstart</a>。</p>
   </div>
   <div class="card card-play">
     <p class="card-kicker">02 / VERIFY A HAND</p>
-    <h3>验证一手牌</h3>
+    <h2>验证一手牌</h2>
     <p>输入 hand id 或 proof digest 跳转到<a href="/proofs/">独立验证入口</a>；同时提供独立 verifier 命令，不依赖运营方私有服务。</p>
   </div>
   <div class="card">
     <p class="card-kicker">03 / READ THE DOCS</p>
-    <h3>阅读文档</h3>
+    <h2>阅读文档</h2>
     <p>版本化文档站（13 个板块），关键安全说明在<a href="/docs/security/">安全</a>与<a href="/docs/economics/">经济模型</a>章节，而不是藏在 FAQ。</p>
   </div>
   <div class="card card-real">
     <p class="card-kicker">04 / NETWORK STATUS</p>
-    <h3>网络状态</h3>
+    <h2>网络状态</h2>
     <p>Sequencer、prover、BFT checkpoint、提现服务的状态入口：<a href="/status/">/status/</a>。v1 为静态层 + 示例数据，接口由后续 portal 服务提供。</p>
   </div>
 </div>
@@ -100,7 +122,7 @@ lead: ZChain Poker（工作名）——面向扑克场景的专用 Appchain。�
 | 工作区测试 | 2350+ 通过 |
 | ForceInclude / BFT checkpoint / 链上出入金 | 未完成（Phase 1 余项 / v1.5） |
 
-完整事实表（可引用版本）见 <a href="/media-kit/v0.1/fact-sheet.md">media-kit fact-sheet</a>；对外承诺边界见<a href="/roadmap/">路线图</a>与<a href="/legal/">法务与风险披露</a>。
+完整事实表（可引用版本）见 [media-kit fact-sheet](/media-kit/v0.1/fact-sheet.md)；对外承诺边界见[路线图](/roadmap/)与[法务与风险披露](/legal/)。
 
 ## 英文简介（English short copy）
 

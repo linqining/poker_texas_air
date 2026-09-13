@@ -209,4 +209,68 @@ DRILL 行）→ 运行 `build.py` → 断言渲染出的 `dist/status/index.html
 
 ---
 
+# 2026-09-13 追加：版面重设计（「午夜毡布」v2 主题）
+
+**改了什么**（用户要求"使用 UI 相关 MCP 重新设计版面"）：
+
+- **设计 token**：新调色板「午夜毡布」经 WCAG 对比度预验后定稿（全部组合 ≥ 8.6:1，
+  门槛 4.5），四处同源同步：`assets/css/main.css :root`、`media-kit/v0.1/colors.md`、
+  `media-kit/v0.1/brand.css`、`tools/check_a11y.py PALETTE`。零 webfont / 零 JS 约束不变。
+- **`assets/css/main.css` 全量重写**：sticky 毛玻璃头部 + env-strip 移出吸顶区；
+  首页 hero 双栏（文案 + 纯 CSS 扑克牌扇面视觉，aria-hidden）+ 数据统计带（stat-band）；
+  卡片升级为渐变面 + hover 抬升；表格圆角化（border-radius + 行 hover + 移动端横向滚动）；
+  状态徽章/横幅/侧栏/页脚全套翻新；断点 960px / 640px 行为复核（移动端取消吸顶）。
+- **模板/构建器**：`base.html`/`docs.html` 页头结构改为 `[[PAGE_HEAD]]`（首页由 hero
+  自带 h1，消除标题重复；`<title>` 首页不再带站名后缀）；`build.py` 行内信任标签
+  白名单补充 `a/strong/em/code`——修复既有缺陷：段落/表格单元格中手写的原生标签
+  曾被转义为字面文本显示（如 `<code>poker-settlement-core</code>`、explorer 页
+  AssetId 代码片段），与既有"行首 HTML 块直通"同一信任模型，内容均为站内自有文件。
+- **内容**：首页 `index.md` 版面重构（hero 双栏 + stat-band + 入口卡）；两处段落内
+  裸 `<a>` 改为 markdown 链接。
+
+**工具链使用**：ui-toolkit `import_design_tokens`（43 token）+ `generate_component`
+（token 接线验证）+ `audit_component`（hero 版面 100/100）；chrome-devtools MCP
+（1440px / 375px 实测截图迭代）；judge 代理视觉验收（首轮 5 页：2 fail 3 pass，
+fail 均为上述 `<code>` 转义问题；修复后复验）。
+
+**回归确认（2026-09-13）**：
+
+- `python3 website/build.py`：41 页构建成功；
+- `check_a11y.py` 41 页全过，12 组对比度 8.75–17.61:1；
+- `check_links.py` 2569 内链 / 42 外链 0 断链；
+- `scan_banned_words.py` 0 命中（59 文件）；
+- judge 复验结论：首轮 5 页（首页桌面/文档页/explorer/状态页桌面/首页移动）2 fail 3 pass，
+  fail 均为 `<code>` 转义问题；修复重建后复验 3 页全部 pass——代码片段渲染为等宽样式、
+  无字面标签残留、无新引入问题，**5/5 页通过视觉验收**。
+
+---
+
+# 2026-09-13 追加：配色 v3（青黑毡布）+ 纯 CSS 动效层
+
+**改了什么**（用户要求"继续修改配色，增加页面动效"）：
+
+- **配色 v3**：冷调青黑底（bg `#070d0a`）+ 春翡翠强调（felt `#37e39c`）+ 天蓝 PLAY
+  （`#66c4ff`）+ 暖金 REAL（`#ffc75a`）。改动前先脚本预验 WCAG 对比度：13 组组合
+  全部 ≥ 9.1:1；四处同源同步（main.css / colors.md / brand.css / check_a11y.py）。
+  hero 主标题新增白→翡翠渐变文字（大字号下两侧均高对比）。
+- **动效层（纯 CSS，零 JS）**：首屏入场（hero 文案逐行上浮、入口卡/统计带错峰
+  `rise-in`）、hero 扑克牌缓慢浮动（`translate` 属性与旋转定位解耦，老浏览器自动
+  忽略）、devnet 徽章呼吸点、按钮 hover 扫光、既有卡片/行 hover 过渡。
+  全部动效在 `prefers-reduced-motion: reduce` 下关闭。
+- **顺手修复**：hero 标题选择器由 `.hero h2` 修正为 `.hero h1, .hero h2`（内容改为
+  h1 后原规则失配，clamp 字号此前未生效）。
+- **踩坑记录（验收发现并修复）**：初版动效含 `animation-timeline: view()` 滚动显现
+  层（`@supports` 包裹）——judge 整页截图发现"产品三点说明/信任声明/资产类型"三
+  章节正文停在 `opacity: 0`：scroll-driven 动画在整页截图/打印等非滚动渲染路径下
+  不前进。已整体移除该层并留注释，动效只保留不依赖滚动/JS 的部分；colors.md 同步
+  记入"明确不做"。
+
+**回归确认（2026-09-13）**：41 页构建成功；`check_a11y.py` 全过（12 组对比度
+9.17–18.0:1）；`check_links.py` 0 断链；`scan_banned_words.py` 0 命中。
+judge 验收：首轮 3 页（首页桌面/explorer/首页移动）2 fail 1 pass（fail = 上述
+滚动动画空白）；移除后复验首页桌面 + 首页移动全部 pass——三章节正文完整可见、
+无半透明残留/错位/截断、新配色对比度良好，**本轮 3/3 页通过视觉验收**。
+
+
+
 > **部署依赖项**：本文件中标注"待部署/待后端/待 CI"的条目已集中登记到 [`RELEASE_PREREQUISITES.md`](./RELEASE_PREREQUISITES.md)（发布前置清单，含关联门槛与关闭动作）；完整验收判定 = 本地证据 + 前置清单关闭。

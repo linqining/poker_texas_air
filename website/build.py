@@ -132,8 +132,8 @@ def parse_front_matter(src: str):
 _CODE_TOKEN = "\x02{}\x03"
 _TAG_TOKEN = "\x04{}\x05"
 
-# 行内级信任标签：markdown 文本/表格单元格中允许原样输出（st 状态徽章、换行等）
-_TRUSTED_TAG_RE = re.compile(r"</?(span|br|wbr|sub|sup)\b[^>]*>", re.I)
+# 行内级信任标签：markdown 文本/表格单元格中允许原样输出（链接/加粗/代码、st 状态徽章、换行等）
+_TRUSTED_TAG_RE = re.compile(r"</?(span|br|wbr|sub|sup|a|strong|em|code)\b[^>]*>", re.I)
 _ENTITY_RE = re.compile(r"&(amp;)?(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]+);")
 
 
@@ -483,14 +483,30 @@ def build_page(rel: Path, tpl_base: str, tpl_docs: str) -> None:
         "PLAY 用于测试与娱乐，REAL 为托管映射。",
     )
 
+    # 首页 page-head 由 hero 自带 h1 承担，避免标题重复渲染
+    if url == "/":
+        page_head = ""
+    else:
+        page_head = (
+            '<div class="page-head">'
+            '<h1 class="page-title">' + html_mod.escape(title, quote=False) + "</h1>"
+            + breadcrumb_html(meta, url)
+            + '<p class="page-lead">' + _inline(meta.get("lead", "")) + "</p></div>"
+        )
+
+    title_tag = html_mod.escape(title, quote=True)
+    if title != SITE["NAME"]:
+        title_tag += " - " + html_mod.escape(SITE["NAME"], quote=True)
+
     mapping = {
         "LANG": meta.get("lang", "zh-CN"),
-        "TITLE": html_mod.escape(title, quote=True) + " - " + SITE["NAME"],
+        "TITLE": title_tag,
         "DESCRIPTION": html_mod.escape(desc, quote=True),
         "FOOTER_VERSION": SITE["FOOTER_VERSION"],
         "NAV": build_nav(meta.get("section", url.rstrip("/").split("/")[1] if url != "/" else "home")),
         "ENV_STRIP": env_strip_html(),
         "FOOTER": footer_html(is_docs),
+        "PAGE_HEAD": page_head,
         "PAGE_TITLE": html_mod.escape(title, quote=False),
         "PAGE_LEAD": _inline(meta.get("lead", "")),
         "BANNERS": banners,
