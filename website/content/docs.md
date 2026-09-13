@@ -2,7 +2,7 @@
 title: 文档
 lang: zh-CN
 section: docs
-lead: 版本化文档站：13 个板块，从 15 分钟 quickstart 到协议规范与威胁模型。docs v1.3.0-alpha (ABI v1.2.2)。
+lead: 版本化文档站：13 个板块，从 15 分钟 quickstart 到协议规范与威胁模型。docs v1.3.0-alpha (ABI v1.2.3)。
 ---
 
 文档站与代码同步版本化：`latest` 只指向已发布 release，草案进入 `next`（<a href="/docs/changelog/versioning/">版本说明</a>）。生产环境将托管于 docs.zchain.example，路径结构与本站 /docs/ 完全一致。

@@ -43,7 +43,7 @@ cd website/dist && python3 -m http.server 8000
 `content/docs/<section>/`：getting-started（15 分钟 quickstart）/ concepts / protocol /
 architecture / developers / validators / operators / proofs / security / economics /
 api-reference / changelog / legal。每页属于 docs 布局（侧边栏 + 面包屑 +
-页脚版本号 `docs v1.3.0-alpha (ABI v1.2.2)`）。
+页脚版本号 `docs v1.3.0-alpha (ABI v1.2.3)`）。
 
 ### 素材包（§6.6/§6.7）
 

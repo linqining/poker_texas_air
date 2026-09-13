@@ -20,10 +20,10 @@ lead: Phase 0 已完成，Phase 1 进行中；v1.5 / Phase 2 / Phase 3 未开始
 - [x] 真实 stwo 证明（canonical AIR，E2E 一手真实出证 + 深度篡改负例）
 - [x] 3/4 节点组网验收（全收敛 skew=0；4 节点 kill-one 容错；重启追块）
 - [x] E2E 完整一手（3 人 REAL 桌：盲注镜像 → raise/all-in/fold/call → 收池 → 守恒恒等式成立）
-- [ ] ForceInclude（M3-ACC-6：inclusion deadline 内未包含可强制包含）
+- [x] ForceInclude（M3-ACC-6：SeenReceipt 签发/查询、inclusion deadline 强制包含、tx_hash 确定性排序、CensorshipProof 三态检测；罚没仅记录属 v2）
 - [ ] BFT checkpoint（属 v1.5 范围，本 Phase 只要求入口预留）
 - [ ] 链上出入金收尾（链上侧已接线：VaultProvider trait + Mock/Starknet 双实现、存款幂等桥、提现 finality 执行、自动对账告警；剩余为线上桥校准，待真实 Starknet 环境）
-- [ ] watcher 证据独立化（M3-ACC-7 部分完成：分叉检测已有，三者一致性独立进程待做）
+- [x] watcher 证据独立化（M3-ACC-7：`appchain_watcher` 独立进程，软确认链/结算语义/proven log 批次根/checkpoint 四路独立重算交叉核对 + 分叉检测）
 
 ### 钱包与产品化（plan §6 / M6，v1.3 已交付）
 
@@ -57,17 +57,18 @@ explorer 当前为<strong>接口就绪的静态层</strong>（SAMPLE DATA 全标
 - [x] 页面结构与数据口径定义：四态确认层级、PLAY/REAL 标识、失败原因与水位缺口如实展示
 - [x] SAMPLE DATA 静态层上线（`/explorer/`，已标注非实时）
 
-### E1 —— 只读实时网关（对应发布前置 A3）
+### E1 —— 只读实时网关（已完成）
 
-- [ ] 只读 JSON 网关代理既有节点 RPC：`get_block` / `get_block_count` / `get_tx` / `get_metrics`（缓存 + 限流，§6.2）
-- [ ] explorer 块列表 / 块计数 / proven watermark 接实时数据，移除 SAMPLE DATA 标注
-- [ ] 验收：devnet 多节点起网后，explorer 显示真实高度与块，数据与节点 `get_metrics` 一致
+- [x] 只读 JSON 网关 `explorer_gateway`：appchain WAL 回放态 + L1 节点 RPC 代理（每 IP 限流、缓存；默认只绑回环，`--public` 显式开启并告警）
+- [x] explorer 页接实时数据（同源 fetch + 刷新按钮；无网关时静默保持 SAMPLE DATA 现状，不误标实时）
+- [x] 验收：3 节点 devnet 起网后，经网关取回真实高度与块（代理 `zchain_block_height` 与节点直连一致，块含 DAG commit certificate）
 
-### E2 —— appchain 领域查询
+### E2 —— appchain 领域查询（部分完成）
 
-- [ ] 新增域查询 RPC：`get_settlement`（按 table_id / hand_binding 查结算记录、payout_root、rake、层级）、`get_proven_watermark`（水位 + 缺口集）、批次根与 proof 归档检索（按 binding/digest 下载）
-- [ ] indexer 持久化（archive 节点），支持分页、时间窗、按桌/按手检索与软确认链帧查询
-- [ ] 验收：E2E 一手可在 explorer 全链路检得（块 → op → settlement → payout_root → proof 归档下载）
+- [x] 结算查询：`/api/v1/settlements`（分页 + 桌过滤 + proven/soft_accepted 层级标注）、`/api/v1/settlement/{hand_binding}` 全量明细
+- [x] 水位与批次根：`/api/v1/status`（proven watermark，proven-log 恢复）+ `/api/v1/batch_roots`；契约经 watcher 独立重算交叉校验一致
+- [x] proof 归档检索：证明注册表（pipeline 挂账 JSONL）+ `/api/v1/proof/{binding}` 下载（引擎头 + base64 归档字节）；settlement 明细含 payout_root 与 proof 链接，"帧 → settlement → payout_root → 归档下载"全链路已测试与 smoke 钉住
+- [ ] indexer 持久化（archive 节点级；当前为 replay 态 + 注册表/聚合 sidecar）
 
 ### E3 —— proof portal 本地复验闭环（WEB-ACC-4）
 

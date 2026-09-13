@@ -3,7 +3,7 @@ title: 变更日志
 lang: zh-CN
 section: changelog
 description: docs/ABI 版本、协议变更、迁移与兼容性。
-lead: docs v1.3.0-alpha (ABI v1.2.2)；`latest` 只指向已发布 release。
+lead: docs v1.3.0-alpha (ABI v1.2.3)；`latest` 只指向已发布 release。
 ---
 
 ## docs v1.3.0-alpha（2026-09-12）

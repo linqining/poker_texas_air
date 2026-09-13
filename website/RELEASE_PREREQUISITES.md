@@ -12,7 +12,7 @@
 |---|---|---|---|---|
 | A1 | 生产域名 + DNS + TLS（`zchain.example` 为 §6.1 占位） | WEB-ACC-1 | 占位 | 域名采购、DNS、证书、品牌评审后替换全站链接 |
 | A2 | 静态托管 + CDN + 缓存/限流策略 | WEB-ACC-1 | 本机 `build.py` + http.server 验证 | 选中托管（对象存储/静态托管均可）、部署流水线 |
-| A3 | **portal 后端服务**（explorer/status/transparency/proofs 的实时数据源：Sequencer metrics + 节点 RPC 桥） | WEB-ACC-4 / WEB-ACC-6、§6.5 五服务 | 页面为 SAMPLE DATA 静态层（已标注） | 部署只读网关：`get_metrics`/`get_block` 等既有 RPC → JSON API → 页面接入；缓存与限流按 §6.2 |
+| A3 | **portal 后端服务**（explorer/status/transparency/proofs 的实时数据源：Sequencer metrics + 节点 RPC 桥） | WEB-ACC-4 / WEB-ACC-6、§6.5 五服务 | **explorer 侧已交付**：`explorer_gateway` devnet 网关（WAL 回放 + L1 RPC 代理，真实 3 节点联测一致）+ 页面同源实时接线；status/transparency 实时面板仍待部署 | 生产 portal 部署网关/只读桥（explorer 模式可复用 `explorer_gateway`，加反代同源与 TLS）；缓存与限流已内建（§6.2） |
 | A4 | 线上 status 真实监控与故障演练 | WEB-ACC-6 | **静态层演练已通过**（`tools/status_fault_drill.py` 4 变体） | 接真实健康探测 + 事故记录存储；线上注入一次并归档 |
 | A5 | **release 自动化**：docs tag / ABI 版本 / genesis hash / changelog / SBOM / 签名随 release 同步 | WEB-ACC-5 | 版本号集中定义于 `build.py SITE["ABI_VERSION"]`；changelog 手动 | CI release job：生成 SBOM（cargo-audit/cyclonedx）、签名、写入站点版本端点 |
 | A6 | API 文档从源码 schema 自动生成 | §6.4 | api-reference 页为手工索引 | RPC/ABI schema 导出工具 + 构建钩子 |

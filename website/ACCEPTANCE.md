@@ -65,7 +65,7 @@
 ## WEB-ACC-5 release 自动同步 docs tag、ABI、genesis hash、changelog、SBOM、签名
 
 - 🟡 部分：版本化机制已落地——版本号集中在 `build.py SITE`，docs 页脚
-  `docs v1.3.0-alpha (ABI v1.2.2)`，`/docs/changelog/` 有版本历史与迁移纪律，
+  `docs v1.3.0-alpha (ABI v1.2.3)`，`/docs/changelog/` 有版本历史与迁移纪律，
   `/docs/changelog/versioning/` 定义 latest/next。
 - 自动同步流水线（release → docs tag/genesis hash/SBOM/签名）待发布基础设施。
 
@@ -115,7 +115,7 @@
 
 ## 版本记录
 
-- 本站页脚版本：`docs v1.3.0-alpha (ABI v1.2.2)`，集中定义于 `build.py SITE`。
+- 本站页脚版本：`docs v1.3.0-alpha (ABI v1.2.3)`，集中定义于 `build.py SITE`。
 - 注意：仓库内 `poker-appchain/docs/ABI.md` 头部当前标注 v1.2 / v1.2.1；发布前需
   与 `SITE["ABI_VERSION"]` 同步核对（改一处即可）。
 
@@ -197,6 +197,15 @@ DRILL 行）→ 运行 `build.py` → 断言渲染出的 `dist/status/index.html
   基线一致，本次追加内容（status.md 影响范围列等）未引入回归。
 - 扩展侧既有测试不回归：`validation.test.js` 28/28、`wasm_smoke.mjs` 通过。
   M6-ACC-1 浏览器验证吞吐的新证据见 `extension/ACCEPTANCE.md` 追加节。
+
+## 回归确认（2026-09-13，ABI v1.3 同步）
+
+- `poker-appchain/docs/ABI.md` 升 **v1.3**（新增 §15 洗牌/发牌证明链消费面 +
+  changelog；`build.py SITE["ABI_VERSION"]`/`FOOTER_VERSION` 同步 v1.3）。
+- `python3 website/build.py`：41 页构建成功；`check_links.py` 2569 内链 /
+  42 外链 **0 断链**；`check_a11y.py` 全过（41 页）；`scan_banned_words.py`
+  **0 命中**（59 文件）。
+- 版本串 grep 复核：`dist/` 内页脚呈 `ABI v1.3`，无 `v1.2.4` 残留。
 
 ---
 

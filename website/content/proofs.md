@@ -17,6 +17,22 @@ v1 无 portal 后端。以下表单为接口就绪的静态层：生产环境将
   <p class="kv">当前状态：v1 静态层 &#183; SAMPLE DATA / devnet &#183; 查询接口待 portal 服务</p>
 </form>
 
+## 浏览器扩展侧接线（ZChain Wallet Extension 0.2，已交付）
+
+网页静态表单之上的可用路径：**ZChain 钱包浏览器扩展（0.2.0-alpha）内置 proof
+portal**（扩展页 <code>portal/portal.html</code>，popup 一键打开）。验证一手
+牌的完整流程在本机完成：
+
+<ol>
+<li>输入 hand binding（64 hex）→ 扩展按当前网络解析网关地址（devnet 默认
+<code>http://127.0.0.1:18900</code>，可设置；testnet 未部署公共网关、须显式
+配置），调 explorer 网关 <code>/api/v1/settlement/{binding}</code> 展示结算明细：payout_root、rake（total/treasury/operator）、层级（proven / soft_accepted，网关水位声明，原样展示）。</li>
+<li>拉取 <code>/api/v1/proof/{binding}</code>，展示归档引擎（X-Zchain-Engine）与字节数——<b>STARK 证明本体不在浏览器内验证</b>（stwo-wasm 未交付，如实标注）。</li>
+<li>wallet-core WASM 本地复验<b>结算关系</b>：payout_root 由赔付集合复算比对（与链同一实现）、守恒（Σinputs == pot == Σpayouts + rake）、费率关系（rake.total == plan.rake）、plan 分层自洽——展示 verifier 版本、耗时与逐项结论。任何一项不一致即 rejected；网关不可达/未配置/404 如实报错，不伪造验证结果。</li>
+</ol>
+
+<p class="kv">权限纪律：扩展默认零主机授权；对网关的跨源访问由用户在 portal 页内显式授予（可选主机权限，chrome.permissions.request），或网关以 <code>--public</code> 启动（CORS *）。验收记录见仓库 <code>extension/ACCEPTANCE.md</code>（真实 explorer_gateway + wallet-core wasm 复验 verified）。</p>
+
 ## 独立验证命令（现在可用）
 
 不依赖任何网页或运营方服务，直接用钱包 crate 的 CLI 验证证明文件（`poker-wallet` crate 由并行工作提供，命令以该接口为准）：

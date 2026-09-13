@@ -45,8 +45,8 @@ SITE = {
     "NETWORK": "devnet",
     "NETWORK_FULL": "zchain-poker-devnet",
     "DOCS_VERSION": "v1.3.0-alpha",
-    "ABI_VERSION": "v1.2.2",
-    "FOOTER_VERSION": "docs v1.3.0-alpha (ABI v1.2.2)",
+    "ABI_VERSION": "v1.3",
+    "FOOTER_VERSION": "docs v1.3.0-alpha (ABI v1.3)",
     "SITE_VERSION": "site v0.1.0 (media-kit v0.1)",
     "URL_BASE": "https://zchain.example",  # §6.1：上线前替换为已过 DNS/TLS/品牌审核的域名
     "DOCS_BASE": "https://docs.zchain.example",

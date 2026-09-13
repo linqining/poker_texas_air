@@ -20,5 +20,5 @@ lead: 草案进入 next，不覆盖已部署网络的规范。
 
 ## 当前指向
 
-- `latest`：docs v1.3.0-alpha（ABI v1.2.2）——devnet 阶段文档，尚无已部署网络，latest 即唯一通道。
+- `latest`：docs v1.3.0-alpha（ABI v1.2.3）——devnet 阶段文档，尚无已部署网络，latest 即唯一通道。
 - `next`：空（无未发布草案）。
