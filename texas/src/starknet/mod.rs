@@ -16,14 +16,20 @@
 //!   - [`recursion_prover`] / [`settlement_prover`]：证明生成
 //!     （SNIP-36 递归信封 / settlement 电路）
 //! - 基础设施
-//!   - [`config`]：环境变量配置（RPC、操作员账户、合约地址）
+//!   - [`config`]：环境变量配置（RPC、操作员账户、合约地址、结算出口）
 //!   - [`chain`]：全局 `StarknetChain` 单例（provider + 操作员账户）及
 //!     felt 解析 / selector / hex 公共辅助
 //!   - [`auth`]：Starknet 钱包签名验证（isValidSignature 视图调用）
 //!   - [`chips`]：vault 筹码余额 / 买入交易回执校验
 //!   - [`paymaster`]：Plan C paymaster 中继（paymaster_* JSON-RPC 透传）
+//! - B6/B7 appchain 出口（`STARKNET_SETTLEMENT_EXIT=appchain` 默认 dev）
+//!   - [`appchain`]：嵌入式 sequencer 结算出口（`SettlementExit` 路由、
+//!     本地 SettlementProver、SOFT_CONFIRM 软确认事件、VaultProvider
+//!     出入金桥 + 自动对账；遗留 Starknet 路径保留可配）
 
 pub mod auth;
+/// B6/B7：嵌入式 appchain 结算出口（sequencer + ProofPipeline）与出入金桥。
+pub mod appchain;
 pub mod chain;
 pub mod chips;
 #[cfg(test)]

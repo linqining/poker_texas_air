@@ -273,6 +273,7 @@ pub fn record_payout(table: &mut Table, wallet: &str, amount: u64) {
 }
 
 /// 结算输入：HandStart 快照 + 游戏层终局事实（对账基准）。
+#[derive(Debug, Clone)]
 pub struct HandSettleInput {
     pub table_id: u32,
     /// HandStart 快照（非 Optional：None 时 take_settle_input 直接返回 None）。

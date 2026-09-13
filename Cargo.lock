@@ -2305,6 +2305,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "poker-appchain"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "blake2",
+ "borsh",
+ "ed25519-dalek",
+ "hex",
+ "poker-settlement-core",
+ "rayon",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "starknet-crypto 0.6.2",
+ "starknet-ff",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "poker-hand-bench"
 version = "0.1.0"
 dependencies = [
@@ -2369,6 +2389,16 @@ dependencies = [
  "rayon",
  "sha3",
  "tracing",
+]
+
+[[package]]
+name = "poker-settlement-core"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "borsh",
+ "starknet-crypto 0.6.2",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3737,11 +3767,14 @@ dependencies = [
  "chrono",
  "clap",
  "dotenv",
+ "ed25519-dalek",
  "hand-verify-native",
  "hex",
  "itertools 0.14.0",
  "jsonwebtoken",
+ "poker-appchain",
  "poker-protocol-core",
+ "poker-settlement-core",
  "poker_l1",
  "poker_protocol",
  "poker_texas_air",

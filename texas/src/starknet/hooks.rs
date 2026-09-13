@@ -163,6 +163,60 @@ async fn settle_from_live_mirror(
         return;
     }
 
+    // ===== B6：Appchain 结算出口（默认，STARKNET_SETTLEMENT_EXIT=appchain）=====
+    // 嵌入式 sequencer 软确认 + 本地出证（终局对账已通过：board/rake/
+    // 逐钱包 deltas 的分歧在 finish().issues 已 fail-closed 拒绝）。任何
+    // 失败（手型不支持/账本不齐/REAL 缺归档/出证超时）回退下方遗留
+    // Starknet 路径——结算绝不因出口改造丢失。放在 legacy prove 之前：
+    // 两条证明栈不重复执行。
+    if super::chain()
+        .map(|c| c.config.settlement_exit_appchain())
+        .unwrap_or(true)
+        && super::appchain::runtime::runtime().is_some()
+    {
+        // REAL 桌的 canonical 归档由归档生产者供给（v1 残余边界：归档
+        // 生产者未接线，REAL 手在此显式回退遗留路径，见 BLOCKERS B6）。
+        let appchain_hand_proof = None;
+        let appchain_mirror = mirror.clone();
+        let appchain_input = input.clone();
+        // settle_from_mirror 是 CPU 重活（REAL 含 STARK 全验证），
+        // spawn_blocking 避免占死 tokio worker。
+        let attempt = tokio::task::spawn_blocking(move || {
+            super::appchain::exit::settle_from_mirror(
+                &appchain_mirror,
+                appchain_input.table_id,
+                appchain_input.start.hand_id,
+                &appchain_input.start.participants,
+                appchain_input.rake_collected,
+                appchain_hand_proof,
+            )
+        });
+        match attempt.await {
+            Ok(Ok(receipt)) => {
+                let _ = settle_ok_once(table_id, hand_id);
+                tracing::info!(
+                    "[appchain-exit] table {table_id} hand {hand_id} on appchain: op={} proven={} root={:?}",
+                    receipt.settle_op_index,
+                    receipt.proven,
+                    receipt.batch_root.map(|r| hex_encode(&r)),
+                );
+                // 遗留路径的 vault session 续钟不适用（嵌入式出口无链上
+                // vault session）；离桌释放等锁定语义由游戏层自持。
+                return;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "[appchain-exit] table {table_id} hand {hand_id} failed: {e} — falling back to legacy starknet path"
+                );
+            }
+            Err(join_err) => {
+                tracing::warn!(
+                    "[appchain-exit] table {table_id} hand {hand_id} task panicked: {join_err:?} — falling back to legacy starknet path"
+                );
+            }
+        }
+    }
+
     // 台费接收方：平台 treasury 地址（STARKNET_TREASURY_ADDRESS），
     // 未配置时缺省 operator（#27 遗留注释已实现，2026-09-04 清理）。
     let rake_recipient = {

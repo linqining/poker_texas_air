@@ -105,6 +105,10 @@ pub mod blake3_flock;
 /// Blake2b authentication of the canonical table-rules preimage and the
 /// fixed-width rake opening consumed by raked settlement terminals.
 pub mod canonical_rake_opening;
+/// Shuffle/deal proof-chain stage-0 producer + native two-sided BG/DLEq/V3
+/// verification (`shuffle-chain stage0`; docs/shuffle-deal-proof-design.md §4
+/// milestone 0, route A upstream half).
+pub mod canonical_shuffle_chain;
 pub mod canonical_reveal_opening;
 /// Lookup-backed authentication of canonical state-image byte preimages.
 pub mod canonical_state_hash;

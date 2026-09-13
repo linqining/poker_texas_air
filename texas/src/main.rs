@@ -42,6 +42,7 @@ async fn main() -> std::io::Result<()> {
 
     // Starknet 链客户端（dev 模式下 RPC 为空也可启动，买入/结算校验自动放行）。
     let sn_config = starknet::StarknetConfig::from_env();
+    let settlement_exit_name = sn_config.settlement_exit_name().to_string();
     if sn_config.rpc_enabled() {
         tracing::info!(
             "Starknet enabled: rpc={} settlement={} vault={}",
@@ -57,8 +58,26 @@ async fn main() -> std::io::Result<()> {
         "Prover mode: {:?} (TEXAS_PROVER_MODE; dev = in-process local prover, remote = STARKNET_PROVER_URL service)",
         starknet::shadow::prover_mode()
     );
+    tracing::info!(
+        "Settlement exit: {settlement_exit_name} (STARKNET_SETTLEMENT_EXIT; appchain = embedded sequencer, starknet = legacy calldata)"
+    );
     // Plan C：paymaster 中继（未配置时自动禁用，客户端回退直签）。
     starknet::paymaster::init_from_env();
+
+    // B6/B7：嵌入式 appchain 运行时（sequencer WAL + 证明管道 + 出入金桥 +
+    // 自动对账；TEXAS_APPCHAIN=0 显式关闭）。失败降级为遗留路径并告警
+    // （服务器绝不因 appchain 装配失败拒绝服务）。
+    if starknet::appchain::AppchainConfig::from_env().enabled {
+        match starknet::appchain::runtime::init(starknet::appchain::AppchainConfig::from_env()) {
+            Ok(rt) => {
+                tracing::info!(
+                    "Appchain runtime ready (attestor 0x{})",
+                    starknet::chain::hex_encode(&rt.attestor_public)
+                );
+            }
+            Err(e) => tracing::error!("Appchain runtime init failed: {e} — settlements fall back to legacy starknet path"),
+        }
+    }
 
     let db = Database::new();
 

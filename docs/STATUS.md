@@ -200,3 +200,5 @@ selectors; no-seat sentinel for seatless micro-steps).
   old perf reports, trust-model/replay essays, migration blueprints).
 
 Document map: [`docs/README.md`](README.md).
+
+- **2026-09-12（shuffle-chain stage0，路线 A+B 上游半边）**：`src/canonical_shuffle_chain.rs` 生产者+原生 BG/DLEq/V3 双端校验落地；单批全链 13 行（7/8 协议行+下注+结算）prove/verify 绿、log 8 判定维持；新缺口记录：street 断点（StartHand→RevealComplete 不可直连）、级联批隔离、reconstruct 续链不可表达——实测详见 zchain `poker-appchain/docs/SHUFFLE_STAGE0.md`。

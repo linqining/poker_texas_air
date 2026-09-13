@@ -917,6 +917,7 @@ async fn sepolia_settle_smoke() {
         auth_strict: false,
         treasury_address: op_addr.clone(),
         table_registry_address: String::new(),
+        settlement_exit: "starknet".into(),
     };
     let chain = super::init(config);
     let operator = chain.operator().await.expect("operator account");

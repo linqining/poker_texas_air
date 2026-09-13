@@ -1,0 +1,14 @@
+[package]
+name = "stwo-vector-gen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 独立于上层 cargo workspace（本目录未来将单独成仓库）。
+[workspace]
+
+[dependencies]
+stwo = "=2.3.0"
+
+[profile.release]
+opt-level = 3

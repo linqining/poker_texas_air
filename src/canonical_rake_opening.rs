@@ -31,7 +31,9 @@ pub const CANONICAL_RULES_DOMAIN: &[u8] = b"zchain.texas.rules.v2";
 /// The authenticated rake-relevant projection of one rules opening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct CanonicalRakeOpening {
-    /// `RAKE_MODE_NONE` (0) or `RAKE_MODE_PERCENTAGE` (1).
+    /// `RAKE_MODE_NONE` (0), `RAKE_MODE_PERCENTAGE` (1), or
+    /// `RAKE_MODE_FIXED_RAKE_BURN` (2).  Discriminators are frozen across the
+    /// three repos (see poker-appchain `docs/ABI_TE.md`).
     pub rake_mode: u8,
     /// Basis points, at most 10_000.
     pub rake_bps: u16,
@@ -49,6 +51,13 @@ impl CanonicalRakeOpening {
 
     /// The percentage-mode discriminator used by raked settlement terminals.
     pub const PERCENTAGE_MODE: u8 = 1;
+
+    /// The fixed-rake-with-burn discriminator (TE-E0, frozen = 2): identical
+    /// charging-quantity relation to percentage mode, but the collected rake
+    /// is burned on the L1 contract side (poker_l1, TE-M4).  The opening only
+    /// authenticates the charging quantity relation — the burn fund-disposal
+    /// rules live entirely in the contract.
+    pub const FIXED_RAKE_BURN_MODE: u8 = 2;
 }
 
 /// The authenticated blind/ante projection of one rules opening (#22②
@@ -199,7 +208,7 @@ fn decode_rules_statement(message: &[u8]) -> TexasAirResult<TableRules> {
 pub fn validate_rules_opening(rules: &TableRules) -> TexasAirResult<()> {
     if !matches!(
         rules.rake_mode,
-        0 | 1 // RAKE_MODE_NONE | RAKE_MODE_PERCENTAGE
+        0 | 1 | 2 // RAKE_MODE_NONE | RAKE_MODE_PERCENTAGE | RAKE_MODE_FIXED_RAKE_BURN (TE-E0, frozen)
     ) || rules.rake_bps > 10_000
     {
         return Err(TexasAirError::SpecViolation(
@@ -230,6 +239,12 @@ pub fn validate_rules_opening(rules: &TableRules) -> TexasAirResult<()> {
 /// Deterministic rake for a raked settlement terminal, mirroring the VM's
 /// `compute_rake_amount` exactly: `min(floor(pot * bps / 10_000), cap, pot)`,
 /// and zero when the mode is `RAKE_MODE_NONE`.
+///
+/// TE-E0: `RAKE_MODE_FIXED_RAKE_BURN` (2) charges with the **same percentage
+/// shape** — the charging-quantity relation is identical to percentage mode,
+/// which is precisely what the opening/AIR prove.  Only the fund disposal of
+/// the collected amount differs (burned on the L1 contract side, poker_l1 /
+/// TE-M4); that disposal is *not* modelled here.
 #[must_use]
 pub fn canonical_settlement_rake(pot: u64, opening: &CanonicalRakeOpening) -> u64 {
     if opening.rake_mode == 0 {
@@ -575,5 +590,69 @@ mod tests {
             canonical_settlement_rake(100_000, &rake_opening_of(&none)),
             0
         );
+    }
+
+    // ---- TE-E0: FIXED_RAKE_BURN (2), frozen discriminator ----
+
+    /// TE-E0: discriminators are frozen across the three repos.
+    #[test]
+    fn rake_mode_discriminators_are_frozen() {
+        assert_eq!(CanonicalRakeOpening::ZERO.rake_mode, 0);
+        assert_eq!(CanonicalRakeOpening::PERCENTAGE_MODE, 1);
+        assert_eq!(CanonicalRakeOpening::FIXED_RAKE_BURN_MODE, 2);
+    }
+
+    /// Mode 2 opens with the same charging-quantity relation as mode 1: the
+    /// authenticated opening accepts it and `canonical_settlement_rake`
+    /// charges the identical `min(floor(pot*bps/10^4), cap, pot)` amount.
+    /// Burn fund disposal is contract-side and intentionally absent here.
+    #[test]
+    fn fixed_rake_burn_opening_charges_like_percentage() {
+        let mut burn = rules();
+        burn.rake_mode = CanonicalRakeOpening::FIXED_RAKE_BURN_MODE;
+        let opening = rake_opening_of(&burn);
+        assert_eq!(opening.rake_mode, 2);
+        assert_eq!(opening, CanonicalRakeOpening {
+            rake_mode: 2,
+            rake_bps: 500,
+            rake_cap: 1_000,
+        });
+
+        // Identical charging relation to percentage mode for every probe pot.
+        let percentage = rake_opening_of(&rules());
+        for pot in [0u64, 3, 90, 999, 19_999, 100_000, u32::MAX as u64] {
+            assert_eq!(
+                canonical_settlement_rake(pot, &opening),
+                canonical_settlement_rake(pot, &percentage),
+                "mode 2 must charge exactly like mode 1 (charging relation only)"
+            );
+        }
+        // Spot anchors: floor, cap, pot bound.
+        assert_eq!(canonical_settlement_rake(90, &opening), 4);
+        assert_eq!(canonical_settlement_rake(100_000, &opening), 1_000);
+        assert_eq!(canonical_settlement_rake(3, &opening), 0);
+
+        // The authenticated rules opening round-trips a mode-2 configuration.
+        let commitment = canonical_rules_commitment(&burn).unwrap();
+        let archive = prove_canonical_rules_hash(&burn).expect("burn rules proof");
+        let authenticated =
+            verify_canonical_rules_hash(&archive, commitment).expect("burn rules verify");
+        assert_eq!(authenticated.rake, opening);
+        assert_eq!(authenticated.rules, burn);
+
+        // The combined hand-opening batch accepts a mode-2 rules preimage too.
+        // (Statement construction is mode-agnostic; verified above.)
+    }
+
+    /// Unknown modes stay fail-closed: only 0 | 1 | 2 pass the opening
+    /// validation, so a mode-3 configuration cannot smuggle into the
+    /// settlement arithmetic.
+    #[test]
+    fn unknown_rake_mode_is_rejected_by_opening_validation() {
+        let mut unknown = rules();
+        unknown.rake_mode = 3;
+        let commitment = canonical_rules_commitment(&unknown).unwrap();
+        let archive = prove_canonical_rules_hash(&unknown).expect("rules hash proof");
+        assert!(verify_canonical_rules_hash(&archive, commitment).is_err());
     }
 }

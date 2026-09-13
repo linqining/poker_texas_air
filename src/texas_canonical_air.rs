@@ -8593,7 +8593,17 @@ impl FrameworkEval for CanonicalAir {
                     * (rc_stack_nonzero_inv[index].clone() * post_stack_sum - posts_blind),
             );
         }
-        eval.add_constraint(is_reveal_raked_award.clone() * (rake_config[0].clone() - one.clone()));
+        // TE-E0: raked rows carry either percentage mode (1) or the frozen
+        // FIXED_RAKE_BURN mode (2).  The charging-quantity relation below is
+        // identical for both — only the L1 contract-side disposal of the
+        // collected amount differs, which the AIR does not model.  The two
+        // roots pin the mode to exactly {1, 2}; any other value fails
+        // (fail-closed), and mode 0 must use the plain award selector.
+        eval.add_constraint(
+            is_reveal_raked_award.clone()
+                * (rake_config[0].clone() - one.clone())
+                * (rake_config[0].clone() - E::F::from(M31::from(2u32))),
+        );
         let rake_bps = rake_config[1].clone();
         let rake_cap_limbs: [E::F; 4] = [
             rake_config[2].clone(),
@@ -11047,6 +11057,37 @@ mod tests {
         let opening = crate::canonical_rake_opening::rake_opening_of(&rules);
         let rake = crate::canonical_rake_opening::canonical_settlement_rake(90, &opening);
         assert_eq!(rake, 4);
+        witness.kind = CanonicalTransitionKind::RevealTimeoutRakedAward;
+        witness.rake_opening = opening;
+        witness.pre.rules_commitment =
+            crate::canonical_rake_opening::canonical_rules_commitment(&rules).unwrap();
+        witness.post.rules_commitment = witness.pre.rules_commitment;
+        witness.post.seats[2].stack -= rake;
+        witness.post.chip_pool -= rake;
+        witness.seal();
+        witness
+    }
+
+    /// TE-E0: table rules carrying the frozen `FIXED_RAKE_BURN` (2) mode.
+    /// The charging relation (bps/cap) is identical to [`raked_table_rules`];
+    /// the burn fund disposal is contract-side (poker_l1, TE-M4) and is not
+    /// modelled in the canonical relation or the AIR.
+    fn burn_table_rules() -> poker_l1::contracts::texas_poker::types::TableRules {
+        let mut rules = raked_table_rules();
+        rules.rake_mode =
+            crate::canonical_rake_opening::CanonicalRakeOpening::FIXED_RAKE_BURN_MODE;
+        rules
+    }
+
+    /// TE-E0: a burn-mode raked sole-survivor terminal — same charging
+    /// arithmetic as [`reveal_timeout_raked_award`], mode discriminator 2.
+    fn reveal_timeout_burn_award() -> CanonicalTransitionWitness {
+        let mut witness = reveal_timeout_award();
+        let rules = burn_table_rules();
+        let opening = crate::canonical_rake_opening::rake_opening_of(&rules);
+        let rake = crate::canonical_rake_opening::canonical_settlement_rake(90, &opening);
+        assert_eq!(rake, 4);
+        assert_eq!(opening.rake_mode, 2);
         witness.kind = CanonicalTransitionKind::RevealTimeoutRakedAward;
         witness.rake_opening = opening;
         witness.pre.rules_commitment =
@@ -13912,6 +13953,74 @@ mod tests {
         invalid.post.chip_pool -= 1;
         invalid.seal();
         assert!(invalid.validate_shape().is_err());
+    }
+
+    // ---- TE-E0: FIXED_RAKE_BURN (2), frozen discriminator ----
+
+    /// TE-E0: a mode-2 raked terminal is a valid witness and its trace
+    /// satisfies the full AIR.  Mode 2 flows through the Fiat--Shamir
+    /// transcript mix and the RAKE_SCOPE preprocessed columns exactly like
+    /// mode 1 — the AIR proves only the charging-quantity relation
+    /// `min(floor(pot*bps/10^4), cap, pot)`; burn disposal is contract-side.
+    #[test]
+    fn canonical_reveal_timeout_burn_award_trace_satisfies_air() {
+        let witness = reveal_timeout_burn_award();
+        witness.validate_shape().expect("burn-mode raked terminal");
+        let (trace, archive) = trace_for(std::slice::from_ref(&witness)).expect("burn trace");
+        assert_eq!(
+            archive.rake_opening.map(|rake| rake.rake_mode),
+            Some(crate::canonical_rake_opening::CanonicalRakeOpening::FIXED_RAKE_BURN_MODE),
+            "mode 2 must be carried into the public batch scope"
+        );
+        assert_trace_satisfies_air(&trace, &archive);
+    }
+
+    /// TE-E0: the burn fixture keeps the same fail-closed boundaries as the
+    /// percentage fixture — unknown modes (3) and the zero mode are rejected
+    /// before proving, and the credited amounts must stay exact.
+    #[test]
+    fn canonical_reveal_timeout_burn_award_rejects_witness_forgeries() {
+        let witness = reveal_timeout_burn_award();
+        witness.validate_shape().expect("valid burn-mode terminal");
+        // Unknown rake mode 3 stays fail-closed.
+        let mut invalid = witness.clone();
+        invalid.rake_opening.rake_mode = 3;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        // A zero-rake configuration must use the plain award selector.
+        let mut invalid = witness.clone();
+        invalid.rake_opening.rake_mode = 0;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+        // The charging arithmetic is exact: undercharging by one chip fails.
+        let mut invalid = witness;
+        invalid.post.seats[2].stack += 1;
+        invalid.post.chip_pool -= 1;
+        invalid.seal();
+        assert!(invalid.validate_shape().is_err());
+    }
+
+    /// TE-E0: end-to-end STARK prove/verify for a mode-2 raked terminal.
+    #[ignore = "slow prove (~10s); full gate runs `--include-ignored`"]
+    #[test]
+    fn canonical_direct_air_proves_reveal_timeout_burn_award() {
+        let witness = reveal_timeout_burn_award();
+        witness
+            .validate_shape()
+            .expect("reveal-timeout burn-mode raked award witness");
+        let rules = burn_table_rules();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("burn-mode raked award trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        let archive =
+            prove_canonical_raked_tagged_batch(std::slice::from_ref(&witness), &rules)
+                .expect("burn-mode raked award proof");
+        verify_canonical_tagged_batch(std::slice::from_ref(&witness), &archive)
+            .expect("burn-mode raked award verification");
+        assert_eq!(
+            archive.rake_opening.map(|rake| rake.rake_mode),
+            Some(crate::canonical_rake_opening::CanonicalRakeOpening::FIXED_RAKE_BURN_MODE)
+        );
     }
 
     #[test]

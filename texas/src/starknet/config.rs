@@ -83,6 +83,10 @@ pub struct StarknetConfig {
     /// PokerTableRegistry 合约地址（`STARKNET_TABLE_REGISTRY_ADDRESS`）。
     /// 留空 = 纯链下模式（不建链上桌台锚点）。
     pub table_registry_address: String,
+    /// B6：结算出口（`STARKNET_SETTLEMENT_EXIT`，默认 `appchain` 供 dev）。
+    /// `appchain` = 嵌入式 sequencer 软确认链 + 本地出证（失败回退本枚举
+    /// 的另一侧）；`starknet` = 遗留路径（行为与改造前逐字节一致）。
+    pub settlement_exit: String,
     // 抽水参数不在本结构：链上/链下同一来源
     // `crate::pokergame::rake::rake_params`（STARKNET_RAKE_BPS/CAP）。
 }
@@ -134,6 +138,22 @@ impl StarknetConfig {
             treasury_address: std::env::var("STARKNET_TREASURY_ADDRESS").unwrap_or_default(),
             table_registry_address: std::env::var("STARKNET_TABLE_REGISTRY_ADDRESS")
                 .unwrap_or_default(),
+            settlement_exit: std::env::var("STARKNET_SETTLEMENT_EXIT").unwrap_or_default(),
+        }
+    }
+
+    /// B6：结算出口是否为嵌入式 appchain（默认；`starknet` 显式回旧路）。
+    pub fn settlement_exit_appchain(&self) -> bool {
+        super::appchain::SettlementExit::parse(&self.settlement_exit)
+            == super::appchain::SettlementExit::Appchain
+    }
+
+    /// 归一化的出口值（观测/日志用）。
+    pub fn settlement_exit_name(&self) -> &'static str {
+        if self.settlement_exit_appchain() {
+            "appchain"
+        } else {
+            "starknet"
         }
     }
 

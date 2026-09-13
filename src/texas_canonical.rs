@@ -2087,12 +2087,22 @@ fn validate_reveal_timeout_award(w: &CanonicalTransitionWitness) -> Result<(), S
 
 /// Raked sole-survivor reveal-timeout terminal.  Identical shape to
 /// [`validate_reveal_timeout_award`], except the authenticated rules opening
-/// carries a percentage rake configuration: the AIR proves
+/// carries a raked configuration: the AIR proves
 /// `rake = min(floor(pot * bps / 10_000), cap, pot)`, the survivor is
 /// credited `pot - rake`, and the rake leaves table custody.
+///
+/// TE-E0: both `PERCENTAGE_MODE` (1) and `FIXED_RAKE_BURN_MODE` (2) are
+/// accepted — the charging-quantity relation is identical, which is all this
+/// relation (and the AIR) prove.  How the collected amount is disposed of
+/// (treasury/operator split vs. burn) is a poker_l1 contract-side rule and
+/// deliberately not modelled here.
 fn validate_reveal_timeout_raked_award(w: &CanonicalTransitionWitness) -> Result<(), String> {
     let opening = &w.rake_opening;
-    if opening.rake_mode != crate::canonical_rake_opening::CanonicalRakeOpening::PERCENTAGE_MODE
+    if !matches!(
+        opening.rake_mode,
+        crate::canonical_rake_opening::CanonicalRakeOpening::PERCENTAGE_MODE
+            | crate::canonical_rake_opening::CanonicalRakeOpening::FIXED_RAKE_BURN_MODE
+    )
         || opening.rake_bps == 0
         || opening.rake_bps > 10_000
         || w.pre.pot > u32::MAX as u64
