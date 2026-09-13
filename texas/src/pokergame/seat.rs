@@ -96,7 +96,14 @@ impl Seat {
         self.has_acted = true;
     }
 
+    /// 投盲注（min(amount, stack)）。调用方（set_blinds 的 dead button
+    /// 推导）必须保证本座位参与本手——防御性断言：sitting out / 等待
+    /// 入局 / 已离场座位不得被扣盲注（资金正确性红线）。
     pub fn place_blind(&mut self, amount: u64) -> u64 {
+        debug_assert!(
+            !self.sitting_out && !self.is_waiting && !self.left_during_hand,
+            "place_blind on a non-participating seat (dead-button track violated)"
+        );
         let actual = if amount > self.stack { self.stack } else { amount };
         self.bet = actual;
         self.total_bet += actual;

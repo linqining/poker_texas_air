@@ -40,22 +40,30 @@ impl Table {
         self.advance_shuffle();
     }
 
-    /// 对齐 Move move_button（table.move:2028-2040）：
-    /// 从当前 button+1 开始找下一个 occupied 座位。
+    /// Dead button 规则（Robert's Rules of Poker §4.2b）：按钮每手无条件
+    /// 前进一个座位——落点允许是空座位 / sitting out 座位（该手为"死按钮"，
+    /// 不承担 button 职责），**不**跳过任何座位。跳过会把过渡手的盲注轨道
+    /// 整体前移，偏离标准语义。无按钮（新桌首手）时退回旧逻辑：从座位 1
+    /// 起找第一个有人的座位。
     pub fn move_button(&mut self) {
         let max = self.max_players();
         let cur = self.button().unwrap_or(0);
-        let mut next = cur + 1;
-        for _ in 0..max {
-            if next > max {
-                next = 1;
+        if cur == 0 {
+            let mut next = 1;
+            for _ in 0..max {
+                if next > max {
+                    next = 1;
+                }
+                if self.seats().contains_key(&next) {
+                    self.set_button(Some(next));
+                    return;
+                }
+                next += 1;
             }
-            if self.seats().contains_key(&next) {
-                self.set_button(Some(next));
-                return;
-            }
-            next += 1;
+            return;
         }
+        let next = if cur >= max { 1 } else { cur + 1 };
+        self.set_button(Some(next));
     }
 
     /// 对齐 Move start_preflop_shuffle（table.move:845-848）：
@@ -127,63 +135,76 @@ impl Table {
         }
     }
 
-    /// 对齐 Move post_blinds：发布盲注 + 设置首行动作（current_turn）。
-    /// 非 heads-up: 首行动作 = BB 后第一个活跃玩家（UTG）
-    /// heads-up: 首行动作 = SB/Button
+    /// Dead button 盲注定位（镜像 poker_l1 post_blinds，§4.2b）：
+    /// - **大盲**：上一手大盲座位（`last_bb_seat`；首手退化为 button）之后
+    ///   顺时针第一个参与座位（active = 在座且非 sitting out / 非等待入局）。
+    ///   轮转永不跳人、永不重复——无人连续两手交大盲。
+    /// - **小盲（非单挑）**：上一手大盲座位本身——该座位空缺 / 离场 / 等
+    ///   待时本手**无小盲**（dead small blind），不向其后顺延。
+    /// - **单挑（2 名参与者）**：大盲按轮转归属，小盲 = 大盲之外另一参与
+    ///   玩家（承担 button 职责：翻牌前先行动、翻牌后后行动）。
+    ///
+    /// 首行动作（UTG）= 大盲之后第一个可行动座位（翻牌前；单挑时该扫描
+    /// 恰好落在小盲身上，与真实规则一致；小盲 all-in 时顺延到大盲）。
     pub fn set_blinds(&mut self) {
         let is_heads_up = self.active_players().len() == 2;
         let button = self.button().unwrap_or(1);
-
+        let last_bb = self.last_bb_seat();
+        let rotation_base = if last_bb > 0 && last_bb <= self.max_players() {
+            last_bb
+        } else {
+            button
+        };
+        // 大盲：轮转基准之后第一个参与座位。
+        let bb = self.next_active_player(rotation_base, 1).unwrap_or(rotation_base);
+        // 小盲：单挑 = 大盲之外另一参与者；非单挑 = 上一手大盲座位本身
+        //（仍参与且 != 大盲时），否则本手无小盲。
         let sb = if is_heads_up {
-            Some(button)
+            self.next_active_player(bb, 1).or(Some(bb))
+        } else if rotation_base != bb {
+            let base_participating = self
+                .seats()
+                .get(&rotation_base)
+                .map(|s| !s.sitting_out && !s.is_waiting)
+                .unwrap_or(false);
+            if base_participating {
+                Some(rotation_base)
+            } else {
+                None
+            }
         } else {
-            self.next_active_player(button, 1)
+            None
         };
-        self.set_small_blind(sb);
-        let bb = if is_heads_up {
-            self.next_active_player(button, 1)
-        } else {
-            self.next_active_player(button, 2)
-        };
-        self.set_big_blind(bb);
+        // 盲注轨道落点：本手大盲座位成为下一手的轮转基准（跨手持久）。
+        self.set_last_bb_seat(Some(bb));
 
         let mut sb_amount: u64 = 0;
         let mut bb_amount: u64 = 0;
 
-        if let Some(sb) = self.small_blind() {
+        if let Some(sb) = sb {
             if let Some(seat) = self.local_seats.get_mut(&sb) {
                 let actual_sb = seat.place_blind(self.summary.min_bet);
                 sb_amount = actual_sb;
             }
         }
-        if let Some(bb) = self.big_blind() {
-            if let Some(seat) = self.local_seats.get_mut(&bb) {
-                let actual_bb = seat.place_blind(self.summary.min_bet * 2);
-                bb_amount = actual_bb;
-            }
+        if let Some(seat) = self.local_seats.get_mut(&bb) {
+            let actual_bb = seat.place_blind(self.summary.min_bet * 2);
+            bb_amount = actual_bb;
         }
 
         self.set_pot(self.pot() + sb_amount + bb_amount);
         self.summary.call_amount = Some(self.summary.min_bet * 2);
         self.set_min_raise(self.summary.min_bet * 2); // = big_blind; minimum re-raise equals the big blind
+        self.set_small_blind(sb);
+        self.set_big_blind(Some(bb));
 
         // 对齐 Move post_blinds：设置首行动作
+        // UTG = 大盲之后第一个可行动座位（next_unfolded 跳过 all-in /
+        // folded / sitting out / waiting）。单挑时该座位即小盲（小盲
+        // all-in 时顺延到大盲，与原 sb_all_in 特例等价）。
         // C5 修复扩展：盲注后可能全员 all-in，需要检查是否有可行动玩家
         if self.has_actionable_player() {
-            let first_to_act = if is_heads_up {
-                // heads-up: SB/Button 先行动，但 SB 可能已 all-in
-                let sb_all_in = self.seats().get(&sb.unwrap_or(button))
-                    .map_or(true, |s| s.stack == 0);
-                if sb_all_in {
-                    // SB all-in，找下一个可行动玩家（BB 或更远）
-                    self.next_unfolded_player(sb.unwrap_or(button), 1)
-                } else {
-                    sb
-                }
-            } else {
-                // 非 heads-up: BB 后第一个活跃玩家
-                self.next_unfolded_player(bb.unwrap_or(button), 1)
-            };
+            let first_to_act = self.next_unfolded_player(bb, 1);
             self.set_turn(first_to_act);
         } else {
             // 全员 all-in，不设置 turn，start_betting_round 会跳过下注轮

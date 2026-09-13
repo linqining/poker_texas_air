@@ -90,15 +90,20 @@ pub const TEXAS_POKER_GOVERNANCE_OBJECT_TYPE: &str = "TexasPokerGovernancePolicy
 /// Version 34（2026-09-11）桌台名出共识：`TexasPokerTable` 不再携带 `name`，
 /// 展示名只存于非共识 metadata 对象（`TexasPokerTableMetadata`）。Incompatible
 /// older layouts are deliberately unsupported.
-pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 34;
+/// Version 36（2026-09-13）dead button 盲注轨道：`TexasPokerTable` 新增
+/// `last_bb_seat`（上一手大盲座位，`NO_SEAT` 表示无历史），完整实现
+/// Robert's Rules of Poker §4.2b。Incompatible older layouts are
+/// deliberately unsupported.
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 36;
 
 /// ObjectDb-only hot-state schema.
 ///
-/// Runtime/proof snapshots use resolved schema v34（座位定宽 + tx_pk 定宽，
-/// 无桌台名）. The v35 ObjectDb encoding combines immutable rules/governance
-/// context commitments with the same physical tagged-seat and typed-reveal
-/// representation；metadata 对象不再被热状态 digest 绑定（展示名非共识）.
-pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 35;
+/// Runtime/proof snapshots use resolved schema v36（v34 定宽布局 + dead
+/// button 盲注轨道 `last_bb_seat`，无桌台名）. The v37 ObjectDb encoding
+/// combines immutable rules/governance context commitments with the same
+/// physical tagged-seat and typed-reveal representation；metadata 对象不再
+/// 被热状态 digest 绑定（展示名非共识）.
+pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 37;
 
 // Phase 3.3: TexasPokerPrecompile impl（待 state_machine/dispatch 完成后补）
 // pub struct TexasPokerPrecompile { ... }

@@ -177,6 +177,7 @@ impl TableMirror {
         deck: Vec<PtxElGamalCiphertext>,
         plan: &[(poker_l1::Address, u64, PtxECPoint, Option<poker_l1::signature::TaggedPubkey>, Vec<u8>)],
         button_rank: u8,
+        last_bb_rank: u8,
         hand_id: u32,
     ) -> Result<(), String> {
         // 全新手状态（TableMirror 由调用方刚构造）：清上一手残留，保证
@@ -206,8 +207,11 @@ impl TableMirror {
         }
 
         // button 对齐：游戏层按钮在参与座位中的 rank（VM post_blinds 据此
-        // 计算盲注位置，与游戏层盲注玩家保持一致）。
+        // 计算盲注位置，与游戏层盲注玩家保持一致）。dead button 轮转轨道
+        // last_bb_rank 一并注入：VM post_blinds 的轮转基准与游戏层
+        // set_blinds 同源，过渡手（dead small blind 等）逐位一致。
         self.table.button = button_rank.min(self.table.max_players.saturating_sub(1) as u8);
+        self.table.last_bb_seat = last_bb_rank;
 
         // 抽水规则：到手牌进入翻后（flop 及以后，即出现公共牌的争夺底池）才抽，
         // 翻前结束（无人跟注的 uncontested 底池）不抽。VM 结算的硬性不变量
@@ -567,7 +571,13 @@ pub(crate) fn mirror_bootstrap(
         ));
     }
     mirror
-        .begin_reveal_hand(start.deck.clone(), &plan, start.button_rank, hand_id)
+        .begin_reveal_hand(
+            start.deck.clone(),
+            &plan,
+            start.button_rank,
+            start.last_bb_rank,
+            hand_id,
+        )
         .map_err(|e| format!("begin_reveal: {e}"))?;
     Ok(mirror)
 }

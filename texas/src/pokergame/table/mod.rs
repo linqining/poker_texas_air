@@ -209,6 +209,11 @@ pub struct Table {
     /// 锚点（未配置注册表，或注册失败降级为纯链下）。
     #[serde(skip)]
     pub registry_table_id: Option<u64>,
+    /// 上一手大盲座位（dead button 盲注轮转轨道，Robert's Rules of Poker
+    /// §4.2b）。0 = 尚无历史（首手退化为按钮相对定位）。仅 set_blinds
+    /// （投盲注时）更新；空桌重置为 0。座位号 1 起始，与 button 一致。
+    #[serde(skip)]
+    pub last_bb_seat: u32,
 }
 
 impl Table {
@@ -230,6 +235,13 @@ impl Table {
     }
     pub fn set_button(&mut self, v: Option<u32>) {
         self.summary.meta.button = v.map(|x| x as u64).unwrap_or(0);
+    }
+    /// 上一手大盲座位（dead button 盲注轮转轨道）；0 = 无历史。
+    pub fn last_bb_seat(&self) -> u32 {
+        self.last_bb_seat
+    }
+    pub fn set_last_bb_seat(&mut self, v: Option<u32>) {
+        self.last_bb_seat = v.unwrap_or(0);
     }
     pub fn turn(&self) -> Option<u32> {
         self.summary.meta.current_turn.map(|x| x as u32)
@@ -523,6 +535,7 @@ impl Table {
             current_hand_id: 0,
             closed: false,
             registry_table_id: None,
+            last_bb_seat: 0,
         }
     }
 
@@ -955,5 +968,157 @@ mod tests {
         // 验证清理后 local_players 不再包含 pk_hex
         assert!(!table.local_players.contains_key(&pk_hex), "local_players should not contain pk after zombie seat cleanup");
         assert!(!table.pk_to_seat.contains_key(&pk_hex), "pk_to_seat should not contain pk after zombie seat cleanup");
+    }
+
+    // ============================================================
+    // Dead button 走庄规则（Robert's Rules of Poker §4.2b / TDA）
+    // ============================================================
+    mod dead_button {
+        use super::*;
+
+        fn make_table_with_players(seats: &[u32]) -> Table {
+            let mut table = Table::new(9500, "dead-button".to_string(), 10000, 9, String::new());
+            for (idx, &seat_id) in seats.iter().enumerate() {
+                let player = GamePlayer {
+                    name: format!("p{idx}"),
+                    bankroll: 100000,
+                    pk_hex: GamePkHex::new(format!("pk-test-{idx}")),
+                    readable_hands: vec![],
+                    wallet_address: WalletAddress(format!("0x{:064x}", idx + 1)),
+                };
+                table.sit_player(player, seat_id, 100000, false);
+                if let Some(seat) = table.local_seats.get_mut(&seat_id) {
+                    seat.folded = false;
+                }
+            }
+            table
+        }
+
+        /// 模拟"第一手已打完"的状态：按钮在 1，SB=2、BB=3 已交盲，
+        /// 盲注轨道 last_bb=3。
+        fn setup_after_hand_one(table: &mut Table) {
+            table.set_button(Some(1));
+            table.set_last_bb_seat(Some(3));
+        }
+
+        /// 大盲出局（剩 3 人）：按钮前进到空座（死按钮），上一手大盲座位
+        /// 空缺 → 本手无小盲（dead small blind），大盲轮转给下一位。
+        #[test]
+        fn bb_busts_produces_dead_small_blind() {
+            let mut table = make_table_with_players(&[1, 2, 3, 4]);
+            setup_after_hand_one(&mut table);
+            // BB（座 3）出局离座。
+            table.local_seats.remove(&3);
+
+            table.move_button(); // 第二手：按钮 +1（死按钮规则）
+            table.set_blinds();
+
+            assert_eq!(table.button(), Some(2), "button lands on the vacated SB seat (dead button)");
+            assert_eq!(table.small_blind(), None, "previous BB seat is gone → dead small blind");
+            assert_eq!(table.big_blind(), Some(4), "BB rotation: next participating after seat 3");
+            assert_eq!(table.last_bb_seat(), 4, "track advances to this hand's BB");
+            let pot = table.pot();
+            assert_eq!(pot, 100, "only the big blind (100) enters the pot");
+            let bb_stack = table.local_seats.get(&4).unwrap().stack;
+            assert_eq!(bb_stack, 100000 - 100, "BB stack reduced by exactly the big blind");
+        }
+
+        /// 小盲出局（剩 3 人）：按钮落在空座位，小盲照常轮转（上一手大盲
+        /// 座位本身交小盲），大盲给再下一位。
+        #[test]
+        fn sb_busts_keeps_blind_rotation() {
+            let mut table = make_table_with_players(&[1, 2, 3, 4]);
+            setup_after_hand_one(&mut table);
+            table.local_seats.remove(&2); // SB 出局
+
+            table.move_button(); // 第二手：按钮 +1（死按钮规则）
+            table.set_blinds();
+
+            assert_eq!(table.button(), Some(2), "button advances onto the vacated seat");
+            assert_eq!(table.small_blind(), Some(3), "previous BB seat posts the small blind");
+            assert_eq!(table.big_blind(), Some(4), "BB moves to the next participating seat");
+            let sb_stack = table.local_seats.get(&3).unwrap().stack;
+            assert_eq!(sb_stack, 100000 - 50, "seat 3 posts only the small blind");
+        }
+
+        /// 按钮出局 → 进单挑：TDA dead button——大盲按轮转交给上一手小盲，
+        /// 上一手大盲改交小盲（无人连续两手大盲）。
+        #[test]
+        fn button_busts_hu_transition_rotates_blinds() {
+            let mut table = make_table_with_players(&[1, 2, 3]);
+            setup_after_hand_one(&mut table);
+            table.local_seats.remove(&1); // 按钮（座 1）出局
+
+            table.move_button(); // 1 → 2
+            table.set_blinds();
+
+            assert_eq!(table.button(), Some(2));
+            assert_eq!(table.big_blind(), Some(2), "HU BB = first participating after the rotation base (seat 3)");
+            assert_eq!(table.small_blind(), Some(3), "HU SB = the other participant (previous BB)");
+            assert_eq!(table.last_bb_seat(), 2);
+            // 翻牌前 UTG：BB 之后第一个可行动座位 = 小盲（座 3）。
+            assert_eq!(table.turn(), Some(3), "HU preflop: SB acts first");
+        }
+
+        /// 资金 bug 回归：断线玩家坐在按钮位、单挑开局——不得被扣小盲。
+        /// （原实现单挑 SB=button，会把小盲扣给 sitting out 玩家。）
+        #[test]
+        fn disconnected_button_seat_never_posts_blinds() {
+            let mut table = make_table_with_players(&[1, 2, 3]);
+            setup_after_hand_one(&mut table);
+            // 座 2 玩家断线且已转 sitting out（新手开始时的标准转换）。
+            if let Some(seat) = table.local_seats.get_mut(&2) {
+                seat.disconnected = true;
+                seat.sitting_out = true;
+            }
+            table.move_button(); // 按钮落在 sitting out 的座 2（死按钮）
+
+            table.set_blinds();
+
+            assert_eq!(table.button(), Some(2), "dead button sits on the disconnected seat");
+            assert_eq!(table.active_players().len(), 2, "heads-up among seats 1 and 3");
+            assert_eq!(table.big_blind(), Some(1), "HU BB = first participating after the rotation base");
+            assert_eq!(table.small_blind(), Some(3), "HU SB = the other participant, never the dead seat");
+            let sitting_stack = table.local_seats.get(&2).unwrap().stack;
+            assert_eq!(sitting_stack, 100000, "sitting-out seat posts nothing (fund-safety regression)");
+        }
+
+        /// 轮转不变式：满员连续多手，大盲严格轮转，无人连续两手大盲。
+        #[test]
+        fn bb_rotation_never_repeats_a_seat() {
+            let mut table = make_table_with_players(&[1, 2, 3]);
+            table.set_button(Some(1));
+            let mut previous_bb = 0u32;
+            for _ in 0..9 {
+                table.move_button();
+                table.set_blinds();
+                let bb = table.big_blind().expect("BB always assigned with 3 players");
+                assert_ne!(bb, previous_bb, "no seat posts the big blind twice in a row");
+                previous_bb = bb;
+                assert_eq!(table.last_bb_seat(), bb, "track follows this hand's BB");
+            }
+        }
+
+        /// 中途买入（waiting）玩家不计入盲注轮转：仍在等待时不交盲注，
+        /// 也不占轮转位。
+        #[test]
+        fn waiting_players_are_skipped_by_the_rotation() {
+            let mut table = make_table_with_players(&[1, 2, 3, 4]);
+            setup_after_hand_one(&mut table);
+            // 座 2 玩家中途买入等待（is_waiting）。
+            if let Some(seat) = table.local_seats.get_mut(&2) {
+                seat.is_waiting = true;
+            }
+
+            table.move_button(); // 第二手：按钮 +1（死按钮规则）
+            table.set_blinds();
+
+            // 座 2 等待中：上一手大盲（座 3）在座且参与 → 照常交小盲；
+            // 大盲 = 座 4。等待座位被完全跳过。
+            assert_eq!(table.small_blind(), Some(3));
+            assert_eq!(table.big_blind(), Some(4));
+            let waiting_stack = table.local_seats.get(&2).unwrap().stack;
+            assert_eq!(waiting_stack, 100000, "waiting seat posts nothing");
+        }
     }
 }

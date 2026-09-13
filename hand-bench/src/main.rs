@@ -43,6 +43,7 @@ fn base_image() -> CanonicalStateImage {
         chip_pool: 0,
         pot: 0,
         button: 0,
+        last_bb_seat: poker_texas_air::texas_canonical::NO_CANONICAL_SEAT,
         max_players: 9,
         acted_mask: 0,
         leave_after_hand_mask: 0,

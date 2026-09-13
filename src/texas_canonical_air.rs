@@ -102,7 +102,8 @@ const OPAQUE_COMMITMENT_COUNT: usize = 5;
 const TIMEOUT_CONFIG_FIELD_COUNT: usize = 5;
 const TIMEOUT_CONFIG_LIMBS: usize = 2 * TIMEOUT_CONFIG_FIELD_COUNT;
 const BETTING_TIMEOUT_LIMB_OFFSET: usize = 2 * 2;
-const STATE_IMAGE_METADATA_LIMBS: usize = 3;
+/// Per endpoint: [abi_version, button, max_players, last_bb_seat].
+const STATE_IMAGE_METADATA_LIMBS: usize = 4;
 const STATE_IMAGE_METADATA_OFFSET: usize =
     OPAQUE_COMMITMENTS_OFFSET + 2 * OPAQUE_COMMITMENT_COUNT * 16;
 const SEAT_COMMITMENT_FIELD_COUNT: usize = 3;
@@ -127,7 +128,13 @@ const START_ACTIVE_PRODUCT_OFFSET: usize = ADVANCE_DEADLINE_GATES_OFFSET + 2;
 const START_ACTIVE_COUNT_INV_OFFSET: usize = START_ACTIVE_PRODUCT_OFFSET + 1;
 const START_BUTTON_SELECTOR_OFFSET: usize = START_ACTIVE_COUNT_INV_OFFSET + 1;
 const START_PRE_BUTTON_SELECTOR_OFFSET: usize = START_BUTTON_SELECTOR_OFFSET + MAX_CANONICAL_SEATS;
-const CONTINUITY_NEXT_PRE_OFFSET: usize = START_PRE_BUTTON_SELECTOR_OFFSET + MAX_CANONICAL_SEATS;
+/// Dead button (unconditional +1) rotation advice: `wrap[i]` marks the
+/// wraparound seat (`from + 1 == max_players`), `next[i]` is the resolved
+/// successor seat index `(from + 1) % max_players`.
+const START_WRAP_OFFSET: usize = START_PRE_BUTTON_SELECTOR_OFFSET + MAX_CANONICAL_SEATS;
+const START_WRAP_MAX_OFFSET: usize = START_WRAP_OFFSET + MAX_CANONICAL_SEATS;
+const START_NEXT_SEAT_OFFSET: usize = START_WRAP_MAX_OFFSET + MAX_CANONICAL_SEATS;
+const CONTINUITY_NEXT_PRE_OFFSET: usize = START_NEXT_SEAT_OFFSET + MAX_CANONICAL_SEATS;
 const CONTINUITY_DOMAIN_COUNT: usize = 6;
 const TRANSITION_COMMITMENT_OFFSET: usize =
     CONTINUITY_NEXT_PRE_OFFSET + CONTINUITY_DOMAIN_COUNT * 16;
@@ -234,12 +241,29 @@ const RC_BB_ONEHOT_OFFSET: usize = RC_SB_ONEHOT_OFFSET + MAX_CANONICAL_SEATS;
 const RC_ROT_OFFSET: usize = RC_BB_ONEHOT_OFFSET + MAX_CANONICAL_SEATS;
 const RC_Q_OFFSET: usize = RC_ROT_OFFSET + 3 * 8;
 const RC_F_OFFSET: usize = RC_Q_OFFSET + 3 * 8;
-/// Small-blind distance selector with a virtual distance-zero slot for the
-/// heads-up button-small-blind rule.
+/// Small-blind distance selector with the heads-up distance-zero slot.
+/// Reinterpreted under the dead-button rule: slot 0 carries the dead-small-
+/// blind/no-post slot, slots 1..=8 the non-HU base seat itself (distance 0
+/// from the rotation base) and the HU first-active-after-BB selection.
 const RC_FFA_OFFSET: usize = RC_F_OFFSET + 3 * 8;
+/// Dead-button rotation base one-hot (previous hand's big blind, or the
+/// button when the track is unset) and its `last_bb_seat == NO_SEAT` flag.
+const RC_BASE_ONEHOT_OFFSET: usize = RC_FFA_OFFSET + 9;
+const RC_NOBB_OFFSET: usize = RC_BASE_ONEHOT_OFFSET + MAX_CANONICAL_SEATS;
+/// Dead small blind flag (non-HU rows whose rotation base seat is not
+/// participating: the hand posts no small blind).
+const RC_DEAD_SB_OFFSET: usize = RC_NOBB_OFFSET + 1;
+/// Linearized `gate * nobb` product (degree-2 relation) keeping the
+/// rotation-base anchoring constraints within the degree budget.
+const RC_GATE_NOBB_OFFSET: usize = RC_DEAD_SB_OFFSET + 1;
+/// Linearized "live small blind" indicator `(1 - heads_up) * (1 - dead_sb)`.
+const RC_LIVE_SB_OFFSET: usize = RC_GATE_NOBB_OFFSET + 1;
+/// Inverse of the summed small-blind limbs, proving a live small blind posts
+/// a non-zero amount (dead small blind ⟺ sb_amount == 0, fail-closed pair).
+const RC_SB_AMT_INV_OFFSET: usize = RC_LIVE_SB_OFFSET + 1;
 /// Blind-posting carry advice: stack (`pre = post + posted`) and total-bet
 /// (`post = pre + posted`) limb carries, three per seat each.
-const RC_STACK_CARRIES_OFFSET: usize = RC_FFA_OFFSET + 9;
+const RC_STACK_CARRIES_OFFSET: usize = RC_SB_AMT_INV_OFFSET + 1;
 const RC_TOTAL_CARRIES_OFFSET: usize = RC_STACK_CARRIES_OFFSET + MAX_CANONICAL_SEATS * 3;
 /// Per-seat inverse proving a blind-posting seat keeps a non-zero stack
 /// (the uncapped discipline: no AllIn flip on reveal completion).
@@ -278,7 +302,7 @@ const RANGE_TABLE_SCOPE_OFFSET: usize = BLIND_SCOPE_OFFSET + 13;
 // fields stay separate, while the remaining bytes use 16-bit little-endian
 // limbs.  Remaining host-zero gaps concern transition semantics, not an
 // unbound endpoint field.
-const CANONICAL_STATE_IMAGE_BORSH_BYTES: usize = 1_680;
+const CANONICAL_STATE_IMAGE_BORSH_BYTES: usize = 1_681;
 const STATE_IMAGE_TABLE_OFFSET: usize = 2;
 const STATE_IMAGE_HAND_OFFSET: usize = 10;
 const STATE_IMAGE_CALL_SEQ_OFFSET: usize = 14;
@@ -297,23 +321,24 @@ const STATE_IMAGE_MIN_RAISE_OFFSET: usize = 58;
 const STATE_IMAGE_CHIP_POOL_OFFSET: usize = 66;
 const STATE_IMAGE_POT_OFFSET: usize = 74;
 const STATE_IMAGE_BUTTON_OFFSET: usize = 82;
-const STATE_IMAGE_MAX_PLAYERS_OFFSET: usize = 83;
-const STATE_IMAGE_ACTED_MASK_OFFSET: usize = 84;
-const STATE_IMAGE_LEAVE_MASK_OFFSET: usize = 86;
-const STATE_IMAGE_PROTOCOL_PENDING_MASK_OFFSET: usize = 88;
-const STATE_IMAGE_BOARD_CARDS_COMMITMENT_OFFSET: usize = 90;
-const STATE_IMAGE_DECK_COMMITMENT_OFFSET: usize = 122;
-const STATE_IMAGE_REVEAL_COMMITMENT_OFFSET: usize = 154;
-const STATE_IMAGE_RECONSTRUCTION_COMMITMENT_OFFSET: usize = 186;
-const STATE_IMAGE_RUN_IT_TWICE_COMMITMENT_OFFSET: usize = 218;
-const STATE_IMAGE_RULES_OFFSET: usize = 250;
-const STATE_IMAGE_GOVERNANCE_OFFSET: usize = 282;
-const STATE_IMAGE_SETTLEMENT_OFFSET: usize = 314;
-const STATE_IMAGE_CUSTODY_OFFSET: usize = 346;
-const STATE_IMAGE_LIFECYCLE_OFFSET: usize = 378;
-const STATE_IMAGE_OVERLAY_OFFSET: usize = 410;
-const STATE_IMAGE_ROOT_OFFSET: usize = 442;
-const STATE_IMAGE_SEATS_OFFSET: usize = 474;
+const STATE_IMAGE_LAST_BB_SEAT_OFFSET: usize = 83;
+const STATE_IMAGE_MAX_PLAYERS_OFFSET: usize = 84;
+const STATE_IMAGE_ACTED_MASK_OFFSET: usize = 85;
+const STATE_IMAGE_LEAVE_MASK_OFFSET: usize = 87;
+const STATE_IMAGE_PROTOCOL_PENDING_MASK_OFFSET: usize = 89;
+const STATE_IMAGE_BOARD_CARDS_COMMITMENT_OFFSET: usize = 91;
+const STATE_IMAGE_DECK_COMMITMENT_OFFSET: usize = 123;
+const STATE_IMAGE_REVEAL_COMMITMENT_OFFSET: usize = 155;
+const STATE_IMAGE_RECONSTRUCTION_COMMITMENT_OFFSET: usize = 187;
+const STATE_IMAGE_RUN_IT_TWICE_COMMITMENT_OFFSET: usize = 219;
+const STATE_IMAGE_RULES_OFFSET: usize = 251;
+const STATE_IMAGE_GOVERNANCE_OFFSET: usize = 283;
+const STATE_IMAGE_SETTLEMENT_OFFSET: usize = 315;
+const STATE_IMAGE_CUSTODY_OFFSET: usize = 347;
+const STATE_IMAGE_LIFECYCLE_OFFSET: usize = 379;
+const STATE_IMAGE_OVERLAY_OFFSET: usize = 411;
+const STATE_IMAGE_ROOT_OFFSET: usize = 443;
+const STATE_IMAGE_SEATS_OFFSET: usize = 475;
 const STATE_IMAGE_SEAT_BYTES: usize = 134;
 const STATE_IMAGE_SEAT_STATUS_OFFSET: usize = 0;
 const STATE_IMAGE_SEAT_ACTED_OFFSET: usize = 1;
@@ -325,7 +350,7 @@ const STATE_IMAGE_SEAT_TIME_BANK_OFFSET: usize = 34;
 const STATE_IMAGE_SEAT_IDENTITY_COMMITMENT_OFFSET: usize = 38;
 const STATE_IMAGE_SEAT_KEY_COMMITMENT_OFFSET: usize = 70;
 const STATE_IMAGE_SEAT_HOLE_CARDS_COMMITMENT_OFFSET: usize = 102;
-const STATE_IMAGE_HEADER_PROJECTION_LIMBS: usize = 48;
+const STATE_IMAGE_HEADER_PROJECTION_LIMBS: usize = 49;
 const STATE_IMAGE_COMMITMENT_PROJECTION_LIMBS: usize = 16 * (7 + OPAQUE_COMMITMENT_COUNT);
 const STATE_IMAGE_SEAT_PROJECTION_LIMBS: usize = 20 + SEAT_COMMITMENT_LIMBS;
 const STATE_IMAGE_PROJECTION_LIMBS: usize = STATE_IMAGE_HEADER_PROJECTION_LIMBS
@@ -541,8 +566,10 @@ fn state_image_projection(bytes: &[u8]) -> TexasAirResult<Vec<M31>> {
     }
     let mut out = Vec::with_capacity(STATE_IMAGE_PROJECTION_LIMBS);
     out.push(state_image_limb(bytes, 0));
+    // 与 AIR 绑定端的 metadata 顺序一致：abi, button, max_players, last_bb。
     out.push(M31::from(u32::from(bytes[STATE_IMAGE_BUTTON_OFFSET])));
     out.push(M31::from(u32::from(bytes[STATE_IMAGE_MAX_PLAYERS_OFFSET])));
+    out.push(M31::from(u32::from(bytes[STATE_IMAGE_LAST_BB_SEAT_OFFSET])));
     append_state_image_u64_projection(&mut out, bytes, STATE_IMAGE_TABLE_OFFSET);
     append_state_image_u32_projection(&mut out, bytes, STATE_IMAGE_HAND_OFFSET);
     append_state_image_u32_projection(&mut out, bytes, STATE_IMAGE_CALL_SEQ_OFFSET);
@@ -1525,9 +1552,11 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         u32::from(w.pre.abi_version),
         u32::from(w.pre.button),
         u32::from(w.pre.max_players),
+        u32::from(w.pre.last_bb_seat),
         u32::from(w.post.abi_version),
         u32::from(w.post.button),
         u32::from(w.post.max_players),
+        u32::from(w.post.last_bb_seat),
     ] {
         out.push(M31::from(value));
     }
@@ -1651,22 +1680,32 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     // this clamp only prevents host-side modulo/index panics before that check.
     let max_players = usize::from(w.pre.max_players.clamp(1, MAX_CANONICAL_SEATS as u8));
     let start_button = usize::from(w.pre.button).min(max_players.saturating_sub(1));
-    let mut button = start_button;
-    for offset in 1..=max_players {
-        let index = (start_button + offset) % max_players;
-        if !matches!(
-            w.pre.seats[index].status,
-            CanonicalSeatStatus::Empty | CanonicalSeatStatus::Out
-        ) {
-            button = index;
-            break;
-        }
-    }
+    // Dead button: the successor seat is unconditionally `button + 1` modulo
+    // capacity — the landing seat may be empty (dead button), no skipping.
+    let start_next = (start_button + 1) % max_players;
     for index in 0..MAX_CANONICAL_SEATS {
-        out.push(M31::from(u32::from(is_start && index == button)));
+        out.push(M31::from(u32::from(is_start && index == start_next)));
     }
     for index in 0..MAX_CANONICAL_SEATS {
         out.push(M31::from(u32::from(index == usize::from(w.pre.button))));
+    }
+    for index in 0..MAX_CANONICAL_SEATS {
+        out.push(M31::from(u32::from(
+            is_start && index == start_button && (start_button + 1) % max_players == 0,
+        )));
+    }
+    for index in 0..MAX_CANONICAL_SEATS {
+        let wrap = is_start && index == start_button && (start_button + 1) % max_players == 0;
+        out.push(M31::from(u32::from(wrap)) * M31::from(max_players as u32));
+    }
+    // start_next_seat[i] = 座位 i 的后继值 (i+1) % capacity（非 start 行为 0）。
+    for index in 0..MAX_CANONICAL_SEATS {
+        let value = if is_start {
+            ((index + 1) % max_players) as u32
+        } else {
+            0
+        };
+        out.push(M31::from(value));
     }
     let zero_digest = [0u8; 32];
     for digest in [
@@ -2221,17 +2260,28 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         (rot, q, f, first)
     };
     let heads_up = active_count == 2;
-    let button = usize::from(w.pre.button) % MAX_CANONICAL_SEATS;
-    let (rot_button, q_button, f_button, first_after_button) = scan(button);
-    // Small blind: heads-up posts from the button itself (virtual distance
-    // zero); otherwise the first Active seat after the button.
-    let sb_seat = if heads_up {
-        button
+    // Dead-button rotation base: the previous hand's big blind, falling back
+    // to the button while the track is unset (first hand / NO_SEAT sentinel).
+    let no_bb_track = w.pre.last_bb_seat == NO_CANONICAL_SEAT;
+    let rotation_base = if no_bb_track {
+        usize::from(w.pre.button) % MAX_CANONICAL_SEATS
     } else {
-        first_after_button.unwrap_or(button)
+        usize::from(w.pre.last_bb_seat) % MAX_CANONICAL_SEATS
     };
-    let (rot_sb, q_sb, f_sb, first_after_sb) = scan(sb_seat);
-    let bb_seat = first_after_sb.unwrap_or(sb_seat);
+    let (rot_button, q_button, f_button, first_after_base) = scan(rotation_base);
+    // Big blind: the first participating seat after the rotation base.
+    let bb_seat = first_after_base.unwrap_or(rotation_base);
+    // Small blind: heads-up — the first Active seat after the big blind (the
+    // other participant); non-HU — the rotation-base seat itself, or a dead
+    // small blind when that seat is not participating.
+    let (rot_sb, q_sb, f_sb, first_after_sb) = scan(bb_seat);
+    let sb_seat = if heads_up {
+        first_after_sb.unwrap_or(bb_seat)
+    } else {
+        rotation_base
+    };
+    let dead_sb = !heads_up
+        && (rotation_base == bb_seat || !active_seat[rotation_base]);
     let (rot_bb, q_bb, f_bb, _) = scan(bb_seat);
     // Storage order matches the evaluate-side reads: kind-grouped (all three
     // rotated-activity blocks, then all prefix blocks, then all selector
@@ -2248,21 +2298,54 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
             out.push(M31::from(u32::from(rc_row && index == seat)));
         }
     };
-    push_onehot(&mut out, sb_seat);
+    // A dead small blind posts nothing: its seat vector is all-zero.
+    let push_sb_onehot = |out: &mut Vec<M31>, seat: usize, dead: bool| {
+        for index in 0..MAX_CANONICAL_SEATS {
+            out.push(M31::from(u32::from(rc_row && !dead && index == seat)));
+        }
+    };
+    push_sb_onehot(&mut out, sb_seat, dead_sb);
     push_onehot(&mut out, bb_seat);
     push_bits(&mut out, [&rot_button, &rot_sb, &rot_bb]);
     push_bits(&mut out, [&q_button, &q_sb, &q_bb]);
     push_bits(&mut out, [&f_button, &f_sb, &f_bb]);
-    // Small-blind distance selector with the heads-up distance-zero slot.
-    out.push(M31::from(u32::from(rc_row && heads_up)));
+    // Small-blind composition selector: slot 0 marks the dead-small-blind /
+    // no-post branch; slots 1..=8 mark the HU first-active-after-BB scan
+    // selectors (all zero on non-HU rows — the SB is the rotation base seat
+    // itself and is rebuilt from the base one-hot directly).
+    out.push(M31::from(u32::from(rc_row && dead_sb)));
     for d in 0..8 {
-        out.push(M31::from(u32::from(rc_row && !heads_up && f_button[d])));
+        let value = heads_up && !dead_sb && f_sb[d];
+        out.push(M31::from(u32::from(rc_row && value)));
     }
+    // Dead-button rotation base one-hot plus its unset-track flag, the
+    // linearized gate*nobb and live-SB indicators, and the small-blind
+    // amount inverse.
+    for index in 0..MAX_CANONICAL_SEATS {
+        out.push(M31::from(u32::from(
+            rc_row && index == rotation_base,
+        )));
+    }
+    out.push(M31::from(u32::from(rc_row && no_bb_track)));
+    out.push(M31::from(u32::from(rc_row && dead_sb)));
+    out.push(M31::from(u32::from(rc_row && no_bb_track)));
+    out.push(M31::from(u32::from(rc_row && !heads_up && !dead_sb)));
+    // Inverse of the summed small-blind limbs (non-zero iff sb_amount != 0)
+    // pinning the live-small-blind side of the dead-SB ⟺ zero-amount pair.
+    let sb_amount_sum: u32 = u64_limbs(blind.small_blind)
+        .into_iter()
+        .map(|limb| u32::from(limb.0))
+        .sum();
+    out.push(if rc_row && !dead_sb && sb_amount_sum != 0 {
+        M31::from(sb_amount_sum).inverse()
+    } else {
+        M31::from(0u32)
+    });
     // Blind-posting arithmetic advice.  `pre = post + posted` for stacks and
     // `post = pre + posted` for total bets, three carry limbs per seat each,
     // stored as two contiguous per-seat blocks.
     for index in 0..MAX_CANONICAL_SEATS {
-        let posted = if rc_row && index == sb_seat {
+        let posted = if rc_row && !dead_sb && index == sb_seat {
             blind.small_blind
         } else if rc_row && index == bb_seat {
             blind.big_blind
@@ -2276,7 +2359,7 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         }
     }
     for index in 0..MAX_CANONICAL_SEATS {
-        let posted = if rc_row && index == sb_seat {
+        let posted = if rc_row && !dead_sb && index == sb_seat {
             blind.small_blind
         } else if rc_row && index == bb_seat {
             blind.big_blind
@@ -2290,7 +2373,8 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         }
     }
     for index in 0..MAX_CANONICAL_SEATS {
-        let posts_blind = rc_row && (index == sb_seat || index == bb_seat);
+        let posts_blind =
+            rc_row && ((index == sb_seat && !dead_sb) || index == bb_seat);
         let stack_sum: u32 = u64_limbs(w.post.seats[index].stack)
             .into_iter()
             .map(|limb| u32::from(limb.0))
@@ -3327,6 +3411,12 @@ impl FrameworkEval for CanonicalAir {
             std::array::from_fn(|_| eval.next_trace_mask());
         let start_pre_button_selectors: [E::F; MAX_CANONICAL_SEATS] =
             std::array::from_fn(|_| eval.next_trace_mask());
+        let start_wrap: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let start_wrap_max: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let start_next_seat: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
         let next_pre_image: Vec<_> = (0..16).map(|_| eval.next_trace_mask()).collect();
         let next_pre_state_root: Vec<_> = (0..16).map(|_| eval.next_trace_mask()).collect();
         let next_pre_lifecycle_root: Vec<_> = (0..16).map(|_| eval.next_trace_mask()).collect();
@@ -3442,6 +3532,13 @@ impl FrameworkEval for CanonicalAir {
         let rc_q: [[E::F; 8]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
         let rc_f: [[E::F; 8]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
         let rc_ffa: [E::F; 9] = std::array::from_fn(|_| eval.next_trace_mask());
+        let rc_base_onehot: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let rc_nobb = eval.next_trace_mask();
+        let rc_dead_sb = eval.next_trace_mask();
+        let rc_gate_nobb = eval.next_trace_mask();
+        let rc_live_sb = eval.next_trace_mask();
+        let rc_sb_amt_inv = eval.next_trace_mask();
         let rc_stack_carries: [[E::F; 3]; MAX_CANONICAL_SEATS] =
             std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
         let rc_total_carries: [[E::F; 3]; MAX_CANONICAL_SEATS] =
@@ -3924,6 +4021,8 @@ impl FrameworkEval for CanonicalAir {
         }
         // Table capacity is a genesis parameter.  The button advances only at
         // `StartHand`; all other tags must preserve the materialized header.
+        // The dead-button blind track (`last_bb_seat`) advances only when
+        // blinds are posted (reveal completion).
         eval.add_constraint(
             active.clone() * (post_state_metadata[2].clone() - pre_state_metadata[2].clone()),
         );
@@ -3931,6 +4030,12 @@ impl FrameworkEval for CanonicalAir {
             (active.clone() - is_start.clone())
                 * (post_state_metadata[1].clone() - pre_state_metadata[1].clone()),
         );
+        let rc_gate_for_track = rc_gate.clone();
+        eval.add_constraint(
+            (active.clone() - rc_gate_for_track.clone())
+                * (post_state_metadata[3].clone() - pre_state_metadata[3].clone()),
+        );
+
         let seat_commitments_immutable = is_create.clone()
             + is_betting.clone()
             + is_funding.clone()
@@ -7982,6 +8087,9 @@ impl FrameworkEval for CanonicalAir {
         for selector in start_button_selectors
             .iter()
             .chain(start_pre_button_selectors.iter())
+            .chain(start_wrap.iter())
+            .chain(start_wrap_max.iter())
+            .chain(start_next_seat.iter())
         {
             eval.add_constraint(inactive.clone() * selector.clone());
         }
@@ -8087,11 +8195,6 @@ impl FrameworkEval for CanonicalAir {
                 active.clone() * selector.clone() * (selector.clone() - one.clone()),
             );
             eval.add_constraint((active.clone() - is_start.clone()) * selector.clone());
-            let occupied = full_pre_status[index][CanonicalSeatStatus::Waiting as usize].clone()
-                + full_pre_status[index][CanonicalSeatStatus::Active as usize].clone()
-                + full_pre_status[index][CanonicalSeatStatus::Folded as usize].clone()
-                + full_pre_status[index][CanonicalSeatStatus::AllIn as usize].clone();
-            eval.add_constraint(is_start.clone() * selector.clone() * (occupied - one.clone()));
             let index_value: E::F = M31::from(index as u32).into();
             start_button_sum += selector.clone();
             start_button_value += selector.clone() * index_value;
@@ -8100,26 +8203,57 @@ impl FrameworkEval for CanonicalAir {
         eval.add_constraint(
             is_start.clone() * (start_button_value.clone() - post_state_metadata[1].clone()),
         );
+        // Dead button: the successor is unconditionally `(button + 1) %
+        // capacity` — the landing seat may be empty (a dead button), and no
+        // occupied-seat skipping is permitted.  `wrap[i]` pins the wraparound
+        // seat (`i == capacity - 1`), `next[i]` resolves to `(i + 1) % cap`,
+        // and the destination selector must sit exactly at `next[button]`.
+        for (index, wrap) in start_wrap.iter().enumerate() {
+            eval.add_constraint(active.clone() * wrap.clone() * (wrap.clone() - one.clone()));
+            eval.add_constraint(
+                active.clone()
+                    * wrap.clone()
+                    * (pre_state_metadata[2].clone()
+                        - one.clone()
+                        - M31::from(index as u32).into()),
+            );
+            eval.add_constraint((active.clone() - is_start.clone()) * wrap.clone());
+            // 线性化 wrap * capacity（度 2 关系），供后继解析约束使用。
+            eval.add_constraint(
+                active.clone()
+                    * (start_wrap_max[index].clone()
+                        - wrap.clone() * pre_state_metadata[2].clone()),
+            );
+        }
+        for (index, next) in start_next_seat.iter().enumerate() {
+            eval.add_constraint((active.clone() - is_start.clone()) * next.clone());
+            let resolved = E::F::from(M31::from(index as u32 + 1)) - start_wrap_max[index].clone();
+            eval.add_constraint(
+                is_start.clone()
+                    * start_pre_button_selectors[index].clone()
+                    * (next.clone() - resolved),
+            );
+        }
+        // BISECT-PAIR-RESTORED
         for from in 0..MAX_CANONICAL_SEATS {
             for to in 0..MAX_CANONICAL_SEATS {
                 let pair =
                     start_pre_button_selectors[from].clone() * start_button_selectors[to].clone();
-                let distance = (to + MAX_CANONICAL_SEATS - from) % MAX_CANONICAL_SEATS;
-                let distance = if distance == 0 {
-                    MAX_CANONICAL_SEATS
-                } else {
-                    distance
-                };
-                for offset in 1..distance {
-                    let between = (from + offset) % MAX_CANONICAL_SEATS;
-                    let occupied = full_pre_status[between][CanonicalSeatStatus::Waiting as usize]
-                        .clone()
-                        + full_pre_status[between][CanonicalSeatStatus::Active as usize].clone()
-                        + full_pre_status[between][CanonicalSeatStatus::Folded as usize].clone()
-                        + full_pre_status[between][CanonicalSeatStatus::AllIn as usize].clone();
-                    eval.add_constraint(pair.clone() * occupied);
-                }
+                let to_value: E::F = M31::from(to as u32).into();
+                eval.add_constraint(
+                    pair.clone() * (to_value - start_next_seat[from].clone()),
+                );
             }
+        }
+        // BISECT-NEXT-RESTORED
+        for (index, next) in start_next_seat.iter().enumerate() {
+            eval.add_constraint((active.clone() - is_start.clone()) * next.clone());
+            let resolved = E::F::from(M31::from(index as u32 + 1)) - start_wrap_max[index].clone();
+            eval.add_constraint(
+                is_start.clone()
+                    * start_pre_button_selectors[index].clone()
+                    * (next.clone() - resolved),
+            );
         }
         let mut post_deadline_sum: E::F = M31::from(0u32).into();
         for limb in &post_deadline_image {
@@ -8347,6 +8481,16 @@ impl FrameworkEval for CanonicalAir {
             for column in rc_ffa.iter() {
                 zero(&mut eval, column.clone());
             }
+            for column in rc_base_onehot
+                .iter()
+                .chain(std::iter::once(&rc_nobb))
+                .chain(std::iter::once(&rc_dead_sb))
+                .chain(std::iter::once(&rc_gate_nobb))
+                .chain(std::iter::once(&rc_live_sb))
+                .chain(std::iter::once(&rc_sb_amt_inv))
+            {
+                zero(&mut eval, column.clone());
+            }
             for seat in 0..MAX_CANONICAL_SEATS {
                 for column in rc_stack_carries[seat]
                     .iter()
@@ -8451,15 +8595,19 @@ impl FrameworkEval for CanonicalAir {
             gate.clone()
                 * (count_minus_two * rc_count_invs[2].clone() - (one.clone() - rc_hu.clone())),
         );
-        // 位置规则：每个基座（button、SB、BB）做模 9 循环"首个 Active"扫描。
-        // rot_d = 基座 + d 处的 Active 位；q 前缀（此前无 Active）；f = 首位
-        // 选择子。占用收敛后该扫描与 VM 的 mod max_players 扫描一致。
-        let bases: [[E::F; MAX_CANONICAL_SEATS]; 3] = [
-            std::array::from_fn(|index| start_pre_button_selectors[index].clone()),
-            std::array::from_fn(|index| rc_sb_onehot[index].clone()),
+        // 位置规则（dead button 轮转，镜像 post_blinds §4.2b）：每个基座
+        // （轮转基准、BB）做模 9 循环"首个 Active"扫描。rot_d = 基座 + d 处
+        // 的 Active 位；q 前缀（此前无 Active）；f = 首位选择子。占用收敛后
+        // 该扫描与 VM 的 mod max_players 扫描一致。
+        // 基座：上一手大盲座位（无历史时为 button）——由 rc_base_onehot 与
+        // rc_nobb 锚定；BB = 基座后首个 Active；SB = 单挑时 BB 后首个
+        // Active（另一参与者），否则基座座位本身（dead SB 时无 SB）。
+        let bases: [[E::F; MAX_CANONICAL_SEATS]; 2] = [
+            std::array::from_fn(|index| rc_base_onehot[index].clone()),
             std::array::from_fn(|index| rc_bb_onehot[index].clone()),
         ];
-        for onehot in [&rc_sb_onehot, &rc_bb_onehot] {
+        // BB 与轮转基座均须恰好单热；SB 单热之和 = 非 dead SB 指示。
+        for onehot in [&rc_bb_onehot, &rc_base_onehot] {
             let mut sum: E::F = M31::from(0u32).into();
             for bit in onehot.iter() {
                 eval.add_constraint(gate.clone() * bit.clone() * (bit.clone() - one.clone()));
@@ -8467,7 +8615,85 @@ impl FrameworkEval for CanonicalAir {
             }
             eval.add_constraint(gate.clone() * (sum - one.clone()));
         }
-        for base in 0..3 {
+        {
+            let mut sum: E::F = M31::from(0u32).into();
+            for bit in rc_sb_onehot.iter() {
+                eval.add_constraint(gate.clone() * bit.clone() * (bit.clone() - one.clone()));
+                sum += bit.clone();
+            }
+            eval.add_constraint(
+                gate.clone()
+                    * (sum.clone()
+                        - one.clone()
+                        + (one.clone() - rc_hu.clone()) * rc_dead_sb.clone()),
+            );
+        }
+        // 轮转基准锚定：rc_nobb ⟺ last_bb_seat == NO_SEAT 哨兵；基座落在
+        // last_bb_seat（nobb=0）或 button（nobb=1）。rc_gate_nobb 线性化
+        // `gate * nobb`，把逐座位锚定约束压回声明度数 3 以内。
+        eval.add_constraint(
+            active.clone() * (rc_gate_nobb.clone() - gate.clone() * rc_nobb.clone()),
+        );
+        eval.add_constraint(gate.clone() * rc_nobb.clone() * (rc_nobb.clone() - one.clone()));
+        eval.add_constraint(
+            gate.clone()
+                * rc_nobb.clone()
+                * (pre_state_metadata[3].clone() - M31::from(15u32).into()),
+        );
+        eval.add_constraint(
+            gate.clone() * rc_dead_sb.clone() * (rc_dead_sb.clone() - one.clone()),
+        );
+        eval.add_constraint(gate.clone() * rc_dead_sb.clone() * rc_hu.clone());
+        for index in 0..MAX_CANONICAL_SEATS {
+            let index_value: E::F = M31::from(index as u32).into();
+            let no_seat_value: E::F = M31::from(15u32).into();
+            // base_sel[i]=1 ⟹ last_bb_seat == i（nobb=0）或 == NO（nobb=1）。
+            eval.add_constraint(
+                rc_base_onehot[index].clone()
+                    * (pre_state_metadata[3].clone() - index_value.clone())
+                    - rc_base_onehot[index].clone()
+                        * rc_gate_nobb.clone()
+                        * (no_seat_value - index_value.clone()),
+            );
+            // nobb=1 → base == button（pre_state_metadata[1]）。
+            eval.add_constraint(
+                rc_gate_nobb.clone()
+                    * rc_base_onehot[index].clone()
+                    * (pre_state_metadata[1].clone() - index_value),
+            );
+        }
+        // dead_sb 完备性（非单挑）：基座座位参与（Active）⟺ 本手有小盲。
+        // 用 rc_live_sb 线性化（其定义约束已钉死 live = (1-hu)(1-dead)），
+        // 两条均不带 gate 保持度数 ≤ 3（非 rc 行相关列恒零）。
+        {
+            let mut base_active: E::F = M31::from(0u32).into();
+            for index in 0..MAX_CANONICAL_SEATS {
+                base_active += rc_base_onehot[index].clone()
+                    * full_pre_status[index][CanonicalSeatStatus::Active as usize].clone();
+            }
+            // live ⟹ 基座座位参与；dead ⟹ 基座座位不参与。
+            eval.add_constraint(rc_live_sb.clone() * (one.clone() - base_active.clone()));
+            eval.add_constraint(rc_dead_sb.clone() * base_active.clone());
+            // 成对纪律：live SB 金额非零（limbs 和的逆元），dead SB 金额为零。
+            // 逆元约束乘 rc_live_sb（ungated，非 rc 行该列恒零）保持度数 3。
+            let sb_amount_sum =
+                rc_blind_limbs[0].clone()
+                    + rc_blind_limbs[1].clone()
+                    + rc_blind_limbs[2].clone()
+                    + rc_blind_limbs[3].clone();
+            eval.add_constraint(
+                rc_live_sb.clone()
+                    * (sb_amount_sum * rc_sb_amt_inv.clone() - one.clone()),
+            );
+            for limb in 0..4 {
+                eval.add_constraint(
+                    rc_blind_limbs[limb].clone()
+                        * (one.clone() - rc_hu.clone())
+                        * rc_dead_sb.clone(),
+                );
+            }
+        }
+        for base in 0..2 {
             let base_onehot = &bases[base];
             eval.add_constraint(gate.clone() * (rc_q[base][0].clone() - one.clone()));
             let mut selector_sum: E::F = M31::from(0u32).into();
@@ -8498,41 +8724,57 @@ impl FrameworkEval for CanonicalAir {
             }
             eval.add_constraint(gate.clone() * (selector_sum - one.clone()));
         }
-        // SB 距离选择子：单挑 = button 本身（虚拟距离 0），否则 button 后
-        // 首个 Active（镜像 post_blinds 的 heads-up 特例）。
-        eval.add_constraint(gate.clone() * (rc_ffa[0].clone() - rc_hu.clone()));
-        let mut ffa_sum: E::F = M31::from(0u32).into();
+        // 第三组扫描（UTG）与第二组同基座（BB），仅复用 BB 扫描的旋转位。
+        eval.add_constraint(gate.clone() * (rc_q[2][0].clone() - one.clone()));
+        let mut selector_sum_utg: E::F = M31::from(0u32).into();
         for d in 0..8 {
             eval.add_constraint(
-                gate.clone()
-                    * (rc_ffa[d + 1].clone() - rc_f[0][d].clone()
-                        + rc_hu.clone() * rc_f[0][d].clone()),
+                gate.clone() * (rc_rot[2][d].clone() - rc_rot[1][d].clone()),
+            );
+            eval.add_constraint(gate.clone() * (rc_f[2][d].clone() - rc_f[1][d].clone()));
+            eval.add_constraint(
+                gate.clone() * (rc_q[2][d].clone() - rc_q[1][d].clone()),
+            );
+            selector_sum_utg += rc_f[2][d].clone();
+        }
+        eval.add_constraint(gate.clone() * (selector_sum_utg - one.clone()));
+        // BISECT-FFA
+        {
+        eval.add_constraint(gate.clone() * (rc_ffa[0].clone() - rc_dead_sb.clone()));
+        for d in 0..8 {
+            eval.add_constraint(
+                gate.clone() * (rc_ffa[d + 1].clone() - rc_hu.clone() * rc_f[1][d].clone()),
             );
             eval.add_constraint(
                 gate.clone() * rc_ffa[d + 1].clone() * (rc_ffa[d + 1].clone() - one.clone()),
             );
-            ffa_sum += rc_ffa[d + 1].clone();
         }
-        eval.add_constraint(gate.clone() * (rc_ffa[0].clone() + ffa_sum - one.clone()));
-        // SB/BB 单热从距离选择子与基座单热线性重建。
+        }
+        // BISECT-END
+        // BISECT-RECON
+        {
+        eval.add_constraint(
+            gate.clone() * (rc_live_sb.clone() - (one.clone() - rc_hu.clone()) * (one.clone() - rc_dead_sb.clone())),
+        );
         for i in 0..MAX_CANONICAL_SEATS {
-            let mut sb_expr: E::F = M31::from(0u32).into();
+            let mut sb_expr: E::F = rc_live_sb.clone() * rc_base_onehot[i].clone();
             let mut bb_expr: E::F = M31::from(0u32).into();
-            for d in 0..9 {
-                sb_expr += rc_ffa[d].clone()
-                    * start_pre_button_selectors[(i + MAX_CANONICAL_SEATS - d) % MAX_CANONICAL_SEATS]
-                        .clone();
-            }
             for d in 0..8 {
-                bb_expr += rc_f[1][d].clone()
-                    * rc_sb_onehot[(i + MAX_CANONICAL_SEATS - (d + 1)) % MAX_CANONICAL_SEATS]
+                sb_expr += rc_ffa[d + 1].clone()
+                    * rc_bb_onehot[(i + MAX_CANONICAL_SEATS - (d + 1)) % MAX_CANONICAL_SEATS]
+                        .clone();
+                bb_expr += rc_f[0][d].clone()
+                    * rc_base_onehot[(i + MAX_CANONICAL_SEATS - (d + 1)) % MAX_CANONICAL_SEATS]
                         .clone();
             }
             eval.add_constraint(gate.clone() * (rc_sb_onehot[i].clone() - sb_expr));
             eval.add_constraint(gate.clone() * (rc_bb_onehot[i].clone() - bb_expr));
         }
-        // UTG = BB 后首个 Active（单挑时该扫描恰好回到 button，与 VM 的
-        // heads-up first-to-act 特例一致）。
+        // BISECT-RECON-END
+        }
+        // BISECT-DEADSB-DISABLED-SEPARATELY
+        // UTG = BB 后首个 Active（单挑时该扫描落在 BB 之外另一参与者，与 VM
+        // 的 UTG 规则一致）。
         let mut utg_seat: E::F = M31::from(0u32).into();
         for d in 0..8 {
             let mut seat_value: E::F = M31::from(0u32).into();
@@ -8543,6 +8785,14 @@ impl FrameworkEval for CanonicalAir {
             utg_seat += rc_f[2][d].clone() * seat_value;
         }
         eval.add_constraint(gate.clone() * (post_turn.clone() - utg_seat));
+        // dead button 盲注轨道：本手大盲座位成为 post.last_bb_seat。
+        let mut bb_track_value: E::F = M31::from(0u32).into();
+        for (index, bit) in rc_bb_onehot.iter().enumerate() {
+            bb_track_value += bit.clone() * E::F::from(M31::from(index as u32));
+        }
+        eval.add_constraint(
+            gate.clone() * (post_state_metadata[3].clone() - bb_track_value),
+        );
         // 下注价：current_bet = min_raise = BB（参与者全部 Active、无历史
         // bet，max(座位 bet, BB) = BB）。
         for limb in 0..4 {
@@ -9806,6 +10056,7 @@ mod tests {
             chip_pool: 0,
             pot: 0,
             button: 0,
+            last_bb_seat: NO_CANONICAL_SEAT,
             max_players: 2,
             acted_mask: 0,
             leave_after_hand_mask: 0,
@@ -9856,7 +10107,7 @@ mod tests {
                 .len(),
             STATE_IMAGE_PROJECTION_LIMBS,
         );
-        assert_eq!(STATE_IMAGE_PROJECTION_LIMBS, 852);
+        assert_eq!(STATE_IMAGE_PROJECTION_LIMBS, 853);
     }
 
     #[test]
@@ -11305,10 +11556,12 @@ mod tests {
         post.deadline_ms = timestamp + u64::from(pre.betting_timeout_ms);
         post.protocol_pending_mask = 0;
         post.reveal_commitment = [0x33; 32];
-        // 单挑：SB = button（座 0）先行动；BB = 座 1。
+        // 单挑：SB = BB（座 1）之外另一参与者（座 0）先行动；BB = 座 1。
         post.current_turn = 0;
         post.current_bet = 100;
         post.min_raise = 100;
+        // dead button 盲注轨道：本手大盲座位成为下一手轮转基准。
+        post.last_bb_seat = 1;
         post.seats[0].stack = 950;
         post.seats[0].bet = 50;
         post.seats[0].total_bet = 50;
@@ -11387,18 +11640,24 @@ mod tests {
         witness.post.deadline_ms = 9_000 + u64::from(witness.pre.betting_timeout_ms);
         witness.post.protocol_pending_mask = 0;
         witness.post.reveal_commitment = [0x33; 32];
-        witness.post.current_turn = 1;
+        witness.post.current_turn = 0;
         witness.post.current_bet = 100;
         witness.post.min_raise = 100;
-        witness.post.seats[0].stack = 900;
-        witness.post.seats[0].bet = 100;
-        witness.post.seats[0].total_bet = 100;
-        witness.post.seats[2].stack = 950;
-        witness.post.seats[2].bet = 50;
-        witness.post.seats[2].total_bet = 50;
-        witness.protocol_completion.post_current_turn = 1;
-        witness.protocol_completion.sb_seat = 2;
-        witness.protocol_completion.bb_seat = 0;
+        // dead button 首手（last_bb == NO）：轮转基准 = button(座1)，
+        // BB = 座2（出 100），SB = 基座座位本身 = 座1（出 50），UTG = 座0。
+        witness.post.last_bb_seat = 2;
+        witness.post.seats[0].stack = 1_000;
+        witness.post.seats[0].bet = 0;
+        witness.post.seats[0].total_bet = 0;
+        witness.post.seats[1].stack = 950;
+        witness.post.seats[1].bet = 50;
+        witness.post.seats[1].total_bet = 50;
+        witness.post.seats[2].stack = 900;
+        witness.post.seats[2].bet = 100;
+        witness.post.seats[2].total_bet = 100;
+        witness.protocol_completion.post_current_turn = 0;
+        witness.protocol_completion.sb_seat = 1;
+        witness.protocol_completion.bb_seat = 2;
         witness.protocol_completion.is_heads_up = false;
         witness.seal();
         witness

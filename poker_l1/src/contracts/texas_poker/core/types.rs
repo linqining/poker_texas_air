@@ -2289,6 +2289,14 @@ pub struct TexasPokerTable {
     /// 庄家位（button seat_index）。
     pub button: u8,
 
+    /// 上一手大盲座位（dead button 盲注轮转轨道，`NO_SEAT` 表示尚无历史）。
+    ///
+    /// 完整实现 dead button 规则（Robert's Rules of Poker §4.2b）：大盲按
+    /// 轮转归属——本手大盲 = 上一手大盲之后顺时针第一个参与座位；小盲 =
+    /// 上一手大盲座位本身（单挑时为另一参与者），该座位空缺/离场/等待时
+    /// 本手无小盲（dead small blind）。跨手持久，仅 `post_blinds` 更新。
+    pub last_bb_seat: u8,
+
     /// 当前底池。
     pub pot: u64,
     /// 公共牌（最多 5 张：flop 3 + turn 1 + river 1）。
@@ -3098,6 +3106,7 @@ impl TexasPokerTable {
             acted_mask: 0,
             leave_after_hand_mask: 0,
             button: 0,
+            last_bb_seat: NO_SEAT,
             pot: 0,
             community_cards: BoardCards::empty(),
             hand_phase: HandPhase::Waiting,
@@ -3361,6 +3370,13 @@ impl TexasPokerTable {
         {
             return Err(PokerL1Error::Serialization(
                 "Texas table contains out-of-range seat flag bits".into(),
+            ));
+        }
+        if self.button >= self.max_players
+            || (self.last_bb_seat != NO_SEAT && self.last_bb_seat >= self.max_players)
+        {
+            return Err(PokerL1Error::Serialization(
+                "Texas table button/last_bb_seat is outside the seat domain".into(),
             ));
         }
         self.validate_hand_phase()?;

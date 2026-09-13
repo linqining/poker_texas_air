@@ -28,6 +28,11 @@ pub struct HandStartData {
     pub participants: Vec<HandParticipant>,
     /// 按参与者序列中按钮的序号（VM post_blinds 据此对齐盲注位）。
     pub button_rank: u8,
+    /// dead button 盲注轮转轨道：上一手大盲玩家在参与者序列中的序号
+    /// （`NO_SEAT` = 无历史，VM 退化为按钮相对定位）。游戏层的轮转基准
+    /// 座位映射到参与者 rank——上一手大盲离场时取其前驱 rank（环形），
+    /// 保证镜像 post_blinds 与游戏层 set_blinds 的盲注定位逐位一致。
+    pub last_bb_rank: u8,
     /// 小盲注额（大盲 = 2×）。
     pub small_blind: u64,
     /// 终局 deck（52 张，游戏层与 VM 逐字节同源——方案A 注入）。
@@ -81,6 +86,7 @@ impl HandProofLog {
                 hand_id,
                 participants: Vec::new(),
                 button_rank: 0,
+                last_bb_rank: poker_l1::contracts::texas_poker::types::NO_SEAT,
                 small_blind: 10,
                 deck: Vec::new(),
             }),
@@ -223,12 +229,17 @@ pub fn record_hand_start(table: &mut Table) {
         .button()
         .and_then(|b| plan.iter().position(|(seat_id, _)| *seat_id == b))
         .unwrap_or(0) as u8;
+    // dead button 轮转轨道映射：游戏层 last_bb 座位 → 参与者 rank。上一手
+    // 大盲离场（座位不在 plan）时取其前驱参与者的 rank（环形）——镜像
+    // post_blinds 从该 rank 顺时针扫描，与游戏层从空座位扫描的落点一致。
+    let last_bb_rank = rank_of_rotation_base(table.last_bb_seat(), &plan);
 
     table.hand_proof_log = HandProofLog {
         start: Some(HandStartData {
             hand_id: table.current_hand_id,
             participants: plan.into_iter().map(|(_, p)| p).collect(),
             button_rank,
+            last_bb_rank,
             small_blind: sb,
             deck,
         }),
@@ -239,6 +250,29 @@ pub fn record_hand_start(table: &mut Table) {
     if let Some(start) = table.hand_proof_log.start.as_ref() {
         table.live_mirror = crate::starknet::shadow::bootstrap(table_id, start);
     }
+}
+
+/// dead button 轮转基准的 rank 映射：把游戏层的上一手大盲座位映射为
+/// 参与者序列（按游戏座位号升序）中的序号。座位本身已离场时取其前驱
+/// 参与者（环形——游戏层从空座位顺时针扫描的落点即前驱之后第一人）；
+/// 无历史（0）时返回 [`NO_SEAT`]。
+fn rank_of_rotation_base(
+    last_bb_seat: u32,
+    plan: &[(u32, HandParticipant)],
+) -> u8 {
+    use poker_l1::contracts::texas_poker::types::NO_SEAT;
+    if last_bb_seat == 0 {
+        return NO_SEAT;
+    }
+    // 严格 <=：座位在 plan 中 → 自身 rank；不在 → 前驱参与者 rank。
+    if let Some(rank) = plan
+        .iter()
+        .rposition(|(seat_id, _)| *seat_id <= last_bb_seat)
+    {
+        return rank as u8;
+    }
+    // 全部参与者座位号 > last_bb：前驱为环形意义上的最后一名参与者。
+    (plan.len().saturating_sub(1)) as u8
 }
 
 /// 派彩前快照终局投入（摊牌/fold-win 两条终局路径各调用一次；重复调用

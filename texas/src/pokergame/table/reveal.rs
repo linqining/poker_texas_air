@@ -299,8 +299,24 @@ impl Table {
             self.reset_bets_and_actions();
             self.betting_round = Some(crate::pokergame::betting::BettingRound::new(self.summary.min_bet * 2));
 
-            // 对齐 Move start_betting_round: 设置 postflop 首行动作
-            let first = self.next_unfolded_player(self.button().unwrap_or(1), 1);
+            // 对齐 Move start_betting_round: 设置 postflop 首行动作。
+            // 非 heads-up：button 之后第一个可行动座位（button 最后行动）。
+            // heads-up：BB 先行动（button 职责=SB，最后行动）——dead button
+            // 下 BB 座位可能与 button 座位不同，显式从 BB 开始（含 BB 本身；
+            // BB 已 all-in/fold 时顺延到 BB 之后第一个可行动座位）。
+            let first = if self.active_players().len() == 2 {
+                let bb = self.big_blind().unwrap_or(self.button().unwrap_or(1));
+                let bb_actionable = self.seats().get(&bb).map(|s| {
+                    !s.folded && !s.sitting_out && !s.is_waiting && s.stack > 0
+                }).unwrap_or(false);
+                if bb_actionable {
+                    Some(bb)
+                } else {
+                    self.next_unfolded_player(bb, 1)
+                }
+            } else {
+                self.next_unfolded_player(self.button().unwrap_or(1), 1)
+            };
             self.set_turn(first);
         }
         self.set_betting_started_at(now_ms());

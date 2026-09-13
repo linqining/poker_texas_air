@@ -798,6 +798,7 @@ mod delta_parity_tests {
                 hand_id: 1,
                 participants: Vec::new(),
                 button_rank: 0,
+                last_bb_rank: poker_l1::contracts::texas_poker::types::NO_SEAT,
                 small_blind: 10,
                 deck: Vec::new(),
             },

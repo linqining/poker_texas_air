@@ -85,6 +85,7 @@ fn base_image(rules_commitment: [u8; 32], deck_commitment: [u8; 32]) -> Canonica
         chip_pool: 0,
         pot: 0,
         button: 0,
+        last_bb_seat: NO_CANONICAL_SEAT,
         max_players: SEATS,
         acted_mask: 0,
         leave_after_hand_mask: 0,
@@ -201,13 +202,10 @@ fn hand_start_projection(
     // StartHand resets the per-hand call sequence.
     post.call_seq = 0;
     post.hand_id = hand_id;
-    // VM rule: button = first occupied seat after the current button.
+    // Dead button rule: the button advances unconditionally by one seat —
+    // the landing seat may be empty (dead button), no skipping.
     let max = usize::from(pre.max_players);
-    post.button = (1..=max)
-        .map(|offset| (usize::from(pre.button) + offset) % max)
-        .find(|&index| pre.seats[index].status != CanonicalSeatStatus::Empty)
-        .map(|index| index as u8)
-        .unwrap_or(pre.button);
+    post.button = ((usize::from(pre.button) + 1) % max) as u8;
     post.phase = CanonicalPhase::Shuffling;
     post.phase_subtag = 1;
     post.street = if street_fix { 1 } else { 0 };
@@ -239,9 +237,11 @@ fn betting_rows(pre: CanonicalStateImage) -> Vec<CanonicalTransitionWitness> {
     let mut rows = Vec::new();
     let mut current = pre;
     let button = current.button;
-    let _sb = next_seat(button, 1);
-    let bb = next_seat(button, 2);
-    // UTG: first active seat after the BB (four full seats, non-heads-up).
+    // Dead-button first-hand blinds: the rotation base falls back to the
+    // button, so SB = the button seat itself and BB = the next seat; UTG =
+    // first active seat after the BB (mirrors `blind_seats_of`).
+    let _sb = button;
+    let bb = next_seat(button, 1);
     let utg = next_seat(bb, 1);
 
     // UTG raises to 300.
@@ -910,7 +910,10 @@ fn stage0_reconstruct_segment_single_batch() {
 
     let mut witnesses: Vec<CanonicalTransitionWitness> = Vec::new();
     let button = current.button;
-    let bb = next_seat(button, 2);
+    // Dead-button first-hand blinds: SB = the button seat itself, BB = the
+    // next seat, UTG = the seat after BB (mirrors `blind_seats_of`).
+    let _sb = button;
+    let bb = next_seat(button, 1);
     let utg = next_seat(bb, 1);
 
     // Betting round: call ×3 then a BB check (four live seats).

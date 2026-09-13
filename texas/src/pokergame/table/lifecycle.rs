@@ -69,6 +69,7 @@ impl Table {
 
     pub fn reset_empty_table(&mut self) {
         self.set_button(None);
+        self.set_last_bb_seat(None);
         self.set_turn(None);
         self.summary.hand_over = true;
         self.summary.went_to_showdown = false;

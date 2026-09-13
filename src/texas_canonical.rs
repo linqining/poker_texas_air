@@ -9,7 +9,11 @@ use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
 
-pub const CANONICAL_ABI_VERSION: u16 = 6;
+/// v7（2026-09-13）：完整实现 dead button 盲注规则（Robert's Rules of
+/// Poker §4.2b）——状态新增 `last_bb_seat`（上一手大盲座位，盲注轮转轨道）；
+/// StartHand 的按钮改为无条件 +1（允许落在空座位，即死按钮）；盲注座位
+/// 改为按轮转归属推导，允许 dead small blind（`sb_seat = NO_CANONICAL_SEAT`）。
+pub const CANONICAL_ABI_VERSION: u16 = 7;
 pub const MAX_CANONICAL_SEATS: usize = 9;
 /// The flop under run-it-twice is the largest board reveal batch: three cards
 /// on each of two runouts.  Keeping this array fixed is essential for the
@@ -147,6 +151,10 @@ pub struct CanonicalStateImage {
     pub chip_pool: u64,
     pub pot: u64,
     pub button: u8,
+    /// 上一手大盲座位（dead button 盲注轮转轨道）。`NO_CANONICAL_SEAT`
+    /// 表示尚无盲注历史（首手退化为按钮相对定位）。仅 reveal 完成
+    /// （投盲注）转移更新，其余转移必须保持不变。
+    pub last_bb_seat: u8,
     pub max_players: u8,
     pub acted_mask: u16,
     pub leave_after_hand_mask: u16,
@@ -178,7 +186,11 @@ impl CanonicalStateImage {
         if !(2..=MAX_CANONICAL_SEATS as u8).contains(&self.max_players) {
             return Err("max_players must be within 2..=9".into());
         }
-        for (name, value) in [("button", self.button), ("current_turn", self.current_turn)] {
+        for (name, value) in [
+            ("button", self.button),
+            ("last_bb_seat", self.last_bb_seat),
+            ("current_turn", self.current_turn),
+        ] {
             if value != NO_CANONICAL_SEAT && value >= self.max_players {
                 return Err(format!("{name} is outside the seat domain"));
             }
@@ -1040,7 +1052,10 @@ fn next_participating_seat(
 ) -> Option<u8> {
     for offset in 1..=usize::from(max) {
         let index = (usize::from(from) + offset) % usize::from(max);
-        if seats[index].status != CanonicalSeatStatus::Empty {
+        if !matches!(
+            seats[index].status,
+            CanonicalSeatStatus::Empty | CanonicalSeatStatus::Out
+        ) {
             return Some(index as u8);
         }
     }
@@ -1131,33 +1146,55 @@ fn validate_reveal_completion_opening(
     if opening.is_heads_up != is_heads_up {
         return Err("final reveal completion has an invalid heads-up flag".into());
     }
-    // 盲注定位（镜像 post_blinds 的 find_next_participating_seat）。
-    let (sb_seat, bb_seat) = if is_heads_up {
-        (pre.button, u8::try_from(usize::from(pre.button)).ok().and_then(|_| {
-            next_participating_seat(&pre.seats, pre.button, pre.max_players)
-        }).unwrap_or(pre.button))
+    // 盲注定位（镜像 post_blinds 的 dead button 轮转规则）：大盲 = 上一手
+    // 大盲座位（首手退化为 button）之后第一个参与座位；小盲 = 上一手大盲
+    // 座位本身（单挑时为 BB 之外另一参与者），该座位空缺/离场时本手无小盲
+    //（dead small blind，`sb_seat = NO_CANONICAL_SEAT`）。在此前校验收敛的
+    // 镜像里占用座位恒为 Active（无 Waiting/Folded/AllIn），参与 = Active。
+    let rotation_base = if pre.last_bb_seat != NO_CANONICAL_SEAT {
+        pre.last_bb_seat
     } else {
-        let sb = next_participating_seat(&pre.seats, pre.button, pre.max_players)
-            .ok_or("final reveal completion cannot locate the small blind")?;
-        let bb = next_participating_seat(&pre.seats, sb, pre.max_players)
-            .ok_or("final reveal completion cannot locate the big blind")?;
+        pre.button
+    };
+    let (sb_seat, bb_seat) = if is_heads_up {
+        let bb = next_participating_seat(&pre.seats, rotation_base, pre.max_players)
+            .unwrap_or(rotation_base);
+        let sb = next_participating_seat(&pre.seats, bb, pre.max_players).unwrap_or(bb);
+        (sb, bb)
+    } else {
+        let bb = next_participating_seat(&pre.seats, rotation_base, pre.max_players)
+            .unwrap_or(rotation_base);
+        let base = &pre.seats[usize::from(rotation_base)];
+        let sb = if rotation_base != bb
+            && base.status != CanonicalSeatStatus::Empty
+            && base.status != CanonicalSeatStatus::Out
+        {
+            rotation_base
+        } else {
+            NO_CANONICAL_SEAT
+        };
         (sb, bb)
     };
     if opening.sb_seat != sb_seat || opening.bb_seat != bb_seat {
         return Err("final reveal completion has invalid blind seats".into());
     }
-    // 盲注面额纪律：无封顶（stack 保持为正 → 无 AllIn 翻转），SB ≤ BB。
+    // 盲注轨道落点：本手大盲座位成为下一手的轮转基准（跨手持久）。
+    if post.last_bb_seat != bb_seat {
+        return Err("final reveal completion has an invalid blind rotation track".into());
+    }
+    // 盲注面额纪律：无封顶（stack 保持为正 → 无 AllIn 翻转），SB ≤ BB；
+    // dead small blind 时 SB 座位与金额必须同时为空/零（fail-closed 成对）。
     let sb_amount = opening.sb_amount;
     let bb_amount = opening.bb_amount;
-    if sb_amount == 0 || bb_amount == 0 || sb_amount > bb_amount {
+    if bb_amount == 0 || sb_amount > bb_amount {
         return Err("final reveal completion has invalid blind amounts".into());
     }
-    // UTG（镜像 start_betting_round：单挑 = button，否则 BB 后首个 Active）。
-    let expected_turn = if is_heads_up {
-        Some(pre.button)
-    } else {
-        next_active_seat(&post.seats, bb_seat, post.max_players)
-    };
+    if (sb_seat == NO_CANONICAL_SEAT) != (sb_amount == 0) {
+        return Err("final reveal completion has an inconsistent dead small blind".into());
+    }
+    // UTG（镜像 start_betting_round：BB 后首个可行动座位；单挑时该扫描
+    // 恰好落在 SB = BB 之外另一参与者上，与 dead button 语义一致）。
+    let expected_turn = next_active_seat(&post.seats, bb_seat, post.max_players);
     if post.current_turn
         != expected_turn.unwrap_or(NO_CANONICAL_SEAT)
         || opening.post_current_turn != post.current_turn
@@ -2325,19 +2362,13 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
             if active_count < 2 {
                 return Err("start_hand requires at least two participating seats".into());
             }
-            let mut button = None;
-            for offset in 1..=usize::from(pre.max_players) {
-                let index = (usize::from(pre.button) + offset) % usize::from(pre.max_players);
-                if !matches!(
-                    pre.seats[index].status,
-                    CanonicalSeatStatus::Empty | CanonicalSeatStatus::Out
-                ) {
-                    button = Some(index as u8);
-                    break;
-                }
-            }
+            // Dead button 规则（Robert's Rules of Poker §4.2b）：按钮每手
+            // 无条件前进一个座位——落点允许是空座位（死按钮），不跳过任何
+            // 座位。跳过会把过渡手的盲注轨道整体前移，偏离标准语义。
+            let button = (usize::from(pre.button) + 1) % usize::from(pre.max_players);
             let participant_mask = active_reveal_mask(&post.seats);
-            if post.button != button.unwrap_or(pre.button)
+            if post.button != button as u8
+                || post.last_bb_seat != pre.last_bb_seat
                 || post.phase_subtag != 1
                 || post.street != 0
                 || post.acted_mask != 0
@@ -3062,6 +3093,8 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                         expected.current_bet = actual.current_bet;
                         expected.min_raise = actual.min_raise;
                         expected.acted_mask = actual.acted_mask;
+                        // dead button 盲注轨道：投盲注时推进到本手大盲座位。
+                        expected.last_bb_seat = actual.last_bb_seat;
                         expected.seats = actual.seats;
                     }
                 })?;
@@ -3218,6 +3251,7 @@ mod tests {
             chip_pool: 0,
             pot: 0,
             button: 0,
+            last_bb_seat: NO_CANONICAL_SEAT,
             max_players: 2,
             acted_mask: 0,
             leave_after_hand_mask: 0,
@@ -3272,9 +3306,11 @@ mod tests {
         post.deadline_ms = timestamp + u64::from(pre.betting_timeout_ms);
         post.protocol_pending_mask = 0;
         post.reveal_commitment = [0x33; 32];
-        post.current_turn = 0; // heads-up: SB(button) 先行动
+        post.current_turn = 0; // UTG = BB(座1) 后首个 Active = 座0 = SB
         post.current_bet = 100; // big blind
         post.min_raise = 100;
+        // dead button 盲注轨道：本手大盲座位成为下一手轮转基准。
+        post.last_bb_seat = 1;
         // 盲注：SB=button(座0) 出 50，BB(座1) 出 100
         post.seats[0].stack = 950;
         post.seats[0].bet = 50;
@@ -3345,6 +3381,8 @@ mod tests {
         let mut witness = reveal_completion_witness();
         witness.pre.protocol_pending_mask = 0b11;
         witness.post.protocol_pending_mask = 0b10; // 清提交者（座0）位
+        // 非最终提交行不更新盲注轨道（该字段仅在完成行推进）。
+        witness.post.last_bb_seat = witness.pre.last_bb_seat;
         witness.post.phase = CanonicalPhase::Revealing;
         witness.post.deadline_ms = witness.pre.deadline_ms;
         witness.post.current_turn = NO_CANONICAL_SEAT;

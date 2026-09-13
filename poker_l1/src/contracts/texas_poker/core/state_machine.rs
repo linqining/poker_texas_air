@@ -476,59 +476,75 @@ fn rebuild_deck_from_reconstruct_deck(table: &mut TexasPokerTable) -> PokerL1Res
 
 // ========== 庄家位与盲注 ==========
 
-/// 移动庄家位到下一 occupied seat。
+/// 移动庄家位：dead button 规则（Robert's Rules of Poker §4.2b）下按钮
+/// 每手严格前进一个座位——即使落点是空座位（该手即为"死按钮"，不承担
+/// button 职责），**不**跳过空座位。跳过空座位会把过渡手的盲注轨道整体
+/// 前移，偏离标准 dead button 语义。
 fn move_button(table: &mut TexasPokerTable) {
-    let n = table.max_players;
-    for offset in 1..=n {
-        let idx = (table.button + offset) % n;
-        if table.seats[idx as usize].is_occupied() {
-            table.button = idx;
-            return;
-        }
-    }
+    table.button = (table.button + 1) % table.max_players;
 }
 
 /// 投盲注，返回 (sb_seat, bb_seat, first_to_act)。
 ///
-/// 镜像 `table.move::post_blinds`（line 2672-2710），并修正座位定位（P0-1）：
-/// - **heads-up（2 人）**：SB=button，BB=顺时针下一个参与本局的座位，
-///   first_to_act=BB（heads-up preflop BB 先行动）。
-/// - **非 heads-up**：SB=顺时针下一个参与本局的座位，BB=SB 之后的下一个，
-///   first_to_act 返回 BB 之后的参考座位（实际 first-to-act 由
-///   `start_betting_round` 用 `find_next_active_seat(seats, bb, n)` 精确定位）。
+/// **完整实现 dead button 规则**（Robert's Rules of Poker §4.2b；TDA 锦标赛
+/// 规则同）：盲注按"轮转归属"而非纯按钮相对位置定位——
+/// - **大盲**：上一手大盲（`last_bb_seat`）之后顺时针第一个参与本局的座位。
+///   轮转永不跳人、永不重复（无人连续两手交大盲）。
+/// - **小盲（非单挑）**：上一手大盲座位本身——该座位已空/离场/等待时，
+///   本手**无小盲**（dead small blind），不向其后顺延。
+/// - **单挑（2 名参与者）**：大盲按轮转归属，小盲 = 大盲之外另一参与者
+///   （承担 button 职责：翻牌前先行动、翻牌后后行动）。
+/// - **首手**（`last_bb_seat == NO_SEAT`，无盲注历史）：退回位置式定位，
+///   SB = button 后第一个参与座位，BB = SB 之后下一个。
 ///
-/// # P0-1 修复
-///
-/// 原实现用 `(button+k) % n` 直接取模定位 SB/BB，不跳过空座位。
-/// 当 button 与 BB 之间存在空座位时，盲注会落到空座位（stack=0，盲注失效）。
-/// 现统一用 `find_next_participating_seat` 顺时针跳过空座位定位。
+/// 返回值的 `sb_seat` 在 dead small blind 时为 [`NO_SEAT`]（该手不收小盲）。
 fn post_blinds(
     table: &mut TexasPokerTable,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<(u8, u8, u8)> {
     let n = table.max_players;
     let active = count_active_occupied(&table.seats);
+    let rotation_base = if table.last_bb_seat != NO_SEAT {
+        debug_assert!(usize::from(table.last_bb_seat) < usize::from(n));
+        table.last_bb_seat
+    } else {
+        table.button
+    };
     let (sb_seat, bb_seat) = if active == 2 {
-        // heads-up: SB=button, BB=顺时针下一个参与本局的座位
-        let sb = table.button;
-        let bb = find_next_participating_seat(&table.seats, sb, n).unwrap_or(sb);
+        // heads-up：BB 按轮转归属，SB = BB 之外另一参与者（死按钮时该
+        // 座位可能与 button 座位不同）。
+        let bb =
+            find_next_participating_seat(&table.seats, rotation_base, n).unwrap_or(rotation_base);
+        let sb = find_next_participating_seat(&table.seats, bb, n).unwrap_or(bb);
         (sb, bb)
     } else {
-        // 非 heads-up: SB=button 之后第一个参与本局的座位，BB=SB 之后下一个
-        let sb =
-            find_next_participating_seat(&table.seats, table.button, n).unwrap_or(table.button);
-        let bb = find_next_participating_seat(&table.seats, sb, n).unwrap_or(sb);
+        // 非 heads-up：BB = 上一手 BB 之后第一个参与座位；SB = 上一手 BB
+        // 座位本身（仍参与时），否则 dead small blind。
+        let bb =
+            find_next_participating_seat(&table.seats, rotation_base, n).unwrap_or(rotation_base);
+        let base = &table.seats[usize::from(rotation_base)];
+        let sb = if rotation_base != bb && base.is_occupied() && !base.is_waiting() {
+            rotation_base
+        } else {
+            NO_SEAT
+        };
         (sb, bb)
     };
+    // 大盲轮转轨道落点记录：下一手的大盲/小盲据此定位（跨手持久）。
+    table.last_bb_seat = bb_seat;
     // first_to_act 仅作事件参考，实际由 start_betting_round 基于 BB 精确定位。
     let first_to_act = bb_seat;
 
-    let sb_amt = table.small_blind.min(table.seats[sb_seat as usize].stack());
     let bb_amt = table.big_blind.min(table.seats[bb_seat as usize].stack());
 
-    let sb_seat_idx = sb_seat as usize;
+    let sb_seat_idx = usize::from(sb_seat);
     let bb_seat_idx = bb_seat as usize;
-    {
+    let sb_amt = if sb_seat == NO_SEAT {
+        0
+    } else {
+        table.small_blind.min(table.seats[sb_seat_idx].stack())
+    };
+    if sb_seat != NO_SEAT {
         let seat = table.seats[sb_seat_idx].playing_mut()?;
         seat.occupied.stack = seat.occupied.stack.checked_sub(sb_amt).ok_or_else(|| {
             PokerL1Error::Serialization("post_blinds: sb stack -= sb_amt underflow".into())
@@ -537,9 +553,9 @@ fn post_blinds(
         seat.total_bet = seat.total_bet.checked_add(sb_amt).ok_or_else(|| {
             PokerL1Error::Serialization("post_blinds: sb total_bet += sb_amt overflow".into())
         })?;
-    }
-    if table.seats[sb_seat_idx].stack() == 0 {
-        table.seats[sb_seat_idx].set_status(SeatStatus::AllIn);
+        if table.seats[sb_seat_idx].stack() == 0 {
+            table.seats[sb_seat_idx].set_status(SeatStatus::AllIn);
+        }
     }
 
     {
@@ -630,20 +646,29 @@ fn start_betting_round(
     let n = table.max_players;
     // 选第一个可行动玩家作为 current_turn。
     let start_seat = if is_preflop {
-        if is_heads_up {
-            // heads-up preflop: SB(button) 先行动
-            Some(table.button)
+        // UTG = BB 之后第一个可行动座位（BB 本身已投盲不行动）。单挑时该
+        // 座位即 SB——dead button 规则下 SB = BB 之外另一参与者，可能与
+        // button 座位不同；SB 已因盲注 all-in 时顺延回 BB。
+        bb_seat.and_then(|bb| find_next_active_seat(&table.seats, bb, n))
+    } else if is_heads_up {
+        // 单挑翻牌后 BB 先行动（button 职责=SB，最后行动）。dead button
+        // 下 BB 座位可能与 button 座位不同，显式从 BB（轮转基准）开始：
+        // BB 本身可行动则先行动，否则顺延到 BB 之后第一个可行动座位。
+        let base = if table.last_bb_seat != NO_SEAT {
+            table.last_bb_seat
         } else {
-            // 非 heads-up preflop: UTG = BB 之后第一个可行动座位
-            bb_seat
-                .filter(|_| !is_heads_up)
-                .and_then(|bb| find_next_active_seat(&table.seats, bb, n))
+            table.button
+        };
+        let base_seat = &table.seats[usize::from(base)];
+        let base_actionable =
+            base_seat.is_occupied() && !base_seat.is_folded() && !base_seat.is_all_in() && !base_seat.is_waiting();
+        if base_actionable {
+            Some(base)
+        } else {
+            find_next_active_seat(&table.seats, base, n)
         }
     } else {
-        // postflop: BB 先行动（真实德扑规则）。heads-up 时 button=SB，
-        // BB 即 button 之后第一个活跃座位——与非 heads-up 相同的选法，
-        // 且与游戏层 start_betting_round(false) 的 next_unfolded_player(button)
-        // 一致（deck 同源对拍要求两边 turn 顺序逐位一致）。
+        // postflop 非 heads-up: button 之后第一个可行动座位（button 最后行动）。
         find_next_active_seat(&table.seats, table.button, n)
     };
 
@@ -2514,18 +2539,21 @@ fn promote_waiting_for_big_blind(table: &mut TexasPokerTable) {
         return;
     }
 
-    // 本手 SB = button 后第一个参与座位；紧随其后的 Waiting 座位以 BB 身份入局。
-    if let Some(sb) = find_next_participating_seat(&table.seats, table.button, table.max_players) {
-        for offset in 1..=n {
-            let idx = (usize::from(sb) + offset) % n;
+    // dead button 盲注轨道：等待入局者在其"轮到大盲"的那一手入局——
+    // 从上一手大盲（首手为 button）顺时针数，第一个被占用的座位若是
+    // waiting 座位则以 BB 身份入局；若是参与座位，本手大盲已有归属。
+    let rotation_base = if table.last_bb_seat != NO_SEAT {
+        table.last_bb_seat
+    } else {
+        table.button
+    };
+    for offset in 1..=n {
+        let idx = (usize::from(rotation_base) + offset) % n;
+        if table.seats[idx].is_occupied() {
             if table.seats[idx].is_waiting() {
                 table.seats[idx].promote_waiting();
-                break;
             }
-            if table.seats[idx].is_occupied() {
-                // SB 后紧邻的已是参与座位，本手 BB 已有归属。
-                break;
-            }
+            break;
         }
     }
 
@@ -5022,6 +5050,74 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, TexasPokerEvent::BlindsPosted { .. }))
         );
+    }
+
+    #[test]
+    fn test_post_blinds_dead_button_rotation() {
+        // Dead button（Robert's Rules §4.2b）：大盲按轮转归属——上一手大盲
+        // 座位之后第一个参与座位；上一手大盲座位本身（仍参与时）交小盲。
+        let mut table = make_table();
+        // 4 桌：座 3 已离场；上一手 BB=座 2，上一手按钮=座 3（空）。
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
+        table.seats[2].fixture_set_player([0x03; 20]);
+        table.seats[2].set_stack(1000).unwrap();
+        table.last_bb_seat = 2;
+        let mut events = vec![];
+        let (sb, bb, _) = post_blinds(&mut table, &mut events).unwrap();
+        // 轮转：BB = 上一手 BB（座 2）之后第一个参与座位 = 座 0；
+        // SB = 上一手 BB 座位本身（座 2，仍参与）。
+        assert_eq!(bb, 0);
+        assert_eq!(sb, 2);
+        assert_eq!(table.last_bb_seat, 0, "track advances to this hand's BB");
+        assert_eq!(table.seats[2].bet(), 50);
+        assert_eq!(table.seats[0].bet(), 100);
+    }
+
+    #[test]
+    fn test_post_blinds_dead_small_blind() {
+        // 上一手大盲座位已离场 → 本手无小盲（dead small blind），只有大盲。
+        // 注意：需要 ≥3 名参与者——单挑时小盲恒为另一参与者，无 dead SB。
+        let mut table = make_table();
+        table.seats[1].fixture_set_player([0x01; 20]);
+        table.seats[1].set_stack(1000).unwrap();
+        table.seats[2].fixture_set_player([0x02; 20]);
+        table.seats[2].set_stack(1000).unwrap();
+        table.seats[3].fixture_set_player([0x03; 20]);
+        table.seats[3].set_stack(1000).unwrap();
+        table.last_bb_seat = 0; // 上一手大盲（座 0）已离场
+        let mut events = vec![];
+        let (sb, bb, _) = post_blinds(&mut table, &mut events).unwrap();
+        assert_eq!(sb, NO_SEAT, "previous BB seat is vacant → dead small blind");
+        assert_eq!(bb, 1, "BB = first participating after the vacant seat");
+        assert_eq!(table.last_bb_seat, 1);
+        assert_eq!(table.seats[1].bet(), 100);
+        assert_eq!(table.seats[2].bet(), 0, "no small blind posted");
+        let posted = events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::BlindsPosted { sb_seat: NO_SEAT, sb_amount: 0, .. }));
+        assert!(posted, "BlindsPosted carries the dead SB shape");
+    }
+
+    #[test]
+    fn test_post_blinds_hu_dead_button_button_seat_differs() {
+        // 单挑 + 死按钮：按钮落在空座位，SB（轮转）≠ button 座位。
+        let mut table = make_table();
+        table.seats[1].fixture_set_player([0x01; 20]);
+        table.seats[1].set_stack(1000).unwrap();
+        table.seats[3].fixture_set_player([0x03; 20]);
+        table.seats[3].set_stack(1000).unwrap();
+        table.button = 0; // 死按钮落在空座位
+        table.last_bb_seat = 1; // 上一手大盲 = 座 1
+        let mut events = vec![];
+        let (sb, bb, _) = post_blinds(&mut table, &mut events).unwrap();
+        // BB 按轮转 = 上一手 BB 之后第一个参与 = 座 3；SB = 另一人 = 座 1。
+        assert_eq!(bb, 3);
+        assert_eq!(sb, 1);
+        assert_ne!(sb, table.button, "dead button: SB seat differs from the button seat");
+        assert_eq!(table.last_bb_seat, 3);
     }
 
     #[test]

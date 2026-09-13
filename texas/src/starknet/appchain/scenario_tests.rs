@@ -95,6 +95,7 @@ fn full_hand_witnesses() -> Vec<CanonicalTransitionWitness> {
             chip_pool: BUY_IN * 3,
             pot: 0,
             button: 0,
+            last_bb_seat: poker_texas_air::texas_canonical::NO_CANONICAL_SEAT,
             max_players: 3,
             acted_mask: 0,
             leave_after_hand_mask: 0,

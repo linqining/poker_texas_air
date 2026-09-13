@@ -659,6 +659,7 @@ fn felt_to_bytes16(felt: Felt) -> TexasAirResult<[u8; 16]> {
 mod tests {
     use super::*;
     use crate::state_root::StateRoot;
+    use crate::texas_canonical::NO_CANONICAL_SEAT;
     use crate::test_support::well_formed_tx_pk_fixture;
     use crate::verified_chain::{VerificationReceipt, VerifiedChain};
 
@@ -747,6 +748,7 @@ mod tests {
             acted_mask: 0,
             leave_after_hand_mask: 0,
             button: 0,
+            last_bb_seat: NO_CANONICAL_SEAT,
             pot: 100,
             community_cards: BoardCards::default(),
             hand_phase: HandPhase::Waiting,

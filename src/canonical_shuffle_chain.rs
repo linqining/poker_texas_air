@@ -69,7 +69,7 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::texas_canonical::{
     CanonicalActionPayload, CanonicalProtocolCompletionKind, CanonicalProtocolCompletionOpening,
     CanonicalPhase, CanonicalSeatStatus, CanonicalStateImage, CanonicalTransitionKind,
-    CanonicalTransitionWitness,
+    CanonicalTransitionWitness, NO_CANONICAL_SEAT,
 };
 use crate::texas_canonical_air::{
     batch_digest_for_witnesses, verify_canonical_tagged_proof, ArchivedCanonicalTaggedProof,
@@ -693,23 +693,23 @@ impl ShuffleChainBuilder {
                     "final reveal row requires set_reveal_completion_blinds".into(),
                 )
             })?;
-            if header.sb_amount == 0
+            let completion_timestamp = stage0_timestamp(&pre);
+            let (sb_seat, bb_seat) = blind_seats_of(&pre)?;
+            // Dead small blind 成对纪律：SB 座位空缺 ⟺ SB 金额为零。
+            if (sb_seat == NO_CANONICAL_SEAT) != (header.sb_amount == 0)
                 || header.bb_amount == 0
                 || header.sb_amount > header.bb_amount
             {
                 return Err(TexasAirError::SpecViolation(
-                    "reveal completion needs 0 < sb <= bb".into(),
+                    "reveal completion needs 0 <= sb <= bb (dead sb allowed)".into(),
                 ));
             }
-            let completion_timestamp = stage0_timestamp(&pre);
-            let (sb_seat, bb_seat) = blind_seats_of(&pre)?;
-            let current_turn = if is_heads_up(&pre) {
-                pre.button
-            } else {
+            let current_turn =
                 next_active_seat(&pre.seats, bb_seat, pre.max_players).ok_or_else(|| {
                     TexasAirError::SpecViolation("reveal completion has no UTG seat".into())
-                })?
-            };
+                })?;
+            // dead button 盲注轨道：本手大盲座位成为下一手的轮转基准。
+            post.last_bb_seat = bb_seat;
             post.phase = CanonicalPhase::Betting;
             post.phase_subtag = 1;
             post.deadline_ms = completion_timestamp
@@ -1170,8 +1170,8 @@ fn fold_chain(label: &[u8], chain: &[[u8; 32]]) -> [u8; 32] {
     poseidon_bytes_digest(&material)
 }
 
-/// Canonical participating-seat scan (occupied, non-`Empty`), mirroring the
-/// VM's `find_next_participating_seat` used for SB/BB location.
+/// Canonical participating-seat scan (occupied, non-`Empty`/`Out`), mirroring
+/// the VM's `find_next_participating_seat` used for SB/BB location.
 fn next_participating_seat(
     seats: &[crate::texas_canonical::CanonicalSeat],
     from: u8,
@@ -1180,7 +1180,12 @@ fn next_participating_seat(
     let max = usize::from(max);
     (1..=max)
         .map(|offset| (usize::from(from) + offset) % max)
-        .find(|&index| seats[index].status != CanonicalSeatStatus::Empty)
+        .find(|&index| {
+            !matches!(
+                seats[index].status,
+                CanonicalSeatStatus::Empty | CanonicalSeatStatus::Out
+            )
+        })
         .map(|index| index as u8)
 }
 
@@ -1219,19 +1224,32 @@ fn is_heads_up(pre: &CanonicalStateImage) -> bool {
         == 2
 }
 
-/// `(sb, bb)` per the VM's `post_blinds` location rule.
+/// `(sb, bb)` per the VM's `post_blinds` dead-button rotation rule.  The big
+/// blind is the first participating seat after the previous hand's big blind
+/// (the button for a rotation-free table); the small blind is the previous
+/// big-blind seat itself, or the other participant heads-up.  A dead small
+/// blind is reported as [`NO_CANONICAL_SEAT`].
 fn blind_seats_of(pre: &CanonicalStateImage) -> TexasAirResult<(u8, u8)> {
-    if is_heads_up(pre) {
-        let bb = next_participating_seat(&pre.seats, pre.button, pre.max_players)
-            .unwrap_or(pre.button);
-        Ok((pre.button, bb))
+    let rotation_base = if pre.last_bb_seat != NO_CANONICAL_SEAT {
+        pre.last_bb_seat
     } else {
-        let sb = next_participating_seat(&pre.seats, pre.button, pre.max_players).ok_or_else(
-            || TexasAirError::SpecViolation("reveal completion cannot locate the SB".into()),
-        )?;
-        let bb = next_participating_seat(&pre.seats, sb, pre.max_players).ok_or_else(|| {
-            TexasAirError::SpecViolation("reveal completion cannot locate the BB".into())
-        })?;
+        pre.button
+    };
+    let bb = next_participating_seat(&pre.seats, rotation_base, pre.max_players)
+        .unwrap_or(rotation_base);
+    if is_heads_up(pre) {
+        let sb = next_participating_seat(&pre.seats, bb, pre.max_players).unwrap_or(bb);
+        Ok((sb, bb))
+    } else {
+        let base = &pre.seats[usize::from(rotation_base)];
+        let sb = if rotation_base != bb
+            && base.status != CanonicalSeatStatus::Empty
+            && base.status != CanonicalSeatStatus::Out
+        {
+            rotation_base
+        } else {
+            NO_CANONICAL_SEAT
+        };
         Ok((sb, bb))
     }
 }

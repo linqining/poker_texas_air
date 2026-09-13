@@ -529,6 +529,7 @@ mod tests {
             chip_pool: 0,
             pot: 0,
             button: 0,
+            last_bb_seat: NO_CANONICAL_SEAT,
             max_players: 2,
             acted_mask: 0,
             leave_after_hand_mask: 0,

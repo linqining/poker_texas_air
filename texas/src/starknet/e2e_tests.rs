@@ -150,8 +150,9 @@ fn play_full_hand_artifacts(
             super::mirror::conv::ciphertexts(&game_deck).expect("deck bridge"),
             &plan,
             0,
+            poker_l1::contracts::texas_poker::types::NO_SEAT,
             7,
-        )
+)
         .map_err(|e| format!("begin_reveal_hand: {e}"))?;
 
     // 对拍断言：重建器 deck 与游戏层 deck 逐字节一致。
@@ -360,7 +361,13 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
     ];
     let mut mirror = TableMirror::new(1, creator, 4, 10, 20, creator);
     mirror
-        .begin_reveal_hand(super::mirror::conv::ciphertexts(&game_deck).unwrap(), &plan, 0, 1)
+        .begin_reveal_hand(
+        super::mirror::conv::ciphertexts(&game_deck).unwrap(),
+        &plan,
+        0,
+        poker_l1::contracts::texas_poker::types::NO_SEAT,
+        1,
+    )
         .expect("inject");
 
     assert_eq!(
