@@ -32,6 +32,7 @@ impl Table {
                 Some(ActionResult { seat_id, message: format!("{} folds", player_name) })
             }
             Some(Err(e)) => {
+                self.sync_rejected_view();
                 tracing::debug!("[betting-authority] table {} fold rejected by VM: {e}", self.summary.id);
                 None
             }
@@ -61,6 +62,7 @@ impl Table {
                 Some(ActionResult { seat_id, message: msg })
             }
             Some(Err(e)) => {
+                self.sync_rejected_view();
                 tracing::debug!("[betting-authority] table {} call rejected by VM: {e}", self.summary.id);
                 None
             }
@@ -82,6 +84,7 @@ impl Table {
                 Some(ActionResult { seat_id, message: format!("{} checks", player_name) })
             }
             Some(Err(e)) => {
+                self.sync_rejected_view();
                 tracing::debug!("[betting-authority] table {} check rejected by VM: {e}", self.summary.id);
                 None
             }
@@ -107,6 +110,7 @@ impl Table {
                 Some(ActionResult { seat_id, message: format!("{} raises to ${:.2}", player_name, amount) })
             }
             Some(Err(e)) => {
+                self.sync_rejected_view();
                 tracing::debug!("[betting-authority] table {} raise rejected by VM: {e}", self.summary.id);
                 None
             }
@@ -169,6 +173,24 @@ impl Table {
         // 游戏层派奖路径，不在此触发。
         if !view.in_betting && !view.hand_over {
             self.advance_to_next_phase();
+        }
+    }
+
+    /// VM 拒绝动作时同步最新权威视图：VM 可能已在拒绝动作的 dispatch 内
+    /// 推进相位（如 preflop 完成 → flop reveal 窗口），游戏层不同步会卡死
+    /// 在旧街视图、reveal token 永远无法提交（失步死锁，2026-09-13 实测）。
+    pub(crate) fn sync_rejected_view(&mut self) {
+        if let Some(sh) = self.live_mirror.as_mut() {
+            if let Some(view) = sh.last_rejected_view.take() {
+                tracing::info!(
+                    "[sync-rejected] applying view: in_betting={} hand_over={} round_before={:?}",
+                    view.in_betting, view.hand_over, self.round_state()
+                );
+                self.apply_betting_view(&view);
+                tracing::info!("[sync-rejected] round_after={:?}", self.round_state());
+            }
+        } else {
+            tracing::info!("[sync-rejected] live_mirror absent");
         }
     }
 

@@ -79,6 +79,10 @@ def mulCM31 (x : QM31) (c : CM31) : QM31 := ⟨x.c0 * c, x.c1 * c⟩
 
 theorem mulCM31_apply (x : QM31) (c : CM31) : mulCM31 x c = ⟨x.c0 * c, x.c1 * c⟩ := rfl
 
+/-- 标量乘 `m · x`，`m ∈ M31`（对应 stwo 自动派生的 `Mul<BaseField> for
+SecureField`；`fft::ibutterfly` 等处使用）。 -/
+def mulM31 (x : QM31) (m : M31) : QM31 := mulCM31 x (CM31.ofU32 m.val 0)
+
 section Ring
 
 instance : CommRing QM31 where

@@ -1,5 +1,6 @@
 [package]
 name = "stwo-vector-gen"
+default-run = "stwo-vector-gen"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -9,6 +10,8 @@ publish = false
 
 [dependencies]
 stwo = "=2.3.0"
+starknet-crypto = "0.6.2"
+starknet-ff = "0.3.7"
 
 [profile.release]
 opt-level = 3

@@ -75,6 +75,14 @@ pub struct StarknetConfig {
     /// proved 模式 workload JSON 导出目录（`STARKNET_PROVER_WORK_DIR`，
     /// 默认 `/tmp/zgame-prover`）——未来独立 prover CLI 消费的输入文件。
     pub prover_work_dir: String,
+    /// SNIP-36 自托管 prover 端点（`STARKNET_SNIP36_PROVER_URL`，即
+    /// starknet_transaction_prover 容器的 JSON-RPC）。仅
+    /// dapv_settle_entry=snip36 时需要；服务无鉴权，务必内网/反代部署。
+    pub snip36_prover_url: Option<String>,
+    /// SNIP-36 证明交易的 l2_gas.max_amount（`STARKNET_SNIP36_L2_GAS`，
+    /// 默认 0x5f5e100 = 100M ≈ 100 万 Cairo 步，prover README 锚点）——
+    /// 即 OS 执行 gas 上限，非 0 是 prover 输入校验的硬要求。
+    pub snip36_l2_gas: u64,
     /// true = 钱包签名必须通过 isValidSignature 链上验证；false = dev 模式放行。
     pub auth_strict: bool,
     /// 平台 treasury 地址（抽水接收方，`STARKNET_TREASURY_ADDRESS`）。
@@ -131,6 +139,14 @@ impl StarknetConfig {
                 .ok()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "/tmp/zgame-prover".to_string()),
+            snip36_prover_url: std::env::var("STARKNET_SNIP36_PROVER_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            snip36_l2_gas: std::env::var("STARKNET_SNIP36_L2_GAS")
+                .ok()
+                .and_then(|s| super::chain::parse_felt(&s))
+                .and_then(|f| u64::try_from(f).ok())
+                .unwrap_or(0x5f5e100),
             auth_strict: std::env::var("STARKNET_AUTH_STRICT")
                 .ok()
                 .and_then(|s| s.parse().ok())

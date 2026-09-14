@@ -149,25 +149,98 @@ fn message_hash_for_segment(self_addr: ContractAddress, segment: Span<felt252>) 
 ```
 
 > 注意：`facts[8]`/`facts[2]` 的槽位与消息哈希公式以 SNIP-36 最终规范
-> 为准（skill 参考实现：poseidon(合约地址, 0, payload_len, payload)）；
-> 上链前用 sepolia 真实 proof_facts 样本对拍一次再冻结常量。
+> 为准；上链前用 sepolia 真实 proof_facts 样本对拍一次再冻结常量。
+> **2026-09-14 修订**：`facts[2]` 的绑定根不是本方电路哈希而是 Starknet
+> 虚拟 OS program hash——实现与裁决见 §5（dual v6）。
 
-## 5. 缺口状态表（2026-09-06 二次核对修订）
+## 5. 缺口状态表（2026-09-14 三次修订：#1/#2/#4 工程落地）
 
 | # | 工作项 | 状态 |
 | --- | --- | --- |
 | 7 | Phase 1 安全边界落档（本文 §1/§2） | ✅ 2026-09-06（同日修订：协议已主网激活，无协议等待项） |
 | 3a | libfuncs `all`（Scarb.toml） | ✅ 2026-09-06（构建 0 错、snforge 92/92） |
-| 0 | **证明瘦身实测**（新增，SNIP-36 直连的先决量化项） | ⏳ 目标 ≤500KB 级：紧凑二进制已定基（2.30MB）；FRI 参数收紧（70→30 queries 等）对**尺寸**的影响未实测（此前只测了时间 −11%/−26%）；批聚合摊薄单位成本（尺寸与手数无关已实测） |
-| 3b | 合约 proof_facts 消费路径（§4 v3 入口） | ✅ 2026-09-07：cairo 2.19.4 迁移 + v3 双门入口上链（dual v5 `0x29bdc970...`，snforge `cheat_proof_facts` mock 四例全绿） |
+| 0 | **证明瘦身实测**（SNIP-36 直连的先决量化项） | ✅ **2026-09-14 实测完成**（`scripts/slimming-matrix.sh`，8 配置矩阵，数据见 §6）：**推荐参数 `p3`（pow26/b2/q35/fs4）在 96-bit 等安全下 bincode −43%（1.31MB→750KB）、bzip2 wire −51%（1.02MB→501KB，达标 ≤500KB 级）、JSON −53%**；证明耗时 6.7s→11.3s（异步结算可接受）。朴素 70→30（p1）证伪：blowup=1 下仅 56-bit——尺寸优势是假象，p3 以同等尺寸保住全安全。`cairo_serde` 格式对本电路不可用（未启用 builtin 触发 vendored 栈 panic，已隔离并记录）。b≥3 在 36GB 机器上临界 OOM。**注：SNIP-36 腿上链证明是虚拟 SNOS 执行（参数由 Starknet 证明服务定），本矩阵约束的是 fact-registry/zchain 腿的自有证明尺寸** |
+| 3b | 合约 proof_facts 消费路径（§4 v3 入口） | ✅ 2026-09-07 上链（dual v5）；**2026-09-14 修正**（见下） |
 | 5 | hand_verify 形态裁决 = 双证明合一（§3 ADR） | ✅ 已裁决；电路合并待做 |
-| 1 | 电路改造为 create_proof 入口 + 虚拟 SNOS 形态适配 | ⏳ §3 规格；被证明对象是虚拟 Starknet OS 程序（`starknet_proveTransaction` 上下文），非裸 prove-hand 产物 |
-| 2 | 证明管线切换（`starknet_os_runner` 自托管 prover） | ⏳ 规范给了 JSON-RPC 接口（`starknet_proveTransaction` → base64 proof + proof_facts + messages）；stwo 同族已确认 |
-| 4 | 提交工具（Invoke V3 `proof`/`proof_facts` 字段的 account.execute 扩展 + snops submit-proof） | ⏳ 后端 `snip36` 选项已预埋；激活随 3b |
-| 8 | snforge mock + sepolia 复现 | ✅ mock 部分（0.63 `cheat_proof_facts`）；sepolia 真实 proof_facts 样本对拍随 P4 |
+| 1 | 电路改造为 create_proof 入口 + 虚拟 SNOS 形态适配 | ✅ 2026-09-14：**两笔交易模式落地**（对齐 starknet-privacy 参考实现）——合约新增 `emit_settlement_proof_message`（create_proof 第一笔：校验公开段 + 发 `to=0、payload=segment` 的 L2→L1 消息，不写存储不结算），v3 为携带 proof 的第二笔；`validate_settlement_segment` 两笔共享同一组完整性断言。**被证明对象 = 该合约交易的虚拟 SNOS 执行，独立 settlement_private 电路仅服务 fact-registry 降级腿** |
+| 2 | 证明管线切换（自托管 prover 客户端） | ✅ 2026-09-14：`texas/src/starknet/snip36.rs`——`Snip36ProverClient`（`starknet_proveTransaction` JSON-RPC：`{block_id, invoke}` → `{proof(b64), proof_facts, l2_to_l1_messages}`，错误码 24/55/61/1000/-32005 映射）+ `ProvedInvokeV3` 原始交易构造/签名/广播。**哈希链与 sequencer 逐位对拍**（官方主网向量：同笔交易无 facts `0x1d47…2219` / 有 facts `0x6d88…7276`，`transaction_hash.json` 条目 2/3）。自托管服务本身 = `docker run ghcr.io/starkware-libs/starknet-privacy/transaction-prover`（无鉴权，须内网；RPC_URL 须 v0.10 节点）——ops 部署项 |
+| 4 | 提交工具（Invoke V3 `proof`/`proof_facts` 字段扩展） | ✅ 2026-09-14：`snops prove`（构造+签名 create_proof 交易 → prover 证明 → 产物落盘）+ `snops submit-proof`（读产物 → v3 结算交易携 proof(uint32)/proof_facts → `add_invoke_transaction` 原始广播）+ **服务内自动接线**（`STARKNET_DAPV_SETTLE_ENTRY=snip36` + `STARKNET_SNIP36_PROVER_URL` 时，`submit_dual_settlement` 自动两笔交易提交，失败自动回退 v2 fact-registry 腿——mock 端到端测试覆盖）。starknet-rs 0.17 无 proof 字段支持，故全程手拼 JSON + 自算哈希（模块单测 + 官方主网向量对拍） |
+| 8 | snforge mock + sepolia 复现 | ✅ mock 部分（`cheat_proof_facts`，v3 模块 8/8 + 服务内接线 mock e2e 2/2）；**对拍工具已就绪**：`snops dump-proof-facts --tx-hash <真实 proved 交易>` 一键拉取并逐槽解读 proof_facts；**sepolia 真实样本采集仍 ⏳**（P4：跑一笔真实 proved 交易后执行该命令，冻结 `VIRTUAL_SNOS_VARIANT`/`virtual_snos_program_hash`/消息哈希槽位） |
+
+**2026-09-14 修正（dual v6 待重部署）**：v5 的 SNIP-36 门断言
+`facts[2] == circuit_program_hash`（本方结算电路哈希）系对布局的误读——
+真实 `proof_facts[2]` 是 **Starknet 虚拟 OS（VIRTUAL_SNOS）的 program
+hash**（`starknet-privacy` ProofFacts 序列化第 3 字段；0.14.3 回归样本
+`0x602b02cff498684f…`），电路绑定只通过 `facts[8]` 消息哈希成立。已修
+正为：`facts[1] == "VIRTUAL_SNOS"`（program variant）∧ `facts[2] ==
+virtual_snos_program_hash`（新增 owner 钉扎存储，部署后 owner 须
+`set_virtual_snos_program_hash` 写入真实值）∧ `facts[8]` 消息哈希不
+变。**v5 上该门等于只认 fact-registry 降级腿（真实 SNIP-36 交易会被
+拒）——重部署 dual v6 前不要发真实 proved 交易。** 合约测试
+112/112（新增 8：v3 门 ×4 + create_proof ×3 + 降级 ×1）。
 
 **cairo ≥2.12 迁移**：✅ 2026-09-07 完成——scarb 2.19.4 + snforge 0.63.0
-（与证明侧 vendored corelib 2.19.4 同版，双工具链合一）；91/91 测试；
-casm 36,508 felts（2.11.4 时代 81,175 → 编译器瘦身 55% 余量）；
-dual v5 已上链（见 DEPLOYMENTS.md）。测试命令：
+（与证明侧 vendored corelib 2.19.4 同版，双工具链合一）；casm 36,508 felts；
+测试命令：
 `PATH=~/.local/opt/toolchains/scarb-2.19.4/bin:~/.local/opt/toolchains/snforge-0.63.0/bin:$PATH snforge test`。
+
+**SNIP-36 两步提交流程（ops runbook，sepolia 先行）**：`segment` 为
+15 个 felt 的十进制/十六进制逗号串（与 v2 calldata 完全同形）。
+```bash
+# 0. 自托管 prover（内网，RPC_URL 指向 v0.10 节点）
+docker run --rm -p 3000:3000 -e RPC_URL=https://<node>/rpc/v0_10 \
+  ghcr.io/starkware-libs/starknet-privacy/transaction-prover
+# 0'. owner 钉扎虚拟 OS 哈希（dual v6 部署后一次性；值以 sepolia 实测为准）
+snops --url $RPC --pk $PK --addr $OWNER invoke --contract $DUAL \
+  --fn set_virtual_snos_program_hash --calldata 0x602b02cff498684fae3d66016137978fdad45a5036878a57257689d4f3f6ccb
+# 1. create_proof 交易 → 证明 → 产物落盘 proof.json
+snops --url $RPC --pk $PK --addr $ADDR prove \
+  --contract $DUAL --fn emit_settlement_proof_message \
+  --calldata "$BINDING,44,$SEG_0,$SEG_1,…,$SEG_14" --out proof.json
+# 2. v3 结算交易 + proof/proof_facts 上链
+snops --url $RPC --pk $PK --addr $ADDR submit-proof \
+  --contract $DUAL --fn verify_and_settle_dapv_stark_private_v3 \
+  --calldata "$BINDING,44,$SEG_0,$SEG_1,…,$SEG_14" --proof_file proof.json
+# 3.（或）服务内自动两笔提交：结算时自动 prove → submit，失败回退 v2：
+#   STARKNET_DAPV_SETTLE_ENTRY=snip36
+#   STARKNET_SNIP36_PROVER_URL=http://127.0.0.1:3000
+#   STARKNET_SNIP36_L2_GAS=0x5f5e100        # 可选，OS 执行 gas 上限
+# 4.（对拍）真实 proved 交易样本逐槽解读：
+snops --url $RPC dump-proof-facts --tx-hash $TX
+```
+
+## 6. 证明瘦身实测数据（2026-09-14，#0 落档）
+
+复现：`proving-tool/scripts/slimming-matrix.sh`（8 配置；每配置
+prove + 四格式落盘 + `--check-only` 独立复核）。对象：settlement_private
+电路（5,374 步）；机器：本机 36GB（b≥3 临界 OOM 记录在案）。
+安全公式 = `pow_bits + log_blowup × n_queries`（stwo `FriConfig::security_bits`）。
+
+| 配置 | sec_bits | proof.json | bincode 原始 | bzip2 wire | prove | verify |
+| --- | --- | --- | --- | --- | --- | --- |
+| p0 默认（26/1/70/fs1） | 96 | 12,211,591 | 1,310,318 | 1,017,617 | 6.7s | 12ms |
+| p1 26/1/**30**（对照） | **56 ⚠** | 6,651,602 | 739,998 | 495,220 | 7.4s | 8ms |
+| p2 26/**2**/35/fs1 | 96 | 7,840,359 | 835,638 | 588,161 | 15.5s | 8ms |
+| **p3 26/2/35/fs4（推荐）** | **96** | **5,798,765** | **750,262** | **500,868** | **11.3s** | 9ms |
+| p6 26/2/47/fs2（加强参照） | 120 | 7,851,874 | 933,046 | 674,472 | 14.1s | 10ms |
+| p7 26/2/35/fs1/llb3 | 96 | 7,679,252 | 827,670 | 578,354 | 11.7s | 8ms |
+| p4 26/3/24 | 98 | OOM（36GB 三试两 kill；成功次 prove 64.7s） | | | | |
+| p5 26/4/18 | 98 | OOM | | | | |
+
+（单位：字节；`p{n} pow/blowup/queries/fold_step/last_layer`。）
+
+**结论**：
+1. **等安全瘦身成立**：p3 相对 p0——bincode −43%、bz2 −51%、JSON −53%，
+   96-bit 不变；bz2 wire 501KB 达到"≤500KB 级"目标。prove +69%（6.7→11.3s）
+   换尺寸，异步结算流程可接受。
+2. **朴素 70→30 证伪**：p1 只有 56-bit（安全塌方），且尺寸与 96-bit 的
+   p3 几乎相同——"省尺寸"的正确姿势是 `b↑q↓`，不是裸砍 queries。
+3. **fold_step=4 是最大的免费杠杆**：p3 vs p2 再省 ~10%（层更少、查询
+   路径更短），安全公式不变。
+4. **blowup≥3 在 36GB 机器不可用**（并行证明器内存随 blowup 放大）；
+   生产若需 b2 以上的安全余量，先解决证明机内存。
+5. 口径注记：bincode 原始字节 = 链上分块对象计费口径；bzip2 = zchain
+   wire；SNIP-36 腿上链的是虚拟 SNOS 证明（参数由 Starknet 证明服务决定），
+   本表约束自有证明的全部出场场景（fact-registry 腿存档/zchain 对象）。
+   `cairo_serde` 对本电路不可用（未启用 builtin 触发 vendored 栈
+   `air.rs` unwrap panic；prove-hand `--all-formats` 已隔离该路径并落档）。

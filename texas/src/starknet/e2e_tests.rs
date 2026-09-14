@@ -921,6 +921,8 @@ async fn sepolia_settle_smoke() {
         settle_mode: super::config::SettleMode::Linear,
         prover_url: None,
         prover_work_dir: "/tmp/zgame-prover".into(),
+        snip36_prover_url: None,
+        snip36_l2_gas: 0x5f5e100,
         auth_strict: false,
         treasury_address: op_addr.clone(),
         table_registry_address: String::new(),

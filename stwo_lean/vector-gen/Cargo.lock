@@ -768,6 +768,8 @@ checksum = "5c21e2c707fb8926e6c4355a87494c29e8e46640ff4796aa8fbb74952327dfdc"
 name = "stwo-vector-gen"
 version = "0.1.0"
 dependencies = [
+ "starknet-crypto",
+ "starknet-ff",
  "stwo",
 ]
 

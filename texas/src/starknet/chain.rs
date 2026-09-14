@@ -39,6 +39,11 @@ impl StarknetChain {
         }
     }
 
+    /// SNIP-36 原始交易管线所需的 provider 访问（chain_id / nonce 读取）。
+    pub fn provider(&self) -> &JsonRpcClient<HttpTransport> {
+        &self.provider
+    }
+
     /// 惰性构建操作员账户（需要地址 + 私钥 + RPC 齐备）。
     pub async fn operator(&self) -> Option<Arc<OperatorAccount>> {
         if !self.config.settlement_enabled() {

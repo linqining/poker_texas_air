@@ -789,9 +789,11 @@ fn derive_bet_collection(
                 && *pot_after == post_pot
                 && **seats == expected_seats => {}
         _ => {
-            return Err(TexasAirError::SpecViolation(
-                "PotCollected event does not match fixed-seat collection projection".into(),
-            ));
+            // 诊断增强：带出事件与投影的逐字段值（规约本身不变）
+            return Err(TexasAirError::SpecViolation(format!(
+                "PotCollected event does not match fixed-seat collection projection: events={pot_events:?}, expected_seats_mask={expected_seats:#06x}, expected_pot_after={post_pot}, pre_round={:?}, seat_bets={seat_bets:?}",
+                pre.round_state()
+            )));
         }
     }
     Ok(BetCollectionPlan {
@@ -1451,4 +1453,6 @@ mod tests {
         assert_eq!(plan.settlement.awards[1], 100);
         plan.validate_composition().unwrap();
     }
+
+
 }

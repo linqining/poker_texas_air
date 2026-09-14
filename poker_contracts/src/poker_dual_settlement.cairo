@@ -131,13 +131,18 @@ pub trait IPokerDualSettlement<TContractState> {
         segment: Span<felt252>,
     );
     /// P2-M5（SNIP-36）：v3 双门私密结算——**协议内证明优先，fact-registry
-    /// 降级**。calldata 与 v2 完全一致；验证门：
-    ///   (a) SNIP-36：tx 携带 proof/proof_facts（Invoke V3 扩展字段），
-    ///       合约经 `get_execution_info_v3_syscall` 读 `tx_info.proof_facts`，
-    ///       断言 `facts[2]`（virtual OS program hash）== 钉死的
-    ///       `circuit_program_hash` 且 `facts[8]`（首条 L2→L1 消息哈希）
-    ///       == `poseidon(本合约地址, 0, segment 长度, segment)`——公开段
-    ///       即被证明 create_proof 入口发出的消息 payload；
+    /// 降级**。calldata 与 v2 完全一致；验证门（对齐 starknet-privacy 参考实现
+    /// `validate_proof` 的两笔交易模式）：
+    ///   (a) SNIP-36：提交侧先用 `emit_settlement_proof_message` 生成
+    ///       create_proof 交易并送 `starknet_proveTransaction` 证明，随后本
+    ///       入口作为**第二笔**交易携带 proof/proof_facts 上链。合约经
+    ///       `get_execution_info_v3_syscall` 读 `tx_info.proof_facts`，断言
+    ///       `facts[1]`（program variant）== "VIRTUAL_SNOS" 且 `facts[2]`
+    ///       （virtual SNOS program hash——**Starknet 虚拟 OS 的固定程序
+    ///       哈希，非本方电路哈希**）== 钉死的 `virtual_snos_program_hash`，
+    ///       且 `facts[8]`（首条 L2→L1 消息哈希）==
+    ///       `poseidon(本合约地址, 0, segment 长度, segment)`——公开段即
+    ///       create_proof 交易发出的消息 payload，把证明绑定到本手公开段；
     ///   (b) 降级：无 proof_facts 时走 v2 同款 fact-registry 门。
     /// 派奖/幂等/事件与 v2 完全一致。
     fn verify_and_settle_dapv_stark_private_v3(
@@ -146,8 +151,25 @@ pub trait IPokerDualSettlement<TContractState> {
         hand_id: u64,
         segment: Span<felt252>,
     );
+    /// P2-M6（SNIP-36 create_proof 形态）：被 `starknet_proveTransaction`
+    /// 证明的**第一笔**交易入口——校验公开段与注册态一致后，发出
+    /// `to_address=0`、`payload=segment` 的 L2→L1 消息。虚拟执行中该消息
+    /// 哈希进入 proof_facts[8]，从而把证明与本手的公开段绑定。本入口不写
+    /// 存储、不结算（结算只发生在携带 proof 的 v3 第二笔交易）。
+    fn emit_settlement_proof_message(
+        ref self: TContractState,
+        hand_binding: felt252,
+        hand_id: u64,
+        segment: Span<felt252>,
+    );
     /// Owner-gated: 钉死电路 program hash（fact 的绑定根，换电路须重设）。
     fn set_circuit_program_hash(ref self: TContractState, program_hash: felt252);
+    /// Owner-gated: 钉死 Starknet 虚拟 OS（VIRTUAL_SNOS）program hash
+    /// ——SNIP-36 proof_facts[2] 的绑定根（随 Starknet 版本演进须重设；
+    /// 槽位/取值上链前用 sepolia 真实样本对拍冻结）。
+    fn set_virtual_snos_program_hash(ref self: TContractState, program_hash: felt252);
+    /// View: 钉死的虚拟 OS program hash。
+    fn virtual_snos_program_hash(self: @TContractState) -> felt252;
     /// Prover/owner-gated: 登记已生成证明的 fact（prove-hand 后由运营侧调用）。
     fn register_settlement_fact(ref self: TContractState, fact: felt252);
     /// View: 钉死的电路 program hash。
@@ -215,7 +237,7 @@ pub trait IPokerDualSettlement<TContractState> {
 pub mod PokerDualSettlement {
     use openzeppelin::access::ownable::OwnableComponent;
     use starknet::ContractAddress;
-    use starknet::syscalls::get_execution_info_v3_syscall;
+    use starknet::syscalls::{get_execution_info_v3_syscall, send_message_to_l1_syscall};
     use starknet::SyscallResultTrait;
     use starknet::TxInfo;
     use core::num::traits::Zero;
@@ -233,6 +255,13 @@ pub mod PokerDualSettlement {
     // #18 Phase B：段长 14 → 15（尾词 = 动作日志哈希，对注册承诺比对）。
     const SETTLEMENT_SEGMENT_MAGIC: felt252 = 0x5350324d5f4f4b;
     const SETTLEMENT_SEGMENT_LEN: usize = 15;
+
+    /// SNIP-36 proof_facts 布局常量（对齐 starknet-privacy 参考实现的
+    /// ProofFacts 序列化与 sequencer `starknet_proof_verifier` 0.14.3 回归
+    /// 样本）：proof_facts[1] = "VIRTUAL_SNOS" ASCII（program variant），
+    /// proof_facts[2] = 虚拟 OS program hash，[7] = L2→L1 消息数（1），
+    /// [8] = 首条消息哈希。槽位上链前仍须用 sepolia 真实样本对拍冻结。
+    const VIRTUAL_SNOS_VARIANT: felt252 = 0x5649525455414c5f534e4f53;
 
     /// SNIP-36 消息哈希公式（skill 参考实现口径；上链前需用真实 proof_facts
 /// 样本对拍冻结——槽位/公式以 SNIP-36 最终规范为准）：
@@ -341,6 +370,34 @@ fn read_registered_digest(self: @ContractState, hand_binding: felt252) -> felt25
     let (registered_digest, _g_attestation, registered_flag) =
         self.bindings.read(hand_binding);
     assert!(registered_flag == 1, "Binding not registered");
+    registered_digest
+}
+
+/// Shared v3/create_proof 公开段校验（P2-M6 抽取：两笔交易跑同一组
+/// 完整性断言，防 create_proof 消息与结算 calldata 漂移）。返回注册的
+/// settlement digest。
+fn validate_settlement_segment(
+    self: @ContractState,
+    hand_binding: felt252,
+    hand_id: u64,
+    segment: Span<felt252>,
+) -> felt252 {
+    assert!(hand_binding != 0, "Zero binding");
+    assert!(segment.len() == SETTLEMENT_SEGMENT_LEN, "Segment length mismatch");
+    assert!(
+        *segment.at(0) == SETTLEMENT_SEGMENT_MAGIC,
+        "Segment magic mismatch"
+    );
+    assert!(*segment.at(1) == hand_id.into(), "Segment hand_id mismatch");
+    assert!(*segment.at(4) == hand_binding, "Segment binding mismatch");
+    let n: u32 = (*segment.at(3)).try_into().expect('n fits u32');
+    assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
+    let registered_digest = read_registered_digest(self, hand_binding);
+    assert!(*segment.at(2) == registered_digest, "Segment digest mismatch");
+    assert!(
+        *segment.at(14) == self.action_logs.read(hand_binding),
+        "Segment action log mismatch"
+    );
     registered_digest
 }
 
@@ -460,6 +517,10 @@ fn dapv_prelude(
         claims_consumed: Map<(felt252, u32), bool>,
         /// P2-M3：钉死的 settlement_private 电路 program hash（fact 绑定根）。
         circuit_program_hash: felt252,
+        /// P2-M6：钉死的 Starknet 虚拟 OS（VIRTUAL_SNOS）program hash——
+        /// SNIP-36 proof_facts[2] 的绑定根（注意：这是 Starknet 侧被证明
+        /// 对象的程序哈希，与本方 settlement 电路哈希无关）。
+        virtual_snos_program_hash: felt252,
         /// P2-M3：已登记的证明 fact（fact-registry 过渡形态）。
         settlement_facts: Map<felt252, bool>,
         /// P2-M3：v2 手的金额藏在 cm 中（consume_claim 走隐藏模式）。
@@ -864,6 +925,35 @@ fn dapv_prelude(
             self.circuit_program_hash.write(program_hash);
         }
 
+        fn set_virtual_snos_program_hash(ref self: ContractState, program_hash: felt252) {
+            self.ownable.assert_only_owner();
+            assert!(program_hash != 0, "Zero program hash");
+            self.virtual_snos_program_hash.write(program_hash);
+        }
+
+        fn virtual_snos_program_hash(self: @ContractState) -> felt252 {
+            self.virtual_snos_program_hash.read()
+        }
+
+        /// P2-M6：SNIP-36 create_proof 形态（被证明的第一笔交易）。校验
+        /// 公开段后发出 `to=0、payload=segment` 的 L2→L1 消息——虚拟执行中
+        /// 其哈希进入 proof_facts[8]（`snip36_message_hash` 同式），把证明
+        /// 绑定到本手公开段。不写存储、不结算：结算只发生在携带 proof 的
+        /// v3 第二笔交易（防重放：重复证明同一手只多付一次证明费，无状态
+        /// 影响；submit 侧由 v3 的 settled_bindings 门兜底）。
+        fn emit_settlement_proof_message(
+            ref self: ContractState,
+            hand_binding: felt252,
+            hand_id: u64,
+            segment: Span<felt252>,
+        ) {
+            validate_settlement_segment(@self, hand_binding, hand_id, segment);
+            send_message_to_l1_syscall(
+                to_address: Zero::zero(), payload: segment,
+            )
+            .unwrap_syscall();
+        }
+
         fn register_settlement_fact(ref self: ContractState, fact: felt252) {
             let caller = starknet::get_caller_address();
             assert!(
@@ -1026,39 +1116,29 @@ fn dapv_prelude(
             hand_id: u64,
             segment: Span<felt252>,
         ) {
-            assert!(hand_binding != 0, "Zero binding");
             assert!(
                 !self.settled_bindings.read(hand_binding),
                 "Hand already settled"
             );
-            assert!(segment.len() == SETTLEMENT_SEGMENT_LEN, "Segment length mismatch");
-            assert!(
-                *segment.at(0) == SETTLEMENT_SEGMENT_MAGIC,
-                "Segment magic mismatch"
-            );
-            assert!(*segment.at(1) == hand_id.into(), "Segment hand_id mismatch");
-            assert!(*segment.at(4) == hand_binding, "Segment binding mismatch");
-            let n: u32 = (*segment.at(3)).try_into().expect('n fits u32');
-            assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
-            let registered_digest = read_registered_digest(@self, hand_binding);
-            assert!(*segment.at(2) == registered_digest, "Segment digest mismatch");
-            assert!(
-                *segment.at(14) == self.action_logs.read(hand_binding),
-                "Segment action log mismatch"
-            );
+            let registered_digest =
+                validate_settlement_segment(@self, hand_binding, hand_id, segment);
 
-            // ===== 双门：SNIP-36 优先 =====
-            let program_hash = self.circuit_program_hash.read();
-            assert!(program_hash != 0, "Circuit program hash not set");
+            // ===== 双门：SNIP-36 优先（两笔交易模式：本笔携带 proof/proof_facts，
+            // 前一笔 create_proof 交易已 emit_settlement_proof_message 并被
+            // starknet_proveTransaction 证明）=====
+            let virtual_hash = self.virtual_snos_program_hash.read();
+            assert!(virtual_hash != 0, "Virtual SNOS program hash not set");
             let mut via_snip36 = false;
             let exec_info = get_execution_info_v3_syscall()
                 .unwrap_syscall();
             let tx_info: TxInfo = exec_info.tx_info.unbox();
             let facts: Span<felt252> = tx_info.proof_facts;
             if facts.len() >= 9 {
-                // facts[2] = virtual OS program hash；facts[8] = 首条
-                // L2→L1 消息哈希（payload = segment）
-                if *facts.at(2) == program_hash
+                // facts[1] = program variant（"VIRTUAL_SNOS"）；facts[2] =
+                // 虚拟 OS program hash（Starknet 侧被证明对象，非本方电路）；
+                // facts[8] = 首条 L2→L1 消息哈希（payload = segment）
+                if *facts.at(1) == VIRTUAL_SNOS_VARIANT
+                    && *facts.at(2) == virtual_hash
                     && *facts.at(8) == snip36_message_hash(
                         starknet::get_contract_address(), segment,
                     )
@@ -1068,6 +1148,8 @@ fn dapv_prelude(
             }
             if !via_snip36 {
                 // 降级门：fact-registry（v2 同款）
+                let program_hash = self.circuit_program_hash.read();
+                assert!(program_hash != 0, "Circuit program hash not set");
                 let fact = fact_for_segment(program_hash, segment);
                 assert!(
                     self.settlement_facts.read(fact),
@@ -1076,6 +1158,7 @@ fn dapv_prelude(
             }
 
             // ===== 派奖（与 v2 完全一致）=====
+            let n: u32 = (*segment.at(3)).try_into().expect('n fits u32');
             let total_u128: u128 = (*segment.at(13)).try_into().expect('total fits u128');
             let total_winnings: u256 = total_u128.into();
             assert!(total_winnings > 0_u256, "No winnings to escrow");
@@ -1688,7 +1771,12 @@ mod settlement_snip36_v3_tests {
     };
 
     const MAGIC: felt252 = 0x5350324d5f4f4b;
+    /// settlement_private 电路哈希（fact-registry 降级腿的绑定根）。
     const PROGRAM_HASH: felt252 = 0xabcdef;
+    /// Starknet 虚拟 OS（VIRTUAL_SNOS）程序哈希（SNIP-36 腿 facts[2] 绑定根）。
+    const VIRTUAL_SNOS_HASH: felt252 = 0x604b02;
+    /// proof_facts[1] 的 program variant："VIRTUAL_SNOS" ASCII。
+    const VIRTUAL_SNOS_VARIANT: felt252 = 0x5649525455414c5f534e4f53;
 
     fn deploy_contract(name: ByteArray, calldata: @Array<felt252>) -> ContractAddress {
         let class = declare(name).unwrap().contract_class();
@@ -1717,6 +1805,7 @@ mod settlement_snip36_v3_tests {
         let dual = IPokerDualSettlementDispatcher { contract_address: dual_addr };
         dual.set_claim_helper(test_addr);
         dual.set_circuit_program_hash(PROGRAM_HASH);
+        dual.set_virtual_snos_program_hash(VIRTUAL_SNOS_HASH);
 
         let hand_binding: felt252 = 0xDDDD;
         let hand_id: u64 = 44;
@@ -1778,10 +1867,14 @@ mod settlement_snip36_v3_tests {
         Setup { dual, vault: IMockVaultDispatcher { contract_address: vault }, hand_binding, segment, total }
     }
 
-    /// 构造 SNIP-36 proof_facts（9 词）：[2] = program hash，
-    /// [8] = 消息哈希（poseidon(合约地址, 0, len, segment)——与合约
-    /// snip36_message_hash 同公式）。
-    fn make_facts(dual_addr: ContractAddress, segment: Span<felt252>, program_hash: felt252) -> Span<felt252> {
+    /// 构造 SNIP-36 proof_facts（9 词，对齐 ProofFacts 序列化布局）：
+    /// [0] proof_version（测试置零）、[1] program variant = "VIRTUAL_SNOS"，
+    /// [2] 虚拟 OS program hash，[7] 消息数 = 1，[8] = 消息哈希
+    /// （poseidon(合约地址, 0, len, segment)——与合约 snip36_message_hash
+    /// 同公式）。
+    fn make_facts(
+        dual_addr: ContractAddress, segment: Span<felt252>, virtual_hash: felt252,
+    ) -> Array<felt252> {
         let mut mh = PoseidonTrait::new();
         mh = mh.update(dual_addr.into());
         mh = mh.update(0);
@@ -1791,16 +1884,32 @@ mod settlement_snip36_v3_tests {
             mh = mh.update(*segment.at(w));
             w += 1;
         }
-        array![0, 0, program_hash, 0, 0, 0, 0, 0, mh.finalize()].span()
+        array![
+            0, VIRTUAL_SNOS_VARIANT, virtual_hash, 0, 0, 0, 0, 1, mh.finalize(),
+        ]
+    }
+
+    /// 重建 segment 并把 `at(4)`（binding 词）替换为 `binding_override`。
+    fn segment_with_binding(
+        segment: Span<felt252>, binding_override: felt252,
+    ) -> Array<felt252> {
+        let mut out = array![];
+        let mut w: u32 = 0;
+        while w < segment.len() {
+            let v = *segment.at(w);
+            out.append(if w == 4 { binding_override } else { v });
+            w += 1;
+        }
+        out
     }
 
     #[test]
     fn v3_snip36_gate_settles_without_fact() {
         let s = setup(false); // 不登记 fact——只可能走 SNIP-36 门
         let facts = make_facts(
-            s.dual.contract_address, s.segment.span(), PROGRAM_HASH,
+            s.dual.contract_address, s.segment.span(), VIRTUAL_SNOS_HASH,
         );
-        cheat_proof_facts(s.dual.contract_address, facts, CheatSpan::Indefinite);
+        cheat_proof_facts(s.dual.contract_address, facts.span(), CheatSpan::Indefinite);
         s.dual.verify_and_settle_dapv_stark_private_v3(s.hand_binding, 44, s.segment.span());
         assert!(s.dual.hand_settled(s.hand_binding), "settled via SNIP-36 gate");
         let total_u256: u256 = s.total.into();
@@ -1816,12 +1925,32 @@ mod settlement_snip36_v3_tests {
 
     #[test]
     #[should_panic(expected: "Settlement fact not registered")]
-    fn v3_wrong_program_hash_rejected() {
+    fn v3_wrong_virtual_snos_hash_rejected() {
         let s = setup(false);
         let facts = make_facts(
-            s.dual.contract_address, s.segment.span(), PROGRAM_HASH + 1,
+            s.dual.contract_address, s.segment.span(), VIRTUAL_SNOS_HASH + 1,
         );
-        cheat_proof_facts(s.dual.contract_address, facts, CheatSpan::Indefinite);
+        cheat_proof_facts(s.dual.contract_address, facts.span(), CheatSpan::Indefinite);
+        s.dual.verify_and_settle_dapv_stark_private_v3(s.hand_binding, 44, s.segment.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Settlement fact not registered")]
+    fn v3_wrong_variant_rejected() {
+        // facts[1] 不是 "VIRTUAL_SNOS"——真实 SNIP-36 交易的 program variant
+        // 必须匹配，防其它证明形态伪造 facts。
+        let s = setup(false);
+        let mut facts = make_facts(
+            s.dual.contract_address, s.segment.span(), VIRTUAL_SNOS_HASH,
+        );
+        let mut tampered = array![];
+        let mut w: u32 = 0;
+        while w < facts.len() {
+            let v = *facts.at(w);
+            tampered.append(if w == 1 { 0x1234 } else { v });
+            w += 1;
+        }
+        cheat_proof_facts(s.dual.contract_address, tampered.span(), CheatSpan::Indefinite);
         s.dual.verify_and_settle_dapv_stark_private_v3(s.hand_binding, 44, s.segment.span());
     }
 
@@ -1831,10 +1960,43 @@ mod settlement_snip36_v3_tests {
         // facts[8] 用错合约地址重算（消息哈希不匹配 segment）
         let s = setup(false);
         let facts = make_facts(
-            get_contract_address(), s.segment.span(), PROGRAM_HASH,
+            get_contract_address(), s.segment.span(), VIRTUAL_SNOS_HASH,
         );
-        cheat_proof_facts(s.dual.contract_address, facts, CheatSpan::Indefinite);
+        cheat_proof_facts(s.dual.contract_address, facts.span(), CheatSpan::Indefinite);
         s.dual.verify_and_settle_dapv_stark_private_v3(s.hand_binding, 44, s.segment.span());
+    }
+
+    // ===== P2-M6：create_proof 入口（被证明的第一笔交易）=====
+
+    #[test]
+    fn create_proof_entry_emits_message_without_state_change() {
+        let s = setup(true);
+        // 入口只发 L2→L1 消息：结算状态不得变化（v3 才结算）。
+        s.dual
+            .emit_settlement_proof_message(s.hand_binding, 44, s.segment.span());
+        assert!(!s.dual.hand_settled(s.hand_binding), "create_proof must not settle");
+        // 幂等：重复证明同一手可重放（仅多付证明费，无状态影响）。
+        s.dual
+            .emit_settlement_proof_message(s.hand_binding, 44, s.segment.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Segment binding mismatch")]
+    fn create_proof_entry_rejects_segment_binding_mismatch() {
+        // 与 v3 同一组完整性断言：伪造公开段的证明材料在源头即被拒。
+        let s = setup(true);
+        let forged = segment_with_binding(s.segment.span(), 0xBAD);
+        s.dual.emit_settlement_proof_message(s.hand_binding, 44, forged.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Binding not registered")]
+    fn create_proof_entry_rejects_unregistered_binding() {
+        let s = setup(true);
+        let ghost: felt252 = 0x90577;
+        // 公开段的 binding 词同步替换，才能走到注册态检查。
+        let forged = segment_with_binding(s.segment.span(), ghost);
+        s.dual.emit_settlement_proof_message(ghost, 44, forged.span());
     }
 }
 

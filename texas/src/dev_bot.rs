@@ -106,7 +106,7 @@ pub async fn start_bot(
 
     eprintln!("[bot] verifying deposit on-chain…");
     // 真实链上买入校验（fetch 回执 + vault chip_balance）
-    crate::starknet::chips::verify_deposit(&deposit_tx, &wallet, 100)
+    crate::starknet::chips::verify_deposit(&deposit_tx, &wallet, 1000)
         .await
         .map_err(|e| format!("deposit verify: {e}"))?;
 
@@ -195,7 +195,9 @@ pub async fn start_bot(
             pk_proof_full,
             Some(mask_and_shuffle),
             seat_id,
-            100,
+            1000, // buy_in：10×BB——恰好 1BB 会触发 preflop all-in，
+                  // mirror normalize 在 reveal dispatch 内连跳收注，
+                  // 违反 canonical AIR 单街收注投影规约
         )
         .await;
 

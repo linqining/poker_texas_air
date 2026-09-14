@@ -543,7 +543,12 @@ impl Orchestrator {
         // the receipt chain stays order-stable.
         let results: Vec<TexasAirResult<(ArchivedProvenTask, VerificationReceipt)>> = tasks
             .par_iter()
-            .map(|task| self.prove_verify_and_archive_task_uncommitted(task))
+            .enumerate()
+            .map(|(idx, task)| {
+                self.prove_verify_and_archive_task_uncommitted(task).map_err(|e| {
+                    TexasAirError::SpecViolation(format!("[task #{idx} method={:?} seq={:?}] {e}", task.method_kind, task.call_seq))
+                })
+            })
             .collect();
         let mut next_chain = self.verified_chain_builder.clone();
         let mut out = Vec::with_capacity(tasks.len());

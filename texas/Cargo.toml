@@ -39,6 +39,8 @@ starknet = "0.17"
 url = "2"
 clap = { version = "4", features = ["derive"] }
 borsh = "1.5"
+# SNIP-36：prover 返回的 base64 证明 → uint32 数组（proof 字段）。
+base64 = "0.22"
 
 # ===== B6/B7：appchain 结算出口与出入金桥（zchain 侧纯库依赖）=====
 # 嵌入式 sequencer（WAL + 软确认链 + Settle/Deposit/Withdraw 操作集）、

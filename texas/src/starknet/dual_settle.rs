@@ -1144,6 +1144,108 @@ pub fn settle_entry_calldata(
     }
 }
 
+/// SNIP-36 两笔交易管线（服务内自动接线，`try_snip36_submit`）：
+/// 1. create_proof 交易（调 `emit_settlement_proof_message`，零价字段、
+///    不广播）→ 自托管 prover `starknet_proveTransaction` 虚拟执行出证；
+/// 2. 同 calldata 的 v3 结算交易 + proof(uint32)/proof_facts 字段原始广播
+///    （starknet-rs 账户抽象无此字段，走 [`super::snip36::ProvedInvokeV3`]
+///    手拼 + 自算含 proof_facts 的交易哈希 + operator 密钥签名）。
+///
+/// 前置：`STARKNET_SNIP36_PROVER_URL` 指向内网 prover；合约侧 v6 门
+/// （facts[2] = 虚拟 OS 哈希钉扎）已部署。任何失败都返回 Err。
+async fn try_snip36_submit(
+    chain: &super::StarknetChain,
+    calldata: Vec<Felt>,
+) -> Result<String, String> {
+    use super::snip36::{BoundsVariant, ProvedInvokeV3, Snip36ProverClient};
+    use starknet::core::types::{BlockId, BlockTag};
+    use starknet::providers::Provider;
+    use starknet::signers::SigningKey;
+
+    let config = &chain.config;
+    let prover_url = config
+        .snip36_prover_url
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "snip36: STARKNET_SNIP36_PROVER_URL not configured".to_string())?
+        .to_string();
+    let sender = super::chain::parse_felt(&config.operator_address)
+        .ok_or_else(|| "snip36: invalid operator address".to_string())?;
+    let secret = super::chain::parse_felt(&config.operator_private_key)
+        .ok_or_else(|| "snip36: invalid operator private key".to_string())?;
+    let signing = SigningKey::from_secret_scalar(secret);
+    let provider = chain.provider();
+    let chain_id = provider
+        .chain_id()
+        .await
+        .map_err(|e| format!("snip36: chain_id: {e}"))?;
+    let nonce = provider
+        .get_nonce(BlockId::Tag(BlockTag::Latest), sender)
+        .await
+        .map_err(|e| format!("snip36: nonce: {e}"))?;
+    // 零价字段是 prover 输入校验的硬要求（证明客户端侧完成、不收费）；
+    // l2_gas.max_amount = OS 执行 gas 上限（非 0）。
+    let build = |proof_base64: Option<String>, proof_facts: Vec<Felt>| ProvedInvokeV3 {
+        sender_address: sender,
+        calldata: calldata.clone(),
+        nonce,
+        tip: 0,
+        l1_gas: (0, 0),
+        l1_data_gas: (0, 0),
+        l2_gas: (config.snip36_l2_gas, 0),
+        bounds_variant: BoundsVariant::AllResources,
+        proof_base64,
+        proof_facts,
+    };
+
+    // 1. create_proof 交易：签名覆盖其哈希，供虚拟执行中的 __validate__ 验证。
+    let create_tx = build(None, vec![]);
+    let sig = signing
+        .sign(&create_tx.transaction_hash(chain_id))
+        .map_err(|e| format!("snip36: sign create_proof tx: {e:?}"))?;
+    let create_invoke = create_tx.to_broadcast_json([sig.r, sig.s]);
+
+    // 2. 证明（对照已 finalization 的最新参考区块虚拟执行）。
+    let output = Snip36ProverClient::new(prover_url)
+        .prove_transaction(serde_json::json!("latest"), &create_invoke)
+        .await?;
+    tracing::info!(
+        "[snip36] prover returned proof ({} felts, {} l2→l1 messages)",
+        output.proof_facts.len(),
+        output.l2_to_l1_messages.len()
+    );
+
+    // 3. proved v3 结算交易：同一 nonce（create_proof 未广播、不消耗 nonce）。
+    let proved = ProvedInvokeV3::from_prove_output(build(None, vec![]), output);
+    let sig = signing
+        .sign(&proved.transaction_hash(chain_id))
+        .map_err(|e| format!("snip36: sign proved tx: {e:?}"))?;
+    let invoke = proved.to_broadcast_json([sig.r, sig.s]);
+
+    // 4. 原始广播 add_invoke_transaction（扩展字段不经 starknet-rs 类型）。
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "add_invoke_transaction",
+        "params": [invoke],
+    });
+    let resp = reqwest::Client::new()
+        .post(&config.rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("snip36: submit: {e}"))?;
+    let reply: serde_json::Value =
+        resp.json().await.map_err(|e| format!("snip36: submit body: {e}"))?;
+    if let Some(err) = reply.get("error") {
+        return Err(format!("snip36: submit rejected: {err}"));
+    }
+    reply["result"]["transaction_hash"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| "snip36: missing result.transaction_hash".to_string())
+}
+
 /// dev 本地 prover 的 settlement fact 登记：读 dual `circuit_program_hash`
 /// 视图 → `fact = poseidon([program_hash ++ 公开段])` → operator 调
 /// `register_settlement_fact`（owner/prover 白名单）。仅
@@ -1344,6 +1446,28 @@ pub async fn submit_dual_settlement(
                 dual.settle_calldata.clone(),
             ),
         };
+
+    // ===== SNIP-36 在线腿（§5 #4 服务内自动接线）=====
+    //
+    // entry=snip36 且 Proved：先走协议内证明提交（create_proof 交易 → 自托管
+    // prover → 携带 proof/proof_facts 的 v3 原始广播）；任何失败（prover 未
+    // 部署/拒绝、服务忙、链上拒收）都回退 v2 fact-registry 腿——同一份
+    // calldata，绝不卡结算。回退的前提是 fact 已由证明运营侧登记。
+    let mut settle_selector = settle_selector;
+    if mode == SettleMode::Proved && chain.config.dapv_settle_entry() == "snip36" {
+        match try_snip36_submit(chain, settle_calldata.clone()).await {
+            Ok(hash) => {
+                tracing::info!("[snip36] in-protocol proved settle submitted tx={hash}");
+                return Ok((hash.clone(), hash));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[snip36] in-protocol submit failed — falling back to v2 fact-registry leg: {e}"
+                );
+                settle_selector = "verify_and_settle_dapv_stark_private_v2";
+            }
+        }
+    }
 
     // ===== 线性模式原子编排（2026-09-07 设计裁定，零合约改动）=====
     //
@@ -3169,3 +3293,117 @@ mod settle_mode_tests {
     }
 }
 
+
+// ============================================================
+// 测试：SNIP-36 服务内自动接线（§5 #4）——双 mock（prover + RPC）端到端：
+// create_proof 交易签名上送 → 证明应答 → proved v3 交易携 proof/proof_facts
+// 广播 → 回退路径（prover 不可达）报错不 panic。
+// ============================================================
+
+#[cfg(test)]
+mod snip36_wire_tests {
+    use super::*;
+    use crate::starknet::config::StarknetConfig;
+    use crate::starknet::StarknetChain;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// 起一个一次性 JSON-RPC/HTTP mock：按序应答 `responses`（每连接一条），
+    /// 并把收到的请求体推入 `captured` 供断言。
+    async fn spawn_mock(
+        responses: Vec<serde_json::Value>,
+        captured: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut iter = responses.into_iter();
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let Some(body) = iter.next() else { break };
+                let mut buf = vec![0u8; 65536];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let payload = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.to_string().len(),
+                    body
+                );
+                let _ = sock.write_all(payload.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn snip36_auto_submit_happy_path() {
+        // starknet-rs provider 会轮询 chainId/getNonce；随后 prove + submit。
+        let captured: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc_responses = vec![
+            serde_json::json!({"jsonrpc":"2.0","id":1,"result":"0x534e5f4d41494e"}), // chainId
+            serde_json::json!({"jsonrpc":"2.0","id":2,"result":"0x7"}),              // getNonce
+            serde_json::json!({"jsonrpc":"2.0","id":3,
+                "result":{"transaction_hash":"0xdeadbeef"}}),                        // add_invoke
+        ];
+        let rpc_url = spawn_mock(rpc_responses, captured.clone()).await;
+        let prover_url = spawn_mock(
+            vec![serde_json::json!({"jsonrpc":"2.0","id":1,"result":{
+                "proof":"AQIDBA==",
+                "proof_facts":["0x1","0x2","0x3"],
+                "l2_to_l1_messages":[["0x1"]]
+
+            }})],
+            captured.clone(),
+        )
+        .await;
+
+        let mut config = StarknetConfig::from_env();
+        config.rpc_url = rpc_url;
+        config.operator_address = "0x1234".into();
+        config.operator_private_key = "0x99".into();
+        config.snip36_prover_url = Some(prover_url);
+        config.snip36_l2_gas = 0x5f5e100;
+        let chain = StarknetChain::new(config);
+
+        let hash = try_snip36_submit(&chain, vec![Felt::ONE, Felt::TWO])
+            .await
+            .expect("snip36 submit via mocks");
+        assert_eq!(hash, "0xdeadbeef");
+
+        let reqs = captured.lock().unwrap();
+        // 提交给 prover 的 create_proof 交易：无 proof 字段、零价、nonce=7。
+        let prove_req = reqs.iter().find(|r| r.contains("starknet_proveTransaction")).unwrap();
+        assert!(prove_req.contains("starknet_proveTransaction"));
+        // 广播的 proved 交易：含 proof/proof_facts 扩展字段。
+        let submit_req = reqs.iter().find(|r| r.contains("add_invoke_transaction")).unwrap();
+        assert!(submit_req.contains("\"proof\":["));
+        assert!(submit_req.contains("\"proof_facts\":[\"0x1\",\"0x2\",\"0x3\"]"));
+    }
+
+    #[tokio::test]
+    async fn snip36_auto_submit_falls_back_when_prover_missing() {
+        // 未配置 prover 端点 → 立即 Err（调用方回退 v2 fact-registry 腿）。
+        let captured: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc_url = spawn_mock(
+            vec![serde_json::json!({"jsonrpc":"2.0","id":1,"result":"0x534e5f4d41494e"})],
+            captured.clone(),
+        )
+        .await;
+        let mut config = StarknetConfig::from_env();
+        config.rpc_url = rpc_url;
+        config.operator_address = "0x1234".into();
+        config.operator_private_key = "0x99".into();
+        config.snip36_prover_url = None;
+        let chain = StarknetChain::new(config);
+
+        let err = try_snip36_submit(&chain, vec![Felt::ONE])
+            .await
+            .unwrap_err();
+        assert!(err.contains("STARKNET_SNIP36_PROVER_URL"), "err: {err}");
+    }
+}

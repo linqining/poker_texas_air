@@ -167,6 +167,26 @@ theorem repeatedDouble_eq_mulScalar (p : CirclePoint F) (n : ℕ) :
   | succ n ih =>
     rw [repeatedDouble, ih, ← mulScalar_add, pow_succ', two_mul]
 
+/-- `n` 的低位在前比特表（燃料结构递归，内核可归约）。 -/
+def natBitsAux : Nat → Nat → List Bool
+  | 0, _ => []
+  | fuel + 1, n => (n % 2 == 1) :: natBitsAux fuel (n / 2)
+
+/-- `n` 的 31 位低位在前比特表（CirclePointIndex 环 `ZMod 2^31` 的宽度）。 -/
+def natBits31 (n : Nat) : List Bool := natBitsAux 31 n
+
+/-- 二进制标量乘（double-and-add，与 stwo `CirclePoint::mul` 同构）：
+按低位比特表逐位处理，`cur` 每层自倍，比特为 1 时并入累加器。
+线性 `mulScalar` 对 2^31 级索引不可执行，域点计算统一走本函数。 -/
+def mulBitsAux (p : CirclePoint F) : List Bool → CirclePoint F → CirclePoint F → CirclePoint F
+  | [], _, acc => acc
+  | b :: bs, cur, acc =>
+    mulBitsAux p bs (cpAdd cur cur) (if b then cpAdd acc cur else acc)
+
+/-- 标量乘的二进制版本。`cur` 初值为 `p`，`acc` 初值为单位元。 -/
+def mulBinary (p : CirclePoint F) (n : Nat) : CirclePoint F :=
+  mulBitsAux p (natBits31 n) p pointOne
+
 section Generators
 
 /-- M31 圆群生成元（stwo `M31_CIRCLE_GEN = (2, 1268011823)`）。 -/

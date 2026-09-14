@@ -87,6 +87,8 @@ pub struct ShadowHand {
     /// VM 20 字节地址 → 参与者钱包 hex（终局 deltas 对账回全精度 felt 用）。
     addr_to_wallet: std::collections::HashMap<poker_l1::Address, String>,
     metrics: Metrics,
+    /// 最近一次 VM 拒绝后的权威视图（游戏层失步同步用）。
+    pub last_rejected_view: Option<BettingView>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -181,6 +183,7 @@ impl ShadowHand {
             by_wallet,
             addr_to_wallet,
             metrics: Metrics::default(),
+            last_rejected_view: None,
         })
     }
 
@@ -389,7 +392,12 @@ impl ShadowHand {
 
         if let Err(e) = self.mirror.apply_recorded_bet(seat, action, total_bet) {
             self.metrics.bet_fail += 1;
-            return Err(e);
+            // 拒绝时也返回当前视图：VM 可能已在动作中推进（如 preflop 完成
+            // → flop reveal 窗口），游戏层必须同步相位，否则 socket 层卡死
+            // 在旧街视图、reveal token 永远无法提交（失步死锁）。
+            self.last_rejected_view = Some(self.betting_view());
+            // 诊断：带出 mirror VM 实际相位（失步排查）
+            return Err(format!("{e} [mirror hand_phase={:?} round_state={}]", self.mirror.table.hand_phase, self.mirror.table.round_state()));
         }
         self.metrics.bet_ok += 1;
 

@@ -60,6 +60,11 @@ struct Args {
     /// Proof serialization format: json | binary | cairo_serde.
     #[arg(long, value_enum, default_value_t = ProofFormat::Json)]
     proof_format: ProofFormat,
+    /// Serialize ONE proof into ALL formats (proof.json / proof.serde.json /
+    /// proof.bin / proof.ext.bin) and record byte sizes + felt count in
+    /// summary.json — the #0 证明瘦身 measurement mode.
+    #[arg(long)]
+    all_formats: bool,
     /// JSON file with prover parameters (same schema as run_and_prove --params_json).
     /// Defaults to the 96-bit-security production parameters.
     #[arg(long)]
@@ -158,6 +163,68 @@ fn main() -> Result<()> {
 
     // 5. Serialize artifacts.
     let t = Instant::now();
+    // #0 证明瘦身口径（--all-formats 时全量测）：
+    // - json_bytes        = proof.json（Rust verifier JSON，生产 fact-registry 腿格式）
+    // - cairo_serde_bytes = felt 流（SNIP-36 proof 字段的同族形态；×4B ≈ uint32 打包下限）
+    // - bincode_raw_bytes = bincode(CairoProofForRustVerifier) 未压缩字节（上链对象口径）
+    // - binary_bz2_bytes  = bzip2(best, bincode)（zchain 分块上传 wire 格式）
+    let mut sizes = serde_json::Map::new();
+    if args.all_formats {
+        let proof_for_rust: cairo_air::CairoProofForRustVerifier<Blake2sMerkleHasher> =
+            proof.clone().into();
+        let bincode_raw = bincode::serialize(&proof_for_rust)
+            .context("bincode serialize (size measurement)")?;
+
+        let json_path = out_dir.join("proof.json");
+        serialize_proof_to_file(&proof, &json_path, ProofFormat::Json)
+            .with_context(|| format!("write {}", json_path.display()))?;
+
+        let bin_path = out_dir.join("proof.bin");
+        serialize_proof_to_file(&proof, &bin_path, ProofFormat::Binary)
+            .with_context(|| format!("write {}", bin_path.display()))?;
+
+        let ext_path = out_dir.join("proof.ext.bin");
+        serialize_proof_to_file(&proof, &ext_path, ProofFormat::ExtendedBinary)
+            .with_context(|| format!("write {}", ext_path.display()))?;
+
+        sizes.insert("json_bytes".into(), json_size(&json_path).into());
+        sizes.insert("bincode_raw_bytes".into(), (bincode_raw.len() as u64).into());
+        sizes.insert("binary_bz2_bytes".into(), json_size(&bin_path).into());
+        sizes.insert("extended_bz2_bytes".into(), json_size(&ext_path).into());
+
+        // cairo_serde 对未启用的 builtin 会在 vendored 栈里 unwrap None 而 panic
+        // （cairo-air/src/air.rs FullSegmentRanges）——隔离该 panic：仅标记
+        // 不可用，不影响其余格式与证明本身。
+        let serde_path = out_dir.join("proof.serde.json");
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(std::boxed::Box::new(|_| {}));
+        let serde_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            serialize_proof_to_file(&proof, &serde_path, ProofFormat::CairoSerde)
+        }));
+        std::panic::set_hook(prev_hook);
+        match serde_result {
+            Ok(Ok(())) => {
+                let felts = read_felt_count(&serde_path);
+                sizes.insert("cairo_serde_bytes_hex".into(), json_size(&serde_path).into());
+                sizes.insert("cairo_serde_felts".into(), felts.into());
+                sizes.insert(
+                    "snip36_u32_words_x4".into(),
+                    ((felts as u64).saturating_mul(4)).into(),
+                );
+                sizes.insert(
+                    "snip36_bytes_x32".into(),
+                    ((felts as u64).saturating_mul(32)).into(),
+                );
+            }
+            _ => {
+                let _ = fs::remove_file(&serde_path);
+                sizes.insert(
+                    "cairo_serde_felts".into(),
+                    "unavailable (unused builtin segments, vendored stack panics)".into(),
+                );
+            }
+        }
+    }
     serialize_proof_to_file(&proof, &proof_path, args.proof_format.clone())
         .with_context(|| format!("write {}", proof_path.display()))?;
     let public_outputs = json!({
@@ -231,7 +298,15 @@ fn main() -> Result<()> {
         },
         "public": public_outputs,
         "prover_params": serde_json::to_value(&params)?,
+        "security_bits": params.fri_config.security_bits(),
     });
+    let summary = if sizes.is_empty() {
+        summary
+    } else {
+        let mut s = summary;
+        s["sizes"] = serde_json::Value::Object(sizes);
+        s
+    };
     let summary_path = out_dir.join("summary.json");
     write_json(&summary_path, &summary)?;
     println!("summary      : {}", summary_path.display());
@@ -407,6 +482,17 @@ fn sorted_counts(map: &std::collections::HashMap<String, usize>) -> Vec<(String,
 fn fmt_dur(d: Duration) -> String {
     let secs = d.as_secs_f64();
     if secs >= 1.0 { format!("{secs:.2} s") } else { format!("{} ms", d.as_millis()) }
+}
+
+/// 文件字节数（--all-formats 的尺寸统计口径；读不到返回 0）。
+fn json_size(path: &Path) -> u64 {
+    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// proof.serde.json（hex felt 数组）的 felt 数。
+fn read_felt_count(path: &Path) -> u64 {
+    let text = fs::read_to_string(path).unwrap_or_default();
+    text.matches("\"0x").count() as u64
 }
 
 fn human_size(path: &Path) -> String {

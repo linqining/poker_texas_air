@@ -43,6 +43,7 @@ pub mod mirror;
 pub mod paymaster;
 pub mod prove_log;
 pub mod settlement_prover;
+pub mod snip36;
 pub mod shadow;
 pub mod submit;
 /// 桌台注册表锚定（PokerTableRegistry：合约分配 id + Open→Closed 生命周期）。

@@ -746,12 +746,17 @@ mod recursion_e2e {
         let seq = seq.max(table.accepted_seq_of(seat));
         table.record_action(seat, seq, &action, amount, false, true, Some(sig));
 
-        // turn 推进镜像（同 act_and_advance）。
+        // turn/phase 推进镜像（对齐生产 handle_turn_advance 的权威模式）：
+        // live_mirror 存在时 turn 轮转由 VM 视图同步负责（accepted 动作经
+        // apply_betting_view、拒绝动作经 sync_rejected_view），此处再手动
+        // 轮转会双重推进——拒绝路径上把权威同步的 turn 又盲转过一位，
+        // 活锁（2026-09-14 recursion_e2e 复现）。仅本地兜底模式才手动轮转。
         if table.unfolded_players().len() <= 1 {
             table.end_without_showdown();
         } else if table.is_betting_round_complete() {
+            table.set_turn(None);
             table.advance_to_next_phase();
-        } else {
+        } else if table.live_mirror.is_none() {
             let last = table.turn().unwrap_or(1);
             table.set_turn(table.next_unfolded_player(last, 1));
         }

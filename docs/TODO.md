@@ -491,5 +491,6 @@ poseidon / snip36-execution / MIGRATION / deadlock-review / RFP 对齐等）
 | 37 | **私密领取守恒修复**（STRK20 比赛主径）：anonymizer OP_WITHDRAW 改 withdraw_to（vault 出资，零池内预存），v4 `0x7ee059dd...` 上线，用户实测通过；前端删自筹桥与余额前置 | 2026-09-07 |
 | 38 | 设计待办：释放权威证明化（leave receipt 进 settlement digest，随 P4）+ 序无关释放条件/结算串行化（多桌/重试窗口） | 2026-09-07 |
 | 39 | 待查：牌桌完整性（物化失败/board-0，去重后观察）；客户端动作签名缺席（snip36 主腿未激活） | 2026-09-07 |
+| 48 | **PotCollected 投影分歧（AIR 层缺口，根因链已修至可观测）**：①dev_bot 买入 100→1000 绕开触发（2026-09-13）；②mirror 拒绝视图同步 `sync_rejected_view`/`last_rejected_view` 落地，recursion_e2e 活锁修复——根因是 harness 在权威模式（live_mirror）下复刻了旧版本地兜底的**无条件 turn 轮转**，把 `sync_rejected_view` 的权威 turn 又盲转过一位（双重推进活锁，2026-09-14 对齐生产 `handle_turn_advance` 语义后修复）；③**仍开放**：all-in/连跳收注 dispatch 的 AIR 投影（`derive_bet_collection` 单街规约 vs normalize 跨街收注）——需真实 violating dispatch 记录钉形（裸 fixture 复现不了：normalize 在 shuffle/reveal 相位即被挡，见 plan.rs tests 环境限制），修复方向二选一：多街 run-out canonical 化（Rust+Cairo 双侧）或合约侧 dispatch 拆分 | 2026-09-14 |
 | — | 文档治理：8 份历史文档归档 docs/archive/、10+ 份头注/内容修订、STATUS.md 重写、本 TODO 重梳 | 2026-09-05 |
 | 35 | 旧测试清理：删除根 `tests/`（11 个 BLS precompile/链机制时代集成测试，Phase 1 起编译不过、拖红 CI `cargo test -p poker_texas_air --tests`）；fuzz/ 两个死 target（proof_wire/tx_decode 引用已删模块）重写为 settlement_statement/digest_felts 现役解析面，fuzz.yml 同步 | 2026-09-05 |

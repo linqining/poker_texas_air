@@ -2,4 +2,10 @@ import StwoLean.M31
 import StwoLean.CM31
 import StwoLean.QM31
 import StwoLean.Circle
+import StwoLean.CircleDomain
+import StwoLean.Poseidon252
+import StwoLean.Channel
+import StwoLean.Merkle
+import StwoLean.FriCore
+import StwoLean.FriVerifier
 import StwoLean.Vectors
