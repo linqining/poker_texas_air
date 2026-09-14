@@ -24,7 +24,7 @@ pub use crate::relayer::util::now_ms;
 
 pub mod shuffle;
 #[cfg(test)]
-mod full_hand_tests;
+pub(crate) mod full_hand_tests;
 #[cfg(test)]
 mod rules_tests;
 #[cfg(test)]

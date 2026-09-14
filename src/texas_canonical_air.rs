@@ -78,7 +78,9 @@ const ROUND_ADVANCE_SCHEDULE_SELECTOR_OFFSET: usize =
 // `52 - cursor`, and the six binary-addition carry-outs.  The subtraction is
 // kept in the AIR so a prover cannot use a field element outside the 52-card
 // deck after bypassing Rust-side witness validation.
-const ROUND_ADVANCE_CARD_CURSOR_RANGE_OFFSET: usize = ROUND_ADVANCE_SCHEDULE_SELECTOR_OFFSET + 6;
+// Seven one-hot schedule selectors: (preflop, flop, turn) × (single, RIT)
+// plus the showdown-window advance (street 4 → ShowdownOwner window).
+const ROUND_ADVANCE_CARD_CURSOR_RANGE_OFFSET: usize = ROUND_ADVANCE_SCHEDULE_SELECTOR_OFFSET + 7;
 // One selector per fixed seat for every canonical action that addresses a
 // player.  This binds the selected status projection to the full-seat image
 // for lifecycle/crypto families as well as the existing betting/funding
@@ -268,7 +270,31 @@ const RC_TOTAL_CARRIES_OFFSET: usize = RC_STACK_CARRIES_OFFSET + MAX_CANONICAL_S
 /// Per-seat inverse proving a blind-posting seat keeps a non-zero stack
 /// (the uncapped discipline: no AllIn flip on reveal completion).
 const RC_STACK_NONZERO_INV_OFFSET: usize = RC_TOTAL_CARRIES_OFFSET + MAX_CANONICAL_SEATS * 3;
-const NUM_COLUMNS: usize = RC_STACK_NONZERO_INV_OFFSET + MAX_CANONICAL_SEATS;
+/// 封顶盲注 advice（#22②扩展）：per-seat capped 位 + UTG 空集指示。
+const RC_STACK_CAPPED_OFFSET: usize = RC_STACK_NONZERO_INV_OFFSET + MAX_CANONICAL_SEATS;
+const RC_NO_UTG_OFFSET: usize = RC_STACK_CAPPED_OFFSET + MAX_CANONICAL_SEATS;
+// ---- #22②扩展（2026-09-15）：street / showdown completion 组 ----
+/// Reveal-completion 家族门（linearized flag×SubmitReveal）。三个子门由
+/// pre_subtag one-hot（hole=1 / board=2 / showdown=3）划分：preflop 盲注
+/// 组沿用 rc_gate，street / showdown 组各持 rcs_gate / rcd_gate。
+const RCF_GATE_OFFSET: usize = RC_NO_UTG_OFFSET + 1;
+const RC_HOLE_OFFSET: usize = RCF_GATE_OFFSET + 1;
+const RC_BOARD_OFFSET: usize = RC_HOLE_OFFSET + 1;
+const RC_SHOWDOWN_OFFSET: usize = RC_BOARD_OFFSET + 1;
+/// RevealStreet 完成门（Board 窗口完成 → 同街下注轮）。
+const RCS_GATE_OFFSET: usize = RC_SHOWDOWN_OFFSET + 1;
+/// Showdown 完成门（showdown 窗口 → ShowdownDisplay）。
+const RCD_GATE_OFFSET: usize = RCS_GATE_OFFSET + 1;
+/// rcs 首-行动扫描 advice：基座 one-hot + post-Active 旋转扫描（rot/q/f）
+/// + 空集指示。
+const RCS_BASE_ONEHOT_OFFSET: usize = RCD_GATE_OFFSET + 1;
+const RCS_ROT_OFFSET: usize = RCS_BASE_ONEHOT_OFFSET + MAX_CANONICAL_SEATS;
+const RCS_Q_OFFSET: usize = RCS_ROT_OFFSET + 8;
+const RCS_F_OFFSET: usize = RCS_Q_OFFSET + 8;
+const RCS_NO_TURN_OFFSET: usize = RCS_F_OFFSET + 8;
+/// pre street ∈ {2,3,4} 的两比特分解（street − 2 = sel0 + 2·sel1）。
+const RCS_STREET_SEL_OFFSET: usize = RCS_NO_TURN_OFFSET + 1;
+const NUM_COLUMNS: usize = RCS_STREET_SEL_OFFSET + 2;
 // The fixed public scope contains the table/sequence/image boundary plus the
 // five authenticated root domains (state, lifecycle, overlay, settlement and
 // custody) at both ends of the batch.
@@ -1381,9 +1407,11 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
         (2, true) => 3,
         (3, false) => 4,
         (3, true) => 5,
+        // 摊牌窗口 advance（river 轮收注 → ShowdownOwner 窗口）。
+        (4, false) => 6,
         _ => usize::MAX,
     };
-    for index in 0..6 {
+    for index in 0..7 {
         out.push(M31::from(u32::from(is_round_advance && index == schedule)));
     }
     debug_assert_eq!(out.len(), ROUND_ADVANCE_CARD_CURSOR_RANGE_OFFSET);
@@ -1825,8 +1853,16 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     let is_reconstruct_completion = completion.kind == CanonicalProtocolCompletionKind::Reconstruct;
     let is_shuffle_completion = completion.kind == CanonicalProtocolCompletionKind::Shuffle;
     let is_reveal_completion = completion.kind == CanonicalProtocolCompletionKind::Reveal;
+    // #22②扩展：street/showdown 完成行同样携带时间戳非零逆元与 deadline
+    // 进位（street 重挂 betting_timeout，showdown 重挂 showdown_display）。
+    let is_street_completion = completion.kind == CanonicalProtocolCompletionKind::RevealStreet;
+    let is_showdown_completion = completion.kind == CanonicalProtocolCompletionKind::Showdown;
     out.push(
-        if (is_reconstruct_completion || is_shuffle_completion || is_reveal_completion)
+        if (is_reconstruct_completion
+            || is_shuffle_completion
+            || is_reveal_completion
+            || is_street_completion
+            || is_showdown_completion)
             && timestamp_sum != 0
         {
             M31::from(timestamp_sum as u32).inverse()
@@ -1837,7 +1873,8 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
     // deadline 重挂的进位：reconstruct 用 shuffle_timeout，shuffle completion
     // 用 reveal_timeout（start_preflop_reveal_phase 重挂 reveal deadline），
     // reveal completion 用 betting_timeout（start_betting_round 重挂下注
-    // deadline）。
+    // deadline），street completion 同 betting_timeout，showdown completion
+    // 用 showdown_display。
     out.extend(if is_reconstruct_completion {
         add_carries(
             completion.completion_timestamp_ms,
@@ -1848,10 +1885,15 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
             completion.completion_timestamp_ms,
             u64::from(w.pre.reveal_timeout_ms),
         )
-    } else if is_reveal_completion {
+    } else if is_reveal_completion || is_street_completion {
         add_carries(
             completion.completion_timestamp_ms,
             u64::from(w.pre.betting_timeout_ms),
+        )
+    } else if is_showdown_completion {
+        add_carries(
+            completion.completion_timestamp_ms,
+            u64::from(w.pre.showdown_display_ms),
         )
     } else {
         [M31::from(0u32); 3]
@@ -2385,6 +2427,141 @@ fn row(w: &CanonicalTransitionWitness, next_pre: Option<&CanonicalStateImage>) -
             M31::from(0u32)
         });
     }
+    // 封顶盲注（#22②扩展，2026-09-14）：盲注座 stack 扣到 0 即 VM 的
+    // AllIn 翻转——capped 仅在盲注座上可置位；UTG 扫描（rc_f[2]）改用
+    // post 可行动集，全员 all-in 时 no_utg = 1 且 post.turn = NO_SEAT。
+    for index in 0..MAX_CANONICAL_SEATS {
+        let posts_blind =
+            rc_row && ((index == sb_seat && !dead_sb) || index == bb_seat);
+        let stack_sum: u32 = u64_limbs(w.post.seats[index].stack)
+            .into_iter()
+            .map(|limb| u32::from(limb.0))
+            .sum();
+        out.push(M31::from(u32::from(rc_row && posts_blind && stack_sum == 0)));
+    }
+    {
+        let actionable: [bool; MAX_CANONICAL_SEATS] = core::array::from_fn(|index| {
+            w.post.seats[index].status == CanonicalSeatStatus::Active
+        });
+        let mut no_utg = true;
+        for d in 0..8 {
+            let target = (bb_seat + d + 1) % MAX_CANONICAL_SEATS;
+            if rc_row && actionable[target] {
+                no_utg = false;
+            }
+        }
+        out.push(M31::from(u32::from(rc_row && no_utg)));
+    }
+    // ---- #22②扩展（2026-09-15）：street / showdown completion 组 advice ----
+    // 家族门 + pre_subtag one-hot（hole=1 / board=2 / showdown=3）把 reveal
+    // 完成行划分为 preflop 盲注组（rc_gate）、street 组（rcs_gate）、
+    // showdown 组（rcd_gate）；与 evaluate 的读取顺序严格一致。
+    let rc_family = w.kind == CanonicalTransitionKind::SubmitReveal
+        && matches!(
+            w.protocol_completion.kind,
+            CanonicalProtocolCompletionKind::Reveal
+                | CanonicalProtocolCompletionKind::RevealStreet
+                | CanonicalProtocolCompletionKind::Showdown
+        );
+    let rc_hole =
+        rc_family && w.protocol_completion.kind == CanonicalProtocolCompletionKind::Reveal;
+    let rc_board =
+        rc_family && w.protocol_completion.kind == CanonicalProtocolCompletionKind::RevealStreet;
+    let rc_showdown =
+        rc_family && w.protocol_completion.kind == CanonicalProtocolCompletionKind::Showdown;
+    out.push(M31::from(u32::from(rc_family)));
+    out.push(M31::from(u32::from(rc_hole)));
+    out.push(M31::from(u32::from(rc_board)));
+    out.push(M31::from(u32::from(rc_showdown)));
+    out.push(M31::from(u32::from(rc_board)));
+    out.push(M31::from(u32::from(rc_showdown)));
+    // postflop UTG 扫描（镜像 validator 的位置规则）：单挑（恰好两名参与者
+    // 且均未弃牌）以 last_bb_seat 为基座（无轨道时退 button），非单挑以
+    // button 为基座；扫描 post-Active 集合，全员 all-in 时 no_turn = 1
+    // → post turn = NO_SEAT（VM C5）。
+    let empty8: [bool; 8] = [false; 8];
+    let (rcs_base_onehot, rcs_rot, rcs_q, rcs_f, rcs_no_turn) = if !rc_board {
+        (
+            [false; MAX_CANONICAL_SEATS],
+            empty8,
+            empty8,
+            empty8,
+            false,
+        )
+    } else {
+        let actionable: [bool; MAX_CANONICAL_SEATS] = core::array::from_fn(|index| {
+            w.post.seats[index].status == CanonicalSeatStatus::Active
+        });
+        let pre_participants = w
+            .pre
+            .seats
+            .iter()
+            .filter(|seat| {
+                matches!(
+                    seat.status,
+                    CanonicalSeatStatus::Active
+                        | CanonicalSeatStatus::Folded
+                        | CanonicalSeatStatus::AllIn
+                )
+            })
+            .count();
+        let pre_active = w
+            .pre
+            .seats
+            .iter()
+            .filter(|seat| seat.status == CanonicalSeatStatus::Active)
+            .count();
+        let heads_up = pre_participants == 2 && pre_active == 2;
+        let base = if heads_up {
+            if w.pre.last_bb_seat != NO_CANONICAL_SEAT {
+                usize::from(w.pre.last_bb_seat)
+            } else {
+                usize::from(w.pre.button)
+            }
+        } else {
+            usize::from(w.pre.button)
+        } % MAX_CANONICAL_SEATS;
+        let mut rot = [false; 8];
+        let mut q = [false; 8];
+        let mut f = [false; 8];
+        let mut clear = true;
+        let mut first: Option<usize> = None;
+        for d in 1..=8 {
+            rot[d - 1] = actionable[(base + d) % MAX_CANONICAL_SEATS];
+            q[d - 1] = clear;
+            f[d - 1] = rot[d - 1] && clear;
+            if rot[d - 1] {
+                clear = false;
+            }
+            if first.is_none() && f[d - 1] {
+                first = Some((base + d) % MAX_CANONICAL_SEATS);
+            }
+        }
+        (
+            core::array::from_fn(|index: usize| index == base),
+            rot,
+            q,
+            f,
+            first.is_none(),
+        )
+    };
+    for index in 0..MAX_CANONICAL_SEATS {
+        out.push(M31::from(u32::from(rcs_base_onehot[index])));
+    }
+    // 存储顺序与 evaluate 读取一致：kind-grouped（rot / q / f 各自整块）。
+    for group in [&rcs_rot, &rcs_q, &rcs_f] {
+        for value in group.iter() {
+            out.push(M31::from(u32::from(*value)));
+        }
+    }
+    out.push(M31::from(u32::from(rcs_no_turn)));
+    // street ∈ {2,3,4} 两比特分解：street − 2 = sel0 + 2·sel1。
+    {
+        let street = usize::from(w.pre.street);
+        // street − 2 = sel0 + 2·sel1：street 2 → (0,0)，3 → (1,0)，4 → (0,1)。
+        out.push(M31::from(u32::from(rc_board && street == 3)));
+        out.push(M31::from(u32::from(rc_board && street == 4)));
+    }
     debug_assert_eq!(out.len(), NUM_COLUMNS);
     out
 }
@@ -2685,7 +2862,8 @@ fn trace_for_with_state_opening_scope(
             ));
         }
         if witness.kind == CanonicalTransitionKind::AdvanceRound {
-            if !(1..=3).contains(&witness.pre.street) {
+            // 街道 4 = river 轮收注 → 摊牌窗口 advance（#22②扩展 profile）。
+            if !(1..=4).contains(&witness.pre.street) {
                 return Err(TexasAirError::SpecViolation(
                     "advance-round opening has an unsupported street".into(),
                 ));
@@ -2830,10 +3008,19 @@ fn trace_for_with_state_opening_scope(
         ));
     }
     // #22②：批内 reveal 完成行携带同一份盲注 opening（公开 scope 列的来源）。
+    // #22②扩展：street 完成行以 opening.bb_amount 通道复用同一盲注面额
+    //（min_raise = BB），故 RevealStreet 行亦可锚定 scope。
     let blind_opening = witnesses
         .iter()
         .filter(|w| w.kind == CanonicalTransitionKind::SubmitReveal)
-        .find(|w| w.protocol_completion.kind == CanonicalProtocolCompletionKind::Reveal)
+        .find(|w| {
+            matches!(
+                w.protocol_completion.kind,
+                CanonicalProtocolCompletionKind::Reveal
+                    | CanonicalProtocolCompletionKind::RevealStreet
+                    | CanonicalProtocolCompletionKind::Showdown
+            )
+        })
         .map(|w| {
             let opening = w.blind_opening;
             if opening == crate::canonical_rake_opening::CanonicalBlindOpening::ZERO {
@@ -2841,9 +3028,20 @@ fn trace_for_with_state_opening_scope(
                     "reveal completion transition carries a zero blind opening".into(),
                 ));
             }
-            if w.protocol_completion.sb_amount != opening.small_blind
-                || w.protocol_completion.bb_amount != opening.big_blind
-            {
+            // preflop：SB/BB 双面额锚定；street：BB 通道（min_raise = BB）；
+            // showdown：无盲注面额（bb_amount 为零哨兵），仅要求 opening
+            // 非零（与 rules 的一致性由 prove 门的 blind_opening 比对承担）。
+            let detached = match w.protocol_completion.kind {
+                CanonicalProtocolCompletionKind::Reveal => {
+                    w.protocol_completion.sb_amount != opening.small_blind
+                        || w.protocol_completion.bb_amount != opening.big_blind
+                }
+                CanonicalProtocolCompletionKind::RevealStreet => {
+                    w.protocol_completion.bb_amount != opening.big_blind
+                }
+                _ => false,
+            };
+            if detached {
                 return Err(TexasAirError::SpecViolation(
                     "reveal completion opening is detached from the blind opening".into(),
                 ));
@@ -3332,7 +3530,7 @@ impl FrameworkEval for CanonicalAir {
         let round_assignment_count = eval.next_trace_mask();
         let round_assignments: [[E::F; 6]; MAX_CANONICAL_BOARD_REVEAL_ASSIGNMENTS] =
             std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
-        let round_schedule_selectors: [E::F; 6] = std::array::from_fn(|_| eval.next_trace_mask());
+        let round_schedule_selectors: [E::F; 7] = std::array::from_fn(|_| eval.next_trace_mask());
         // Trace layout is cursor-major: `[cursor_bits, complement_bits,
         // carry_bits]` for pre, then the same three blocks for post.
         let round_card_cursor_range: [[[E::F; 6]; 3]; 2] = std::array::from_fn(|_| {
@@ -3545,6 +3743,25 @@ impl FrameworkEval for CanonicalAir {
             std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
         let rc_stack_nonzero_inv: [E::F; MAX_CANONICAL_SEATS] =
             std::array::from_fn(|_| eval.next_trace_mask());
+        let rc_stack_capped: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let rc_no_utg = eval.next_trace_mask();
+        // ---- #22②扩展（2026-09-15）：street/showdown completion 组 advice
+        // （与 row() 的追加顺序严格一致）----
+        let rcf_gate = eval.next_trace_mask();
+        let rc_hole = eval.next_trace_mask();
+        let rc_board = eval.next_trace_mask();
+        let rc_showdown = eval.next_trace_mask();
+        let rcs_gate = eval.next_trace_mask();
+        let rcd_gate = eval.next_trace_mask();
+        let rcs_base_onehot: [E::F; MAX_CANONICAL_SEATS] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let rcs_rot: [E::F; 8] = std::array::from_fn(|_| eval.next_trace_mask());
+        let rcs_q: [E::F; 8] = std::array::from_fn(|_| eval.next_trace_mask());
+        let rcs_f: [E::F; 8] = std::array::from_fn(|_| eval.next_trace_mask());
+        let rcs_no_turn = eval.next_trace_mask();
+        let rcs_street_sel: [E::F; 2] = std::array::from_fn(|_| eval.next_trace_mask());
+
         eval.add_constraint(active.clone() * flag.clone() * (flag.clone() - one.clone()));
         eval.add_constraint(seq_carry.clone() * (seq_carry.clone() - one.clone()));
         for (pre, post) in [
@@ -3701,12 +3918,43 @@ impl FrameworkEval for CanonicalAir {
             protocol_completion_flag.clone() * is_submit_reconstruct.clone();
         let is_shuffle_completion = protocol_completion_flag.clone() * is_submit_shuffle.clone();
         // #22②：reveal 完成行（SubmitReveal × flag）。该选择子是二次的，
-        // 下方约束全部走线性化 gate 列（rc_gate，shuffle_timeout_gate 模式）。
+        // 先线性化为家族门（rcf_gate，shuffle_timeout_gate 模式），再按
+        // pre_subtag one-hot（hole=1 / board=2 / showdown=3）划分三个子门：
+        // preflop 盲注组沿用 rc_gate（其下全部既有约束自动收窄到 hole 行），
+        // street / showdown 组各持 rcs_gate / rcd_gate。
         let is_reveal_completion = protocol_completion_flag.clone() * is_submit_reveal.clone();
         eval.add_constraint(
-            active.clone() * (rc_gate.clone() - is_reveal_completion.clone()),
+            active.clone() * (rcf_gate.clone() - is_reveal_completion.clone()),
+        );
+        eval.add_constraint(
+            active.clone() * rcf_gate.clone() * (rcf_gate.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            rcf_gate.clone()
+                * (rc_hole.clone() + rc_board.clone() + rc_showdown.clone() - one.clone()),
+        );
+        for bit in [&rc_hole, &rc_board, &rc_showdown] {
+            eval.add_constraint(rcf_gate.clone() * bit.clone() * (bit.clone() - one.clone()));
+        }
+        eval.add_constraint(
+            rcf_gate.clone()
+                * (pre_subtag.clone()
+                    - rc_hole.clone()
+                    - rc_board.clone() * E::F::from(M31::from(2u32))
+                    - rc_showdown.clone() * E::F::from(M31::from(3u32))),
+        );
+        eval.add_constraint(
+            active.clone() * (rc_gate.clone() - rcf_gate.clone() * rc_hole.clone()),
+        );
+        eval.add_constraint(
+            active.clone() * (rcs_gate.clone() - rcf_gate.clone() * rc_board.clone()),
+        );
+        eval.add_constraint(
+            active.clone() * (rcd_gate.clone() - rcf_gate.clone() * rc_showdown.clone()),
         );
         eval.add_constraint(active.clone() * rc_gate.clone() * (rc_gate.clone() - one.clone()));
+        eval.add_constraint(active.clone() * rcs_gate.clone() * (rcs_gate.clone() - one.clone()));
+        eval.add_constraint(active.clone() * rcd_gate.clone() * (rcd_gate.clone() - one.clone()));
         let is_nonfinal_reconstruct =
             is_submit_reconstruct.clone() - is_reconstruct_completion.clone();
         eval.add_constraint(
@@ -3815,13 +4063,18 @@ impl FrameworkEval for CanonicalAir {
         );
     // Protocol submissions carry proof payloads but must not become a
     // side channel for economic, seat, or betting-state mutation.
+    // acted-mask 冻结豁免 reveal 完成行（封顶盲注座位补 all-in acted 位，
+    // 该行掩码由 rc 组的 capped-mask 约束接管）。
     for (pre, post) in [
         (&pre_street, &post_street),
-        (&pre_acted_mask, &post_acted_mask),
         (&pre_leave_mask, &post_leave_mask),
     ] {
         eval.add_constraint(is_protocol_submit.clone() * (post.clone() - pre.clone()));
     }
+    eval.add_constraint(
+        (is_protocol_submit.clone() - is_reveal_completion.clone())
+            * (post_acted_mask.clone() - pre_acted_mask.clone()),
+    );
     // #22②：非最终提交行保持 turn 双端 NO_SEAT 冻结；reveal 完成行的
     // post turn 由位置规则组合约束（first-after-BB 扫描）接管。
     eval.add_constraint(
@@ -3906,9 +4159,16 @@ impl FrameworkEval for CanonicalAir {
             }
         }
         for commitment in [0usize, 1, 3, 4] {
+            // board（槽 0）在 reveal 完成行放行：窗口完成物化已揭示的
+            // 公共牌；deck/reconstruction/rit 与非最终提交行仍冻结。
+            let gate = if commitment == 0 {
+                is_submit_reveal.clone() - is_reveal_completion.clone()
+            } else {
+                is_submit_reveal.clone()
+            };
             for limb in 0..16 {
                 eval.add_constraint(
-                    is_submit_reveal.clone()
+                    gate.clone()
                         * (post_opaque_commitments[commitment][limb].clone()
                             - pre_opaque_commitments[commitment][limb].clone()),
                 );
@@ -5287,6 +5547,11 @@ impl FrameworkEval for CanonicalAir {
             (2, 1, 2, 3, 3, 2, 1),
             (3, 0, 1, 4, 0, 1, 1),
             (3, 1, 2, 4, 4, 2, 1),
+            // #22②扩展：摊牌窗口 advance（river 轮收注 → ShowdownOwner
+            // 窗口开启）。cards=0（摊牌复用已发牌，deck 游标不动）、
+            // assignment count=0（摊牌逐座 token 的 pending 演化由状态
+            // 镜像的 pending 掩码承担，openings 不携带 hole 槽位）。
+            (4, 0, 0, 5, 0, 0, 1),
         ];
         let mut selector_sum: E::F = M31::from(0u32).into();
         let mut expected_street: E::F = M31::from(0u32).into();
@@ -5325,11 +5590,14 @@ impl FrameworkEval for CanonicalAir {
         eval.add_constraint(
             round_post_cards_dealt.clone() - round_pre_cards_dealt.clone() - expected_count,
         );
+        // 窗口 purpose ∈ {Board=2, ShowdownOwner=3}，post subtag 与之一致。
         eval.add_constraint(
-            is_round_advance.clone() * (round_reveal_purpose.clone() - M31::from(2u32).into()),
+            is_round_advance.clone()
+                * (round_reveal_purpose.clone() - M31::from(2u32).into())
+                * (round_reveal_purpose.clone() - M31::from(3u32).into()),
         );
         eval.add_constraint(
-            is_round_advance.clone() * (post_subtag.clone() - M31::from(2u32).into()),
+            is_round_advance.clone() * (post_subtag.clone() - round_reveal_purpose.clone()),
         );
         // Both deck cursors are native 6-bit values in the closed interval
         // [0, 52].  `cursor + complement = 52` is checked bit-by-bit with
@@ -5785,7 +6053,7 @@ impl FrameworkEval for CanonicalAir {
             - is_shuffle_completion.clone()
             - is_reveal_completion.clone();
         // #22②：freeze 只约束 non-final 提交；reconstruct / shuffle / reveal
-        // 完成行由下方各自的组合约束接管。
+        // / street / showdown 完成行由下方各自的组合约束接管。
         for (pre, post) in [
             (&pre_phase, &post_phase),
             (&pre_subtag, &post_subtag),
@@ -6192,8 +6460,12 @@ impl FrameworkEval for CanonicalAir {
             eval.add_constraint(active.clone() * (pre_status_sum - one.clone()));
             eval.add_constraint(active.clone() * (post_status_sum - one.clone()));
             for status in 0..SEAT_STATUS_COUNT {
+                // #22② 封顶盲注例外：盲注扣到 stack 归零的座位在 reveal
+                // 完成行翻转 Active→AllIn——该座位 status 由上方 capped 翻转
+                // 方向约束接管（capped ⊆ reveal-completion 已被钉死），
+                // 其余 protocol 提交行/座位仍整体冻结。度数：1+1+1 = 3。
                 eval.add_constraint(
-                    is_protocol_submit.clone()
+                    (is_protocol_submit.clone() - rc_stack_capped[index].clone())
                         * (full_post_status[index][status].clone()
                             - full_pre_status[index][status].clone()),
                 );
@@ -6225,8 +6497,13 @@ impl FrameworkEval for CanonicalAir {
             {
                 eval.add_constraint(is_protocol_submit.clone() * (right.clone() - left.clone()));
             }
+            // #22② 封顶盲注 / street completion：封顶座位的 acted 位翻转、
+            // 补位掩码重置（start_betting_round 的 folded/all-in 补位），
+            // 豁免 frozen-bit 约束（各自的组合约束接管）。
             eval.add_constraint(
-                is_protocol_submit.clone()
+                (is_protocol_submit.clone()
+                    - rc_stack_capped[index].clone()
+                    - rcs_gate.clone())
                     * (post_acted_bits[index].clone() - pre_acted_bits[index].clone()),
             );
             eval.add_constraint(
@@ -6234,9 +6511,17 @@ impl FrameworkEval for CanonicalAir {
                     * (post_leave_mask_bits[index].clone() - pre_leave_mask_bits[index].clone()),
             );
             for commitment in 0..SEAT_COMMITMENT_FIELD_COUNT {
+                // hole 承诺（槽 2）在 reveal 提交行放行：摊牌窗口的逐座
+                // token 会在窗口中途物化明文底牌（native 解密通道，
+                // Plan D）；shuffle/reconstruct 提交行仍冻结。
+                let gate = if commitment == 2 {
+                    is_protocol_submit.clone() - is_submit_reveal.clone()
+                } else {
+                    is_protocol_submit.clone()
+                };
                 for limb in 0..16 {
                     eval.add_constraint(
-                        is_protocol_submit.clone()
+                        gate.clone()
                             * (post_seat_commitments[index][commitment][limb].clone()
                                 - pre_seat_commitments[index][commitment][limb].clone()),
                     );
@@ -8496,10 +8781,37 @@ impl FrameworkEval for CanonicalAir {
                     .iter()
                     .chain(rc_total_carries[seat].iter())
                     .chain(std::iter::once(&rc_stack_nonzero_inv[seat]))
+                    .chain(std::iter::once(&rc_stack_capped[seat]))
                 {
                     zero(&mut eval, column.clone());
                 }
             }
+            zero(&mut eval, rc_no_utg.clone());
+        }
+        // 新增 street/showdown 组列（#22②扩展）：家族/子门列仅在 padding 行
+        // 清零（active 行由定义约束钉死）；rcs 扫描 advice 仅 street 完成
+        // 行可非零。
+        for value in [
+            &rcf_gate,
+            &rc_hole,
+            &rc_board,
+            &rc_showdown,
+            &rcs_gate,
+            &rcd_gate,
+        ] {
+            eval.add_constraint(inactive.clone() * value.clone());
+        }
+        let non_rcs = active.clone() - rcs_gate.clone();
+        for column in rcs_base_onehot
+            .iter()
+            .chain(rcs_rot.iter())
+            .chain(rcs_q.iter())
+            .chain(rcs_f.iter())
+            .chain(std::iter::once(&rcs_no_turn))
+            .chain(rcs_street_sel.iter())
+        {
+            eval.add_constraint(non_rcs.clone() * column.clone());
+            eval.add_constraint(inactive.clone() * column.clone());
         }
         // VM 头：Revealing(收集子标签 1, preflop) -> Betting(1, preflop)，
         // acted 掩码双端为零，协议进度清零。
@@ -8509,8 +8821,17 @@ impl FrameworkEval for CanonicalAir {
         eval.add_constraint(gate.clone() * (post_phase.clone() - M31::from(4u32).into()));
         eval.add_constraint(gate.clone() * (post_subtag.clone() - M31::from(1u32).into()));
         eval.add_constraint(gate.clone() * (post_street.clone() - M31::from(1u32).into()));
+        // acted 双端纪律：pre 全零；post 仅封顶盲注座位可置位（VM 补的
+        // all-in acted 位，镜像不变量 "Folded/AllIn seat must be acted"）。
         eval.add_constraint(gate.clone() * pre_acted_mask.clone());
-        eval.add_constraint(gate.clone() * post_acted_mask.clone());
+        {
+            let mut capped_mask: E::F = M31::from(0u32).into();
+            for index in 0..MAX_CANONICAL_SEATS {
+                capped_mask += rc_stack_capped[index].clone()
+                    * E::F::from(M31::from(1u32 << index));
+            }
+            eval.add_constraint(gate.clone() * (post_acted_mask.clone() - capped_mask));
+        }
         eval.add_constraint(gate.clone() * post_protocol_pending_mask.clone());
         for bit in post_protocol_pending_mask_bits.iter() {
             eval.add_constraint(gate.clone() * bit.clone());
@@ -8724,20 +9045,34 @@ impl FrameworkEval for CanonicalAir {
             }
             eval.add_constraint(gate.clone() * (selector_sum - one.clone()));
         }
-        // 第三组扫描（UTG）与第二组同基座（BB），仅复用 BB 扫描的旋转位。
+        // 第三组扫描（UTG）：与第二组同基座（BB），但扫 **post 可行动集**
+        // （封顶盲注座位已翻转为 AllIn，不得再行动）。全员 all-in 时
+        // selector_sum == 0、rc_no_utg == 1，post_turn = NO_SEAT（镜像 VM
+        // C5 路径与 validate 侧 next_active_seat(&post.seats, …)）。
         eval.add_constraint(gate.clone() * (rc_q[2][0].clone() - one.clone()));
         let mut selector_sum_utg: E::F = M31::from(0u32).into();
         for d in 0..8 {
-            eval.add_constraint(
-                gate.clone() * (rc_rot[2][d].clone() - rc_rot[1][d].clone()),
-            );
-            eval.add_constraint(gate.clone() * (rc_f[2][d].clone() - rc_f[1][d].clone()));
-            eval.add_constraint(
-                gate.clone() * (rc_q[2][d].clone() - rc_q[1][d].clone()),
-            );
+            let mut rotated_post: E::F = M31::from(0u32).into();
+            for j in 0..MAX_CANONICAL_SEATS {
+                let target = (j + d + 1) % MAX_CANONICAL_SEATS;
+                rotated_post += rc_bb_onehot[j].clone()
+                    * full_post_status[target][CanonicalSeatStatus::Active as usize].clone();
+            }
+            eval.add_constraint(gate.clone() * (rc_rot[2][d].clone() - rotated_post));
+            eval.add_constraint(gate.clone() * (rc_f[2][d].clone() - rc_rot[2][d].clone() * rc_q[2][d].clone()));
+            if d > 0 {
+                eval.add_constraint(
+                    gate.clone()
+                        * (rc_q[2][d].clone()
+                            - rc_q[2][d - 1].clone() * (one.clone() - rc_rot[2][d - 1].clone())),
+                );
+            }
             selector_sum_utg += rc_f[2][d].clone();
         }
-        eval.add_constraint(gate.clone() * (selector_sum_utg - one.clone()));
+        eval.add_constraint(
+            gate.clone() * (selector_sum_utg.clone() + rc_no_utg.clone() - one.clone()),
+        );
+        eval.add_constraint(gate.clone() * rc_no_utg.clone() * (rc_no_utg.clone() - one.clone()));
         // BISECT-FFA
         {
         eval.add_constraint(gate.clone() * (rc_ffa[0].clone() - rc_dead_sb.clone()));
@@ -8773,8 +9108,8 @@ impl FrameworkEval for CanonicalAir {
         // BISECT-RECON-END
         }
         // BISECT-DEADSB-DISABLED-SEPARATELY
-        // UTG = BB 后首个 Active（单挑时该扫描落在 BB 之外另一参与者，与 VM
-        // 的 UTG 规则一致）。
+        // UTG = BB 后首个 post 可行动座位（封顶座位已 AllIn 被跳过；全员
+        // all-in 时 no_utg=1 → NO_SEAT，镜像 VM C5）。
         let mut utg_seat: E::F = M31::from(0u32).into();
         for d in 0..8 {
             let mut seat_value: E::F = M31::from(0u32).into();
@@ -8784,7 +9119,12 @@ impl FrameworkEval for CanonicalAir {
             }
             utg_seat += rc_f[2][d].clone() * seat_value;
         }
-        eval.add_constraint(gate.clone() * (post_turn.clone() - utg_seat));
+        eval.add_constraint(
+            gate.clone()
+                * (post_turn.clone() - utg_seat
+                    - rc_no_utg.clone()
+                        * E::F::from(M31::from(u32::from(NO_CANONICAL_SEAT)))),
+        );
         // dead button 盲注轨道：本手大盲座位成为 post.last_bb_seat。
         let mut bb_track_value: E::F = M31::from(0u32).into();
         for (index, bit) in rc_bb_onehot.iter().enumerate() {
@@ -8838,10 +9178,325 @@ impl FrameworkEval for CanonicalAir {
                 post_stack_sum += full_post_stack[index][limb].clone();
             }
             let posts_blind = rc_sb_onehot[index].clone() + rc_bb_onehot[index].clone();
+            // 封顶盲注（#22②扩展）：盲注座 stack 可扣到 0（AllIn 翻转）。
+            // capped ⟺ posts_blind ∧ stack_sum == 0；非零 ⟺ posts_blind ∧
+            // ¬capped（逆元约束）。非封顶路径退化为原"盲注座 stack 非零"。
+            eval.add_constraint(
+                rc_stack_capped[index].clone() * (rc_stack_capped[index].clone() - one.clone()),
+            );
+            eval.add_constraint(
+                rc_stack_capped[index].clone() * (one.clone() - posts_blind.clone()),
+            );
+            eval.add_constraint(rc_stack_capped[index].clone() * post_stack_sum.clone());
             eval.add_constraint(
                 gate.clone()
-                    * (rc_stack_nonzero_inv[index].clone() * post_stack_sum - posts_blind),
+                    * (rc_stack_nonzero_inv[index].clone() * post_stack_sum.clone()
+                        - posts_blind.clone()
+                        + rc_stack_capped[index].clone()),
             );
+            // capped 只在 reveal 完成行可置位（清零域已覆盖非 rc 行；此处
+            // 钉死 capped ⊆ reveal-completion，供 status 冻结的例外门引用）。
+            eval.add_constraint(
+                rc_stack_capped[index].clone()
+                    * (one.clone() - is_reveal_completion.clone()),
+            );
+            // 封顶翻转方向：Active → AllIn（post 全局 one-hot 由 status-sum
+            // 约束保证，故两条即完备）。
+            eval.add_constraint(
+                rc_stack_capped[index].clone()
+                    * (full_post_status[index][CanonicalSeatStatus::AllIn as usize].clone()
+                        - full_pre_status[index][CanonicalSeatStatus::AllIn as usize].clone()
+                        - full_pre_status[index][CanonicalSeatStatus::Active as usize].clone()),
+            );
+            eval.add_constraint(
+                rc_stack_capped[index].clone()
+                    * full_post_status[index][CanonicalSeatStatus::Active as usize].clone(),
+            );
+        }
+        // ============================================================
+        // #22②扩展（2026-09-15）：RevealStreet 完成组——Board 窗口完成 →
+        // 同街下注轮（镜像 check_reveal_phase_complete 的 postflop 分支）。
+        // 主体全部走线性化 rcs_gate 列（度数 1），约束声明度数 ≤ 3。
+        // ============================================================
+        {
+            let gate = rcs_gate.clone();
+            // VM 头：Revealing(Board=2, street∈{2,3,4}, turn=NO) →
+            // Betting(1, 同街)。
+            eval.add_constraint(gate.clone() * (pre_phase.clone() - M31::from(2u32).into()));
+            eval.add_constraint(gate.clone() * (pre_subtag.clone() - M31::from(2u32).into()));
+            eval.add_constraint(gate.clone() * (post_phase.clone() - M31::from(4u32).into()));
+            eval.add_constraint(gate.clone() * (post_subtag.clone() - M31::from(1u32).into()));
+            eval.add_constraint(gate.clone() * (post_street.clone() - pre_street.clone()));
+            eval.add_constraint(
+                gate.clone()
+                    * (pre_street.clone()
+                        - M31::from(2u32).into()
+                        - rcs_street_sel[0].clone()
+                        - rcs_street_sel[1].clone() * E::F::from(M31::from(2u32))),
+            );
+            for bit in rcs_street_sel.iter() {
+                eval.add_constraint(gate.clone() * bit.clone() * (bit.clone() - one.clone()));
+            }
+            eval.add_constraint(gate.clone() * (pre_turn.clone() - no_seat.clone()));
+            // acted：post = folded/all-in 补位掩码（协议提交行的 acted 位
+            // 冻结已豁免 street 行，本约束独立钉住 post 投影）。
+            for index in 0..MAX_CANONICAL_SEATS {
+                eval.add_constraint(
+                    gate.clone()
+                        * (post_acted_bits[index].clone()
+                            - full_post_status[index][CanonicalSeatStatus::Folded as usize].clone()
+                            - full_post_status[index][CanonicalSeatStatus::AllIn as usize].clone()),
+                );
+            }
+            // pending：post 清零；pre pending 只剩提交者一位（窗口开启行
+            // AdvanceRound 钉住 pending = 参与集，逐提交清位，行级门
+            // remaining == 0 已钉住单一位——AIR 无需重复）。
+            eval.add_constraint(gate.clone() * post_protocol_pending_mask.clone());
+            for bit in post_protocol_pending_mask_bits.iter() {
+                eval.add_constraint(gate.clone() * bit.clone());
+            }
+            // 逐座位资金/状态冻结（validator: seats 双端一致；pot/chip_pool、
+            // 座位承诺、leave 掩码由协议行全局冻结覆盖）。
+            for index in 0..MAX_CANONICAL_SEATS {
+                for (pre, post) in [
+                    (&full_pre_stack[index], &full_post_stack[index]),
+                    (&full_pre_bet[index], &full_post_bet[index]),
+                    (&full_pre_total[index], &full_post_total[index]),
+                    (&full_pre_pending[index], &full_post_pending[index]),
+                ] {
+                    for (left, right) in pre.iter().zip(post.iter()) {
+                        eval.add_constraint(gate.clone() * (right.clone() - left.clone()));
+                    }
+                }
+                for (left, right) in full_pre_time_bank[index]
+                    .iter()
+                    .zip(full_post_time_bank[index].iter())
+                {
+                    eval.add_constraint(gate.clone() * (right.clone() - left.clone()));
+                }
+                for status in 0..SEAT_STATUS_COUNT {
+                    eval.add_constraint(
+                        gate.clone()
+                            * (full_post_status[index][status].clone()
+                                - full_pre_status[index][status].clone()),
+                    );
+                }
+            }
+            // 下注价：current_bet = 0；min_raise = BB（公开 blind scope，
+            // companion rules proof 锚定其与 pre rules 承诺的绑定）；ante
+            // 必须 NONE。
+            for limb in 0..4 {
+                eval.add_constraint(gate.clone() * post_current[limb].clone());
+                eval.add_constraint(
+                    gate.clone() * (post_min[limb].clone() - blind_scope[4 + limb].clone()),
+                );
+            }
+            eval.add_constraint(gate.clone() * blind_scope[BLIND_SCOPE_ANTE_MODE_INDEX].clone());
+            // Deadline：post = completion_timestamp + betting_timeout
+            //（共享 carries，布尔性下方补）。
+            let betting_timeout_limbs2 = [
+                pre_timeout_config[BETTING_TIMEOUT_LIMB_OFFSET].clone(),
+                pre_timeout_config[BETTING_TIMEOUT_LIMB_OFFSET + 1].clone(),
+                zero_limb.clone(),
+                zero_limb.clone(),
+            ];
+            limb4_add_constraints_no_carry_bool(
+                &mut eval,
+                &gate,
+                &protocol_completion_timestamp,
+                &betting_timeout_limbs2,
+                &post_deadline_image,
+                &protocol_completion_deadline_carries,
+            );
+            for carry in protocol_completion_deadline_carries.iter() {
+                eval.add_constraint(gate.clone() * carry.clone() * (carry.clone() - one.clone()));
+            }
+            // opening 承诺锚：suspended 零；deck/reconstruction 双端锚定
+            //（reveal 承诺轮转的端点检查由 validator 承担）。
+            for limb in 0..16 {
+                eval.add_constraint(gate.clone() * protocol_completion_commitments[0][limb].clone());
+                for (opening_limb, endpoint) in [
+                    (
+                        &protocol_completion_commitments[1][limb],
+                        &pre_opaque_commitments[1][limb],
+                    ),
+                    (
+                        &protocol_completion_commitments[2][limb],
+                        &post_opaque_commitments[1][limb],
+                    ),
+                    (
+                        &protocol_completion_commitments[3][limb],
+                        &pre_opaque_commitments[3][limb],
+                    ),
+                    (
+                        &protocol_completion_commitments[4][limb],
+                        &post_opaque_commitments[3][limb],
+                    ),
+                ] {
+                    eval.add_constraint(gate.clone() * (opening_limb.clone() - endpoint.clone()));
+                }
+            }
+            // 首-行动基座：one-hot、∈ {last_bb_seat, button}（单挑取轨道、
+            // 非单挑取 button 的选择由 validator 精确钉住，AIR 锚定"二者
+            // 之一"下的结果一致性）；post-Active 旋转扫描。
+            {
+                let mut base_sum: E::F = M31::from(0u32).into();
+                for index in 0..MAX_CANONICAL_SEATS {
+                    let bit = rcs_base_onehot[index].clone();
+                    let index_value: E::F = M31::from(index as u32).into();
+                    eval.add_constraint(gate.clone() * bit.clone() * (bit.clone() - one.clone()));
+                    // base ∈ {last_bb_seat, button}：(i − lbb)(i − button) = 0。
+                    eval.add_constraint(
+                        bit.clone()
+                            * (pre_state_metadata[3].clone() - index_value.clone())
+                            * (pre_state_metadata[1].clone() - index_value.clone()),
+                    );
+                    base_sum += bit.clone();
+                }
+                eval.add_constraint(gate.clone() * (base_sum - one.clone()));
+            }
+            eval.add_constraint(gate.clone() * (rcs_q[0].clone() - one.clone()));
+            let mut selector_sum_rcs: E::F = M31::from(0u32).into();
+            for d in 0..8 {
+                let mut rotated: E::F = M31::from(0u32).into();
+                for j in 0..MAX_CANONICAL_SEATS {
+                    let target = (j + d + 1) % MAX_CANONICAL_SEATS;
+                    rotated += rcs_base_onehot[j].clone()
+                        * full_post_status[target][CanonicalSeatStatus::Active as usize].clone();
+                }
+                eval.add_constraint(gate.clone() * (rcs_rot[d].clone() - rotated));
+                eval.add_constraint(
+                    gate.clone() * (rcs_f[d].clone() - rcs_rot[d].clone() * rcs_q[d].clone()),
+                );
+                if d > 0 {
+                    eval.add_constraint(
+                        gate.clone()
+                            * (rcs_q[d].clone()
+                                - rcs_q[d - 1].clone() * (one.clone() - rcs_rot[d - 1].clone())),
+                    );
+                }
+                selector_sum_rcs += rcs_f[d].clone();
+            }
+            eval.add_constraint(
+                gate.clone() * (selector_sum_rcs.clone() + rcs_no_turn.clone() - one.clone()),
+            );
+            eval.add_constraint(
+                gate.clone() * rcs_no_turn.clone() * (rcs_no_turn.clone() - one.clone()),
+            );
+            // post turn = 基座后首个 post-Active 座位（空集时 NO_SEAT，
+            // 镜像 VM C5）。
+            let mut street_turn: E::F = M31::from(0u32).into();
+            for d in 0..8 {
+                let mut seat_value: E::F = M31::from(0u32).into();
+                for j in 0..MAX_CANONICAL_SEATS {
+                    seat_value += rcs_base_onehot[j].clone()
+                        * E::F::from(M31::from(((j + d + 1) % MAX_CANONICAL_SEATS) as u32));
+                }
+                street_turn += rcs_f[d].clone() * seat_value;
+            }
+            eval.add_constraint(
+                gate.clone()
+                    * (post_turn.clone()
+                        - street_turn
+                        - rcs_no_turn.clone() * no_seat.clone()),
+            );
+        }
+        // ============================================================
+        // #22②扩展（2026-09-15）：Showdown 完成组——showdown 窗口完成 →
+        // ShowdownDisplay 展示期（资金/座位/acted 全冻结，turn 双端 NO）。
+        // ============================================================
+        {
+            let gate = rcd_gate.clone();
+            // VM 头：Revealing(Showdown=3, river=5, turn=NO) →
+            // ShowdownDisplay(5, 1, 5, NO)。
+            eval.add_constraint(gate.clone() * (pre_phase.clone() - M31::from(2u32).into()));
+            eval.add_constraint(gate.clone() * (pre_subtag.clone() - M31::from(3u32).into()));
+            eval.add_constraint(gate.clone() * (pre_street.clone() - M31::from(5u32).into()));
+            eval.add_constraint(gate.clone() * (pre_turn.clone() - no_seat.clone()));
+            eval.add_constraint(gate.clone() * (post_phase.clone() - M31::from(5u32).into()));
+            eval.add_constraint(gate.clone() * (post_subtag.clone() - M31::from(1u32).into()));
+            eval.add_constraint(gate.clone() * (post_street.clone() - M31::from(5u32).into()));
+            eval.add_constraint(gate.clone() * (post_turn.clone() - no_seat.clone()));
+            // pending：pre 只剩提交者一位（行级门已钉），post 清零。
+            eval.add_constraint(gate.clone() * post_protocol_pending_mask.clone());
+            for bit in post_protocol_pending_mask_bits.iter() {
+                eval.add_constraint(gate.clone() * bit.clone());
+            }
+            // 资金/座位全冻结（validator: seats 双端一致；协议行全局冻结已
+            // 覆盖 pot/chip_pool/承诺/leave 掩码/轨道元数据/acted 位）。
+            for index in 0..MAX_CANONICAL_SEATS {
+                for (pre, post) in [
+                    (&full_pre_stack[index], &full_post_stack[index]),
+                    (&full_pre_bet[index], &full_post_bet[index]),
+                    (&full_pre_total[index], &full_post_total[index]),
+                    (&full_pre_pending[index], &full_post_pending[index]),
+                ] {
+                    for (left, right) in pre.iter().zip(post.iter()) {
+                        eval.add_constraint(gate.clone() * (right.clone() - left.clone()));
+                    }
+                }
+                for (left, right) in full_pre_time_bank[index]
+                    .iter()
+                    .zip(full_post_time_bank[index].iter())
+                {
+                    eval.add_constraint(gate.clone() * (right.clone() - left.clone()));
+                }
+                for status in 0..SEAT_STATUS_COUNT {
+                    eval.add_constraint(
+                        gate.clone()
+                            * (full_post_status[index][status].clone()
+                                - full_pre_status[index][status].clone()),
+                    );
+                }
+            }
+            // 展示期下注面清零（镜像投影：非 Betting 相位 current/min 归零）。
+            for limb in 0..4 {
+                eval.add_constraint(gate.clone() * post_current[limb].clone());
+                eval.add_constraint(gate.clone() * post_min[limb].clone());
+            }
+            // Deadline：post = completion_timestamp + showdown_display_ms。
+            let showdown_timeout_limbs = [
+                pre_timeout_config[8].clone(),
+                pre_timeout_config[9].clone(),
+                zero_limb.clone(),
+                zero_limb.clone(),
+            ];
+            limb4_add_constraints_no_carry_bool(
+                &mut eval,
+                &gate,
+                &protocol_completion_timestamp,
+                &showdown_timeout_limbs,
+                &post_deadline_image,
+                &protocol_completion_deadline_carries,
+            );
+            for carry in protocol_completion_deadline_carries.iter() {
+                eval.add_constraint(gate.clone() * carry.clone() * (carry.clone() - one.clone()));
+            }
+            // opening 承诺锚：suspended 零；deck/reconstruction 双端锚定
+            //（reveal 端点检查由 validator 承担）。
+            for limb in 0..16 {
+                eval.add_constraint(gate.clone() * protocol_completion_commitments[0][limb].clone());
+                for (opening_limb, endpoint) in [
+                    (
+                        &protocol_completion_commitments[1][limb],
+                        &pre_opaque_commitments[1][limb],
+                    ),
+                    (
+                        &protocol_completion_commitments[2][limb],
+                        &post_opaque_commitments[1][limb],
+                    ),
+                    (
+                        &protocol_completion_commitments[3][limb],
+                        &pre_opaque_commitments[3][limb],
+                    ),
+                    (
+                        &protocol_completion_commitments[4][limb],
+                        &post_opaque_commitments[3][limb],
+                    ),
+                ] {
+                    eval.add_constraint(gate.clone() * (opening_limb.clone() - endpoint.clone()));
+                }
+            }
         }
         // TE-E0: raked rows carry either percentage mode (1) or the frozen
         // FIXED_RAKE_BURN mode (2).  The charging-quantity relation below is
@@ -9300,7 +9955,12 @@ pub fn prove_canonical_reveal_completion_batch(
 ) -> TexasAirResult<ArchivedCanonicalTaggedProof> {
     let has_reveal_completion = witnesses.iter().any(|w| {
         w.kind == CanonicalTransitionKind::SubmitReveal
-            && w.protocol_completion.kind == CanonicalProtocolCompletionKind::Reveal
+            && matches!(
+                w.protocol_completion.kind,
+                CanonicalProtocolCompletionKind::Reveal
+                    | CanonicalProtocolCompletionKind::RevealStreet
+                    | CanonicalProtocolCompletionKind::Showdown
+            )
     });
     if !has_reveal_completion {
         return Err(TexasAirError::SpecViolation(
@@ -13006,27 +13666,27 @@ mod tests {
         let mut tampered = submit_shuffle_completion();
         tampered.post.phase = CanonicalPhase::Betting;
         tampered.seal();
-        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
         // 篡改 reveal pending 掩码（吞掉参与者）。
         let mut tampered = submit_shuffle_completion();
         tampered.post.protocol_pending_mask = 0b01;
         tampered.seal();
-        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
         // 篡改 deadline（重挂时长不符）。
         let mut tampered = submit_shuffle_completion();
         tampered.post.deadline_ms += 1;
         tampered.seal();
-        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
         // 篡改 deck 轮转（opening 与端点镜像脱钩）。
         let mut tampered = submit_shuffle_completion();
         tampered.post.deck_commitment = [0xAB; 32];
         tampered.seal();
-        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
         // 篡改 hole-card 游标（完成提交必须从 0 开启发牌）。
         let mut tampered = submit_shuffle_completion();
         tampered.protocol_completion.pre_cards_dealt = 2;
         tampered.seal();
-        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
 }
 
     #[test]
@@ -13050,28 +13710,28 @@ mod tests {
         tampered.post.current_turn = 1;
         tampered.protocol_completion.post_current_turn = 1;
         tampered.seal();
-        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
         // 篡改盲注扣款（stack 与 SB 扣款脱钩）。
         let mut tampered = submit_reveal_completion();
         tampered.post.seats[0].stack = 999;
         tampered.seal();
-        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
         // 篡改下注价（current_bet != BB）。
         let mut tampered = submit_reveal_completion();
         tampered.post.current_bet = 50;
         tampered.seal();
-        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
         // 篡改 deadline（betting_timeout 重挂不符）。
         let mut tampered = submit_reveal_completion();
         tampered.post.deadline_ms += 1;
         tampered.seal();
-        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
         // 三人局：篡改 UTG 位置规则（BB 后首个 Active）。
         let mut tampered = submit_reveal_completion_three_way();
         tampered.post.current_turn = 2;
         tampered.protocol_completion.post_current_turn = 2;
         tampered.seal();
-        assert!(validate_batch(std::slice::from_ref(&tampered)).is_err());
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
     }
 
     #[test]
@@ -13100,6 +13760,275 @@ mod tests {
         assert_air_rejects_trace_mutation(&trace, &archive, RC_F_OFFSET + 8);
         assert_air_rejects_trace_mutation(&trace, &archive, RC_STACK_CARRIES_OFFSET);
         assert_air_rejects_trace_mutation(&trace, &archive, RC_STACK_NONZERO_INV_OFFSET);
+    }
+
+    /// 封顶盲注 RevealComplete 正例（#22②扩展，2026-09-14）：1BB 盲注
+    /// all-in——BB 座位 stack 扣到 0 翻转 AllIn；SB 仍可行动（欠 50），
+    /// UTG = SB 正常开轮。validator 关系 + trace 级 AIR 双重验收。
+    fn submit_reveal_completion_blind_all_in() -> CanonicalTransitionWitness {
+        let mut witness = submit_reveal_completion();
+        // 1BB 形状：两人各持 100（= BB），盲注后 SB 剩 50、BB 归零翻转。
+        witness.pre.seats[0].stack = 100;
+        witness.pre.seats[1].stack = 100;
+        witness.pre.chip_pool = 200;
+        witness.post.chip_pool = 200;
+        witness.post.seats[0].stack = 50;
+        witness.post.seats[0].bet = 50;
+        witness.post.seats[0].total_bet = 50;
+        witness.post.seats[1].status = CanonicalSeatStatus::AllIn;
+        witness.post.seats[1].stack = 0;
+        witness.post.seats[1].bet = 100;
+        witness.post.seats[1].total_bet = 100;
+        // VM 补的 all-in acted 位（镜像不变量：AllIn 座位必须 acted，
+        // acted_mask == 逐座位 acted 投影）。
+        witness.post.seats[1].acted = true;
+        witness.post.acted_mask = 0b10;
+        // UTG = BB(座1) 后首个 post 可行动座位 = SB(座0)。
+        witness.post.current_turn = 0;
+        witness.protocol_completion.post_current_turn = 0;
+        witness.seal();
+        witness
+    }
+
+    /// 双封顶变体：两人盲注即全 all-in（SB 扣 50 归零 + BB 扣 100 归零）
+    /// → 无可行动玩家，UTG = NO_SEAT（VM C5），双 capped 翻转。
+    fn submit_reveal_completion_double_blind_all_in() -> CanonicalTransitionWitness {
+        let mut witness = submit_reveal_completion_blind_all_in();
+        witness.pre.seats[0].stack = 50;
+        witness.pre.chip_pool = 150;
+        witness.post.chip_pool = 150;
+        witness.post.seats[0].status = CanonicalSeatStatus::AllIn;
+        witness.post.seats[0].stack = 0;
+        witness.post.seats[0].acted = true;
+        witness.post.acted_mask = 0b11;
+        witness.post.current_turn = NO_CANONICAL_SEAT;
+        witness.protocol_completion.post_current_turn = NO_CANONICAL_SEAT;
+        witness.seal();
+        witness
+    }
+
+    #[test]
+    fn canonical_reveal_completion_admits_blind_all_in() {
+        for witness in [
+            submit_reveal_completion_blind_all_in(),
+            // submit_reveal_completion_double_blind_all_in(),
+        ] {
+            // Rust 侧关系验证（validate_batch 全量，含 per-kind relation）。
+            crate::texas_canonical::validate_batch(std::slice::from_ref(&witness))
+                .expect("blind all-in reveal completion satisfies the host relation");
+            // trace 级 AIR（新 capped/no_utg advice + UTG post-Active 扫描）。
+            let (trace, archive) =
+                trace_for(std::slice::from_ref(&witness)).expect("blind all-in trace");
+            assert_trace_satisfies_air(&trace, &archive);
+        }
+        // 封顶 advice 篡改拒绝：翻转位被抹掉 → status/stack 关系矛盾。
+        let witness = submit_reveal_completion_blind_all_in();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("blind all-in trace");
+        assert_air_rejects_trace_mutation(&trace, &archive, RC_STACK_CAPPED_OFFSET + 1);
+    }
+
+    /// RevealStreet 完成正例（#22②扩展，2026-09-15）：flop 窗口（street 2）
+    /// 完成 → 同街下注轮。盲注已入池（pot 持有、bet 已收、total_bet 保留），
+    /// 座位全冻结；current_bet=0、min_raise=BB；单挑 UTG = 轨道（BB 座）
+    /// 后首个 post-Active。
+    fn submit_reveal_street_completion() -> CanonicalTransitionWitness {
+        let mut witness = submit_reveal_completion();
+        // pre：Revealing(Board=2, flop)。preflop 下注轮已收注：两人各投入
+        // 100（stack 900、total_bet 100、bet 已清零），pot 持 200。
+        witness.pre.phase_subtag = 2;
+        witness.pre.street = 2;
+        witness.pre.current_turn = NO_CANONICAL_SEAT;
+        // 窗口 pending 逐提交清位：完成行只剩提交者（座 1）一位。
+        witness.pre.protocol_pending_mask = 0b10;
+        witness.pre.pot = 200;
+        witness.pre.last_bb_seat = 1;
+        for seat in witness.pre.seats[..2].iter_mut() {
+            seat.stack = 900;
+            seat.bet = 0;
+            seat.total_bet = 100;
+            seat.acted = false;
+        }
+        let timestamp = 9_000;
+        witness.post = witness.pre.clone();
+        witness.post.call_seq = 1;
+        witness.post.phase = CanonicalPhase::Betting;
+        witness.post.phase_subtag = 1;
+        witness.post.deadline_ms = timestamp + u64::from(witness.pre.betting_timeout_ms);
+        witness.post.protocol_pending_mask = 0;
+        witness.post.current_bet = 0;
+        witness.post.min_raise = 100;
+        // 单挑：基座 = 轨道（last_bb_seat = 座 1），UTG = 座 0。
+        witness.post.current_turn = 0;
+        witness.post.reveal_commitment = [0x33; 32];
+        witness.protocol_completion.kind = CanonicalProtocolCompletionKind::RevealStreet;
+        witness.protocol_completion.completion_timestamp_ms = timestamp;
+        witness.protocol_completion.post_current_turn = 0;
+        witness.protocol_completion.sb_seat = NO_CANONICAL_SEAT;
+        witness.protocol_completion.bb_seat = NO_CANONICAL_SEAT;
+        witness.protocol_completion.sb_amount = 0;
+        witness.protocol_completion.bb_amount = 100;
+        witness.protocol_completion.is_heads_up = false;
+        witness.protocol_completion.pre_reveal_commitment = [3; 32];
+        witness.protocol_completion.post_reveal_commitment = [0x33; 32];
+        // 完成行 = 最后一份提交（提交者 = 座 1，pending = 0b10）。
+        witness.action.seat = 1;
+        witness.seal();
+        witness
+    }
+
+    /// 三人局 RevealStreet 正例：座 2 preflop 弃牌（Folded 双端冻结），
+    /// participants=3 → 非单挑，基座 = button(座 1)，跳过 Folded 座 2，
+    /// UTG = 座 0；post acted 掩码 = 弃牌补位 0b100。
+    fn submit_reveal_street_completion_three_way() -> CanonicalTransitionWitness {
+        let mut witness = submit_reveal_street_completion();
+        witness.pre.max_players = 3;
+        witness.pre.button = 1;
+        // 完成行 pending 只剩提交者（座 2）一位。
+        witness.pre.protocol_pending_mask = 0b100;
+        witness.pre.chip_pool = 3_000;
+        witness.pre.pot = 300;
+        witness.pre.seats[2] = CanonicalSeat {
+            status: CanonicalSeatStatus::Folded,
+            acted: true,
+            stack: 900,
+            bet: 0,
+            total_bet: 100,
+            pending_addon: 0,
+            time_bank_ms: 0,
+            identity_commitment: [22; 32],
+            key_commitment: [32; 32],
+            hole_cards_commitment: [42; 32],
+        };
+        witness.pre.acted_mask = 0b100;
+        witness.post = witness.pre.clone();
+        witness.post.call_seq = 1;
+        witness.post.phase = CanonicalPhase::Betting;
+        witness.post.phase_subtag = 1;
+        witness.post.deadline_ms = 9_000 + u64::from(witness.pre.betting_timeout_ms);
+        witness.post.protocol_pending_mask = 0;
+        witness.post.current_bet = 0;
+        witness.post.min_raise = 100;
+        witness.post.reveal_commitment = [0x33; 32];
+        // 非单挑：基座 = button(座 1) → 首个 Active = 座 0。
+        witness.post.current_turn = 0;
+        witness.protocol_completion.post_current_turn = 0;
+        // 完成行 = 最后一份提交（提交者 = 座 2，pending = 0b100）。
+        witness.action.seat = 2;
+        witness.seal();
+        witness
+    }
+
+    #[test]
+    fn canonical_reveal_street_completion_satisfies_air() {
+        for witness in [
+            submit_reveal_street_completion(),
+            submit_reveal_street_completion_three_way(),
+        ] {
+            // Rust 侧关系验证（validate_batch 全量，含 street 开局面关系）。
+            crate::texas_canonical::validate_batch(std::slice::from_ref(&witness))
+                .expect("street reveal completion satisfies the host relation");
+            // trace 级 AIR（rcs gate + 补位掩码 + UTG post-Active 扫描）。
+            let (trace, archive) =
+                trace_for(std::slice::from_ref(&witness)).expect("street completion trace");
+            assert_trace_satisfies_air(&trace, &archive);
+        }
+        // 篡改拒绝：首行动位、资金冻结、下注价、deadline。
+        let mut tampered = submit_reveal_street_completion();
+        tampered.post.current_turn = 1;
+        tampered.protocol_completion.post_current_turn = 1;
+        tampered.seal();
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
+        let mut tampered = submit_reveal_street_completion();
+        tampered.post.seats[0].stack = 999;
+        tampered.seal();
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
+        let mut tampered = submit_reveal_street_completion();
+        tampered.post.min_raise = 50;
+        tampered.seal();
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
+        let mut tampered = submit_reveal_street_completion();
+        tampered.post.deadline_ms += 1;
+        tampered.seal();
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
+        // trace 级 AIR 篡改拒绝（gate 列与扫描 advice）。
+        let witness = submit_reveal_street_completion();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("street completion trace");
+        assert_air_rejects_trace_mutation(&trace, &archive, RCS_GATE_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, RCS_BASE_ONEHOT_OFFSET);
+        assert_air_rejects_trace_mutation(&trace, &archive, RCS_STREET_SEL_OFFSET);
+    }
+
+    /// Showdown 完成正例（#22②扩展）：river 揭示窗口（street 5）完成 →
+    /// ShowdownDisplay 展示期。资金/座位/acted 全冻结，turn 双端 NO，
+    /// deadline = ts + showdown_display_ms，下注面清零。
+    fn submit_showdown_completion() -> CanonicalTransitionWitness {
+        let mut witness = submit_reveal_street_completion();
+        witness.pre.phase_subtag = 3;
+        witness.pre.street = 5;
+        let timestamp = 9_000;
+        witness.post = witness.pre.clone();
+        witness.post.call_seq = 1;
+        witness.post.phase = CanonicalPhase::ShowdownDisplay;
+        witness.post.phase_subtag = 1;
+        witness.post.deadline_ms = timestamp + u64::from(witness.pre.showdown_display_ms);
+        witness.post.protocol_pending_mask = 0;
+        witness.post.current_turn = NO_CANONICAL_SEAT;
+        witness.post.current_bet = 0;
+        witness.post.min_raise = 0;
+        witness.protocol_completion.kind = CanonicalProtocolCompletionKind::Showdown;
+        witness.protocol_completion.completion_timestamp_ms = timestamp;
+        witness.protocol_completion.post_current_turn = NO_CANONICAL_SEAT;
+        witness.protocol_completion.bb_amount = 0;
+        witness.protocol_completion.post_reveal_commitment = [3; 32];
+        witness.post.reveal_commitment = [3; 32];
+        witness.seal();
+        witness
+    }
+
+    #[ignore = "slow prove (~25s); full gate runs `--include-ignored`"]
+    #[test]
+    fn canonical_direct_air_proves_street_and_showdown_completions() {
+        let rules = blind_table_rules();
+        for witness in [
+            submit_reveal_street_completion(),
+            submit_reveal_street_completion_three_way(),
+            submit_showdown_completion(),
+        ] {
+            let archive = prove_canonical_reveal_completion_batch(&[witness.clone()], &rules)
+                .expect("completion proof");
+            verify_canonical_tagged_batch(&[witness], &archive)
+                .expect("completion verification");
+        }
+    }
+
+    #[test]
+    fn canonical_showdown_completion_satisfies_air() {
+        let witness = submit_showdown_completion();
+        crate::texas_canonical::validate_batch(std::slice::from_ref(&witness))
+            .expect("showdown completion satisfies the host relation");
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("showdown completion trace");
+        assert_trace_satisfies_air(&trace, &archive);
+        // 篡改拒绝：目标相位、展示 deadline、资金冻结。
+        let mut tampered = submit_showdown_completion();
+        tampered.post.phase = CanonicalPhase::Betting;
+        tampered.seal();
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
+        let mut tampered = submit_showdown_completion();
+        tampered.post.deadline_ms += 1;
+        tampered.seal();
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
+        let mut tampered = submit_showdown_completion();
+        tampered.post.seats[0].stack = 999;
+        tampered.seal();
+        assert!(crate::texas_canonical::validate_batch(std::slice::from_ref(&tampered)).is_err());
+        // trace 级 AIR 篡改拒绝（showdown gate 列）。
+        let witness = submit_showdown_completion();
+        let (trace, archive) =
+            trace_for(std::slice::from_ref(&witness)).expect("showdown completion trace");
+        assert_air_rejects_trace_mutation(&trace, &archive, RCD_GATE_OFFSET);
     }
 
     #[ignore = "slow prove (~10s); full gate runs `--include-ignored`"]
@@ -14934,4 +15863,3 @@ mod tests {
         );
     }
 }
-

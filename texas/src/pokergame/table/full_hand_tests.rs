@@ -1330,7 +1330,7 @@ mod allin_e2e {
     /// game_loop::handle_turn_advance 的纯表镜像 + 揭牌仪式守卫
     /// （reveal 激活时不推进——2026-09-07 双推进回归的守卫语义）。
     /// `first = true` 时当前行动者直接 all-in，其后所有人 call。
-    fn act_allin_then_call(table: &mut Table, players: &[Player], first: &mut bool) {
+    pub(crate) fn act_allin_then_call(table: &mut Table, players: &[Player], first: &mut bool) {
         let turn_seat = table.turn().expect("betting must have a current turn");
         let turn_pk = {
             let seat = table.local_seats.get(&turn_seat).expect("turn seat");
@@ -1596,14 +1596,15 @@ mod allin_e2e {
         assert!(report.issues.is_empty(), "shadow parity on all-in runout: {report:?}");
     }
 
-    /// 1BB 盲注 all-in（双方买入恰为一大盲 → 盲注即全下）：整个 runout
-    /// 发生在 reveal dispatch 内的多街 normalize 级联中。生产结算构建
-    ///（submit::settle_hand 的 composite 单街收注投影）尚不接受该级联
-    /// ——控制逻辑入 AIR（micro-step witness 链）落地后本测试启用并
-    /// 必须通过。
+    /// 1BB 盲注 all-in（双方买入恰为一大盲 → 盲注即全下）的镜像侧验收：
+    /// 游戏层/镜像零分歧 + 逐钱包对账。控制逻辑入 AIR 的出证验收由
+    /// `starknet::canonical_trace_roundtrip::
+    /// blind_allin_control_trace_proves_as_canonical_row_chain` 承担
+    /// （封顶盲注 Reveal completion + all-in Call + AdvanceRound 行链
+    /// 真实 stwo 出证）；legacy composite 结算路径对该级联仍 fail-closed
+    /// （postflop completion 的 AIR 扩写后接线，见 docs/STATUS.md）。
     #[test]
-    #[ignore = "Stage 2 回归锚点：reveal dispatch 内多街 normalize 级联 vs 单街收注投影（PotCollected 分歧根因）"]
-    fn one_bb_blind_allin_hand_builds_production_settlement() {
+    fn one_bb_blind_allin_hand_mirror_parity() {
         let table_id = 424_253u32;
         let table = drive_allin_hand(table_id, 100);
         assert!(table.summary.went_to_showdown, "blind all-in runs out to showdown");
@@ -1615,27 +1616,100 @@ mod allin_e2e {
         assert!(report.issues.is_empty(), "game/mirror parity: {report:?}");
         let mirror = crate::starknet::vm_session::take_last_mirror_for_test(table_id)
             .expect("live hand mirror");
+        crate::starknet::hooks::cross_check_snapshot(&mirror, &input)
+            .expect("blind all-in snapshot parity");
+    }
+}
 
-        let wallet_map: Vec<(poker_l1::Address, starknet_crypto::Felt)> = input
-            .start
-            .participants
-            .iter()
-            .filter_map(|p| {
-                let addr = crate::starknet::vm_session::VmTable::addr_from_starknet(&p.wallet)?;
-                let felt = crate::starknet::chain::parse_felt(&p.wallet)?;
-                Some((addr, felt))
-            })
-            .collect();
-        let treasury: poker_l1::Address = [0x77u8; 20];
-        let action_log_digest = starknet_crypto::Felt::from(0xBEEF_u64);
-        let settlement = crate::starknet::submit::settle_hand(
-            &mirror,
-            Some(treasury),
-            &wallet_map,
-            action_log_digest,
-            &[],
-        )
-        .expect("production settlement build must accept the blind-all-in runout");
-        assert!(!settlement.deltas.is_empty());
+// ============================================================
+// Stage 2 端到端验收 driver：真实手牌驱动到摊牌窗口打开（不 finish
+// ——保留实时 VM 会话的控制轨迹），供 canonical_trace_roundtrip 复用。
+// ============================================================
+pub(crate) struct RealHandDriver {
+    pub(crate) table: Table,
+    pub(crate) players: Vec<Player>,
+}
+
+impl RealHandDriver {
+    /// 建桌 + 入座 + 真实洗牌 + 翻前 HandReveal 完成（盲注已发布）。
+    pub(crate) fn new(table_id: u32, bankroll: u64) -> Self {
+        let mut table = Table::new(table_id, "canonical-e2e".to_string(), 10000, 9, String::new());
+        let players = allin_e2e::seat_players_bankroll(&mut table, 2, bankroll);
+        table.mental_poker_game.encrypt_deck();
+        table.start_hand();
+        while table.shuffle_state.is_active() && !table.shuffle_state.pending_players.is_empty() {
+            let current = table.shuffle_state.current_player_pk.clone().expect("shuffler");
+            let player = players.iter().find(|p| p.pk_hex == current).expect("seated");
+            submit_real_shuffle(&mut table, player);
+        }
+        table.advance_shuffle();
+        allin_e2e::drive_reveal_cascade(&mut table, &players);
+        Self { table, players }
+    }
+
+    /// 推进到 ShowdownReveal 窗口打开（all-in 首行动或 check/call 线）。
+    /// 不调 finish_showdown——实时 VM 会话与其控制轨迹保留在桌上。
+    pub(crate) fn drive_to_showdown_window(mut self) -> Table {
+        let mut steps = 0;
+        let mut first_action = true;
+        loop {
+            steps += 1;
+            assert!(steps < 400, "game did not terminate");
+            if self.table.reveal_token_state.is_active() {
+                if self.table.reveal_token_state.phase == RevealPhase::ShowdownReveal {
+                    return self.table; // 摊牌窗口打开即停（不 finish）
+                }
+                allin_e2e::drive_reveal_cascade(&mut self.table, &self.players);
+                continue;
+            }
+            if self.table.summary.hand_over || self.table.round_state() == RoundState::Waiting {
+                return self.table;
+            }
+            if self.table.turn().is_some() {
+                let mut first = first_action;
+                allin_e2e::act_allin_then_call(&mut self.table, &self.players, &mut first);
+                first_action = first;
+                continue;
+            }
+            return self.table;
+        }
+    }
+
+    /// 推进到摊牌展示期（最后一份摊牌 token 触发的 Showdown 完成已入
+    /// 控制轨迹）。不调 end_hand——实时 VM 会话保留（展示期到期前的
+    /// 终态）。Game 层的 Showdown 相位在摊牌 reveal 完成时即进入，
+    /// 与 VM 的 ShowdownDisplay 同步（单一状态，refresh_from_vm）。
+    pub(crate) fn drive_to_showdown_display(mut self) -> Table {
+        let mut steps = 0;
+        let mut first_action = true;
+        loop {
+            steps += 1;
+            assert!(steps < 400, "game did not terminate");
+            if self.table.reveal_token_state.is_active() {
+                if self.table.reveal_token_state.phase == RevealPhase::ShowdownReveal {
+                    // 完成摊牌窗口（最后一份 token → Showdown 完成级联）。
+                    allin_e2e::drive_reveal_cascade(&mut self.table, &self.players);
+                    if !self.table.reveal_token_state.is_active() {
+                        return self.table;
+                    }
+                    continue;
+                }
+                allin_e2e::drive_reveal_cascade(&mut self.table, &self.players);
+                continue;
+            }
+            if self.table.summary.hand_over || self.table.round_state() == RoundState::Waiting {
+                return self.table;
+            }
+            if self.table.turn().is_some() {
+                let mut first = first_action;
+                allin_e2e::act_allin_then_call(&mut self.table, &self.players, &mut first);
+                first_action = first;
+                continue;
+            }
+            if self.table.round_state() == RoundState::Showdown {
+                return self.table;
+            }
+            return self.table;
+        }
     }
 }

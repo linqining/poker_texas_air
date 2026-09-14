@@ -138,6 +138,28 @@ pub fn normalization_trace_armed() -> bool {
     NORMALIZE_TRACE_SLOT.with(|slot| slot.borrow().is_some())
 }
 
+thread_local! {
+    /// CompleteReveal 行的边界锚：窗口完成在 `start_betting_round` 内触发
+    /// all-in runout 时，canonical 行链要求 SubmitReveal（RevealStreet
+    /// opening）的 post 停在**新开的下注轮**、runout 以独立 AdvanceRound
+    /// 行呈现。该槽由 runout 分支写入（armed 时），witness 生产者的捕获
+    /// 包装读取后清除。
+    static COMPLETION_BOUNDARY: std::cell::RefCell<Option<TexasPokerTable>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// runout 边界写/读（见 [`COMPLETION_BOUNDARY`]）。
+pub fn set_completion_boundary(state: &TexasPokerTable) {
+    COMPLETION_BOUNDARY.with(|slot| {
+        *slot.borrow_mut() = Some(state.clone());
+    });
+}
+
+/// 取走边界锚（无则 None）。
+pub fn take_completion_boundary() -> Option<TexasPokerTable> {
+    COMPLETION_BOUNDARY.with(|slot| slot.borrow_mut().take())
+}
+
 fn record_step_trace(step: NormalizationStep, pre: &TexasPokerTable, post: &TexasPokerTable) {
     // 未武装时 borrow_mut 后立即返回——仅一次 RefCell 检查的开销。
     NORMALIZE_TRACE_SLOT.with(|slot| {
@@ -719,7 +741,16 @@ fn start_betting_round(
     // （例如 preflop raise 后 Alice.acted=true，flop 开始时未重置，
     //  Bob check 后 is_betting_complete 检测到 Alice 已 acted 且 bet 匹配，
     //  错误地认为本轮下注完成并提前 advance_round）。
+    // 盲注 all-in 座位（#22② 封顶盲注）补 acted 位：all-in 玩家本轮无
+    // 行动权，canonical 镜像不变量要求 Folded/AllIn 座位带 acted 标记。
+    // 本轮无行动权的座位（folded/all-in）补 acted 位——canonical 镜像
+    // 不变量 "Folded/AllIn seat must be acted"。
     table.acted_mask = 0;
+    for (index, seat) in table.seats.iter().enumerate() {
+        if seat.is_all_in() || seat.is_folded() {
+            table.acted_mask |= 1u16 << index;
+        }
+    }
 
     let is_heads_up = count_active_occupied(&table.seats) == 2;
     let n = table.max_players;
@@ -754,9 +785,24 @@ fn start_betting_round(
     set_current_turn(table, start_seat, events)?;
 
     // All-in runout: with at most one stack still able to wager, no matched action remains.
+    // canonical AdvanceRound 行不变量同 advance_turn：pre.turn 必须 NO_SEAT
+    //（全员 all-in 的 C5 路径已为 None；唯一可行动者的路径在此清掉），
+    // 收注 + 推街拆为独立 AdvanceBettingRound step（Reveal completion 行
+    // 的 post 停在 Betting 状态，行链随后续 AdvanceRound 行咬合）。
     if no_further_betting_possible(table) {
-        collect_bets_to_pot(table, events)?;
-        advance_round(table, events)?;
+        set_current_turn(table, None, events)?;
+        if normalization_trace_armed() {
+            let before = table.clone();
+            // 边界锚：CompleteReveal 行的 post（新开下注轮，armed 语义由
+            // 生产者修正），runout 以独立 AdvanceRound 行呈现。
+            set_completion_boundary(&before);
+            collect_bets_to_pot(table, events)?;
+            advance_round(table, events)?;
+            record_step_trace(NormalizationStep::AdvanceBettingRound, &before, table);
+        } else {
+            collect_bets_to_pot(table, events)?;
+            advance_round(table, events)?;
+        }
         return Ok(());
     }
 
@@ -784,6 +830,11 @@ fn set_current_turn(
 ) -> PokerL1Result<()> {
     let old = table.current_turn_option();
     table.set_betting_turn(turn.unwrap_or(NO_SEAT))?;
+    // 幂等：turn 未变时不发事件（normalize 拆步引入的重复清 turn 会产生
+    // old == new == None 的噪音事件）。
+    if old == turn {
+        return Ok(());
+    }
     events::emit_event(
         events,
         TexasPokerEvent::CurrentTurnChanged {
@@ -820,8 +871,22 @@ fn advance_turn(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if is_betting_complete(table) {
-        collect_bets_to_pot(table, events)?;
-        advance_round(table, events)?;
+        // canonical AdvanceRound 行不变量（控制逻辑入 AIR，Stage 2）：本
+        // micro-step 的 pre 必须是"final actor 已离场"——turn 清到 NO_SEAT
+        // （把 turn 留在最后行动者身上正是游戏层一直在 fight 的陈旧指针，
+        // canonical AIR 据此证明"仅收注"关系）。收注 + 推街作为独立
+        // AdvanceBettingRound step 进轨迹（armed 时），witness 生产者据此
+        // 产出单街收注行。
+        set_current_turn(table, None, events)?;
+        if normalization_trace_armed() {
+            let before = table.clone();
+            collect_bets_to_pot(table, events)?;
+            advance_round(table, events)?;
+            record_step_trace(NormalizationStep::AdvanceBettingRound, &before, table);
+        } else {
+            collect_bets_to_pot(table, events)?;
+            advance_round(table, events)?;
+        }
         return Ok(());
     }
     let cur = table.current_turn_option().unwrap_or(0);
@@ -1779,11 +1844,28 @@ pub fn apply_submit_player_reveal_tokens(
     materialize_completed_reveal_assignments(table, events)?;
     // 命令内联级联（reveal 完成检查 → post_blinds / 开下一窗口）：armed 时
     // 作为 CompleteReveal micro-step 进轨迹（有实际状态变更才记）。
+    // runout 边界：start_betting_round 内的 all-in runout 已把
+    // AdvanceBettingRound 记为独立 step（pre = 新开下注轮）——CompleteReveal
+    // 行的 post 取边界锚（同一状态），行链逐行咬合。
     if normalization_trace_armed() {
         let before = table.clone();
         check_reveal_phase_complete(table, events)?;
-        if *table != before {
-            record_step_trace(NormalizationStep::CompleteReveal, &before, table);
+        let boundary = take_completion_boundary();
+        match boundary {
+            Some(fresh_betting) => {
+                if fresh_betting != before {
+                    record_step_trace(
+                        NormalizationStep::CompleteReveal,
+                        &before,
+                        &fresh_betting,
+                    );
+                }
+            }
+            None => {
+                if *table != before {
+                    record_step_trace(NormalizationStep::CompleteReveal, &before, table);
+                }
+            }
         }
     } else {
         check_reveal_phase_complete(table, events)?;

@@ -103,6 +103,48 @@ pub fn on_hand_complete(table: &mut Table) {
 ///
 /// 手牌只有一份 VM 状态表示（实时镜像）；比对不干净或镜像缺失 =
 /// fail-closed 拒绝该手结算（与游戏层事实分歧的状态绝不上链）。
+/// REAL 手的 canonical 归档生产（#22②扩展完成后接线）：实时镜像的控制
+/// 轨迹 → canonical 行链 → 真实 stwo 出证。任何失败返回 None（fail-soft：
+/// 未入证的 selector 族（admin/kick/addon…）、无 reveal 完成的极早手、
+/// 出证失败等按行家族 fail-closed，回退遗留 Starknet 路径）。
+fn build_appchain_hand_proof(
+    mirror: &VmTable,
+    table_id: u32,
+) -> Option<poker_appchain::settlement::HandProofBinding> {
+    let first = mirror.traces.first()?;
+    let rules = first.pre.rules.clone();
+    let records: Vec<poker_texas_air::canonical_dispatch_trace::DispatchRecord<'_>> = mirror
+        .traces
+        .iter()
+        .map(|trace| trace.as_record())
+        .collect();
+    let witnesses = poker_texas_air::canonical_dispatch_trace::witnesses_from_dispatch_records(
+        &records,
+        u64::from(table_id),
+    )
+    .ok()?;
+    // 终态绑定：链必须终止于摊牌展示期或无摊牌终局（Waiting）。
+    let last = witnesses.last()?;
+    if !matches!(
+        last.post.phase,
+        poker_texas_air::texas_canonical::CanonicalPhase::ShowdownDisplay
+            | poker_texas_air::texas_canonical::CanonicalPhase::Waiting
+    ) {
+        return None;
+    }
+    let archive = poker_texas_air::texas_canonical_air::prove_canonical_reveal_completion_batch(
+        &witnesses,
+        &rules,
+    )
+    .ok()?;
+    Some(poker_appchain::settlement::HandProofBinding {
+        archive_bytes: borsh::to_vec(&archive).ok()?,
+        post_state_commitment: archive.post_state_commitment,
+        pre_state_root: archive.pre_state_root,
+        post_state_root: archive.post_state_root,
+    })
+}
+
 async fn settle_from_live_mirror(
     input: super::prove_log::HandSettleInput,
     live: super::vm_session::VmSession,
@@ -174,9 +216,30 @@ async fn settle_from_live_mirror(
         .unwrap_or(true)
         && super::appchain::runtime::runtime().is_some()
     {
-        // REAL 桌的 canonical 归档由归档生产者供给（v1 残余边界：归档
-        // 生产者未接线，REAL 手在此显式回退遗留路径，见 BLOCKERS B6）。
-        let appchain_hand_proof = None;
+        // REAL 桌的 canonical 归档：实时镜像控制轨迹 → 行链 → 出证
+        //（#22②扩展完成后接线；PLAY 手不经此路径，绑定语义不变）。
+        let asset_class_real = super::appchain::runtime::runtime()
+            .map(|rt| rt.config.asset_class == poker_appchain::note::AssetClass::Real)
+            .unwrap_or(false);
+        let appchain_hand_proof = if asset_class_real {
+            match build_appchain_hand_proof(&mirror, table_id) {
+                Some(proof) => {
+                    tracing::info!(
+                        "[appchain-exit] table {table_id} hand {hand_id}: canonical archive                          produced ({} rows)",
+                        proof.archive_bytes.len(),
+                    );
+                    Some(proof)
+                }
+                None => {
+                    tracing::warn!(
+                        "[appchain-exit] table {table_id} hand {hand_id}: canonical archive                          production failed — falling back to legacy starknet path"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let appchain_mirror = mirror.clone();
         let appchain_input = input.clone();
         // settle_from_mirror 是 CPU 重活（REAL 含 STARK 全验证），

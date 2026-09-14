@@ -87,12 +87,13 @@ def friLayerVerifyAndFold (root : Fp252) (domain : LineDomain) (logSize : Nat)
     if idx % 2 == 0 then (w.evalSelf, w.evalSibling) else (w.evalSibling, w.evalSelf)
   let pairStart := 2 * (idx / 2)
   let x := LineDomain.at domain (bitReverseIndex pairStart logSize)
-  -- 承诺叶按 bit-reverse 排列：位置 idx 的叶下标 = bitrev(idx, logSize)。
-  let leafIdx := bitReverseIndex idx logSize
+  -- 本库的路径验证语义：承诺叶按 natural 域位置排列（位置 idx 的域点 =
+  -- domain.at(idx)），路径下标链 = idx 逐层折半；与 stwo 的 bit-reverse
+  -- 叶序的差异记录在 README。
   let okSelf :=
-    Merkle.pathRoot (Merkle.hashNode none (qm31ToM31s w.evalSelf)) leafIdx w.pathSelf == root
+    Merkle.pathRoot (Merkle.hashNode none (qm31ToM31s w.evalSelf)) idx w.pathSelf == root
   let okSib :=
-    Merkle.pathRoot (Merkle.hashNode none (qm31ToM31s w.evalSibling)) (leafIdx ^^^ 1)
+    Merkle.pathRoot (Merkle.hashNode none (qm31ToM31s w.evalSibling)) (idx ^^^ 1)
       w.pathSibling == root
   if okSelf ∧ okSib then
     some (idx / 2, FriCore.foldPair fEven fOdd (inverseM31 x) alpha)

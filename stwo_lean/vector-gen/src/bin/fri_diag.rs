@@ -69,6 +69,11 @@ fn main() {
             levels.push(cur.clone());
         }
         let root = levels[levels.len() - 1][0];
+        for (li, lv) in levels.iter().enumerate() {
+            for (k, v) in lv.iter().enumerate() {
+                println!("  MERKLE L{}[{}] = {}", li, k, hexf(*v));
+            }
+        }
 
         // ---- Lean friLayerVerifyAndFold 语义 ----
         let leaf_idx = bit_reverse_index(idx, log);
@@ -95,6 +100,9 @@ fn main() {
                 r = Poseidon252MerkleHasher::hash_node(Some((*sib, r)), &[]);
             }
             jj >>= 1;
+        }
+        for (k, lh) in leaf_hashes.iter().enumerate() {
+            println!("  L{} leaf[{}] = {}", layer, k, hexf(*lh));
         }
         println!(
             "layer {}: leaf_idx={} pathRoot==root? {} root={}",

@@ -195,9 +195,11 @@ pub async fn start_bot(
             pk_proof_full,
             Some(mask_and_shuffle),
             seat_id,
-            1000, // buy_in：10×BB——恰好 1BB 会触发 preflop all-in，
-                  // mirror normalize 在 reveal dispatch 内连跳收注，
-                  // 违反 canonical AIR 单街收注投影规约
+            100, // buy_in：1×BB（#22②扩展后退役 10×BB 垫高）。整手控制
+                 // 轨迹（翻前盲注完成 → 街道窗口完成 → 摊牌完成）已入
+                 // canonical AIR 并真实出证（canonical_trace_roundtrip 全
+                 // 手验收 + hooks REAL 归档生产接线），1BB 盲注 all-in 的
+                 // 极端手型不再是结算盲区。
         )
         .await;
 

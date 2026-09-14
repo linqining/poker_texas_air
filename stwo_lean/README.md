@@ -27,13 +27,17 @@ Lean 4 + Mathlib 形式化的 **Stwo（Starkware STARK prover）证明验证库*
 | `StwoLean.Channel` | `core/channel/poseidon252.rs` | `Poseidon252Channel`：`mixU64`/`mixU32s`（含 `add_length_padding`）/`mixFelts`/`drawU32s`/`drawSecureFelt`（base-2^31 数字提取） | ✅ 绿 |
 | `StwoLean.Merkle` | `core/vcs/poseidon252_merkle.rs` | `hashNode` 三分支（叶打包/内部/内部+列，8-M31 块 + 长度注入）、单路径 `pathRoot`/`verifyPath` | ✅ 绿 |
 | `StwoLean.FriCore` | `core/fri.rs` + `core/fft.rs` | FRI 折叠核心方程：`ibutterfly`（`(f₀+f₁, (f₀-f₁)·x⁻¹)`）与 `foldPair`（`g + α·h`），即每层 `verify_and_fold` 的验证内核 | ✅ 绿 |
-| （待做） | `core/fri.rs` FriVerifier | 多层 FRI 状态机 + circle domain 数学 + DEEP | ⏳ |
-| （待做） | `core/pcs/` + `core/verifier.rs` | CommitmentSchemeVerifier + verifier 主循环 | ⏳ |
+| `StwoLean.CircleDomain` | `core/circle.rs` + `core/poly/line.rs` + `core/utils.rs` | CirclePointIndex（mod 2^31）、Coset（`at`/`double`）、LineDomain、`bitReverseIndex` | ✅ 绿 |
+| `StwoLean.FriVerifier` | `core/fri.rs` FriVerifier | 多层 FRI 折叠状态机：逐层 `friLayerVerifyAndFold`（merkle 路径核对 + foldPair 折叠）+ 末层多项式核对（Horner）；含 `inverseM31` 及 spec 引理 | ✅ 绿 |
+| （待做） | `core/pcs/quotients.rs` | DEEP 商多项式（OODS 抽样、`fri_answers`）、`PointSample` | ⏳ |
+| （待做） | `core/pcs/verifier.rs` | `CommitmentSchemeVerifier.verify_values` 全链（TreeVec 多树 + Lifted Merkle + POW + FRI 主循环编排） | ⏳ |
 
-向量（`StwoLean.Vectors`，54 条）：41 条 M31/CM31/QM31/Circle（decide）+
+向量（`StwoLean.Vectors`，55 条）：41 条 M31/CM31/QM31/Circle（decide）+
 8 条 Poseidon/Channel（native_decide，含 stwo 测试金向量）+
-5 条 Merkle/FRI（2 个 `hash_node` stwo 金向量、4 叶树路径往返、
-`ibutterfly`/`foldPair` 数值）。
+5 条 Merkle/FRI 折叠（decide）+
+1 条完整 3 层 FRI 实例 `friVerify`（native_decide：3 层 merkle 根链 +
+foldPair 折叠 + 末层多项式核对，位置 idx=5）+ 5 条 merkle 树节点值
+（2 个 stwo `hash_node` 金向量 + 4 叶树路径 + 3 叶数据）。
 
 **对拍发现的真实语义陷阱**（对拍方法学的直接收益）：
 

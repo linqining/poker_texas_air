@@ -40,6 +40,8 @@ pub mod recursion_prover;
 pub mod hooks;
 pub mod lock;
 pub mod vm_session;
+#[cfg(test)]
+mod canonical_trace_roundtrip;
 pub mod paymaster;
 pub mod prove_log;
 pub mod settlement_prover;

@@ -91,12 +91,39 @@ pub struct DispatchTrace {
     pub selector: [u8; 32],
     /// canonical Borsh 命令载荷（与 ProveTask.raw_args 同源）。
     pub args: Vec<u8>,
+    /// 认证时间戳（canonical completion opening 依据）。
+    pub timestamp_ms: u64,
     /// 命令应用前的表。
     pub pre: TexasPokerTable,
     /// 命令 + 全部 normalize 之后的表（下一 trace 的 pre）。
     pub post: TexasPokerTable,
     /// normalize 级联的逐步轨迹（含命令内部触发的级联）。
     pub normalization: poker_l1::contracts::texas_poker::state_machine::NormalizationTrace,
+}
+
+impl DispatchTrace {
+    /// 根 crate 生产者（canonical_dispatch_trace）的输入记录。
+    pub fn as_record(
+        &self,
+    ) -> poker_texas_air::canonical_dispatch_trace::DispatchRecord<'_> {
+        poker_texas_air::canonical_dispatch_trace::DispatchRecord {
+            selector: &self.selector,
+            args: &self.args,
+            timestamp_ms: self.timestamp_ms,
+            pre: &self.pre,
+            post: &self.post,
+            steps: self
+                .normalization
+                .steps
+                .iter()
+                .map(|s| poker_texas_air::canonical_dispatch_trace::StepRecord {
+                    step: s.step,
+                    pre: &s.pre,
+                    post: &s.post,
+                })
+                .collect(),
+        }
+    }
 }
 
 impl VmTable {
@@ -188,6 +215,7 @@ impl VmTable {
             self.traces.push(DispatchTrace {
                 selector: *selector,
                 args,
+                timestamp_ms: ctx.block_timestamp,
                 post: self.table.clone(),
                 normalization,
                 pre,
@@ -1117,6 +1145,11 @@ impl VmSession {
     /// [`Self::current_view`] 是对外只读入口（refresh_from_vm 的数据源）。
     pub(crate) fn current_view(&self) -> BettingView {
         self.betting_view()
+    }
+
+    /// 本手控制轨迹只读视图（canonical witness 生产者的数据源）。
+    pub(crate) fn vm_traces(&self) -> &Vec<DispatchTrace> {
+        &self.vm.traces
     }
 
     fn betting_view(&self) -> BettingView {

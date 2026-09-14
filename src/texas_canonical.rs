@@ -552,6 +552,15 @@ impl Default for CanonicalRoundAdvanceOpening {
 pub enum CanonicalProtocolCompletionKind {
     None = 0,
     Reconstruct = 1,
+    /// Postflop street board-reveal completion（#22②扩展，2026-09-14）：
+    /// flop/turn/river 窗口的最终提交推进到**同街**下注轮（下注价清零、
+    /// min_raise = BB、acted/pending 清零、turn 按 postflop 规则定位——
+    /// 单挑 BB 先行动，否则 button 后首个可行动座位）。资金全冻结。
+    RevealStreet = 4,
+    /// 摊牌窗口完成：全部存活底牌已物化 → ShowdownDisplay（派奖展示期，
+    /// deadline = ts + showdown_display_ms；结算派发在展示期超时后由
+    /// settle 流程另行处理，不进 canonical 行）。
+    Showdown = 5,
     /// Final shuffle contribution (preflop): the completing submit advances
     /// the hand from `Shuffling` into the preflop reveal phase.  The opening
     /// mirrors the VM's `start_preflop_reveal_phase` normalization (deck
@@ -939,6 +948,21 @@ fn only_allowed_changes(
     Ok(())
 }
 
+/// 无行动权座位（folded/all-in）掩码——VM start_betting_round 的 acted
+/// 补位语义（canonical 镜像不变量的行端点形状）。
+fn folded_or_all_in_mask(seats: &[CanonicalSeat; MAX_CANONICAL_SEATS]) -> u16 {
+    seats.iter().enumerate().fold(0u16, |mask, (index, seat)| {
+        if matches!(
+            seat.status,
+            CanonicalSeatStatus::Folded | CanonicalSeatStatus::AllIn
+        ) {
+            mask | (1u16 << index)
+        } else {
+            mask
+        }
+    })
+}
+
 fn active_reveal_mask(seats: &[CanonicalSeat; MAX_CANONICAL_SEATS]) -> u16 {
     seats.iter().enumerate().fold(0u16, |mask, (index, seat)| {
         if matches!(
@@ -1104,6 +1128,16 @@ fn validate_reveal_completion_opening(
         return Err("final reveal completion is detached from endpoint commitments".into());
     }
     // VM 头：Revealing(收集子标签 1, preflop) -> Betting(1, preflop)。
+    // post acted 掩码仅封顶盲注座位可置位（VM 的 all-in acted 位）。
+    let capped_mask: u16 = (0..MAX_CANONICAL_SEATS)
+        .filter(|&index| {
+            let blind_posted = usize::from(opening.sb_seat) == index
+                && opening.sb_amount > 0
+                || usize::from(opening.bb_seat) == index;
+            blind_posted && post.seats[index].stack == 0
+        })
+        .map(|index| 1u16 << index)
+        .fold(0u16, |acc, bit| acc | bit);
     if pre.phase != CanonicalPhase::Revealing
         || pre.phase_subtag != 1
         || pre.street != 1
@@ -1112,10 +1146,10 @@ fn validate_reveal_completion_opening(
         || post.phase != CanonicalPhase::Betting
         || post.phase_subtag != 1
         || post.street != 1
-        || post.acted_mask != 0
+        || post.acted_mask & !capped_mask != 0
         || post.protocol_pending_mask != 0
     {
-        return Err("final reveal completion has invalid VM normalization header".into());
+        return Err("final reveal completion has an invalid VM normalization header".into());
     }
     let deadline_ms = opening
         .completion_timestamp_ms
@@ -1135,7 +1169,14 @@ fn validate_reveal_completion_opening(
         return Err("final reveal completion has no participants".into());
     }
     for index in 0..MAX_CANONICAL_SEATS {
-        if pre.seats[index].status != post.seats[index].status {
+        // #22② 封顶盲注扩展（2026-09-14）：盲注座位（opening 定位）扣到
+        // stack 归零时翻转为 AllIn——其余座位 status 仍冻结。
+        let blind_posted = usize::from(opening.sb_seat) == index && opening.sb_amount > 0
+            || usize::from(opening.bb_seat) == index;
+        let capped_flip = blind_posted
+            && pre.seats[index].status == CanonicalSeatStatus::Active
+            && post.seats[index].status == CanonicalSeatStatus::AllIn;
+        if pre.seats[index].status != post.seats[index].status && !capped_flip {
             return Err("final reveal completion changed a seat status".into());
         }
         if pre.seats[index].bet != 0 {
@@ -1226,8 +1267,15 @@ fn validate_reveal_completion_opening(
             return Err("final reveal completion has an invalid seat stack".into());
         }
         if posted > 0 && seat_post.stack == 0 {
-            // 无封顶纪律：盲注后归零即 VM 的 AllIn 翻转，保持 fail-closed。
-            return Err("final reveal completion blinds cap the seat stack".into());
+            // 封顶盲注（#22②扩展，2026-09-14）：盲注扣到归零即 VM 的 AllIn
+            // 翻转——放行但必须翻转（status 检查已放宽至同一条件），不再
+            // fail-closed（1BB 盲注 all-in 手的 canonical 归档由此可证）。
+            if seat_post.status != CanonicalSeatStatus::AllIn {
+                return Err(
+                    "final reveal completion capped the seat stack without the all-in flip"
+                        .into(),
+                );
+            }
         }
         let total_bet = seat_pre.total_bet.checked_add(posted).ok_or(
             "final reveal completion total bet overflow",
@@ -1235,8 +1283,11 @@ fn validate_reveal_completion_opening(
         if seat_post.total_bet != total_bet {
             return Err("final reveal completion has an invalid seat total bet".into());
         }
-        // 其余座位字段不动。
-        if seat_post.acted != seat_pre.acted
+        // 其余座位字段不动；封顶翻转座位的 acted 翻转（VM 的 all-in
+        // acted 位）是唯一例外。
+        let capped = posted > 0 && seat_post.stack == 0;
+        let acted_flip_allowed = capped && !seat_pre.acted && seat_post.acted;
+        if seat_post.acted != seat_pre.acted && !acted_flip_allowed
             || seat_post.pending_addon != seat_pre.pending_addon
             || seat_post.time_bank_ms != seat_pre.time_bank_ms
             || seat_post.identity_commitment != seat_pre.identity_commitment
@@ -1249,6 +1300,183 @@ fn validate_reveal_completion_opening(
     // 守恒：盲注只在 stack 与 bet 桶之间移动，pot/custody 不变。
     if post.pot != pre.pot || post.chip_pool != pre.chip_pool {
         return Err("final reveal completion moved custody buckets".into());
+    }
+    Ok(())
+}
+
+/// Postflop street board-reveal completion（#22②扩展）：同街下注轮开局面。
+fn validate_reveal_street_completion_opening(
+    pre: &CanonicalStateImage,
+    post: &CanonicalStateImage,
+    opening: &CanonicalProtocolCompletionOpening,
+) -> Result<(), String> {
+    if opening.kind != CanonicalProtocolCompletionKind::RevealStreet
+        || opening.completion_timestamp_ms == 0
+        || opening.pre_cards_dealt != 0
+        || opening.post_cards_dealt != 0
+        || opening.post_shuffle_pending_mask != 0
+        || opening.post_shuffle_completed_mask != 0
+        || opening.suspended_reveal_commitment != [0; 32]
+        || opening.post_current_turn != post.current_turn
+        // postflop 无盲注（资金全冻结），SB/BB 定位字段保留零哨兵。
+        || opening.sb_seat != NO_CANONICAL_SEAT
+        || opening.bb_seat != NO_CANONICAL_SEAT
+        || opening.sb_amount != 0
+        || opening.bb_amount == 0
+        || opening.is_heads_up
+    {
+        return Err("street reveal completion has invalid kind/legacy/blind fields".into());
+    }
+    // 端点承诺锚：deck/reconstruction 双端一致；reveal 承诺完成行轮转。
+    if opening.pre_deck_commitment != pre.deck_commitment
+        || opening.post_deck_commitment != post.deck_commitment
+        || opening.pre_reconstruction_commitment != pre.reconstruction_commitment
+        || opening.post_reconstruction_commitment != post.reconstruction_commitment
+    {
+        return Err("street reveal completion is detached from endpoint commitments".into());
+    }
+    // VM 头：Revealing(Board=2, flop/turn/river) -> Betting(1, 同街)。
+    if pre.phase != CanonicalPhase::Revealing
+        || pre.phase_subtag != 2
+        || !(2..=4).contains(&pre.street)
+        || pre.current_turn != NO_CANONICAL_SEAT
+        || post.phase != CanonicalPhase::Betting
+        || post.phase_subtag != 1
+        || post.street != pre.street
+        || post.acted_mask != folded_or_all_in_mask(&post.seats)
+        || post.protocol_pending_mask != 0
+    {
+        return Err("street reveal completion has an invalid VM normalization header".into());
+    }
+    let deadline_ms = opening
+        .completion_timestamp_ms
+        .checked_add(u64::from(pre.betting_timeout_ms))
+        .ok_or("street reveal betting deadline overflow")?;
+    if post.deadline_ms != deadline_ms {
+        return Err("street reveal completion has an invalid betting deadline".into());
+    }
+    // 参与者形状：完成行提交时 pending 只剩提交者一位（窗口开启行
+    // AdvanceRound 已钉住 pending = 参与集，逐提交清位，行级门要求
+    // remaining == 0）；post pending 清零。
+    if post.protocol_pending_mask != 0 {
+        return Err("street reveal completion has an invalid pending mask".into());
+    }
+    // 资金全冻结：座位（含 bet——上一 AdvanceRound 已收注）与 pot/chip_pool
+    // 双端一致。
+    if pre.seats.iter().enumerate().any(|(index, seat_pre)| {
+        let seat_post = &post.seats[index];
+        seat_pre.status != seat_post.status
+            || seat_pre.stack != seat_post.stack
+            || seat_pre.bet != seat_post.bet
+            || seat_pre.total_bet != seat_post.total_bet
+            || seat_pre.pending_addon != seat_post.pending_addon
+            || seat_pre.time_bank_ms != seat_post.time_bank_ms
+            || seat_pre.identity_commitment != seat_post.identity_commitment
+            || seat_pre.key_commitment != seat_post.key_commitment
+            || seat_pre.hole_cards_commitment != seat_post.hole_cards_commitment
+    }) {
+        return Err("street reveal completion moved seat material".into());
+    }
+    if post.pot != pre.pot || post.chip_pool != pre.chip_pool {
+        return Err("street reveal completion moved custody buckets".into());
+    }
+    // 下注价：current_bet = 0、min_raise = BB（盲注面额由共享 rules-opening
+    // 通道锚定——与 bb_amount 复用同一 opening 槽）。
+    if post.current_bet != 0 || post.min_raise != opening.bb_amount {
+        return Err("street reveal completion has an invalid betting price".into());
+    }
+    // 首-行动座位（镜像 start_betting_round postflop 分支）：单挑 BB
+    // （轮转轨道）先行动（可行动则自身，否则顺延）；非单挑 button 后
+    // 首个可行动座位。
+    let heads_up = active_reveal_mask(&pre.seats).count_ones() == 2
+        && pre
+            .seats
+            .iter()
+            .filter(|seat| seat.status == CanonicalSeatStatus::Active)
+            .count()
+            == 2;
+    let base = if heads_up {
+        if pre.last_bb_seat != NO_CANONICAL_SEAT {
+            pre.last_bb_seat
+        } else {
+            pre.button
+        }
+    } else {
+        pre.button
+    };
+    let expected_turn = next_active_seat(&post.seats, base, post.max_players);
+    if post.current_turn != expected_turn.unwrap_or(NO_CANONICAL_SEAT) {
+        return Err("street reveal completion has an invalid first-to-act seat".into());
+    }
+    Ok(())
+}
+
+/// 摊牌窗口完成：ShowdownDisplay 开局面（资金/座位全冻结）。
+fn validate_showdown_completion_opening(
+    pre: &CanonicalStateImage,
+    post: &CanonicalStateImage,
+    opening: &CanonicalProtocolCompletionOpening,
+) -> Result<(), String> {
+    if opening.kind != CanonicalProtocolCompletionKind::Showdown
+        || opening.completion_timestamp_ms == 0
+        || opening.pre_cards_dealt != 0
+        || opening.post_cards_dealt != 0
+        || opening.post_shuffle_pending_mask != 0
+        || opening.post_shuffle_completed_mask != 0
+        || opening.suspended_reveal_commitment != [0; 32]
+        || opening.post_current_turn != NO_CANONICAL_SEAT
+        || opening.sb_seat != NO_CANONICAL_SEAT
+        || opening.bb_seat != NO_CANONICAL_SEAT
+        || opening.sb_amount != 0
+        || opening.bb_amount != 0
+        || opening.is_heads_up
+        || opening.pre_deck_commitment != pre.deck_commitment
+        || opening.post_deck_commitment != post.deck_commitment
+        || opening.pre_reconstruction_commitment != pre.reconstruction_commitment
+        || opening.post_reconstruction_commitment != post.reconstruction_commitment
+        || opening.pre_reveal_commitment != pre.reveal_commitment
+        || opening.post_reveal_commitment != post.reveal_commitment
+    {
+        return Err("showdown completion has invalid opening fields".into());
+    }
+    if pre.phase != CanonicalPhase::Revealing
+        || pre.phase_subtag != 3
+        || pre.street != 5
+        || pre.current_turn != NO_CANONICAL_SEAT
+        || post.phase != CanonicalPhase::ShowdownDisplay
+        || post.phase_subtag != 1
+        || post.street != 5
+        || post.current_turn != NO_CANONICAL_SEAT
+        || post.protocol_pending_mask != 0
+    {
+        return Err("showdown completion has an invalid VM normalization header".into());
+    }
+    let deadline_ms = opening
+        .completion_timestamp_ms
+        .checked_add(u64::from(pre.showdown_display_ms))
+        .ok_or("showdown display deadline overflow")?;
+    if post.deadline_ms != deadline_ms {
+        return Err("showdown completion has an invalid display deadline".into());
+    }
+    // 完成行提交时 pending 只剩提交者一位（行级门 remaining == 0 已钉）；
+    // post pending 清零由上方 header 检查覆盖。
+    // 座位面双端冻结——**除了** hole 承诺：摊牌窗口的最后一份 token 在
+    // 完成级联内物化剩余明文底牌（native 解密通道，Plan D）。
+    if pre.seats.iter().zip(post.seats.iter()).any(|(a, b)| {
+        a.status != b.status
+            || a.acted != b.acted
+            || a.stack != b.stack
+            || a.bet != b.bet
+            || a.total_bet != b.total_bet
+            || a.pending_addon != b.pending_addon
+            || a.time_bank_ms != b.time_bank_ms
+            || a.identity_commitment != b.identity_commitment
+            || a.key_commitment != b.key_commitment
+    }) || pre.pot != post.pot
+        || pre.chip_pool != post.chip_pool
+        || pre.acted_mask != post.acted_mask
+    {
+        return Err("showdown completion moved seat or custody material".into());
     }
     Ok(())
 }
@@ -1308,6 +1536,33 @@ fn validate_board_reveal_opening(
     // 1=preflop, 2=flop, 3=turn, 4=river.  River->showdown needs the
     // owner-readable-hole-card opening and is fail-closed until that distinct
     // fixed-width ledger component is in the AIR.
+    if pre.street == 4 {
+        // #22②扩展（2026-09-15）：river 轮收注 → 摊牌窗口（owner-readable
+        // hole cards）。摊牌复用已发牌（deck 游标不动、board 不增长），
+        // 逐座 token 的 pending 演化由窗口状态镜像掩码承担——openings
+        // 不携带 hole 槽位（AIR 同口径 profile，count=0）。
+        if opening.reveal_purpose != 3
+            || opening.run_it_twice
+            || opening.pre_cards_dealt != opening.post_cards_dealt
+            || opening.pre_cards_dealt > 52
+            || opening.pre_board_len != 5
+            || opening.post_board_len != 5
+            || opening.pre_second_board_len != 0
+            || opening.post_second_board_len != 0
+            || opening.assignment_count != 0
+            || opening
+                .assignments
+                .iter()
+                .any(|assignment| *assignment != CanonicalBoardRevealAssignment::EMPTY)
+        {
+            return Err("advance_round showdown opening has invalid deck/board metadata".into());
+        }
+        let pending_mask = active_reveal_mask(&pre.seats);
+        if pending_mask == 0 {
+            return Err("advance_round showdown opening has no reveal participants".into());
+        }
+        return Ok(());
+    }
     let (cards_per_runout, expected_board_len) = match pre.street {
         1 => (3u8, 0u8),
         2 => (1u8, 3u8),
@@ -3065,9 +3320,27 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                             &w.protocol_completion,
                         )?;
                     }
-                    CanonicalTransitionKind::SubmitReveal => {
-                        validate_reveal_completion_opening(pre, post, &w.protocol_completion)?;
-                    }
+                    CanonicalTransitionKind::SubmitReveal => match w.protocol_completion.kind {
+                        CanonicalProtocolCompletionKind::Reveal => {
+                            validate_reveal_completion_opening(pre, post, &w.protocol_completion)?;
+                        }
+                        CanonicalProtocolCompletionKind::RevealStreet => {
+                            validate_reveal_street_completion_opening(
+                                pre,
+                                post,
+                                &w.protocol_completion,
+                            )?;
+                        }
+                        CanonicalProtocolCompletionKind::Showdown => {
+                            validate_showdown_completion_opening(pre, post, &w.protocol_completion)?;
+                        }
+                        _ => {
+                            return Err(
+                                "final reveal submission requires a reveal-completion opening"
+                                    .into(),
+                            );
+                        }
+                    },
                     _ => {
                         return Err(
                             "final reveal submission requires the reveal-completion opening, whose betting-state turn rule is not enabled yet"
@@ -3089,6 +3362,8 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                         // 盲注/下注开局字段——逐字段语义由
                         // validate_reveal_completion_opening 承担。
                         expected.reveal_commitment = actual.reveal_commitment;
+                        // 窗口完成物化已揭示的公共牌（flop/turn/river）。
+                        expected.board_cards_commitment = actual.board_cards_commitment;
                         expected.current_turn = actual.current_turn;
                         expected.current_bet = actual.current_bet;
                         expected.min_raise = actual.min_raise;
@@ -3128,6 +3403,13 @@ fn validate_transition_relation(w: &CanonicalTransitionWitness) -> Result<(), St
                     }
                     CanonicalTransitionKind::SubmitReveal => {
                         expected.reveal_commitment = actual.reveal_commitment;
+                        // 摊牌窗口的逐座 token 提交会在窗口中途物化该座位的
+                        // 明文底牌（解密正确性属 native 通道，Plan D）——
+                        // canonical 层只冻结资金/状态面，放行 hole 承诺。
+                        for index in 0..MAX_CANONICAL_SEATS {
+                            expected.seats[index].hole_cards_commitment =
+                                actual.seats[index].hole_cards_commitment;
+                        }
                     }
                     CanonicalTransitionKind::SubmitReconstruct => {
                         expected.reconstruction_commitment = actual.reconstruction_commitment;

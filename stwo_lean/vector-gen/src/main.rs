@@ -34,6 +34,7 @@ fn felt252_lean(f: starknet_ff::FieldElement) -> String {
 }
 
 /// 固定种子的 LCG，保证生成结果可复现。
+#[derive(Clone)]
 struct Lcg(u64);
 
 impl Lcg {
@@ -467,6 +468,17 @@ fn main() {
         let coset = Coset::new(CirclePointIndex(1), 3);
         let domain = LineDomain::new(coset);
         let mut rng = Lcg(0xabcdef);
+        // LCG 状态打印（供 Lean 侧数据流核对）
+        {
+            let mut t = rng.clone();
+            let ev: Vec<QM31> = (0..8).map(|_| t.next_qm31()).collect();
+            for (i, q) in ev.iter().enumerate() {
+                println!(
+                    "-- DBG eval[{}] = QM31.ofU32 {} {} {} {}",
+                    i, q.0.0.0, q.0.1.0, q.1.0.0, q.1.1.0
+                );
+            }
+        }
         let mut evals: Vec<SecureField> = (0..8).map(|_| rng.next_qm31()).collect();
         let alphas: Vec<SecureField> = (0..3).map(|_| rng.next_qm31()).collect();
 
@@ -501,17 +513,11 @@ fn main() {
         let mut log_i = 3usize;
         for layer in 0..3 {
             let ev = &layers_evals[layer];
-            // 承诺叶按 bit-reverse 排列（对应 stwo fold_line 输出后
-            // 的 `bit_reverse_column`）；承诺叶[j] 的域点 =
-            // domain.at(bit_reverse_index(j, log))。
-            let log_l = (3 - layer) as u32;
-            let mut leaf_vals: Vec<starknet_ff::FieldElement> =
+            // 本库的路径验证语义：承诺叶按 natural 域位置排列
+            // （位置 idx 的域点 = domain.at(idx)；与 stwo 的 bit-reverse
+            // 叶序的差异记录在 README）。
+            let leaf_hashes: Vec<starknet_ff::FieldElement> =
                 ev.iter().map(&layer_leaf).collect();
-            let br: Vec<usize> = (0..ev.len())
-                .map(|i| bit_reverse_index(i, log_l))
-                .collect();
-            leaf_vals = br.iter().map(|&i| leaf_vals[i]).collect();
-            let leaf_hashes: Vec<starknet_ff::FieldElement> = leaf_vals;
             // 自底向上构造树（log_i 层）
             let mut levels = vec![leaf_hashes.clone()];
             let mut cur = leaf_hashes.clone();
@@ -526,10 +532,22 @@ fn main() {
                 levels.push(cur.clone());
             }
             roots.push(levels[levels.len() - 1][0]);
+            // 自检：pathSelf 链重算根（模拟 Lean pathRoot）
+            let leaf_idx_self = bit_reverse_index(idx >> layer, log_i as u32);
+            let mut rr = leaf_hashes[leaf_idx_self];
+            let mut jj2 = leaf_idx_self;
+            for lev in 0..levels.len() - 1 {
+                let sib = levels[lev][(jj2 ^ 1) % levels[lev].len()];
+                if jj2 % 2 == 0 { rr = Poseidon252MerkleHasher::hash_node(Some((rr, sib)), &[]); }
+                else { rr = Poseidon252MerkleHasher::hash_node(Some((sib, rr)), &[]); }
+                jj2 >>= 1;
+            }
+            println!("-- DBG FRI layer {} selfcheck: pathRoot==root? {} (root={})",
+                layer, rr == levels[levels.len() - 1][0], felt252_lean(levels[levels.len() - 1][0]));
             // idx >> layer 的路径：每层兄弟（单元素末层无兄弟，跳过）
             // 承诺叶为 bit-reverse 排列，叶下标 = bitrev(自然位置, log)。
             let mut pth: Vec<starknet_ff::FieldElement> = Vec::new();
-            let mut j = bit_reverse_index(idx >> layer, log_i as u32);
+            let mut j = idx >> layer;
             for level in &levels {
                 if level.len() == 1 {
                     break;
@@ -563,7 +581,7 @@ fn main() {
                     // pathSelf: 位置 j 的兄弟哈希链（承诺叶 bit-reverse 排列，
                     // 叶下标 = bitrev(自然位置, log)，逐层折半）
                     let mut parts: Vec<String> = Vec::new();
-                    let mut jj = bit_reverse_index(j, (3 - layer) as u32);
+                    let mut jj = j;
                     for lev in 0..(3 - layer) {
                         let tree_leaf: Vec<starknet_ff::FieldElement> =
                             layers_evals[layer].iter().map(&layer_leaf).collect();
@@ -585,7 +603,7 @@ fn main() {
                 {
                     // pathSibling: 位置 j^1 的兄弟哈希链
                     let mut parts: Vec<String> = Vec::new();
-                    let mut jj = bit_reverse_index(j ^ 1, (3 - layer) as u32);
+                    let mut jj = j ^ 1;
                     for lev in 0..(3 - layer) {
                         let tree_leaf: Vec<starknet_ff::FieldElement> =
                             layers_evals[layer].iter().map(&layer_leaf).collect();

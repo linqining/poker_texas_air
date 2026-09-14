@@ -57,13 +57,100 @@ game_loop 手动轮转）是失步死锁族 bug（09-07 多发公共牌、09-13 
   记录每手全部 dispatch 的 (命令 pre/post + 逐步 pre/post 链)，
   `trace_capture_tests` 钉板链式咬合契约。
 
-**Stage 2 后续（已定规格，未实施）**：canonical witness 生产者
-（`TexasPokerTable → CanonicalStateImage` 投影 + DispatchTrace →
-call_seq 连续的 canonical 行链，含 9 承诺推导）→ hooks.rs
-`appchain_hand_proof` 接线（当前 None → legacy 回退）→ 1BB all-in
-锚点测试（`one_bb_blind_allin_hand_builds_production_settlement`，
-`#[ignore]` 挂起）启用。all-in 连跳自此以多个单街 micro-step 行呈现，
-PotCollected 单街投影分歧结构性消除。
+## 2026-09-14 Stage 2（续）：控制逻辑入 AIR——行链生产者 + 封顶盲注 AIR 扩写
+
+**VM 侧对齐**（`cargo test -p poker_l1` 364 绿）：
+
+- `advance_turn` 完成分支与 `start_betting_round` 的 all-in runout 分支：
+  turn 清到 NO_SEAT（canonical AdvanceRound 行不变量："final actor 已离场"；
+  把 turn 留在最后行动者身上正是陈旧指针的来源），收注 + 推街拆为独立
+  `AdvanceBettingRound` micro-step 进 NormalizationTrace；
+  `set_current_turn` 幂等化（old == new 不发事件）。
+- `start_betting_round` 重置 acted 后为 all-in 座位补 acted 位
+  （canonical 镜像不变量 "Folded/AllIn seat must be acted"）。
+
+**AIR 扩写——Reveal completion 容纳封顶盲注**（`texas_canonical.rs`
+`validate_reveal_completion_opening` + `texas_canonical_air.rs` rc 约束组）：
+
+- 1BB 盲注 all-in（盲注扣到 stack 归零 → VM AllIn 翻转）此前被
+  "blinds cap the seat stack" fail-closed；现放行为受约束的翻转形状：
+  - AIR：per-seat `rc_stack_capped` advice（capped ⟺ 盲注座 ∧ post stack
+    归零）+ 翻转方向约束（Active→AllIn）+ status/acted 冻结豁免
+    （`(is_protocol_submit - capped) * diff`，度 ≤3）+ post acted 掩码 =
+    capped 掩码；
+  - UTG 扫描（rc_f[2]）改扫 **post 可行动集**：全员 all-in 时
+    `rc_no_utg = 1`、post.turn = NO_SEAT（镜像 VM C5 与 validator 的
+    `next_active_seat(&post.seats, …)`）；
+  - KAT：单封顶/双封顶两形状 validator + trace 级 AIR + 篡改拒绝全过。
+
+**canonical 行链生产者**（`src/canonical_dispatch_trace.rs`，新模块）：
+
+- `project_state_image`：`TexasPokerTable → CanonicalStateImage` 确定性
+  投影（deck/rules 用 stage-0 权威推导；governance/settlement/custody/
+  roots 用**手级** scope——跨行 immutable；Revealing subtag = purpose
+  序数；Betting deadline==0 的中间态以 dispatch 前 armed 值修正）。
+- `witnesses_from_dispatch_records`：DispatchTrace → call_seq 连续、逐行
+  咬合的 canonical 行链——命令行 + CompleteReveal 内联并入 SubmitReveal
+  （Reveal completion opening + blind opening）+ AdvanceBettingRound →
+  AdvanceRound 行（board-reveal opening）+ EndWithoutShowdown 行。
+- 端到端验收（`texas/src/starknet/canonical_trace_roundtrip.rs`，真实
+  stwo 出证）：1BB 盲注 all-in 手的 SubmitReveal×2 → 封顶盲注 Reveal
+  completion → all-in Call → AdvanceRound 五行链 validate_batch +
+  prove/verify 全通；常规手 preflop 段同样可证。**all-in 连跳收注自此以
+  多个单街行呈现——PotCollected 单街投影分歧在 canonical 路径结构性
+  消除**。
+
+**剩余边界（fail-closed，后续接线规格）**：
+
+1. ~~postflop RevealStreet / Showdown completion 的 AIR 组合~~ —
+   **closed（2026-09-15，#22②扩展全部落地）**。前次会话的 rcs/rcd
+   约束组违约（#21892/#21995）根因是完成族 gate 以数值 kind 绑定而
+   row() 以布尔发射 flag——本次以 **pre_subtag one-hot 划分**重写：
+   - **门结构**：`rcf_gate`（家族门，linearized flag×SubmitReveal）+
+     hole/board/showdown 三位 one-hot（AIR 钉 `pre_subtag = hole + 2·board
+     + 3·showdown`）→ `rc_gate := rcf∧hole`（preflop 盲注组自动收窄）、
+     `rcs_gate := rcf∧board`（RevealStreet）、`rcd_gate := rcf∧showdown`。
+     新增 42 列（门/one-hot/rcs 扫描 advice），NUM_COLUMNS 同步；
+     freeze 豁免按族生效（`is_reveal_completion` 覆盖三完成变体）。
+   - **rcs 组**（Board 窗口完成 → 同街下注轮）：header/street 两比特
+     分解、post acted = folded/all-in 补位、pending 清零、逐座位资金/
+     状态冻结、current=0/min=BB（公开 blind scope 锚定）、deadline
+     = ts + betting_timeout、opening 承诺锚、post-Active UTG 扫描。
+   - **rcd 组**（showdown 窗口完成 → ShowdownDisplay）：header 冻结、
+     deadline = ts + showdown_display_ms、资金/座位全冻结、下注面清零。
+   - **KAT**：street（HU + 三人局含 Folded 座位）/showdown 完成的
+     validator + trace 级 AIR + 篡改拒绝 + 真实 stwo prove/verify 全通
+     （`canonical_reveal_street_completion_satisfies_air` /
+     `canonical_showdown_completion_satisfies_air` /
+     `canonical_direct_air_proves_street_and_showdown_completions`）。
+2. **生产者全手贯通**（`canonical_dispatch_trace.rs`）：
+   - 完成行 opening 按 **purpose** 分类（DealHole→Reveal / Board→
+     RevealStreet（bb_amount=BB 通道）/ ShowdownOwner→Showdown）；
+   - 完成级联的 runout 形状 `[AdvanceBettingRound, CompleteReveal]`：
+     完成行 post 取 advance.pre（真实边界下注轮——trace 末步 post 被
+     patch 成 dispatch 终态，不可直接用），advance 以独立行跟随；
+   - deadline 修复：VM dispatch 级 disarm/re-arm 使 micro-step 快照带 0，
+     按链上连续性回填（完成行 = canonical 公式值 ts+timeout，advance
+     行 post = dispatch 终态 re-arm 值，其余 = 上一行 post）；
+   - `truncate_at_supported_boundary` **移除**：整手控制轨迹（翻前盲注
+     完成 → flop/turn/river 窗口完成 → 摊牌窗口完成 → ShowdownDisplay
+     终态）validate + prove/verify 全通
+     （`full_hand_control_trace_proves_through_showdown_display`）。
+   - 配套放宽（全部镜像"揭示物化"语义，逐条注明）：reveal 完成行放行
+     board 承诺轮转（AIR+validator）、非最终 reveal 提交行放行 hole
+     承诺物化（摊牌窗口逐座 token，AIR 槽 2 豁免 + validator 同口径）、
+     摊牌完成座位冻结豁免 hole 承诺、ShowdownDisplay 投影 street=5、
+     AdvanceRound 第 7 号 schedule profile（street 4 → 摊牌窗口：
+     purpose=3、cards=0、count=0——摊牌逐座 token 由状态镜像掩码承担，
+     AIR `validate_board_reveal_opening` 同步分支）。
+3. **hooks REAL 归档接线**（`texas/src/starknet/hooks.rs`
+   `build_appchain_hand_proof`）：实时镜像控制轨迹 → 行链 → 出证 →
+   `HandProofBinding`（终态 ShowdownDisplay/Waiting 绑定；任何未入证
+   selector 族 fail-soft 返回 None 回退遗留路径）。`dev_bot` buy_in
+   1000→100（10×BB 垫高退役，1BB 盲注 all-in 极端手型不再是结算盲区）。
+4. 密码学方程（BG/DLEQ/reveal token）维持 Plan D native 验证边界。
+   全量回归：poker_l1 364 绿、poker_texas_air 225+10+1 绿（含
+   `--include-ignored` 慢 prove KAT 59 绿）、texas 175+6 绿。
 
 ## Canonical AIR — composed relations (current)
 
