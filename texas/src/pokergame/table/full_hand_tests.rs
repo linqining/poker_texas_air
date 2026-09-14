@@ -747,7 +747,7 @@ mod recursion_e2e {
         table.record_action(seat, seq, &action, amount, false, true, Some(sig));
 
         // turn/phase 推进镜像（对齐生产 handle_turn_advance 的权威模式）：
-        // live_mirror 存在时 turn 轮转由 VM 视图同步负责（accepted 动作经
+        // vm_session 存在时 turn 轮转由 VM 视图同步负责（accepted 动作经
         // apply_betting_view、拒绝动作经 sync_rejected_view），此处再手动
         // 轮转会双重推进——拒绝路径上把权威同步的 turn 又盲转过一位，
         // 活锁（2026-09-14 recursion_e2e 复现）。仅本地兜底模式才手动轮转。
@@ -756,7 +756,7 @@ mod recursion_e2e {
         } else if table.is_betting_round_complete() {
             table.set_turn(None);
             table.advance_to_next_phase();
-        } else if table.live_mirror.is_none() {
+        } else if table.vm_session.is_none() {
             let last = table.turn().unwrap_or(1);
             table.set_turn(table.next_unfolded_player(last, 1));
         }
@@ -1041,7 +1041,7 @@ mod shadow_e2e {
     fn shadow_one_pass_matches_game_layer() {
         let table = drive_showdown_hand(424242);
 
-        let report = crate::starknet::shadow::take_last_report_for_test(424242)
+        let report = crate::starknet::vm_session::take_last_report_for_test(424242)
             .expect("shadow must have finished with the hand");
         assert_eq!(report.hand_id, table.current_hand_id, "shadow hand id");
         assert_eq!(report.metrics.bet_fail, 0, "one-pass bet failures: {report:?}");
@@ -1058,7 +1058,7 @@ mod shadow_e2e {
         let table_id = 424244;
         let table = drive_showdown_hand_opt(table_id, true);
 
-        let report = crate::starknet::shadow::take_last_report_for_test(table_id)
+        let report = crate::starknet::vm_session::take_last_report_for_test(table_id)
             .expect("shadow must have finished with the hand");
         assert_eq!(report.metrics.bet_fail, 1, "exactly one rejected bet: {report:?}");
         assert!(report.issues.is_empty(), "rejected bet is client noise, not divergence: {report:?}");
@@ -1066,7 +1066,7 @@ mod shadow_e2e {
         // 结算输入照常产出、快照对账通过（旧门 bet_fail>0 会在此前拒掉这手）。
         let input = crate::starknet::prove_log::take_settle_input(&table)
             .expect("hand must have settle input");
-        let mirror = crate::starknet::shadow::take_last_mirror_for_test(table_id)
+        let mirror = crate::starknet::vm_session::take_last_mirror_for_test(table_id)
             .expect("live hand mirror");
         crate::starknet::hooks::cross_check_snapshot(&mirror, &input)
             .expect("snapshot parity holds despite rejected bet");
@@ -1158,13 +1158,13 @@ mod shadow_e2e {
         // 单一状态表示：结算直接取用实时镜像（无重放构建）。
         // （on_hand_complete 已在 drive 中消费实时镜像并完成终局比对，
         // 测试经 test-only stash 取回镜像与报告。）
-        let report = crate::starknet::shadow::take_last_report_for_test(table_id)
+        let report = crate::starknet::vm_session::take_last_report_for_test(table_id)
             .expect("live mirror finish report");
         assert!(
             report.issues.is_empty() && report.metrics.bet_fail == 0,
             "live mirror must match game layer: {report:?}"
         );
-        let mirror = crate::starknet::shadow::take_last_mirror_for_test(table_id)
+        let mirror = crate::starknet::vm_session::take_last_mirror_for_test(table_id)
             .expect("live hand mirror");
 
         // 对账 1（快照）：board / per-wallet total_bet。
@@ -1177,7 +1177,7 @@ mod shadow_e2e {
             .participants
             .iter()
             .filter_map(|p| {
-                let addr = crate::starknet::mirror::TableMirror::addr_from_starknet(&p.wallet)?;
+                let addr = crate::starknet::vm_session::VmTable::addr_from_starknet(&p.wallet)?;
                 let felt = crate::starknet::chain::parse_felt(&p.wallet)?;
                 Some((addr, felt))
             })
@@ -1204,5 +1204,438 @@ mod shadow_e2e {
             &input,
         )
         .expect("delta parity through the production settle path");
+    }
+}
+
+// ============================================================
+// 控制轨迹捕获（控制逻辑入 AIR 的原料契约）：VmTable.traces 必须为
+// canonical witness 生产者提供完整、链式咬合的 pre/post 链——
+// - 跨 dispatch：traces[i].post == traces[i+1].pre；
+// - dispatch 内：normalize steps 逐步咬合，末步落在 dispatch 终态；
+// - 级联以多个单步呈现（不再折叠成一对 pre/post）。
+// ============================================================
+mod trace_capture_tests {
+    use super::*;
+    use poker_l1::contracts::texas_poker::state_machine::NormalizationStep;
+
+    #[test]
+    fn dispatch_traces_are_chained_and_complete() {
+        let table_id = 424_262u32;
+        let mut table = Table::new(table_id, "traces".to_string(), 10000, 9, String::new());
+        let players = allin_e2e::seat_players_bankroll(&mut table, 2, 10_000);
+        table.mental_poker_game.encrypt_deck();
+        table.start_hand();
+        while table.shuffle_state.is_active() && !table.shuffle_state.pending_players.is_empty() {
+            let current = table.shuffle_state.current_player_pk.clone().unwrap();
+            let player = players.iter().find(|p| p.pk_hex == current).unwrap();
+            submit_real_shuffle(&mut table, player);
+        }
+        table.advance_shuffle();
+        allin_e2e::drive_reveal_cascade(&mut table, &players);
+        // 一注跟注后终局弃牌：覆盖 betting 命令行 + EndWithoutShowdown 级联。
+        let turn_pk = {
+            let seat = table.local_seats.get(&table.turn().expect("turn")).unwrap();
+            seat.player.as_ref().unwrap().pk_hex.clone()
+        };
+        assert!(table.handle_call(&turn_pk).is_some());
+        let next_pk = {
+            let seat = table.local_seats.get(&table.turn().expect("turn")).unwrap();
+            seat.player.as_ref().unwrap().pk_hex.clone()
+        };
+        assert!(table.handle_fold(&next_pk).is_some());
+        assert!(table.summary.hand_over, "terminal fold ended the hand");
+
+        let mirror = crate::starknet::vm_session::take_last_mirror_for_test(table_id)
+            .expect("live hand mirror");
+        let traces = &mirror.traces;
+        assert!(
+            traces.len() >= 3,
+            "reveal submissions + call + fold all recorded: {}",
+            traces.len()
+        );
+        // 跨 dispatch 链式咬合。
+        for w in traces.windows(2) {
+            assert_eq!(w[0].post, w[1].pre, "dispatch chain broken at {:?}", w[0].selector);
+        }
+        // dispatch 内部：normalize 步步咬合、末步即终态。
+        let mut step_rows = 0usize;
+        for t in traces {
+            for s in t.normalization.steps.windows(2) {
+                assert_eq!(s[0].post, s[1].pre, "step chain broken in {:?}", s[0].step);
+            }
+            if let Some(last) = t.normalization.steps.last() {
+                assert_eq!(
+                    last.post, t.post,
+                    "last normalize step must land on the dispatch end state"
+                );
+            }
+            step_rows += t.normalization.steps.len();
+        }
+        assert!(step_rows > 0, "reveal-complete cascades captured: {step_rows}");
+        // 终局弃牌的最后一次状态变更 dispatch 含 EndWithoutShowdown 级联。
+        let last = traces.last().unwrap();
+        assert!(
+            last.normalization
+                .steps
+                .iter()
+                .any(|s| matches!(s.step, NormalizationStep::EndWithoutShowdown)),
+            "terminal fold dispatch carries the EndWithoutShowdown micro-step: {:?}",
+            last.normalization.steps.iter().map(|s| s.step).collect::<Vec<_>>()
+        );
+    }
+}
+
+// ============================================================
+// All-in 路径 e2e（Stage 0 基线 + Stage 2 回归锚点）：
+// 既有全部满手测试只打 check/call 线——all-in（及盲注即 all-in 的
+// runout）是历史零覆盖路径，也正是 PotCollected 单街收注投影分歧
+//（reveal dispatch 内多街 normalize 级联）的触发场景。
+// ============================================================
+mod allin_e2e {
+    use super::*;
+
+    /// seat_players 的可调买入版本（1BB 场景需要小买入）。
+    pub(super) fn seat_players_bankroll(table: &mut Table, n: u64, bankroll: u64) -> Vec<Player> {
+        let mut players = Vec::new();
+        for idx in 1..=n {
+            let client = ClientPlayer::new();
+            let proof = client.generate_pk_proof();
+            let pk_hex = poker_protocol::z_poker::convert::ecpoint_to_hex(&client.pk);
+            crate::starknet::prove_log::record_join(
+                table.summary.id,
+                &format!("0x{:064x}", idx),
+                &pk_hex,
+                crate::relayer::proof_bytes::serialize_pk_ownership_proof(&proof),
+                None,
+            );
+            table
+                .mental_poker_game
+                .register_player(pk_hex.clone(), client.pk, proof);
+            let player = GamePlayer {
+                name: format!("p{idx}"),
+                bankroll: bankroll as i64,
+                pk_hex: GamePkHex::new(pk_hex.clone()),
+                readable_hands: vec![],
+                wallet_address: WalletAddress(format!("0x{:064x}", idx)),
+            };
+            table.sit_player(player, idx as u32, bankroll, false);
+            if let Some(seat) = table.local_seats.get_mut(&(idx as u32)) {
+                seat.folded = false;
+            }
+            players.push(Player { pk_hex: GamePkHex::new(pk_hex), client });
+        }
+        players
+    }
+
+    /// game_loop::handle_turn_advance 的纯表镜像 + 揭牌仪式守卫
+    /// （reveal 激活时不推进——2026-09-07 双推进回归的守卫语义）。
+    /// `first = true` 时当前行动者直接 all-in，其后所有人 call。
+    fn act_allin_then_call(table: &mut Table, players: &[Player], first: &mut bool) {
+        let turn_seat = table.turn().expect("betting must have a current turn");
+        let turn_pk = {
+            let seat = table.local_seats.get(&turn_seat).expect("turn seat");
+            seat.player.as_ref().expect("seat occupied").pk_hex.clone()
+        };
+        let player = players.iter().find(|p| p.pk_hex == turn_pk).expect("turn player");
+        if *first {
+            *first = false;
+            assert!(
+                table.handle_allin(&player.pk_hex).is_some(),
+                "all-in raise must be accepted"
+            );
+        } else {
+            assert!(table.handle_call(&player.pk_hex).is_some(), "call must be accepted");
+        }
+        // 推进守卫：all-in 跟注后 VM 在 dispatch 内收注推进到下一街
+        //（apply_betting_view 已触发游戏层仪式）——此处不得二次推进。
+        if table.reveal_token_state.is_active() {
+            return;
+        }
+        if table.unfolded_players().len() <= 1 {
+            table.end_without_showdown();
+        } else if table.is_betting_round_complete() {
+            table.set_turn(None);
+            table.advance_to_next_phase();
+        }
+    }
+
+    /// 驱动连续 reveal 窗口（all-in runout 特有：窗口完成后下注轮被跳过、
+    /// 下一街窗口立即链式打开）。返回 Some(ShowdownReveal) 表示摊牌窗口
+    /// 已消化完毕；None 表示窗口链停在了一个下注轮上。
+    pub(super) fn drive_reveal_cascade(table: &mut Table, players: &[Player]) -> Option<RevealPhase> {
+        let mut windows = 0;
+        while table.reveal_token_state.is_active() {
+            windows += 1;
+            assert!(windows < 12, "reveal cascade did not terminate");
+            let phase = table.reveal_token_state.phase;
+            let pending: Vec<GamePkHex> = table.reveal_token_state.pending_players.clone();
+            assert!(!pending.is_empty(), "active window must have pending players");
+            for pk_hex in pending {
+                let player = players
+                    .iter()
+                    .find(|p| p.pk_hex == pk_hex)
+                    .expect("pending player must be seated");
+                let assign = table
+                    .reveal_token_state
+                    .player_assignments
+                    .get(&pk_hex)
+                    .cloned()
+                    .expect("assignment for pending player");
+                let cards: Vec<ElGamalCiphertext> = match phase {
+                    RevealPhase::HandReveal | RevealPhase::RedealReveal | RevealPhase::ShowdownReveal => assign.hand_card,
+                    RevealPhase::CommunityReveal => assign.community_card,
+                    RevealPhase::None => unreachable!(),
+                };
+                let mut tokens = Vec::new();
+                for ct in cards {
+                    let token = ct.gen_reveal_token(&player.client.sk);
+                    let proof = RevealTokenProof::prove(
+                        &player.client.sk,
+                        &player.client.pk,
+                        &ct,
+                        &token,
+                        &mut OsRng,
+                        &mut PoseidonFeltTranscript::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
+                    );
+                    tokens.push(poker_protocol::z_poker::protocol::RevealToken {
+                        encrypted_card: ct,
+                        proof,
+                        reveal_token: token,
+                        user_public_key: player.client.pk,
+                    });
+                }
+                table
+                    .submit_player_reveal_tokens(&pk_hex, tokens)
+                    .unwrap_or_else(|e| panic!("{phase:?} token submit failed for {pk_hex}: {e}"));
+                table.mark_player_reveal_complete(&pk_hex);
+            }
+            if phase == RevealPhase::ShowdownReveal {
+                assert!(!table.reveal_token_state.is_active(), "showdown closes the hand");
+                return Some(phase);
+            }
+            // on_reveal_complete 已触发：runout 链式开下一街窗口，或恢复下注轮。
+        }
+        None
+    }
+
+    /// 驱动一手 all-in runout 到摊牌（真实洗牌/reveal + 实时镜像路径）。
+    fn drive_allin_hand(table_id: u32, bankroll: u64) -> Table {
+        let mut table = Table::new(table_id, "allin-e2e".to_string(), 10000, 9, String::new());
+        let players = seat_players_bankroll(&mut table, 2, bankroll);
+        table.mental_poker_game.encrypt_deck();
+
+        table.start_hand();
+        while table.shuffle_state.is_active() && !table.shuffle_state.pending_players.is_empty() {
+            let current = table
+                .shuffle_state
+                .current_player_pk
+                .clone()
+                .expect("current shuffler set");
+            let player = players
+                .iter()
+                .find(|p| p.pk_hex == current)
+                .expect("current shuffler seated");
+            submit_real_shuffle(&mut table, player);
+        }
+        table.advance_shuffle();
+        assert_eq!(table.reveal_token_state.phase, RevealPhase::HandReveal);
+        drive_reveal_cascade(&mut table, &players);
+
+        let mut steps = 0;
+        let mut first_action = true;
+        loop {
+            steps += 1;
+            assert!(steps < 400, "game did not terminate");
+            if table.reveal_token_state.is_active() {
+                if let Some(RevealPhase::ShowdownReveal) = drive_reveal_cascade(&mut table, &players) {
+                    table.finish_showdown();
+                    break;
+                }
+                continue;
+            }
+            if table.summary.hand_over || table.round_state() == RoundState::Waiting {
+                break;
+            }
+            if table.turn().is_some() {
+                act_allin_then_call(&mut table, &players, &mut first_action);
+                continue;
+            }
+            break;
+        }
+        table
+    }
+
+    /// 超时 fold 的 VM 权威路径：真实手牌进入下注轮后把计时起点拨回
+    /// 超时阈值之前，check_betting_timeout → handle_fold → VM dispatch
+    /// 弃牌（本地兜底已删除，此为唯一超时弃牌路径）。终局弃牌必须确定
+    /// 性终结手牌（游戏层派奖 + 结算输入）——此前 post-reset 视图令
+    /// unfolded≤1 推断永不成立，手牌卡死（2026-09-14 探针实测回归）。
+    #[test]
+    fn betting_timeout_folds_via_vm() {
+        let table_id = 424_254u32;
+        let mut table = Table::new(table_id, "timeout-e2e".to_string(), 10000, 9, String::new());
+        let players = seat_players_bankroll(&mut table, 2, 10_000);
+        table.mental_poker_game.encrypt_deck();
+
+        table.start_hand();
+        while table.shuffle_state.is_active() && !table.shuffle_state.pending_players.is_empty() {
+            let current = table.shuffle_state.current_player_pk.clone().expect("shuffler");
+            let player = players.iter().find(|p| p.pk_hex == current).expect("seated");
+            submit_real_shuffle(&mut table, player);
+        }
+        table.advance_shuffle();
+        assert_eq!(table.reveal_token_state.phase, RevealPhase::HandReveal);
+        drive_reveal_cascade(&mut table, &players);
+        let turn_seat = table.turn().expect("betting started after blinds");
+        let turn_pk = {
+            let seat = table.local_seats.get(&turn_seat).expect("turn seat");
+            seat.player.as_ref().expect("occupied").pk_hex.clone()
+        };
+
+        table.set_betting_started_at(now_ms().saturating_sub(60_000));
+        let r = table.check_betting_timeout(30).expect("timeout must fold via VM");
+        assert_eq!(r.seat_id, turn_seat);
+        // 终局弃牌 → 手牌当场终结（fold-win 派奖 + Waiting）。
+        assert!(table.summary.hand_over, "terminal fold ends the hand immediately");
+        assert_eq!(table.round_state(), RoundState::Waiting);
+        assert!(!table.summary.win_messages.is_empty(), "fold-win payout recorded");
+        // 终局前账目保留（对账基准）：两人盲注各 ≥ 50。
+        let snap = table
+            .hand_proof_log
+            .final_total_bets
+            .as_ref()
+            .expect("pre-payout totals snapshotted");
+        assert!(snap.iter().all(|(_, b)| *b >= 50), "totals preserved: {snap:?}");
+        // 结算输入可产出（游戏层/镜像对账基准完好）。
+        assert!(crate::starknet::prove_log::take_settle_input(&table).is_some());
+    }
+
+    /// 主动终局弃牌（客户端 FOLD 路径）同样当场终结：fold-win 派奖 +
+    /// 影像零分歧 + 生产结算构建通过。
+    #[test]
+    fn terminal_fold_ends_hand_and_settles() {
+        let table_id = 424_261u32;
+        let mut table = Table::new(table_id, "foldout".to_string(), 10000, 9, String::new());
+        let players = seat_players_bankroll(&mut table, 2, 10_000);
+        table.mental_poker_game.encrypt_deck();
+        table.start_hand();
+        while table.shuffle_state.is_active() && !table.shuffle_state.pending_players.is_empty() {
+            let current = table.shuffle_state.current_player_pk.clone().unwrap();
+            let player = players.iter().find(|p| p.pk_hex == current).unwrap();
+            submit_real_shuffle(&mut table, player);
+        }
+        table.advance_shuffle();
+        drive_reveal_cascade(&mut table, &players);
+        let turn_seat = table.turn().expect("betting started");
+        let turn_pk = {
+            let seat = table.local_seats.get(&turn_seat).unwrap();
+            seat.player.as_ref().unwrap().pk_hex.clone()
+        };
+        let totals_before: Vec<(u32, u64)> = {
+            let mut v: Vec<(u32, u64)> = table.local_seats.values().map(|s| (s.id, s.total_bet)).collect();
+            v.sort();
+            v
+        };
+
+        let r = table.handle_fold(&turn_pk).expect("fold accepted");
+        assert_eq!(r.seat_id, turn_seat);
+        assert!(table.summary.hand_over, "hand ends on terminal fold");
+        assert_eq!(table.round_state(), RoundState::Waiting);
+        assert!(!table.summary.win_messages.is_empty());
+
+        let report = crate::starknet::vm_session::take_last_report_for_test(table_id)
+            .expect("shadow finished with the hand");
+        assert!(report.issues.is_empty(), "fold-out parity: {report:?}");
+        let _ = totals_before;
+
+        // 生产结算构建（镜像 pre_settlement 快照 + 证明链）。
+        let input = crate::starknet::prove_log::take_settle_input(&table)
+            .expect("settle input after fold-win");
+        let mirror = crate::starknet::vm_session::take_last_mirror_for_test(table_id)
+            .expect("live hand mirror");
+        crate::starknet::hooks::cross_check_snapshot(&mirror, &input)
+            .expect("fold-out snapshot parity");
+        let wallet_map: Vec<(poker_l1::Address, starknet_crypto::Felt)> = input
+            .start
+            .participants
+            .iter()
+            .filter_map(|p| {
+                let addr = crate::starknet::vm_session::VmTable::addr_from_starknet(&p.wallet)?;
+                let felt = crate::starknet::chain::parse_felt(&p.wallet)?;
+                Some((addr, felt))
+            })
+            .collect();
+        let settlement = crate::starknet::submit::settle_hand(
+            &mirror,
+            Some([0x77u8; 20]),
+            &wallet_map,
+            starknet_crypto::Felt::from(0xBEEF_u64),
+            &[],
+        )
+        .expect("production settlement build accepts the fold-out");
+        assert!(!settlement.deltas.is_empty());
+    }
+
+    /// 大筹码 all-in（首行动全下 + 对方跟注）→ runout 到摊牌：实时镜像
+    /// 与游戏层零分歧（既有满手测试从未覆盖 all-in 行动路径）。
+    #[test]
+    fn allin_raise_and_call_runs_out_to_showdown() {
+        let table_id = 424_252u32;
+        let table = drive_allin_hand(table_id, 10_000);
+
+        assert!(table.summary.went_to_showdown, "all-in runout reaches showdown");
+        assert_eq!(
+            table.mental_poker_game.list_revealed_community_cards().len(),
+            5,
+            "board completes without betting"
+        );
+        let report = crate::starknet::vm_session::take_last_report_for_test(table_id)
+            .expect("shadow must have finished with the hand");
+        assert_eq!(report.metrics.bet_fail, 0, "one-pass bet failures: {report:?}");
+        assert!(report.metrics.bet_ok >= 2, "allin + call dispatched: {report:?}");
+        assert!(report.issues.is_empty(), "shadow parity on all-in runout: {report:?}");
+    }
+
+    /// 1BB 盲注 all-in（双方买入恰为一大盲 → 盲注即全下）：整个 runout
+    /// 发生在 reveal dispatch 内的多街 normalize 级联中。生产结算构建
+    ///（submit::settle_hand 的 composite 单街收注投影）尚不接受该级联
+    /// ——控制逻辑入 AIR（micro-step witness 链）落地后本测试启用并
+    /// 必须通过。
+    #[test]
+    #[ignore = "Stage 2 回归锚点：reveal dispatch 内多街 normalize 级联 vs 单街收注投影（PotCollected 分歧根因）"]
+    fn one_bb_blind_allin_hand_builds_production_settlement() {
+        let table_id = 424_253u32;
+        let table = drive_allin_hand(table_id, 100);
+        assert!(table.summary.went_to_showdown, "blind all-in runs out to showdown");
+
+        let input = crate::starknet::prove_log::take_settle_input(&table)
+            .expect("hand must have settle input");
+        let report = crate::starknet::vm_session::take_last_report_for_test(table_id)
+            .expect("live mirror finish report");
+        assert!(report.issues.is_empty(), "game/mirror parity: {report:?}");
+        let mirror = crate::starknet::vm_session::take_last_mirror_for_test(table_id)
+            .expect("live hand mirror");
+
+        let wallet_map: Vec<(poker_l1::Address, starknet_crypto::Felt)> = input
+            .start
+            .participants
+            .iter()
+            .filter_map(|p| {
+                let addr = crate::starknet::vm_session::VmTable::addr_from_starknet(&p.wallet)?;
+                let felt = crate::starknet::chain::parse_felt(&p.wallet)?;
+                Some((addr, felt))
+            })
+            .collect();
+        let treasury: poker_l1::Address = [0x77u8; 20];
+        let action_log_digest = starknet_crypto::Felt::from(0xBEEF_u64);
+        let settlement = crate::starknet::submit::settle_hand(
+            &mirror,
+            Some(treasury),
+            &wallet_map,
+            action_log_digest,
+            &[],
+        )
+        .expect("production settlement build must accept the blind-all-in runout");
+        assert!(!settlement.deltas.is_empty());
     }
 }

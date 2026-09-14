@@ -95,6 +95,63 @@ pub struct NormalizationReport {
     pub steps: Vec<NormalizationStep>,
 }
 
+/// 控制逻辑入 AIR：单个 normalize micro-step 的执行轨迹——该步前后的
+/// 完整表快照（witness 生产的原料；`pre` 与原子回滚用的 before 克隆
+/// 同源，零额外语义）。
+#[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct NormalizationStepTrace {
+    pub step: NormalizationStep,
+    pub pre: TexasPokerTable,
+    pub post: TexasPokerTable,
+}
+
+/// 一次（或一段）dispatch 的规范化轨迹：按执行顺序的全部 micro-step。
+/// 经线程局部槽捕获（[`arm_normalization_trace`] / [`take_normalization_trace`]），
+/// 仅证明 armed 的会话开启——关闭时零开销，不进 DispatchOutput。
+#[derive(Clone, Debug, Default, BorshSerialize, BorshDeserialize)]
+pub struct NormalizationTrace {
+    pub steps: Vec<NormalizationStepTrace>,
+}
+
+thread_local! {
+    static NORMALIZE_TRACE_SLOT: std::cell::RefCell<Option<NormalizationTrace>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 武装本线程的轨迹捕获：此后 [`normalize_until_blocked`] 族执行的每个
+/// micro-step 追加到槽内（含命令内部级联与 dispatch 级收尾）。调用方
+/// （texas VmTable，证明 armed）负责在 dispatch 前后 arm/take 配对。
+pub fn arm_normalization_trace() {
+    NORMALIZE_TRACE_SLOT.with(|slot| {
+        *slot.borrow_mut() = Some(NormalizationTrace::default());
+    });
+}
+
+/// 取走并解除本线程的轨迹捕获（未武装返回 None）。与
+/// [`arm_normalization_trace`] 配对；间隙期（未 armed）的 normalize 零开销。
+pub fn take_normalization_trace() -> Option<NormalizationTrace> {
+    NORMALIZE_TRACE_SLOT.with(|slot| slot.borrow_mut().take())
+}
+
+/// 轨迹槽是否已武装（命令内联级联的快照克隆据此门控——关闭时零开销）。
+pub fn normalization_trace_armed() -> bool {
+    NORMALIZE_TRACE_SLOT.with(|slot| slot.borrow().is_some())
+}
+
+fn record_step_trace(step: NormalizationStep, pre: &TexasPokerTable, post: &TexasPokerTable) {
+    // 未武装时 borrow_mut 后立即返回——仅一次 RefCell 检查的开销。
+    NORMALIZE_TRACE_SLOT.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        if let Some(trace) = guard.as_mut() {
+            trace.steps.push(NormalizationStepTrace {
+                step,
+                pre: pre.clone(),
+                post: post.clone(),
+            });
+        }
+    });
+}
+
 /// Canonical timeout class consumed by `AdvanceDeadline`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[allow(missing_docs)]
@@ -379,8 +436,30 @@ fn count_actionable_players(seats: &[Seat]) -> usize {
 }
 
 /// Whether no further contested betting decision is possible.
+///
+/// 判定 =（≥2 未弃牌）且（可行动玩家 ≤ 1）且**没有可行动玩家还欠注**：
+/// 面对未跟注的水位（bet < current_bet），唯一留有筹码的玩家仍须
+/// call/fold，不得跳过——all-in 加注后对手保留行动权（2026-09-14 all-in
+/// e2e 复现：VM 在加注 dispatch 的 normalize 内连跳收注，对手随后的
+/// call 被 "not in betting round" 拒绝，游戏层/VM 失步）。欠注且已
+/// all-in 的玩家无需行动（缺口由边池处理）。与游戏层
+/// `is_betting_round_complete` 及 canonical prover 侧 AdvanceRound 边界
+/// （actionable seat 必须已匹配）对齐。
 fn no_further_betting_possible(table: &TexasPokerTable) -> bool {
-    count_active_players(&table.seats) >= 2 && count_actionable_players(&table.seats) <= 1
+    if count_active_players(&table.seats) < 2 || count_actionable_players(&table.seats) > 1 {
+        return false;
+    }
+    let Some(round) = table.betting_round() else {
+        return false;
+    };
+    table.seats.iter().all(|seat| {
+        let actionable = seat.is_occupied()
+            && !seat.is_folded()
+            && !seat.is_all_in()
+            && !seat.is_waiting()
+            && !seat.has_left_hand();
+        !actionable || seat.bet() == round.current_bet
+    })
 }
 
 // ========== PK 聚合 ==========
@@ -1698,7 +1777,17 @@ pub fn apply_submit_player_reveal_tokens(
     }
 
     materialize_completed_reveal_assignments(table, events)?;
-    check_reveal_phase_complete(table, events)?;
+    // 命令内联级联（reveal 完成检查 → post_blinds / 开下一窗口）：armed 时
+    // 作为 CompleteReveal micro-step 进轨迹（有实际状态变更才记）。
+    if normalization_trace_armed() {
+        let before = table.clone();
+        check_reveal_phase_complete(table, events)?;
+        if *table != before {
+            record_step_trace(NormalizationStep::CompleteReveal, &before, table);
+        }
+    } else {
+        check_reveal_phase_complete(table, events)?;
+    }
     Ok(())
 }
 
@@ -2449,7 +2538,15 @@ pub fn apply_player_action(
     }
 
     if matches!(action, PlayerAction::Fold { .. }) && count_active_players(&table.seats) <= 1 {
-        end_without_showdown(table, events)?;
+        // 命令内联级联（终局弃牌 → 派奖 + 复位）：作为 EndWithoutShowdown
+        // micro-step 进轨迹（armed 时），与 normalize 级联同构呈现。
+        if normalization_trace_armed() {
+            let before = table.clone();
+            end_without_showdown(table, events)?;
+            record_step_trace(NormalizationStep::EndWithoutShowdown, &before, table);
+        } else {
+            end_without_showdown(table, events)?;
+        }
         return Ok(());
     }
     advance_turn(table, events)?;
@@ -2752,6 +2849,9 @@ fn normalize_until_blocked_in_place(
                 "normalize: stage {step:?} made no progress"
             )));
         }
+        // 控制逻辑入 AIR：轨迹捕获（未武装零开销）。pre 复用原子回滚的
+        // before 克隆，post 为该步落地后的表。
+        record_step_trace(step, &before, table);
         table.arm_active_deadline_if_needed(now_ms)?;
         table.validate_state_schema()?;
         let _ = table.canonical_hand_phase()?;

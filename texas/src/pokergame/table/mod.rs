@@ -25,6 +25,10 @@ pub use crate::relayer::util::now_ms;
 pub mod shuffle;
 #[cfg(test)]
 mod full_hand_tests;
+#[cfg(test)]
+mod rules_tests;
+#[cfg(test)]
+mod view_semantics_tests;
 pub mod reveal;
 pub mod reconstruct;
 pub mod seat_mgmt;
@@ -192,7 +196,7 @@ pub struct Table {
     /// 本手 id（开局时分配；动作签名域 v2 与结算记账同源）。
     pub current_hand_id: u32,
     /// 本手证明事实（单一状态架构）：HandStart 快照 + 游戏层对账基准
-    /// （终局投入/逐笔派奖）；结算取用实时 VM 镜像（live_mirror），
+    /// （终局投入/逐笔派奖）；结算取用实时 VM 镜像（vm_session），
     /// 本结构是对账与动作签名材料的来源。
     /// `record_hand_start`（deck 终局时）整体重置。
     #[serde(skip)]
@@ -200,7 +204,7 @@ pub struct Table {
     /// 实时 VM 镜像（单一状态表示）：deck 终局时挂载，随桌存在，
     /// 结算时 take。挂在 Table 上而非全局表——无跨桌串流。
     #[serde(skip)]
-    pub live_mirror: Option<crate::starknet::shadow::ShadowHand>,
+    pub vm_session: Option<crate::starknet::vm_session::VmSession>,
     /// 关桌标志（终态）：置位后不再开局（game_loop 跳过 auto-start）、
     /// 不再接受入座（SIT_DOWN 拒绝）。"关桌后不开新手"的服务端权威执行点。
     #[serde(skip)]
@@ -530,7 +534,7 @@ impl Table {
             accepted_seq: HashMap::new(),
             action_log: Vec::new(),
             hand_proof_log: crate::starknet::prove_log::HandProofLog::default(),
-            live_mirror: None,
+            vm_session: None,
             hand_log_start: 0,
             current_hand_id: 0,
             closed: false,

@@ -56,7 +56,7 @@ async fn main() -> std::io::Result<()> {
     starknet::init(sn_config);
     tracing::info!(
         "Prover mode: {:?} (TEXAS_PROVER_MODE; dev = in-process local prover, remote = STARKNET_PROVER_URL service)",
-        starknet::shadow::prover_mode()
+        starknet::vm_session::prover_mode()
     );
     tracing::info!(
         "Settlement exit: {settlement_exit_name} (STARKNET_SETTLEMENT_EXIT; appchain = embedded sequencer, starknet = legacy calldata)"

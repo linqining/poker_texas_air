@@ -26,7 +26,7 @@ impl Table {
                 .find_map(|s| s.player.as_ref().filter(|p| &p.pk_hex == pk))
             {
                 let wallet = player.wallet_address.0.clone();
-                self.mirror_on_force_fold(&wallet);
+                self.vm_force_fold(&wallet);
             }
         } else {
             self.stand_player_by_pk(pk);
@@ -378,21 +378,21 @@ impl Table {
             seat.sitting_out = true;
         }
         if is_turn {
-            if let Some(ref betting) = self.betting_round {
-                if let Some(seat_ref) = self.seats().get(&seat_id) {
-                    if betting.validate_fold(seat_ref).is_ok() {
-                        if let Some(seat) = self.local_seats.get_mut(&seat_id) {
-                            seat.fold();
-                        }
-                        if let Some(ref mut betting) = self.betting_round {
-                            betting.update_after_fold();
-                        }
-                        return Some(ActionResult {
-                            seat_id,
-                            message: format!("{} auto-folds (disconnected)", player_name),
-                        });
-                    }
+            // 单一状态重构：断线代打弃牌也必须经 VM dispatch（本地直接
+            // seat.fold() 会绕过权威状态造成双写失步）。force_fold 非致命
+            // （VM 拒绝 = 状态不变），随后统一从 VM 重派生视图。
+            if let Some(seat) = self.local_seats.get(&seat_id) {
+                if let Some(player) = &seat.player {
+                    let wallet = player.wallet_address.0.clone();
+                    self.vm_force_fold(&wallet);
                 }
+            }
+            self.refresh_from_vm();
+            if self.local_seats.get(&seat_id).map(|s| s.folded).unwrap_or(false) {
+                return Some(ActionResult {
+                    seat_id,
+                    message: format!("{} auto-folds (disconnected)", player_name),
+                });
             }
         }
         None

@@ -10,13 +10,12 @@ impl Table {
         self.reveal_token_state.is_active()
     }
 
-    /// betting 域权威路径（Phase 2b 第一刀）：下注动作先经实时 VM 镜像
-    /// 校验并应用（VM 规则 = min-raise/TDA/all-in/轮次完成的唯一裁判），
-    /// 成功后游戏层从 VM 状态**派生**自己的下注状态（apply_betting_view）
-    /// ——pokergame 的下注账本退化为派生视图，不再是第二份权威。
-    /// VM 拒绝 = 动作非法，直接拒绝（不再"游戏层先改、VM 分歧后记账"）。
-    /// 无实时镜像的手（不可证明：缺 join 证明/停用开关）走 `*_local`
-    /// 本地规则兜底——此时游戏层账本是唯一表示，无重复可言。
+    /// betting 域权威路径（单一状态重构）：下注动作只经实时 VM dispatch
+    /// （VM 规则 = min-raise/TDA/all-in/轮次完成的唯一裁判），成功后游戏
+    /// 层从返回视图派生自己的下注状态；**拒绝后同样从 VM 当前状态重派生**
+    ///（refresh_from_vm——dispatch 内可能已推进相位）。
+    /// 无实时镜像 = 不可证明手 → fail-closed 直接拒绝（本地规则兜底路径
+    /// 已随单一状态重构删除：规则引擎只保留 VM 一份）。
 
     pub fn handle_fold(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
         if self.reject_during_reveal_ceremony() {
@@ -25,18 +24,38 @@ impl Table {
         let seat = self.find_player_by_pk(pk)?;
         let seat_id = seat.id;
         let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
-        match self.mirror_try_bet(pk.0.as_str(), "fold", None) {
+        match self.vm_try_bet(pk.0.as_str(), "fold", None) {
             Some(Ok(view)) => {
                 self.apply_betting_view(&view);
-                self.set_betting_started_at(now_ms());
+                if view.hand_over {
+                    // 终局弃牌：VM 已在 dispatch 内派奖并复位（视图不再
+                    // 携带 folded/total_bet）——游戏层在此确定性终结本手：
+                    // 补上弃牌者标记（终局前账目 apply 已保留）→ fold-win
+                    // 派奖 + on_hand_complete。此前依赖 driver 的
+                    // unfolded≤1 推断，而 post-reset 视图让该推断永不成立
+                    //（手牌卡死在无 turn 的 PreFlop，2026-09-14 探针实测）。
+                    if let Some(seat) = self.local_seats.get_mut(&seat_id) {
+                        seat.folded = true;
+                        seat.has_acted = true;
+                    }
+                    self.end_without_showdown();
+                } else {
+                    self.set_betting_started_at(now_ms());
+                }
                 Some(ActionResult { seat_id, message: format!("{} folds", player_name) })
             }
             Some(Err(e)) => {
-                self.sync_rejected_view();
+                self.refresh_from_vm();
                 tracing::debug!("[betting-authority] table {} fold rejected by VM: {e}", self.summary.id);
                 None
             }
-            None => self.fold_local(pk),
+            None => {
+                tracing::warn!(
+                    "[betting-authority] table {} fold rejected: no live VM mirror (unprovable hand, fail-closed)",
+                    self.summary.id
+                );
+                None
+            }
         }
     }
 
@@ -51,7 +70,7 @@ impl Table {
         let added_to_pot = self.summary.call_amount.map(|ca| {
             if ca > seat.stack + seat.bet { seat.stack } else { ca.saturating_sub(seat.bet) }
         });
-        match self.mirror_try_bet(pk.0.as_str(), "call", None) {
+        match self.vm_try_bet(pk.0.as_str(), "call", None) {
             Some(Ok(view)) => {
                 self.apply_betting_view(&view);
                 self.set_betting_started_at(now_ms());
@@ -62,11 +81,17 @@ impl Table {
                 Some(ActionResult { seat_id, message: msg })
             }
             Some(Err(e)) => {
-                self.sync_rejected_view();
+                self.refresh_from_vm();
                 tracing::debug!("[betting-authority] table {} call rejected by VM: {e}", self.summary.id);
                 None
             }
-            None => self.call_local(pk),
+            None => {
+                tracing::warn!(
+                    "[betting-authority] table {} call rejected: no live VM mirror (unprovable hand, fail-closed)",
+                    self.summary.id
+                );
+                None
+            }
         }
     }
 
@@ -77,18 +102,24 @@ impl Table {
         let seat = self.find_player_by_pk(pk)?;
         let seat_id = seat.id;
         let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
-        match self.mirror_try_bet(pk.0.as_str(), "check", None) {
+        match self.vm_try_bet(pk.0.as_str(), "check", None) {
             Some(Ok(view)) => {
                 self.apply_betting_view(&view);
                 self.set_betting_started_at(now_ms());
                 Some(ActionResult { seat_id, message: format!("{} checks", player_name) })
             }
             Some(Err(e)) => {
-                self.sync_rejected_view();
+                self.refresh_from_vm();
                 tracing::debug!("[betting-authority] table {} check rejected by VM: {e}", self.summary.id);
                 None
             }
-            None => self.check_local(pk),
+            None => {
+                tracing::warn!(
+                    "[betting-authority] table {} check rejected: no live VM mirror (unprovable hand, fail-closed)",
+                    self.summary.id
+                );
+                None
+            }
         }
     }
 
@@ -103,52 +134,61 @@ impl Table {
         if amount <= seat.bet {
             return None;
         }
-        match self.mirror_try_bet(pk.0.as_str(), "raise", Some(amount)) {
+        match self.vm_try_bet(pk.0.as_str(), "raise", Some(amount)) {
             Some(Ok(view)) => {
                 self.apply_betting_view(&view);
                 self.set_betting_started_at(now_ms());
                 Some(ActionResult { seat_id, message: format!("{} raises to ${:.2}", player_name, amount) })
             }
             Some(Err(e)) => {
-                self.sync_rejected_view();
+                self.refresh_from_vm();
                 tracing::debug!("[betting-authority] table {} raise rejected by VM: {e}", self.summary.id);
                 None
             }
-            None => self.raise_local(pk, amount),
+            None => {
+                tracing::warn!(
+                    "[betting-authority] table {} raise rejected: no live VM mirror (unprovable hand, fail-closed)",
+                    self.summary.id
+                );
+                None
+            }
         }
     }
 
     /// 把权威 VM 下注视图派生进游戏层：座位投入/筹码/弃牌/行动标记、
     /// 底池、call_amount、betting_round、行动指针——全部以 VM 为准。
-    /// hand_over（VM 内部已 fold-win 结束本手）时：跳过 stack 同步
-    /// （游戏层派奖是记账权威），pot 取终局前底池。
-    pub(crate) fn apply_betting_view(&mut self, view: &crate::starknet::shadow::BettingView) {
+    /// hand_over（VM 已在 dispatch 内终结本手——fold-win 派奖 + 复位）
+    /// 时：**跳过全部座位同步**——post-reset 视图不携带终局事实
+    /// （folded/total_bet 已被 VM 复位清零，照抄会把游戏层账本清成 0、
+    /// 丢失弃牌者标记 → end_without_showdown 永不触发、对账基准归零，
+    /// 2026-09-14 foldout 探针实测）；pot 取终局前底池（fold_win_pot）。
+    pub(crate) fn apply_betting_view(&mut self, view: &crate::starknet::vm_session::BettingView) {
         let turn_seat: Option<u32> = view
             .current_turn_pk
             .as_ref()
             .and_then(|pk| self.pk_to_seat.get(&GamePkHex::new(pk.clone())).copied());
-        for vs in &view.seats {
-            if vs.pk_hex.is_empty() {
-                continue;
-            }
-            let Some(seat_id) = self.pk_to_seat.get(&GamePkHex::new(vs.pk_hex.clone())).copied() else {
-                continue;
-            };
-            if let Some(seat) = self.local_seats.get_mut(&seat_id) {
-                seat.folded = vs.folded;
-                seat.bet = vs.bet;
-                seat.total_bet = vs.total_bet;
-                if !view.hand_over {
-                    seat.stack = vs.stack;
+        if !view.hand_over {
+            for vs in &view.seats {
+                if vs.pk_hex.is_empty() {
+                    continue;
                 }
-                seat.has_acted = vs.has_acted;
-                seat.turn = turn_seat == Some(seat_id);
+                let Some(seat_id) = self.pk_to_seat.get(&GamePkHex::new(vs.pk_hex.clone())).copied() else {
+                    continue;
+                };
+                if let Some(seat) = self.local_seats.get_mut(&seat_id) {
+                    seat.folded = vs.folded;
+                    seat.bet = vs.bet;
+                    seat.total_bet = vs.total_bet;
+                    seat.stack = vs.stack;
+                    seat.has_acted = vs.has_acted;
+                    seat.turn = turn_seat == Some(seat_id);
+                }
             }
-        }
-        if let Some(fwp) = view.fold_win_pot {
-            self.set_pot(fwp);
-        } else {
             self.set_pot(view.pot + view.street_bets);
+        } else if let Some(fwp) = view.fold_win_pot {
+            // 终局前底池（游戏层派奖基数）；无 fold_win_pot 的 hand_over
+            // （终局后的迟到刷新）不动 pot——游戏层账目已是权威。
+            self.set_pot(fwp);
         }
         if view.in_betting {
             let cb = view.current_bet.unwrap_or(0);
@@ -169,140 +209,14 @@ impl Table {
         // 相位联锁：VM 已在下注轮完成时收集筹码并推进街道（dispatch 内
         // normalize），游戏层必须随之执行自己的发牌仪式（发下一街牌 +
         // 打开 reveal 窗口）——否则 VM 在窗口等 token、游戏层永远不发牌。
-        // hand_over（fold-win）的收尾由 driver 的 end_without_showdown 走
-        // 游戏层派奖路径，不在此触发。
+        // hand_over（fold-win）的收尾由 handle_fold 的终局分支驱动。
         if !view.in_betting && !view.hand_over {
             self.advance_to_next_phase();
         }
     }
 
-    /// VM 拒绝动作时同步最新权威视图：VM 可能已在拒绝动作的 dispatch 内
-    /// 推进相位（如 preflop 完成 → flop reveal 窗口），游戏层不同步会卡死
-    /// 在旧街视图、reveal token 永远无法提交（失步死锁，2026-09-13 实测）。
-    pub(crate) fn sync_rejected_view(&mut self) {
-        if let Some(sh) = self.live_mirror.as_mut() {
-            if let Some(view) = sh.last_rejected_view.take() {
-                tracing::info!(
-                    "[sync-rejected] applying view: in_betting={} hand_over={} round_before={:?}",
-                    view.in_betting, view.hand_over, self.round_state()
-                );
-                self.apply_betting_view(&view);
-                tracing::info!("[sync-rejected] round_after={:?}", self.round_state());
-            }
-        } else {
-            tracing::info!("[sync-rejected] live_mirror absent");
-        }
-    }
-
-    // ===== 本地规则兜底（无实时镜像的不可证明手；游戏层账本此时是唯一表示）=====
-
-    fn fold_local(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
-        let seat = self.find_player_by_pk(pk)?;
-        let seat_id = seat.id;
-        let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
-        if let Some(ref betting) = self.betting_round {
-            if betting.validate_fold(&seat).is_err() {
-                return None;
-            }
-        }
-        if let Some(seat) = self.local_seats.get_mut(&seat_id) {
-            seat.fold();
-        }
-        if let Some(ref mut betting) = self.betting_round {
-            betting.update_after_fold();
-        }
-        self.set_betting_started_at(now_ms());
-        Some(ActionResult { seat_id, message: format!("{} folds", player_name) })
-    }
-
-    fn call_local(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
-        let seat = self.find_player_by_pk(pk)?;
-        let seat_id = seat.id;
-        let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
-        let call_amount = self.summary.call_amount?;
-        if let Some(ref betting) = self.betting_round {
-            if betting.validate_call(&seat).is_err() {
-                return None;
-            }
-        }
-        let added_to_pot = if call_amount > seat.stack + seat.bet {
-            seat.stack
-        } else {
-            call_amount.saturating_sub(seat.bet)
-        };
-        if let Some(seat) = self.local_seats.get_mut(&seat_id) {
-            seat.call_raise(call_amount);
-        }
-        if let Some(ref mut betting) = self.betting_round {
-            betting.update_after_call();
-        }
-        self.add_to_pot(added_to_pot);
-        self.set_betting_started_at(now_ms());
-        Some(ActionResult { seat_id, message: format!("{} calls ${:.2}", player_name, added_to_pot) })
-    }
-
-    fn check_local(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
-        let seat = self.find_player_by_pk(pk)?;
-        let seat_id = seat.id;
-        let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
-        if let Some(ref betting) = self.betting_round {
-            if betting.validate_check(&seat).is_err() {
-                return None;
-            }
-        }
-        if let Some(seat) = self.local_seats.get_mut(&seat_id) {
-            seat.check();
-        }
-        if let Some(ref mut betting) = self.betting_round {
-            betting.update_after_check();
-        }
-        self.set_betting_started_at(now_ms());
-        Some(ActionResult { seat_id, message: format!("{} checks", player_name) })
-    }
-
-    fn raise_local(&mut self, pk: &GamePkHex, amount: u64) -> Option<ActionResult> {
-        let seat = self.find_player_by_pk(pk)?;
-        let seat_id = seat.id;
-        let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
-        let seat_bet = seat.bet;
-        let seat_stack = seat.stack;
-        if amount <= seat_bet {
-            return None;
-        }
-        let (raise_amount, is_all_in, qualifies_full_raise) = if let Some(ref betting) = self.betting_round {
-            let raise_amount = amount.saturating_sub(betting.current_bet());
-            if betting.validate_raise(&seat, raise_amount).is_err() {
-                return None;
-            }
-            let needed = amount.saturating_sub(seat_bet);
-            let is_all_in = needed == seat_stack && seat_stack > 0;
-            let qualifies = !is_all_in || raise_amount >= betting.min_raise();
-            (raise_amount, is_all_in, qualifies)
-        } else {
-            (0, false, true)
-        };
-        let added_to_pot = amount.saturating_sub(seat_bet);
-        if let Some(seat) = self.local_seats.get_mut(&seat_id) {
-            seat.raise(amount);
-        }
-        if let Some(ref mut betting) = self.betting_round {
-            betting.update_after_raise(amount, seat_id, is_all_in);
-        }
-        self.add_to_pot(added_to_pot);
-        self.summary.call_amount = Some(amount);
-        if qualifies_full_raise {
-            self.set_min_raise(raise_amount);
-        }
-        if qualifies_full_raise {
-            for seat in self.local_seats.values_mut() {
-                if seat.id != seat_id && !seat.folded && !seat.sitting_out && seat.stack > 0 {
-                    seat.has_acted = false;
-                }
-            }
-        }
-        self.set_betting_started_at(now_ms());
-        Some(ActionResult { seat_id, message: format!("{} raises to ${:.2}", player_name, amount) })
-    }
+    // ===== 本地规则兜底路径已随单一状态重构删除（fail-closed）：无实时
+    // 镜像的不可证明手不接受下注动作，规则引擎只保留 VM 一份。=====
 
     pub fn handle_allin(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
         let seat = self.find_player_by_pk(pk)?;

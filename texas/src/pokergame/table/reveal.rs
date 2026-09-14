@@ -345,10 +345,10 @@ impl Table {
         if !self.reveal_token_state.pending_players.iter().any(|p| p == player_pk) {
             return Err(Self::ERR_ALREADY_SUBMITTED.to_string());
         }
-        // reveal 域权威路径（Phase 2b 第二刀）：先经实时 VM 镜像做 canonical
+        // reveal 域权威路径（单一状态重构）：先经实时 VM 做 canonical
         // 重排 + 证明验证 + 窗口推进——VM 拒绝 = 动作非法，直接拒绝客户端。
-        // 无实时镜像的手（不可证明）走下方本地规则兜底。
-        match self.mirror_try_reveal(player_pk.0.as_str(), &tokens) {
+        // 无实时镜像 = 不可证明手 → fail-closed 拒绝（本地兜底已删除）。
+        match self.vm_try_reveal(player_pk.0.as_str(), &tokens) {
             Some(Err(e)) => {
                 tracing::debug!("[reveal-authority] table {} reveal rejected by VM: {e}", self.summary.id);
                 return Err(format!("reveal rejected by VM: {e}"));
@@ -359,7 +359,13 @@ impl Table {
                     self.summary.id, view.window_open, view.revealed_board, view.pending_pks.len()
                 );
             }
-            None => {}
+            None => {
+                tracing::warn!(
+                    "[reveal-authority] table {} reveal rejected: no live VM mirror (unprovable hand, fail-closed)",
+                    self.summary.id
+                );
+                return Err("reveal rejected: hand has no live VM mirror".to_string());
+            }
         }
 
         let assign = match self.reveal_token_state.player_assignments.get(player_pk) {

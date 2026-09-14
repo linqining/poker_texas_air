@@ -154,14 +154,35 @@ pub(crate) fn next_hand_id(table_id: u32) -> u32 {
     *e
 }
 
+/// fail-closed 中止：deck 终局时无法挂载实时 VM 镜像（缺 join 证明 /
+/// 类型桥接失败 / bootstrap 失败 / 证明停用）→ 本手不可证明 → 不允许
+/// 开局。重置牌局回 Waiting；可定位的肇事座位转 sitting_out（下一手
+/// 不再参与直到重新入座，否则 tick 自动开局会对同一失败无限重试）。
+fn abort_unprovable_hand(table: &mut Table, reason: &str, offender_seat: Option<u32>) {
+    tracing::warn!(
+        "[prove-log] table {} hand {} aborted (unprovable): {reason}",
+        table.summary.id,
+        table.current_hand_id
+    );
+    if let Some(seat_id) = offender_seat {
+        if let Some(seat) = table.local_seats.get_mut(&seat_id) {
+            seat.sitting_out = true;
+        }
+    }
+    table.reset_for_next_hand();
+    table.emit_event(crate::pokergame::table::events::TableEvent::TableUpdated {
+        message: Some("牌局已中止：本手无法证明（缺少有效入座证明），已重置".to_string()),
+    });
+}
+
 pub fn record_hand_start(table: &mut Table) {
     let table_id = table.summary.id;
     let sb = table.summary.min_bet.max(1);
-    let deck = match super::mirror::conv::ciphertexts(&table.mental_poker_game.deck_encrypted) {
+    let deck = match super::vm_session::conv::ciphertexts(&table.mental_poker_game.deck_encrypted) {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!("[prove-log] table {table_id} deck conv failed: {e} — hand unprovable");
             table.hand_proof_log = HandProofLog::default();
+            abort_unprovable_hand(table, &format!("deck conv failed: {e}"), None);
             return;
         }
     };
@@ -169,6 +190,7 @@ pub fn record_hand_start(table: &mut Table) {
     let joins = join_buffer().lock().ok();
     let mut plan: Vec<(u32, HandParticipant)> = Vec::new();
     let mut missing_proof = false;
+    let mut offender_seat: Option<u32> = None;
     for (seat_id, seat) in table.seats() {
         let Some(player) = seat.player.as_ref() else { continue };
         if seat.sitting_out || seat.is_waiting {
@@ -181,15 +203,17 @@ pub fn record_hand_start(table: &mut Table) {
                 "[prove-log] table {table_id} seat {seat_id} has no buffered join proof — hand unprovable"
             );
             missing_proof = true;
+            offender_seat = Some(seat_id);
             break;
         };
         let pk = match poker_protocol::z_poker::convert::hex_to_ecpoint(&pk_hex)
-            .map(|zp| super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(zp)))
+            .map(|zp| super::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(zp)))
         {
             Ok(Ok(p)) => p,
             _ => {
                 tracing::warn!("[prove-log] table {table_id} seat {seat_id} pk conv failed — hand unprovable");
                 missing_proof = true;
+                offender_seat = Some(seat_id);
                 break;
             }
         };
@@ -214,6 +238,7 @@ pub fn record_hand_start(table: &mut Table) {
     }
     if missing_proof {
         table.hand_proof_log = HandProofLog::default();
+        abort_unprovable_hand(table, "missing join proof", offender_seat);
         return;
     }
     // 与旧 mirror_begin_reveal 相同：按游戏座位号升序（VM DealHole 升序
@@ -223,6 +248,7 @@ pub fn record_hand_start(table: &mut Table) {
     if plan.len() < 2 {
         // 与 MIN_START_NUM 一致：不足 2 人无手牌
         table.hand_proof_log = HandProofLog::default();
+        abort_unprovable_hand(table, "fewer than 2 provable participants", None);
         return;
     }
     let button_rank = table
@@ -247,8 +273,12 @@ pub fn record_hand_start(table: &mut Table) {
         payouts: Vec::new(),
     };
     // 实时 VM 镜像开局（单一状态表示的起点；镜像随桌挂载）。
+    // fail-closed：bootstrap 失败/停用 → 中止本手（不可证明的手不可玩）。
     if let Some(start) = table.hand_proof_log.start.as_ref() {
-        table.live_mirror = crate::starknet::shadow::bootstrap(table_id, start);
+        table.vm_session = crate::starknet::vm_session::bootstrap(table_id, start);
+    }
+    if table.vm_session.is_none() {
+        abort_unprovable_hand(table, "live mirror bootstrap failed", None);
     }
 }
 

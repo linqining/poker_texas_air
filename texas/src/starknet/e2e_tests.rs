@@ -18,7 +18,7 @@ use poker_protocol::crypto::{DefaultCurve};
 use poker_protocol::crypto::curve::{Curve, CurveScalar};
 use rand::rngs::OsRng;
 
-use super::mirror::TableMirror;
+use super::vm_session::VmTable;
 use poker_protocol::z_poker::protocol::{ClientPlayer, MentalPokerGame};
 
 type ZgCt = poker_protocol::crypto::ElGamalCiphertext;
@@ -100,7 +100,7 @@ fn play_full_hand() -> Result<(), String> {
 /// 全链路构建（游戏层真实流程 → 证明 → dapv calldata 对拍），返回中间产物
 /// 供链上冒烟（sepolia_settle_smoke）复用。
 fn play_full_hand_artifacts(
-) -> Result<(TableMirror, super::submit::HandSettlement, super::dual_settle::DualSettlement), String> {
+) -> Result<(VmTable, super::submit::HandSettlement, super::dual_settle::DualSettlement), String> {
     let creator: poker_l1::Address = [0xC0; 20];
     let p1: poker_l1::Address = [0x11; 20];
     let p2: poker_l1::Address = [0x22; 20];
@@ -130,12 +130,12 @@ fn play_full_hand_artifacts(
     // 此刻 deck 终局（后续 street 不再改写整副 deck）
     let game_deck: Vec<ZgCt> = game.deck_encrypted.clone();
 
-    // ---- 结算构建（#20 Phase 2 现行架构）：TableMirror 是 settle 时
+    // ---- 结算构建（#20 Phase 2 现行架构）：VmTable 是 settle 时
     // 一次性重建器（非常驻 VM/第二本账）——从本手证明日志注入 deck，
     // 产出 ProveTask 链 + pre-payout 快照，供 dapv calldata 对拍 ----
     use poker_l1::contracts::texas_poker::utils::create_pk_ownership_proof;
-    let zpk1 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client1.pk)).unwrap();
-    let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
+    let zpk1 = super::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client1.pk)).unwrap();
+    let zpk2 = super::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
     let proof1 = create_pk_ownership_proof(&sk1, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng))
         .expect("proof p1");
     let proof2 = create_pk_ownership_proof(&sk2, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng))
@@ -144,10 +144,10 @@ fn play_full_hand_artifacts(
         (p1, 1000u64, zpk1, None, proof1),
         (p2, 1000u64, zpk2, None, proof2),
     ];
-    let mut mirror = TableMirror::new(1, creator, 4, 10, 20, creator);
+    let mut mirror = VmTable::new(1, creator, 4, 10, 20, creator);
     mirror
         .begin_reveal_hand(
-            super::mirror::conv::ciphertexts(&game_deck).expect("deck bridge"),
+            super::vm_session::conv::ciphertexts(&game_deck).expect("deck bridge"),
             &plan,
             0,
             poker_l1::contracts::texas_poker::types::NO_SEAT,
@@ -158,7 +158,7 @@ fn play_full_hand_artifacts(
     // 对拍断言：重建器 deck 与游戏层 deck 逐字节一致。
     assert_eq!(
         mirror.deck(),
-        super::mirror::conv::ciphertexts(&game_deck).unwrap(),
+        super::vm_session::conv::ciphertexts(&game_deck).unwrap(),
         "mirror deck must byte-match the game deck after injection"
     );
 
@@ -186,7 +186,7 @@ fn play_full_hand_artifacts(
             let mut tokens = Vec::new();
             let mut proofs = Vec::new();
             for target in &targets {
-                let ct = super::mirror::conv::ciphertexts(std::slice::from_ref(
+                let ct = super::vm_session::conv::ciphertexts(std::slice::from_ref(
                     &poker_protocol::crypto::ElGamalCiphertext { c1: target.c1, c2: target.c2 },
                 ))
                 .expect("ct bridge")
@@ -196,8 +196,8 @@ fn play_full_hand_artifacts(
                     &client.sk, &client.pk, &ct, &token, &mut OsRng,
                     &mut PfT::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
                 );
-                tokens.push(super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)).unwrap());
-                proofs.push(super::mirror::conv::reveal_token_proof(&proof).unwrap());
+                tokens.push(super::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)).unwrap());
+                proofs.push(super::vm_session::conv::reveal_token_proof(&proof).unwrap());
             }
             mirror
                 .submit_reveal_tokens(seat, tokens, proofs)
@@ -351,18 +351,18 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
     let game_deck: Vec<ZgCt> = game.deck_encrypted.clone();
 
     use poker_l1::contracts::texas_poker::utils::create_pk_ownership_proof;
-    let zpk1 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client1.pk)).unwrap();
-    let zpk2 = super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
+    let zpk1 = super::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client1.pk)).unwrap();
+    let zpk2 = super::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(client2.pk)).unwrap();
     let proof1 = create_pk_ownership_proof(&sk1, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng)).unwrap();
     let proof2 = create_pk_ownership_proof(&sk2, &<DefaultCurve as Curve>::Scalar::random(&mut OsRng)).unwrap();
     let plan = vec![
         (p1, 1000u64, zpk1, None, proof1),
         (p2, 1000u64, zpk2, None, proof2),
     ];
-    let mut mirror = TableMirror::new(1, creator, 4, 10, 20, creator);
+    let mut mirror = VmTable::new(1, creator, 4, 10, 20, creator);
     mirror
         .begin_reveal_hand(
-        super::mirror::conv::ciphertexts(&game_deck).unwrap(),
+        super::vm_session::conv::ciphertexts(&game_deck).unwrap(),
         &plan,
         0,
         poker_l1::contracts::texas_poker::types::NO_SEAT,
@@ -372,7 +372,7 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
 
     assert_eq!(
         mirror.deck(),
-        super::mirror::conv::ciphertexts(&game_deck).unwrap(),
+        super::vm_session::conv::ciphertexts(&game_deck).unwrap(),
         "deck parity after injection"
     );
 
@@ -392,8 +392,8 @@ fn e2e_starknet_prefix_join_inject_reveal_betting() {
         for target in &targets {
             let ct = poker_protocol::crypto::ElGamalCiphertext { c1: target.c1, c2: target.c2 };
             let token = ct.gen_reveal_token(&client.sk);
-            tokens.push(super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)).unwrap());
-            proofs.push(super::mirror::conv::reveal_token_proof(
+            tokens.push(super::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(token)).unwrap());
+            proofs.push(super::vm_session::conv::reveal_token_proof(
                 &ZgRevealProof::prove(&client.sk, &client.pk, &ct, &token, &mut OsRng,
                     &mut PfT::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON))).unwrap());
         }
@@ -600,11 +600,11 @@ async fn live_flow_assignments_match_mirror_targets() {
         .start
         .clone()
         .expect("hand start recorded at advance_shuffle");
-    let mirror = super::mirror::mirror_bootstrap(1, &start, 1).expect("mirror bootstrap");
+    let mirror = super::vm_session::bootstrap_vm_table(1, &start, 1).expect("mirror bootstrap");
     for (pk_hex, _player) in &pks {
         let key = GamePkHex::new(pk_hex.clone());
         let wallet = table.players().get(&key).unwrap().0.clone();
-        let addr = TableMirror::addr_from_starknet(&wallet).unwrap();
+        let addr = VmTable::addr_from_starknet(&wallet).unwrap();
         let assignment = assignments.get(&key).expect("assignment for player");
         let seat = mirror.seat_index_of(addr).expect("mirror seat for participant");
         let targets = mirror
@@ -1071,7 +1071,7 @@ mod runtime_authority_e2e {
             let address = caller_id::wallet_to_address(&wallet).expect("test wallet parses");
             // 跨 crate 对拍：poker_l1 权威公式与 texas addr_from_starknet 同源。
             debug_assert_eq!(
-                super::super::mirror::TableMirror::addr_from_starknet(&wallet),
+                super::super::vm_session::VmTable::addr_from_starknet(&wallet),
                 Some(address)
             );
             // 随机会话密钥（与钱包地址零派生关系——授权与寻址分离）。
@@ -1118,7 +1118,7 @@ mod runtime_authority_e2e {
     }
 
     /// VM 当前 reveal 窗口中该座位待提交的密文（canonical 顺序）——
-    /// 与 TableMirror::pending_reveal_ciphertexts 同语义（直接在 VM 表上计算）。
+    /// 与 VmTable::pending_reveal_ciphertexts 同语义（直接在 VM 表上计算）。
     fn pending_ciphertexts(
         table: &poker_l1::contracts::texas_poker::types::TexasPokerTable,
         seat_index: u8,
@@ -1148,7 +1148,7 @@ mod runtime_authority_e2e {
                         .get(a.encrypted_card_index as usize)
                         .ok_or_else(|| "reveal card index out of range".to_string())?
                 };
-                out.push(super::super::mirror::conv::ciphertexts(std::slice::from_ref(
+                out.push(super::super::vm_session::conv::ciphertexts(std::slice::from_ref(
                     &poker_protocol::crypto::ElGamalCiphertext { c1: ct.c1, c2: ct.c2 },
                 ))
                 .expect("ct bridge")
@@ -1202,7 +1202,7 @@ mod runtime_authority_e2e {
             game.deal_to_player(&pk_hex2, 1).expect("deal p2");
         }
         let game_deck: Vec<ZgCt> = game.deck_encrypted.clone();
-        let vm_deck = super::super::mirror::conv::ciphertexts(&game_deck).expect("deck bridge");
+        let vm_deck = super::super::vm_session::conv::ciphertexts(&game_deck).expect("deck bridge");
 
         // ---- 链运行时：开桌 + host 背书入座（P1-2 修复：签名通道不接受
         //     join——未入座无验签锚；join 由服务端完成 vault 登记核验后
@@ -1239,7 +1239,7 @@ mod runtime_authority_e2e {
         let join1_args = borsh::to_vec(&JoinTableArgs {
             player: w1.address,
             buy_in: 1000,
-            pk: super::super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(
+            pk: super::super::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(
                 client1.pk,
             ))
             .expect("pk bridge"),
@@ -1271,7 +1271,7 @@ mod runtime_authority_e2e {
         let join2_args = borsh::to_vec(&JoinTableArgs {
             player: w2.address,
             buy_in: 1000,
-            pk: super::super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(
+            pk: super::super::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(
                 client2.pk,
             ))
             .expect("pk bridge"),
@@ -1347,7 +1347,7 @@ mod runtime_authority_e2e {
             t.deck_state.owner_readable_hole_cards.clear();
             let mut contributor_mask: SeatMask = 0;
             for idx in 0..usize::from(t.max_players) {
-                if super::super::mirror::seat_player_addr(&t.seats[idx]).is_some() {
+                if super::super::vm_session::seat_player_addr(&t.seats[idx]).is_some() {
                     contributor_mask |= 1u16 << idx;
                 }
             }
@@ -1383,7 +1383,7 @@ mod runtime_authority_e2e {
                     .get(7)
                     .expect("turn ciphertext");
                 for (seat, client) in clients.iter().enumerate() {
-                    let ct = super::super::mirror::conv::ciphertexts(std::slice::from_ref(
+                    let ct = super::super::vm_session::conv::ciphertexts(std::slice::from_ref(
                         &poker_protocol::crypto::ElGamalCiphertext { c1: turn_ct.c1, c2: turn_ct.c2 },
                     ))
                     .expect("ct bridge")
@@ -1399,11 +1399,11 @@ mod runtime_authority_e2e {
                     );
                     let args = borsh::to_vec(&SubmitRevealTokensArgs {
                         seat_index: seat as u8,
-                        reveal_tokens: vec![super::super::mirror::conv::ec_point(
+                        reveal_tokens: vec![super::super::vm_session::conv::ec_point(
                             &poker_protocol::crypto::types::ECPoint(token),
                         )
                         .expect("token bridge")],
-                        proofs: vec![super::super::mirror::conv::reveal_token_proof(&proof)
+                        proofs: vec![super::super::vm_session::conv::reveal_token_proof(&proof)
                             .expect("proof bridge")],
                     })
                     .expect("reveal args");
@@ -1450,13 +1450,13 @@ mod runtime_authority_e2e {
                         &mut RtPfT::new_domain(poker_protocol::transcript_domains::REVEAL_TOKEN_V3_POSEIDON),
                     );
                     tokens.push(
-                        super::super::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(
+                        super::super::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(
                             token,
                         ))
                         .expect("token bridge"),
                     );
                     proofs.push(
-                        super::super::mirror::conv::reveal_token_proof(&proof).expect("proof bridge"),
+                        super::super::vm_session::conv::reveal_token_proof(&proof).expect("proof bridge"),
                     );
                 }
                 let args = borsh::to_vec(&SubmitRevealTokensArgs {

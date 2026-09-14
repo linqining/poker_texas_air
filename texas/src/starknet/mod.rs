@@ -5,7 +5,7 @@
 //! - 实时镜像与对账事实
 //!   - [`shadow`]：实时 VM 镜像（**权威入口**）——每个接受点同步 dispatch
 //!     的单一 VM 状态，结算直接取用其 ProveTask 链与 pre-payout 快照
-//!   - [`mirror`]：VM 机械层——`TableMirror` dispatch 包装、开局引导、
+//!   - [`mirror`]：VM 机械层——`VmTable` dispatch 包装、开局引导、
 //!     zgame ↔ ptx 类型的 borsh 桥
 //!   - [`prove_log`]：手牌对账事实记录（HandStart 快照、终局投入、派奖）
 //! - 结算编排与提交
@@ -39,12 +39,11 @@ pub mod dual_settle;
 pub mod recursion_prover;
 pub mod hooks;
 pub mod lock;
-pub mod mirror;
+pub mod vm_session;
 pub mod paymaster;
 pub mod prove_log;
 pub mod settlement_prover;
 pub mod snip36;
-pub mod shadow;
 pub mod submit;
 /// 桌台注册表锚定（PokerTableRegistry：合约分配 id + Open→Closed 生命周期）。
 pub mod table_registry;

@@ -11,12 +11,59 @@
 
 This workspace is the extracted `poker_texas_air` project: a Starknet
 off-chain stwo proving stack. There is no L1 chain, no transaction replay,
-and no resident mirror. The proof pipeline is: a per-hand live VM mirror
-(`texas/src/starknet/shadow.rs`, dispatched synchronously at every game
-acceptance point) → ProveTask chain → canonical AIR / outer aggregate →
-on-chain settlement (`poker_contracts`), cross-checked against game-layer
-facts recorded in `texas/src/starknet/prove_log.rs`. Settlement digests bind
-the hand's action log (`action_log_digest` tail word, #18 Phase B).
+and no resident mirror. The proof pipeline is: a per-hand **single VM
+session** (`texas/src/starknet/vm_session.rs` — `VmSession`/`VmTable`,
+2026-09-14 由 shadow.rs + mirror.rs 合并重组；dispatched synchronously at
+every game acceptance point) → ProveTask chain → canonical AIR / outer
+aggregate → on-chain settlement (`poker_contracts`), cross-checked against
+game-layer facts recorded in `texas/src/starknet/prove_log.rs`. Settlement
+digests bind the hand's action log (`action_log_digest` tail word, #18
+Phase B).
+
+## 2026-09-14 单一状态重构（mirror 双状态模式移除）
+
+**动机**：AIR 是 preimage→postimage 行约束，postimage 由宿主计算——控制
+逻辑（谁行动/何时收注/何时推街）在游戏层与 VM 两处实现、散落同步点
+（apply_betting_view / sync_rejected_view / last_rejected_view /
+game_loop 手动轮转）是失步死锁族 bug（09-07 多发公共牌、09-13 reveal
+死锁、09-14 双推进活锁）与 PotCollected 投影分歧的根因。
+
+**落地**（`cargo test -p texas` 171 绿 / `-p poker_l1` 364 绿）：
+
+- **fail-closed**：不可证明的手不可玩——`*_local` 本地规则兜底删除；
+  无实时 VM 会话时下注/reveal 动作一律拒绝；`TEXAS_SHADOW_PROVER=0`
+  不开局；deck 终局时 bootstrap 失败/缺 join 证明 → 中止本手
+  （`abort_unprovable_hand`，肇事座位转 sitting_out）。
+- **单一同步入口** `refresh_from_vm()`：拒绝/超时/后台路径统一从 VM
+  当前状态重派生视图（`last_rejected_view` 补丁点删除）。
+- **VM 权威街道推进**：game_loop 的"轮次完成即推街"与本地手动轮转
+  分支删除——街道推进唯一触发是 VM dispatch 内 normalize → 视图同步
+  的相位联锁（hand_over 语义 = VM `HandPhase::Waiting`，派生可靠）。
+- **终局弃牌确定性终结**（bug 修复，2026-09-14 探针实测）：post-reset
+  视图不再覆盖游戏层账本（folded/total_bet/stack 全部跳过同步），
+  `handle_fold` 在 view.hand_over 时当场 `end_without_showdown`——
+  此前手牌卡死在无 turn 的 PreFlop。
+- **VM 欠注判定修复**（bug 修复）：`no_further_betting_possible` 补
+  "无可行动玩家欠注"条件——all-in 加注后唯一留筹码且欠注的对手仍须
+  call/fold，不得连跳收注（对齐游戏层 `is_betting_round_complete` 与
+  canonical prover 侧 AdvanceRound 边界）。
+- **结算单源**：`cross_check_deltas` 收缩为守恒门（Σdeltas ∈ {0, −rake}）；
+  `finish()` issues 收缩为 board 双表示一致 + 计划守恒
+  （Σawards + rake == Σtotal_bet）——游戏层 evaluator 与 VM 的逐钱包
+  一致性降级为可观测指标（VM 是结算唯一来源）。
+- **控制轨迹捕获**（控制逻辑入 AIR 的原料，Stage 2 地基）：
+  `poker_l1` 线程局部 `NormalizationTrace`（arm/take，关闭零开销）+
+  命令内联级联（终局弃牌/reveal 完成）同样入轨迹；`VmTable.traces`
+  记录每手全部 dispatch 的 (命令 pre/post + 逐步 pre/post 链)，
+  `trace_capture_tests` 钉板链式咬合契约。
+
+**Stage 2 后续（已定规格，未实施）**：canonical witness 生产者
+（`TexasPokerTable → CanonicalStateImage` 投影 + DispatchTrace →
+call_seq 连续的 canonical 行链，含 9 承诺推导）→ hooks.rs
+`appchain_hand_proof` 接线（当前 None → legacy 回退）→ 1BB all-in
+锚点测试（`one_bb_blind_allin_hand_builds_production_settlement`，
+`#[ignore]` 挂起）启用。all-in 连跳自此以多个单街 micro-step 行呈现，
+PotCollected 单街投影分歧结构性消除。
 
 ## Canonical AIR — composed relations (current)
 

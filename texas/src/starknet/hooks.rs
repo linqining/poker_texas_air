@@ -12,7 +12,7 @@
 //! 绕过验证失败放宽 VM 证明校验；对账不一致宁可不结算，绝不带分歧状态上链。
 
 use std::sync::OnceLock;
-use super::mirror::{seat_player_addr, TableMirror};
+use super::vm_session::{seat_player_addr, VmTable};
 
 /// settle 成功上链的 (table, hand_id) 集合：失败可重试（game_loop tick
 /// 驱动），成功后幂等跳过。
@@ -79,7 +79,7 @@ pub fn on_hand_complete(table: &mut Table) {
     };
     // 单一状态表示：取走本手的实时 VM 镜像交给结算流程。缺失 =
     // bootstrap 失败 / 紧急停用 / 进程重启——该手不可证明，fail-closed。
-    let Some(live) = table.live_mirror.take() else {
+    let Some(live) = table.vm_session.take() else {
         refuse_settlement(
             input.table_id,
             input.start.hand_id,
@@ -105,7 +105,7 @@ pub fn on_hand_complete(table: &mut Table) {
 /// fail-closed 拒绝该手结算（与游戏层事实分歧的状态绝不上链）。
 async fn settle_from_live_mirror(
     input: super::prove_log::HandSettleInput,
-    live: super::shadow::ShadowHand,
+    live: super::vm_session::VmSession,
 ) {
     let table_id = input.table_id;
     let start = input.start.clone();
@@ -234,7 +234,7 @@ async fn settle_from_live_mirror(
             None
         } else {
             register_treasury_wallet(&treasury_full);
-            TableMirror::addr_from_starknet(&treasury_full)
+            VmTable::addr_from_starknet(&treasury_full)
         }
     };
 
@@ -340,7 +340,7 @@ async fn settle_from_live_mirror(
 /// 结算永不因证明阻塞/失败而丢失（对账已通过的 settlement 保底上链）。
 async fn snip36_settle_flow(
     table_id: u32,
-    mirror: TableMirror,
+    mirror: VmTable,
     settlement: super::submit::HandSettlement,
     start: super::prove_log::HandStartData,
     input: super::prove_log::HandSettleInput,
@@ -436,7 +436,7 @@ async fn snip36_settle_flow(
 /// endorsement 退役后 P-batch 由操作员自铸（纯形状合规的折叠方程）。
 async fn submit_dual_fallback(
     table_id: u32,
-    mirror: &super::mirror::TableMirror,
+    mirror: &super::vm_session::VmTable,
     settlement: &super::submit::HandSettlement,
 ) {
     let Some(chain) = super::chain() else { return };
@@ -523,7 +523,7 @@ async fn submit_dual_fallback(
 /// 参与者集合）。任何不一致都拒绝结算——输赢金额以游戏层为准，
 /// 证明工件必须为其背书，否则宁可不结算。
 pub(crate) fn cross_check_snapshot(
-    mirror: &TableMirror,
+    mirror: &VmTable,
     input: &super::prove_log::HandSettleInput,
 ) -> Result<(), String> {
     let snap = mirror.pre_settlement.as_ref().unwrap_or(&mirror.table);
@@ -532,7 +532,7 @@ pub(crate) fn cross_check_snapshot(
         return Err(format!("board mismatch: vm {vm_board} vs game {}", input.board_len));
     }
     for (wallet, bet) in &input.total_bets {
-        let Some(addr) = TableMirror::addr_from_starknet(wallet) else {
+        let Some(addr) = VmTable::addr_from_starknet(wallet) else {
             continue;
         };
         let vm_bet = snap
@@ -557,74 +557,33 @@ pub(crate) fn cross_check_snapshot(
     Ok(())
 }
 
-/// 逐钱包净输赢对账：VM 结算表（players_remapped/deltas，chips）vs 游戏层
-/// 终局事实。game_delta = Σ派奖 − 终局 total_bet；台费不查注册表，按数值
-/// 匹配归属——delta = 期望值 + rake 即"台费并入该玩家"（VM treasury merge
-/// 语义），delta = rake 即纯台费接收方（非本手参与者）。任何不一致都拒绝
-/// 结算——赢家身份/金额以游戏层为准，证明工件必须为其背书（对账 3，补齐
-/// 此前只查 board/total_bet/rake 的缺口：双 evaluator 的 tie-break 分歧
-/// 在此显式暴露，不再静默上链）。
+/// 结算守恒对账（单一状态重构后）：VM 结算表（players/deltas，chips）
+/// 只须满足**资金守恒**——Σdeltas 与台费归零（treasury 独立条目并入时
+/// Σdeltas == 0；纯座位 delta、台费在链外扣减时 Σdeltas == −rake）。
+///
+/// 历史的"逐钱包 vs 游戏层派奖一致性"门已随结算单源化移除：VM 是结算
+/// 唯一来源，游戏层 evaluator（展示账本）与 VM 的分歧（如 tie-break）
+/// 是可观测指标，不是结算门——双实现分歧不再有阻塞结算的权力
+///（与 bet_fail 降级同理，2026-09-10 语义）。守恒仍 fail-closed：
+/// 多记/漏记 delta 或凭空派币在此拒绝。
 pub(crate) fn cross_check_deltas(
     players: &[starknet_crypto::Felt],
     deltas: &[i128],
     input: &super::prove_log::HandSettleInput,
 ) -> Result<(), String> {
-    use std::collections::HashMap;
-    let felt_of = |wallet: &str| -> Option<starknet_crypto::Felt> {
-        super::chain::parse_felt(wallet)
-    };
     let rake = input.rake_collected as i128;
-    let mut expected: HashMap<starknet_crypto::Felt, i128> = HashMap::new();
-    for (wallet, bet) in &input.total_bets {
-        if let Some(f) = felt_of(wallet) {
-            *expected.entry(f).or_insert(0) -= *bet as i128;
-        }
-    }
-    for (wallet, win) in &input.payouts {
-        if let Some(f) = felt_of(wallet) {
-            *expected.entry(f).or_insert(0) += *win as i128;
-        }
-    }
-    let game_net: i128 = expected.values().sum();
-    // 台费归属探测：VM 表可能含独立 treasury 条目（Phase 0 结算 calldata
-    // 约定）也可能不含（影子表只派生座位 delta）——按匹配时是否实际
-    // 归属了 rake 决定零和基准。
-    let mut rake_attributed = false;
-    for (player, delta) in players.iter().zip(deltas.iter()) {
-        match expected.remove(player) {
-            Some(exp) if exp == *delta => {}
-            Some(exp) if rake > 0 && *delta == exp + rake => {
-                rake_attributed = true;
-            }
-            Some(exp) => {
-                return Err(format!("delta mismatch: player {player} vm {delta} vs game {exp}"))
-            }
-            None if *delta == 0 => {}
-            None if rake > 0 && *delta == rake => {
-                rake_attributed = true;
-            }
-            None => {
-                return Err(format!(
-                    "delta mismatch: player {player} vm {delta} has no game-layer facts"
-                ))
-            }
-        }
-    }
-    for (player, exp) in &expected {
-        if *exp != 0 {
-            return Err(format!(
-                "delta mismatch: player {player} game {exp} not settled on-chain"
-            ));
-        }
-    }
-    // 零和总账兜底：VM 净额必须等于游戏层净额 + 已归属台费（逐项匹配之上
-    // 的全局守恒，防止多记/漏记一笔 delta 仍逐项通过的组合漏洞）。
-    let vm_sum: i128 = deltas.iter().sum();
-    let expected_vm_sum = game_net + if rake_attributed { rake } else { 0 };
-    if vm_sum != expected_vm_sum {
+    if players.len() != deltas.len() {
         return Err(format!(
-            "zero-sum mismatch: vm {vm_sum} vs game {game_net} + attributed rake {}",
-            expected_vm_sum - game_net
+            "malformed settlement: {} players vs {} deltas",
+            players.len(),
+            deltas.len()
+        ));
+    }
+    let sum: i128 = deltas.iter().sum();
+    let balanced = if rake > 0 { sum == 0 || sum == -rake } else { sum == 0 };
+    if !balanced {
+        return Err(format!(
+            "settlement violates conservation: Σdelta={sum}, rake={rake} (expected 0 or -rake)"
         ));
     }
     Ok(())
@@ -648,7 +607,7 @@ fn hand_wallet_map(start: &super::prove_log::HandStartData) -> Vec<(poker_l1::Ad
         .participants
         .iter()
         .filter_map(|p| {
-            let addr = TableMirror::addr_from_starknet(&p.wallet)?;
+            let addr = VmTable::addr_from_starknet(&p.wallet)?;
             let felt = super::chain::parse_felt(&p.wallet)?;
             Some((addr, felt))
         })
@@ -656,7 +615,7 @@ fn hand_wallet_map(start: &super::prove_log::HandStartData) -> Vec<(poker_l1::Ad
     if let Ok(set) = TREASURY_WALLETS.lock() {
         for w in set.iter() {
             if let (Some(a), Some(f)) = (
-                TableMirror::addr_from_starknet(w),
+                VmTable::addr_from_starknet(w),
                 super::chain::parse_felt(w),
             ) {
                 out.push((a, f));
@@ -787,11 +746,7 @@ mod delta_parity_tests {
         crate::starknet::chain::parse_felt(hex).expect("test wallet parses")
     }
 
-    fn input_with(
-        total_bets: Vec<(&str, u64)>,
-        payouts: Vec<(&str, u64)>,
-        rake: u64,
-    ) -> HandSettleInput {
+    fn input_with_rake(rake: u64) -> HandSettleInput {
         HandSettleInput {
             table_id: 1,
             start: crate::starknet::prove_log::HandStartData {
@@ -803,116 +758,77 @@ mod delta_parity_tests {
                 deck: Vec::new(),
             },
             rake_collected: rake,
-            total_bets: total_bets
-                .into_iter()
-                .map(|(w, b)| (w.to_string(), b))
-                .collect(),
-            payouts: payouts.into_iter().map(|(w, b)| (w.to_string(), b)).collect(),
+            total_bets: Vec::new(),
+            payouts: Vec::new(),
             board_len: 5,
             action_log_digest: [0u8; 32],
             action_log: Vec::new(),
         }
     }
 
-    /// 单赢家：投入 100，净得 240（已扣台费 10）→ game delta +140；
-    /// 台费接收方 +10。
+    /// treasury 独立条目：Σdeltas（含台费接收方）== 0。
     #[test]
-    fn parity_ok_when_game_and_vm_agree() {
-        let input = input_with(vec![(P1, 100)], vec![(P1, 240)], 10);
-        let players = vec![ff(P1), ff(TREASURY)];
-        let deltas = vec![140, 10];
-        assert!(cross_check_deltas(&players, &deltas, &input).is_ok());
-    }
-
-    /// 台费并入玩家地址（VM treasury merge 语义）：单条 delta = 期望 + rake。
-    #[test]
-    fn parity_ok_when_treasury_merged_into_player() {
-        let input = input_with(vec![(P1, 100)], vec![(P1, 240)], 10);
-        let players = vec![ff(P1)];
-        let deltas = vec![150];
-        assert!(cross_check_deltas(&players, &deltas, &input).is_ok());
-    }
-
-    /// 平局分池：两赢家各 +140，零和成立。
-    #[test]
-    fn parity_ok_for_split_pot() {
-        let input = input_with(
-            vec![(P1, 100), (P2, 100)],
-            vec![(P1, 190), (P2, 190)],
-            20,
-        );
+    fn conservation_ok_with_treasury_entry() {
+        let input = input_with_rake(10);
         let players = vec![ff(P1), ff(P2), ff(TREASURY)];
-        let deltas = vec![90, 90, 20];
+        let deltas = vec![90, -100, 10];
         assert!(cross_check_deltas(&players, &deltas, &input).is_ok());
     }
 
-    /// 打平玩家（净额 0）被 VM 合法省略（SettleHandCalldata 跳过零 delta）。
+    /// 纯座位 delta（影子表约定，台费链外扣减）：Σdeltas == −rake。
     #[test]
-    fn parity_ok_when_zero_delta_player_omitted() {
-        let input = input_with(vec![(P1, 100)], vec![(P1, 100)], 0);
-        let players: Vec<starknet_crypto::Felt> = Vec::new();
-        let deltas: Vec<i128> = Vec::new();
-        assert!(cross_check_deltas(&players, &deltas, &input).is_ok());
-    }
-
-    /// VM delta 与游戏层净输赢不一致 → 拒绝。
-    #[test]
-    fn parity_rejects_delta_mismatch() {
-        let input = input_with(vec![(P1, 100)], vec![(P1, 240)], 10);
-        let players = vec![ff(P1), ff(TREASURY)];
-        let deltas = vec![141, 10];
-        let err = cross_check_deltas(&players, &deltas, &input).unwrap_err();
-        assert!(err.contains("delta mismatch"), "{err}");
-    }
-
-    /// VM 结算了游戏层没有事实的地址 → 拒绝。
-    #[test]
-    fn parity_rejects_unknown_player() {
-        let input = input_with(vec![(P1, 100)], vec![(P1, 240)], 10);
-        let players = vec![ff("0x0999")];
-        let deltas = vec![7];
-        let err = cross_check_deltas(&players, &deltas, &input).unwrap_err();
-        assert!(err.contains("no game-layer facts"), "{err}");
-    }
-
-    /// 游戏层有净输赢但 VM 未结算该玩家 → 拒绝。
-    #[test]
-    fn parity_rejects_missing_player() {
-        let input = input_with(vec![(P1, 100)], vec![(P1, 240)], 10);
-        let players: Vec<starknet_crypto::Felt> = Vec::new();
-        let deltas: Vec<i128> = Vec::new();
-        let err = cross_check_deltas(&players, &deltas, &input).unwrap_err();
-        assert!(err.contains("not settled on-chain"), "{err}");
-    }
-
-    /// 逐项匹配齐全但零和被破坏 → 零和总账兜底拒绝。用例：台费既并入
-    /// 玩家 delta（140+10）又单独付给 treasury（10）——rake 双重归属，
-    /// 两个条目单独看都合法，总账多记一笔。
-    #[test]
-    fn parity_rejects_broken_zero_sum() {
-        let input = input_with(vec![(P1, 100)], vec![(P1, 240)], 10);
-        let players = vec![ff(P1), ff(TREASURY)];
-        let deltas = vec![150, 10];
-        let err = cross_check_deltas(&players, &deltas, &input).unwrap_err();
-        assert!(err.contains("zero-sum mismatch"), "{err}");
-    }
-
-    /// fold-win 语义：payout 记净得（已扣台费），与 VM award 口径一致。
-    #[test]
-    fn parity_ok_for_fold_win_net_payout() {
-        let input = input_with(vec![(P1, 100)], vec![(P1, 285)], 15);
-        let players = vec![ff(P1), ff(TREASURY)];
-        let deltas = vec![185, 15];
-        assert!(cross_check_deltas(&players, &deltas, &input).is_ok());
-    }
-
-    /// 影子表约定：deltas 只含座位（不含 treasury 条目）——零和基准
-    /// 不再额外加 rake（game_net 本身已净含台费）。
-    #[test]
-    fn parity_ok_for_seat_only_deltas() {
-        let input = input_with(vec![(P1, 100), (P2, 100)], vec![(P1, 190)], 10);
+    fn conservation_ok_seat_only() {
+        let input = input_with_rake(10);
         let players = vec![ff(P1), ff(P2)];
         let deltas = vec![90, -100];
+        assert!(cross_check_deltas(&players, &deltas, &input).is_ok());
+    }
+
+    /// 零台费：严格零和。
+    #[test]
+    fn conservation_ok_zero_rake() {
+        let input = input_with_rake(0);
+        let players = vec![ff(P1), ff(P2)];
+        let deltas = vec![50, -50];
+        assert!(cross_check_deltas(&players, &deltas, &input).is_ok());
+    }
+
+    /// 凭空派币（Σdeltas 落在 {0, −rake} 之外）→ 拒绝。
+    #[test]
+    fn conservation_rejects_created_chips() {
+        let input = input_with_rake(10);
+        let players = vec![ff(P1), ff(P2)];
+        let deltas = vec![95, -100];
+        let err = cross_check_deltas(&players, &deltas, &input).unwrap_err();
+        assert!(err.contains("conservation"), "{err}");
+    }
+
+    /// 台费双重归属（并入座位又独立付 treasury）→ Σ = +rake → 拒绝。
+    #[test]
+    fn conservation_rejects_double_rake_attribution() {
+        let input = input_with_rake(10);
+        let players = vec![ff(P1), ff(P2), ff(TREASURY)];
+        let deltas = vec![100, -100, 10];
+        let err = cross_check_deltas(&players, &deltas, &input).unwrap_err();
+        assert!(err.contains("conservation"), "{err}");
+    }
+
+    /// players/deltas 长度不齐 → 拒绝。
+    #[test]
+    fn malformed_settlement_rejected() {
+        let input = input_with_rake(0);
+        let players = vec![ff(P1), ff(P2)];
+        let deltas = vec![50];
+        let err = cross_check_deltas(&players, &deltas, &input).unwrap_err();
+        assert!(err.contains("malformed"), "{err}");
+    }
+
+    /// 零 delta 全省略（SettleHandCalldata 同语义）+ 零台费 → 通过。
+    #[test]
+    fn all_zero_deltas_omitted_ok() {
+        let input = input_with_rake(0);
+        let players: Vec<starknet_crypto::Felt> = Vec::new();
+        let deltas: Vec<i128> = Vec::new();
         assert!(cross_check_deltas(&players, &deltas, &input).is_ok());
     }
 }

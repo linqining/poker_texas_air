@@ -52,7 +52,7 @@ use poker_texas_air::hand_binding::{compute_hand_binding, HandBindingInput};
 use poker_texas_air::starknet_settlement::AggregateDigestFelts;
 
 use super::config::SettleMode;
-use super::mirror::TableMirror;
+use super::vm_session::VmTable;
 use super::submit::{i128_to_felt, HandSettlement};
 
 pub type Sc = <StarkCurve as Curve>::Scalar;
@@ -424,7 +424,7 @@ pub struct HandBatchBinding {
 /// reveal 承诺、状态根、结算摘要）。`build_dual_settlement_with` 内部
 /// 复用同一确定性计算，两处结果逐字节一致。
 pub fn prepare_handbatch_binding(
-    mirror: &TableMirror,
+    mirror: &VmTable,
     settlement: &HandSettlement,
 ) -> Result<HandBatchBinding, String> {
     let pre_table = mirror
@@ -461,7 +461,7 @@ pub fn prepare_handbatch_binding(
 }
 
 pub fn build_dual_settlement_with(
-    mirror: &TableMirror,
+    mirror: &VmTable,
     settlement: &HandSettlement,
     produce: &dyn Fn(&[u8; 32], &[Felt]) -> Result<Vec<Endorsement>, String>,
 ) -> Result<DualSettlement, String> {
@@ -1300,7 +1300,7 @@ pub async fn submit_dual_settlement(
         // 校验并出具 attestation（fact 由 operator 直登），生产 remote
         // 模式走 STARKNET_PROVER_URL 外部服务。
         let local_prover =
-            super::shadow::prover_mode() == super::shadow::ProverMode::Local;
+            super::vm_session::prover_mode() == super::vm_session::ProverMode::Local;
         // P2-M2：settlement-private 电路 inputs 导出 + prover attestation。
         // best-effort：任何失败只告警，绝不阻塞结算（与 batch prover 同语义）。
         // P2-M4/M3：请求成功时构建公开段（15 felt），按
@@ -2922,7 +2922,7 @@ mod settle_mode_tests {
     }
 
     fn build_test_dual() -> DualSettlement {
-        let mirror = TableMirror::new(7, [0xAA; 20], 9, 10, 20, [0xAA; 20]);
+        let mirror = VmTable::new(7, [0xAA; 20], 9, 10, 20, [0xAA; 20]);
         let settlement = synthetic_settlement();
         let binding = prepare_handbatch_binding(&mirror, &settlement).expect("binding");
         let endorsements: Vec<Endorsement> = (0..2)
@@ -2958,7 +2958,7 @@ mod settle_mode_tests {
 
     #[test]
     fn tampered_endorsement_fails_closed_before_onchain() {
-        let mirror = TableMirror::new(7, [0xAA; 20], 9, 10, 20, [0xAA; 20]);
+        let mirror = VmTable::new(7, [0xAA; 20], 9, 10, 20, [0xAA; 20]);
         let settlement = synthetic_settlement();
         let binding = prepare_handbatch_binding(&mirror, &settlement).expect("binding");
 
@@ -3050,7 +3050,7 @@ mod settle_mode_tests {
 
     #[test]
     fn fold_check_cannot_detect_missing_endorsements() {
-        let mirror = TableMirror::new(7, [0xAA; 20], 9, 10, 20, [0xAA; 20]);
+        let mirror = VmTable::new(7, [0xAA; 20], 9, 10, 20, [0xAA; 20]);
         let settlement = synthetic_settlement();
         let binding = prepare_handbatch_binding(&mirror, &settlement).expect("binding");
 

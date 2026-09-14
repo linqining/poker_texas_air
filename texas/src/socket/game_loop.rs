@@ -967,29 +967,28 @@ pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>,
             } else if table.unfolded_players().len() <= 1 {
                 table.end_without_showdown();
             } else if table.is_betting_round_complete() {
-                // 下注轮结束即清行动指针：turn 若停留在最后一个行动人身上，
-                // 仪式期间的重复动作会通过轮次校验进入 handle_* 并被记入
-                // 证明日志；auto/timeout 代打也会在非行动窗口开火。下一街
-                // 首行动人由 set_blinds / start_betting_round 重新设置。
-                table.set_turn(None);
-                table.advance_to_next_phase();
-                // advance_to_next_phase 启动 reveal phase，turn 由 on_reveal_complete 设置。
-                // 仅在 Showdown（无 reveal）时不需要设置 turn。
-            } else if table.live_mirror.is_some() {
-                // 权威模式（Phase 2b）：turn 轮转由 VM 视图同步负责
-                // （apply_betting_view），此处不再手动轮转。
-                table.set_betting_started_at(now_ms());
-            } else {
-                // 本地兜底模式（不可证明手）：turn 轮转由本地驱动。
-                let last_turn = table.turn().unwrap_or(1);
-                table.set_turn(table.next_unfolded_player(last_turn, 1));
-                table.set_betting_started_at(now_ms());
-                let current_turn = table.turn();
-                for i in 1..=table.max_players() {
-                    if let Some(seat) = table.local_seats.get_mut(&i) {
-                        seat.turn = current_turn == Some(i);
-                    }
+                // 单一状态重构：街道推进的唯一触发是 VM dispatch 内的
+                // normalize（收注 + 推街）→ 视图同步（apply_betting_view /
+                // refresh_from_vm 的相位联锁）→ advance_to_next_phase。
+                // 此处的游戏层"轮次完成即推街"分支已删除——它与 VM 推进
+                // 并存正是双重推街（2026-09-14 活锁）与多发公共牌
+                // （2026-09-07）的根因。走到这里仍认为轮次完成 = 视图
+                // 滞后于 VM，从 VM 重派生一次（含必要的相位联锁）。
+                tracing::warn!(
+                    "[handle_turn_advance] table {table_id} betting round looks complete — \
+                     refreshing view from VM (street advance is VM-authoritative)"
+                );
+                table.refresh_from_vm();
+                if table.reveal_token_state.is_active() {
+                    // VM 已推街且联锁已执行发牌仪式。
+                } else {
+                    table.set_betting_started_at(now_ms());
                 }
+            } else {
+                // turn 轮转由 VM 视图同步负责（refresh_from_vm /
+                // apply_betting_view）；本地手动轮转分支已随 fail-closed
+                // 删除（不可证明手不存在下注轮）。
+                table.set_betting_started_at(now_ms());
             }
             Some(())
         } else { None }

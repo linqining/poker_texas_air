@@ -167,7 +167,7 @@ mod sig_materials_tests {
             tx_pk: None,
             wallet: "0xabc".into(),
             pk_hex: pk_hex.clone(),
-            pk: crate::starknet::mirror::conv::ec_point(&poker_protocol::crypto::types::ECPoint(player.pk)).unwrap(),
+            pk: crate::starknet::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(player.pk)).unwrap(),
             pk_ownership_proof: vec![],
             stack: 1000,
         }];

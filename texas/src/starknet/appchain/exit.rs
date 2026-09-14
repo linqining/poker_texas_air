@@ -111,7 +111,7 @@ pub(super) struct MirrorProjection {
 /// 结算校验失败 / 出证超时——全部文本错误，语义上"该手不可走 Appchain
 /// 出口"，调用方应回退遗留路径。
 pub fn settle_from_mirror(
-    mirror: &super::super::mirror::TableMirror,
+    mirror: &super::super::vm_session::VmTable,
     table_id: u32,
     hand_id: u32,
     participants: &[super::super::prove_log::HandParticipant],

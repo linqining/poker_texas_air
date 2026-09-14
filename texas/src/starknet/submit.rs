@@ -21,7 +21,7 @@ use starknet::accounts::Account;
 use starknet::core::types::{Call, Felt};
 use starknet::core::utils::starknet_keccak;
 
-use super::mirror::TableMirror;
+use super::vm_session::VmTable;
 
 /// 一手牌的完整结算产物。
 pub struct HandSettlement {
@@ -55,7 +55,7 @@ pub struct HandSettlement {
 ///
 /// 同步执行（prove 约 2 秒/hand），调用方应放在 `tokio::task::spawn_blocking` 里。
 pub fn settle_hand(
-    mirror: &TableMirror,
+    mirror: &VmTable,
     rake_recipient: Option<poker_l1::Address>,
     wallet_map: &[(poker_l1::Address, Felt)],
     action_log_digest: Felt,

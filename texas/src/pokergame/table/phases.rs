@@ -12,6 +12,15 @@ impl Table {
         if self.round_state() != RoundState::Waiting{
             return;
         }
+        // fail-closed：证明停用开关（TEXAS_SHADOW_PROVER=0）开启时不开局
+        // ——不可证明的手不可玩（结算 fail-closed 的前置一致语义）。
+        if !crate::starknet::vm_session::enabled() {
+            tracing::warn!(
+                "[start_hand] table {} shadow prover disabled — hand not started (fail-closed)",
+                self.summary.id
+            );
+            return;
+        }
         // 开局人数按"非 sitting_out 的在座玩家"计（含 is_waiting 的中途买入者）：
         // active_players() 会过滤 is_waiting，而 waiting 标记要到
         // start_preflop_shuffle 的 clear_waiting_flags 才清除——用前者判断
