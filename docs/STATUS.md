@@ -152,6 +152,35 @@ game_loop 手动轮转）是失步死锁族 bug（09-07 多发公共牌、09-13 
    全量回归：poker_l1 364 绿、poker_texas_air 225+10+1 绿（含
    `--include-ignored` 慢 prove KAT 59 绿）、texas 175+6 绿。
 
+## 2026-09-15 德扑规则全面场景测试（逻辑正确性验收）
+
+**背景**：`evaluator.rs`/`hand_rank.rs`（牌型评估）此前零测试；摊牌
+派奖（`settle_hand`/`evaluate_player_hands`）只有边池分层金额测试、
+无真实手牌决胜场景；盲注定位只覆盖单挑。新增
+`texas/src/pokergame/table/holdem_scenario_tests.rs`（29 用例，全绿）：
+
+- **牌型评估矩阵**：十类牌型识别（皇家同花顺 → 高牌）、类别排序链
+  （真实五张样本逐级压制）、kicker 逐级比较（一对/两对/三条/四条/
+  同花）、轮子 A2345 与钢轮、6 高顺压轮子、Broadway 压 K 高、7 选 5
+  （同花压顺子、葫芦、对子诱饵）、牌面 playing-the-board 平分、公共
+  牌四条 kicker 战、公共轮子 + 底牌 6 陷阱、<5 张无手、六张同花取
+  最高五张。
+- **摊牌结算端到端**（mental-poker `playing_card` 直接注入 = reveal
+  完成等价物）：高对胜出净得 pot−rake（零和守恒断言）、同点数 kicker
+  战、三层 all-in 边池逐层派奖（短 all-in 最强牌赢主池 / 次强赢边池 /
+  跟满者收回未跟注层——含 35 抽水分摊的精确到账）、三家平分（公共牌
+  为各家最优）、弃牌座位排除出评估、<5 张公共牌 F5 平分（奇数筹码归
+  首座）。
+- **盲注定位与下注序列**：三人首手（按钮即小盲，与 canonical AIR rc
+  组同口径）、跨手 dead-button 轨道轮转（SB = 上手 BB）、dead small
+  blind（基准座 sitting out → 无小盲）、短盲注 all-in 封顶、min-raise
+  链（current_bet/min_raise 推进 + 短 all-in 不重开）、翻前 fold-win
+  未跟注返还（no flop no drop）、翻后 fold-win 按 fold_win_rake 公式
+  抽水（含未跟注扣减基数）。
+
+回归：texas 204+6 绿（新增 29），poker_l1 364 绿，poker_texas_air
+225 绿；无新告警。
+
 ## Canonical AIR — composed relations (current)
 
 `texas_canonical_air` (fixed-width ABI, `CanonicalTransitionKind` 0..=28,

@@ -28,6 +28,8 @@ pub(crate) mod full_hand_tests;
 #[cfg(test)]
 mod rules_tests;
 #[cfg(test)]
+mod holdem_scenario_tests;
+#[cfg(test)]
 mod view_semantics_tests;
 pub mod reveal;
 pub mod reconstruct;
