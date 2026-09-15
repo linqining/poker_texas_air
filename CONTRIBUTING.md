@@ -91,8 +91,10 @@ configuration above is present.
 ## Benchmarks
 
 Performance baselines live in `docs/PERFORMANCE.md` (post-Plan-D release
-numbers; the repro commands are in `poker-protocol-proofs/tests/plan_d_perf.rs`).
-Run them with:
+numbers; the repro commands are in `poker-protocol-proofs/tests/plan_d_perf.rs`,
+which now lives in the separate
+[`poker_protocol`](https://github.com/linqining/poker_protocol) repo — run it
+from a checkout of that repo):
 
 ```bash
 cargo +nightly test --release -p poker-protocol-proofs --test plan_d_perf -- --nocapture

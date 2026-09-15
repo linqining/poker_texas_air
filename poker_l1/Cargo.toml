@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 poker_protocol = { workspace = true }
-poker-protocol-core = { path = "../poker-protocol-core" }
+poker-protocol-core = { workspace = true }
 vm-common = { path = "../vm-common" }
 borsh = { workspace = true }
 blake2 = { workspace = true }

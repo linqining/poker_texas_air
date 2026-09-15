@@ -19,18 +19,18 @@ members = [
     "poker_contracts/hand-verify-native",
     "poker_l1",
     "vm-common",
-    "poker_protocol",
-    "poker-protocol-core",
-    "poker-protocol-proofs",
-    "poker-protocol-abi",
-    "poker-protocol-bg",
     "texas",
 ]
 
+# poker-protocol 系列 crate 已拆分至独立仓库（含 poker_protocol_lean 的 Lean 形式化）。
+# 本地开发时如需跟随未推送的改动，可用 [patch] 指向本地 checkout：
+# [patch."ssh://git@github.com/linqining/poker_protocol.git"]
+# poker_protocol = { path = "../poker_protocol/poker_protocol" }
 [workspace.dependencies]
-poker_protocol = { path = "poker_protocol", features = ["borsh", "ristretto-air"] }
-poker-protocol-core = { path = "poker-protocol-core" }
-poker-protocol-bg = { path = "poker-protocol-bg" }
+poker_protocol = { git = "ssh://git@github.com/linqining/poker_protocol.git", features = ["borsh", "ristretto-air"] }
+poker-protocol-core = { git = "ssh://git@github.com/linqining/poker_protocol.git" }
+poker-protocol-proofs = { git = "ssh://git@github.com/linqining/poker_protocol.git" }
+poker-protocol-bg = { git = "ssh://git@github.com/linqining/poker_protocol.git" }
 rand_core = "0.6.4"
 vm-common = { path = "vm-common" }
 serde = { version = "1", features = ["derive"] }

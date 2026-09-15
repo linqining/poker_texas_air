@@ -42,7 +42,7 @@ starknet-crypto = { version = "0.8", default-features = false, features = ["allo
 starknet-curve = "0.6"
 # 曲线后端与挑战公式的单一真源：EC 点运算、mod-n 标量、域标签（见
 # curve.rs / handbatch.rs 的委托与对拍测试）。
-poker-protocol-core = { path = "../../poker-protocol-core" }
+poker-protocol-core = { workspace = true }
 num-bigint = "0.4.8"
 bincode = "1"
 serde_json = "1"

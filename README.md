@@ -158,7 +158,7 @@ found what the test suites had not:
 
 | The failure | The rule we now ship by |
 |---|---|
-| Reconstruction **V2 was unsound**: a machine-checked counterexample showed removed/folded seats leaking card slots to anyone replaying the reconstruction. Found by Lean, not by fuzzing. | No protocol revision ships without machine-checked completeness **and** soundness theorems. V3 carries both ([SECURITY_RECONSTRUCTION.md](poker_protocol_lean/SECURITY_RECONSTRUCTION.md)). |
+| Reconstruction **V2 was unsound**: a machine-checked counterexample showed removed/folded seats leaking card slots to anyone replaying the reconstruction. Found by Lean, not by fuzzing. | No protocol revision ships without machine-checked completeness **and** soundness theorems. V3 carries both ([SECURITY_RECONSTRUCTION.md](https://github.com/linqining/poker_protocol/blob/main/poker_protocol_lean/SECURITY_RECONSTRUCTION.md)). |
 
 That is what "proven fair by construction" means in practice: not a slogan, but
 a theorem, a counterexample, and a rule that outlived both.
@@ -281,9 +281,11 @@ verification key and constraints become chain facts. Design details:
 
 ## Repository guide
 
-This is a large repo (11 workspace crates, ~320 first-party Rust source files
-plus the vendored StarkWare proving stack, 25 Cairo contract files, 33 Lean
-files). It is organized in five layers, bottom-up:
+This is a large repo (6 workspace crates, ~230 first-party Rust source files
+plus the vendored StarkWare proving stack, 25 Cairo contract files, 43 Lean
+files; the mental-poker protocol crates live in the separate
+[`poker_protocol`](https://github.com/linqining/poker_protocol) repo, see ①).
+It is organized in five layers, bottom-up:
 
 ```mermaid
 flowchart TD
@@ -324,28 +326,32 @@ flowchart TD
 ```
 
 *Run-time view: the browser verifies everything it receives, the host moves only
-ciphertext, the chain settles only on commitments. Offline, `poker_protocol_lean/`
-machine-checks the reconstruction theorems behind this crypto.*
+ciphertext, the chain settles only on commitments. Offline, the
+[`poker_protocol_lean`](https://github.com/linqining/poker_protocol/tree/main/poker_protocol_lean)
+formalization machine-checks the reconstruction theorems behind this crypto.*
 
 **Pick a reading path:**
 
 ```
 I just want to play / watch   → client/ + texas/            (or the live demo)
-I want to check the fairness  → poker_protocol*/ + client-wasm/ + poker_protocol_lean/
+I want to check the fairness  → poker_protocol repo + client-wasm/
 I want to audit the chain     → poker_contracts/ + docs/design/DUAL_PROOF_PROTOCOL.md
 I care about the proving tech → src/ + proving-tool/ + hand-bench/ + docs/PERFORMANCE.md
 ```
 
 **① Protocol layer — why the game is fair** (pure cryptography, no I/O)
 
-| Directory | Role |
+Lives in the standalone [`poker_protocol`](https://github.com/linqining/poker_protocol)
+repo, consumed here as a git dependency:
+
+| Crate (in [`poker_protocol`](https://github.com/linqining/poker_protocol)) | Role |
 |---|---|
-| [`poker_protocol/`](poker_protocol/) | Mental-poker orchestration: ElGamal encryption, joint shuffle, deal / reveal / leave / reconstruct state machine |
-| [`poker-protocol-core/`](poker-protocol-core/) | Curve-generic crypto backends — **the Stark curve is the only production world** (Plan D) |
-| [`poker-protocol-proofs/`](poker-protocol-proofs/) | Sigma-proof suite: shuffle, remask, leave, reveal, DLEq, unified sigma |
-| [`poker-protocol-bg/`](poker-protocol-bg/) | Bayer–Groth shuffle argument (`bg_stark`) |
-| [`poker-protocol-abi/`](poker-protocol-abi/) | Byte-stable Rust↔Cairo ABI — single source of truth for curve/transcript/payload encodings |
-| [`poker_protocol_lean/`](poker_protocol_lean/) | Lean 4 + Mathlib formalization: the V2 counterexample, the V3 theorems |
+| [`poker_protocol`](https://github.com/linqining/poker_protocol/tree/main/poker_protocol) | Mental-poker orchestration: ElGamal encryption, joint shuffle, deal / reveal / leave / reconstruct state machine |
+| [`poker-protocol-core`](https://github.com/linqining/poker_protocol/tree/main/poker-protocol-core) | Curve-generic crypto backends — **the Stark curve is the only production world** (Plan D) |
+| [`poker-protocol-proofs`](https://github.com/linqining/poker_protocol/tree/main/poker-protocol-proofs) | Sigma-proof suite: shuffle, remask, leave, reveal, DLEq, unified sigma |
+| [`poker-protocol-bg`](https://github.com/linqining/poker_protocol/tree/main/poker-protocol-bg) | Bayer–Groth shuffle argument (`bg_stark`) |
+| [`poker-protocol-abi`](https://github.com/linqining/poker_protocol/tree/main/poker-protocol-abi) | Byte-stable Rust↔Cairo ABI — single source of truth for curve/transcript/payload encodings |
+| [`poker_protocol_lean`](https://github.com/linqining/poker_protocol/tree/main/poker_protocol_lean) | Lean 4 + Mathlib formalization: the V2 counterexample, the V3 theorems |
 | [`fuzz/`](fuzz/) | Protocol fuzz targets (standalone `cargo-fuzz` workspace) |
 
 **② Proving layer — the G-layer STARK, hand-written**
@@ -391,7 +397,7 @@ I care about the proving tech → src/ + proving-tool/ + hand-bench/ + docs/PERF
 - [docs/design/SETTLEMENT_PRIVACY_PLAN.md](docs/design/SETTLEMENT_PRIVACY_PLAN.md) — settlement privacy plan
 - [docs/design/TEXAS_TAGGED_AIR.md](docs/design/TEXAS_TAGGED_AIR.md) — direct state-transition AIR paths
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — final performance record (baselines, production pipeline, on-chain gas)
-- [poker_protocol_lean/SECURITY_RECONSTRUCTION.md](poker_protocol_lean/SECURITY_RECONSTRUCTION.md) — the V2 counterexample and V3 theorems
+- [poker_protocol_lean/SECURITY_RECONSTRUCTION.md](https://github.com/linqining/poker_protocol/blob/main/poker_protocol_lean/SECURITY_RECONSTRUCTION.md) — the V2 counterexample and V3 theorems
 - [poker_contracts/DEPLOYMENTS.md](poker_contracts/DEPLOYMENTS.md) — full deployment & wiring history (devnet → Sepolia → mainnet)
 - [CONTRIBUTING.md](CONTRIBUTING.md) · superseded docs: [docs/archive/](docs/archive/)
 
@@ -406,9 +412,10 @@ I care about the proving tech → src/ + proving-tool/ + hand-bench/ + docs/PERF
   [proving-tool/README.md](proving-tool/README.md).
 - **Rebuild from source:**
   `cargo test --workspace` (Rust stack) · `snforge test` in `poker_contracts`
-  (91 contract tests) · `poker_protocol_lean` (Lean 4 theorems) ·
-  `cargo test -p poker-protocol-proofs --release --test plan_d_perf -- --ignored`
-  (the performance numbers above).
+  (91 contract tests) · in a [`poker_protocol`](https://github.com/linqining/poker_protocol)
+  checkout: `cargo test --workspace` (sigma suites) + `poker_protocol_lean`
+  (Lean 4 theorems) + `cargo test -p poker-protocol-proofs --release --test
+  plan_d_perf -- --ignored` (the performance numbers above).
 - **On-chain e2e smoke** (real settlement against Sepolia):
   `STARKNET_SEPOLIA_SMOKE=1 cargo test -p texas --bin texas sepolia_settle_smoke -- --ignored --nocapture`
 - **Explorer-first:** every mainnet claim in this README links to Starkscan, and

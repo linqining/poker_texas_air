@@ -2342,10 +2342,12 @@ dependencies = [
 [[package]]
 name = "poker-protocol-abi"
 version = "0.1.0"
+source = "git+ssh://git@github.com/linqining/poker_protocol.git#45df5021afc72fcbf04eb9f79b08f064412bc04a"
 
 [[package]]
 name = "poker-protocol-bg"
 version = "0.1.0"
+source = "git+ssh://git@github.com/linqining/poker_protocol.git#45df5021afc72fcbf04eb9f79b08f064412bc04a"
 dependencies = [
  "borsh",
  "poker-protocol-core",
@@ -2355,14 +2357,13 @@ dependencies = [
 [[package]]
 name = "poker-protocol-core"
 version = "0.1.0"
+source = "git+ssh://git@github.com/linqining/poker_protocol.git#45df5021afc72fcbf04eb9f79b08f064412bc04a"
 dependencies = [
  "borsh",
  "crypto-bigint",
  "curve25519-dalek",
  "halo2curves",
- "hex",
  "k256",
- "poker-protocol-proofs",
  "rand 0.8.7",
  "rand_core 0.6.4",
  "rayon",
@@ -2376,10 +2377,9 @@ dependencies = [
 [[package]]
 name = "poker-protocol-proofs"
 version = "0.1.0"
+source = "git+ssh://git@github.com/linqining/poker_protocol.git#45df5021afc72fcbf04eb9f79b08f064412bc04a"
 dependencies = [
  "borsh",
- "curve25519-dalek",
- "halo2curves",
  "lazy_static",
  "merlin",
  "poker-protocol-bg",
@@ -2424,6 +2424,7 @@ dependencies = [
 [[package]]
 name = "poker_protocol"
 version = "0.1.0"
+source = "git+ssh://git@github.com/linqining/poker_protocol.git#45df5021afc72fcbf04eb9f79b08f064412bc04a"
 dependencies = [
  "borsh",
  "hex",
@@ -2433,7 +2434,6 @@ dependencies = [
  "rand 0.8.7",
  "rand_core 0.6.4",
  "rayon",
- "serde_json",
  "tracing",
 ]
 

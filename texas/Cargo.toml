@@ -25,12 +25,12 @@ dotenv = "0.15"
 itertools = "0.14"
 hex = "0.4"
 
-# ===== 工作区内协议栈（单一真源）=====
+# ===== 协议栈（单一真源；poker-protocol 系列已拆至独立 git 仓库）=====
 # Plan D（2026-09-05）：Stark 曲线唯一世界；legacy-bls381/blst 已移除。
-poker_protocol = { path = "../poker_protocol", features = ["borsh", "stark-curve"] }
+poker_protocol = { workspace = true, features = ["borsh", "stark-curve"] }
 poker_l1 = { path = "../poker_l1" }
 poker_texas_air = { path = ".." }
-poker-protocol-core = { path = "../poker-protocol-core" }
+poker-protocol-core = { workspace = true }
 # 注：镜像层的 ptx_protocol 别名已改为在 mirror.rs 内 `use poker_protocol as ptx_protocol;`
 # （cargo 不允许同一路径依赖以不同名字出现两次）。
 

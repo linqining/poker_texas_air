@@ -9,8 +9,8 @@ publish = false
 [dependencies]
 poker_texas_air = { path = ".." }
 poker_protocol = { workspace = true }
-poker-protocol-core = { path = "../poker-protocol-core" }
-poker-protocol-proofs = { path = "../poker-protocol-proofs" }
+poker-protocol-core = { workspace = true }
+poker-protocol-proofs = { workspace = true }
 poker_l1 = { path = "../poker_l1" }
 borsh = { workspace = true }
 rayon = { workspace = true }

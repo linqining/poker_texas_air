@@ -101,6 +101,37 @@ hand_batch σ 批量校验（ρ 折叠 MSM）**并进 settlement_private 电路*
   电路上链，作为过渡期双保险；届时退役
   `set_hand_verify_program_hash`（owner 门控，天然可退役）。
 
+### 3a. 附记（2026-09-15，ADR-2026-09-15-1）：合并撤销——canonical 全手证明承载
+
+单一状态重构 + canonical AIR 全手贯通（见 `docs/STATUS.md` 2026-09-14/15
+三节：VmSession 单一状态、控制轨迹 → canonical 行链、
+`full_hand_control_trace_proves_through_showdown_display` 全通）落地后，
+本 ADR 的三条理由被**逐一结构性消解**，电路合并不再实施：
+
+1. **EC_OP 不确定性 → 结构性消解**：σ 批量校验维持 Plan D native 验证
+   边界（hand-verify-native AIR），**永不进入 SNIP-36 被证明交易**——
+   v3 结算交易（create_proof + settle）只含 Poseidon/存储/escrow 调用，
+   无 EC 方程；σ/牌局正确性由 canonical 全手证明链（`HandProofBinding`，
+   `hooks.rs::build_appchain_hand_proof`）承载，两条信任锚各司其职。
+2. **省一半证明费 → moot**：SNIP-36 主腿本来就只提交一张 proved 交易
+   （v3 结算）；"两张证明"只发生在 proved_private 双 fact 入口——该入口
+   进入退役路线（见下）。
+3. **fact 结构消解 → 改形**：canonical 行链的终态承诺
+   （`post_state_commitment` / pre-post state roots）即整手绑定，随
+   `HandProofBinding` 走 appchain 结算出口；dual 合约 fact 公式
+   `poseidon(program_hash, segment)` **保持不变**（v6 兼容，不破坏
+   fact-verify/proving-tool 工具面）。
+
+**新裁决**：
+- settlement_private 电路**冻结**为 fact-registry 降级腿专用（现版，
+  不并入 σ）；
+- SNIP-36 主腿 = create_proof 交易虚拟 SNOS 证明 + v3 双门（现状即终态）；
+- `proved_private` 双 fact 入口与 `hand_verify_program_hash` 的退役条件
+  改为：**canonical-backed settlement 接线完成**（HandProofBinding 进
+  Starknet 结算出口，Stage 3）后随 v7 移除；v6 不动它们（保持
+  proved_private 过渡保险可用）。
+- v6 构建指纹：scarb 2.19.4，sierra_program 15,791 felts / 34 入口。
+
 ## 4. 合约 v3 双门入口设计（cairo ≥2.12 上链时实施）
 
 ```cairo
@@ -161,7 +192,7 @@ fn message_hash_for_segment(self_addr: ContractAddress, segment: Span<felt252>) 
 | 3a | libfuncs `all`（Scarb.toml） | ✅ 2026-09-06（构建 0 错、snforge 92/92） |
 | 0 | **证明瘦身实测**（SNIP-36 直连的先决量化项） | ✅ **2026-09-14 实测完成**（`scripts/slimming-matrix.sh`，8 配置矩阵，数据见 §6）：**推荐参数 `p3`（pow26/b2/q35/fs4）在 96-bit 等安全下 bincode −43%（1.31MB→750KB）、bzip2 wire −51%（1.02MB→501KB，达标 ≤500KB 级）、JSON −53%**；证明耗时 6.7s→11.3s（异步结算可接受）。朴素 70→30（p1）证伪：blowup=1 下仅 56-bit——尺寸优势是假象，p3 以同等尺寸保住全安全。`cairo_serde` 格式对本电路不可用（未启用 builtin 触发 vendored 栈 panic，已隔离并记录）。b≥3 在 36GB 机器上临界 OOM。**注：SNIP-36 腿上链证明是虚拟 SNOS 执行（参数由 Starknet 证明服务定），本矩阵约束的是 fact-registry/zchain 腿的自有证明尺寸** |
 | 3b | 合约 proof_facts 消费路径（§4 v3 入口） | ✅ 2026-09-07 上链（dual v5）；**2026-09-14 修正**（见下） |
-| 5 | hand_verify 形态裁决 = 双证明合一（§3 ADR） | ✅ 已裁决；电路合并待做 |
+| 5 | hand_verify 形态裁决 = 双证明合一（§3 ADR） | ♻️ **2026-09-15 撤销合并（§3a 附记 ADR-2026-09-15-1）**：canonical 全手证明承接 σ/牌局正确性，settlement_private 电路冻结为降级腿专用，proved_private 退役条件改挂 Stage 3（canonical-backed settlement） |
 | 1 | 电路改造为 create_proof 入口 + 虚拟 SNOS 形态适配 | ✅ 2026-09-14：**两笔交易模式落地**（对齐 starknet-privacy 参考实现）——合约新增 `emit_settlement_proof_message`（create_proof 第一笔：校验公开段 + 发 `to=0、payload=segment` 的 L2→L1 消息，不写存储不结算），v3 为携带 proof 的第二笔；`validate_settlement_segment` 两笔共享同一组完整性断言。**被证明对象 = 该合约交易的虚拟 SNOS 执行，独立 settlement_private 电路仅服务 fact-registry 降级腿** |
 | 2 | 证明管线切换（自托管 prover 客户端） | ✅ 2026-09-14：`texas/src/starknet/snip36.rs`——`Snip36ProverClient`（`starknet_proveTransaction` JSON-RPC：`{block_id, invoke}` → `{proof(b64), proof_facts, l2_to_l1_messages}`，错误码 24/55/61/1000/-32005 映射）+ `ProvedInvokeV3` 原始交易构造/签名/广播。**哈希链与 sequencer 逐位对拍**（官方主网向量：同笔交易无 facts `0x1d47…2219` / 有 facts `0x6d88…7276`，`transaction_hash.json` 条目 2/3）。自托管服务本身 = `docker run ghcr.io/starkware-libs/starknet-privacy/transaction-prover`（无鉴权，须内网；RPC_URL 须 v0.10 节点）——ops 部署项 |
 | 4 | 提交工具（Invoke V3 `proof`/`proof_facts` 字段扩展） | ✅ 2026-09-14：`snops prove`（构造+签名 create_proof 交易 → prover 证明 → 产物落盘）+ `snops submit-proof`（读产物 → v3 结算交易携 proof(uint32)/proof_facts → `add_invoke_transaction` 原始广播）+ **服务内自动接线**（`STARKNET_DAPV_SETTLE_ENTRY=snip36` + `STARKNET_SNIP36_PROVER_URL` 时，`submit_dual_settlement` 自动两笔交易提交，失败自动回退 v2 fact-registry 腿——mock 端到端测试覆盖）。starknet-rs 0.17 无 proof 字段支持，故全程手拼 JSON + 自算哈希（模块单测 + 官方主网向量对拍） |

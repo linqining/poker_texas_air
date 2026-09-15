@@ -143,7 +143,7 @@ sigma proof，所有其他客户端即时校验；P 层在结算时再经链上�
 
 | 失败 | 从此遵守的规则 |
 |---|---|
-| 重建协议 **V2 不健全**：机器检查出反例——被移除/弃牌的座位会向重放重建过程的任何人泄露牌槽。是 Lean 发现的，不是 fuzz。 | 协议任何修订必须带机器检查的完备性**与**健全性定理才能上线。V3 两者兼备（[SECURITY_RECONSTRUCTION.md](poker_protocol_lean/SECURITY_RECONSTRUCTION.md)）。 |
+| 重建协议 **V2 不健全**：机器检查出反例——被移除/弃牌的座位会向重放重建过程的任何人泄露牌槽。是 Lean 发现的，不是 fuzz。 | 协议任何修订必须带机器检查的完备性**与**健全性定理才能上线。V3 两者兼备（[SECURITY_RECONSTRUCTION.md](https://github.com/linqining/poker_protocol/blob/main/poker_protocol_lean/SECURITY_RECONSTRUCTION.md)）。 |
 
 这就是"构造上证明公平"的实操含义：不是口号，是一条定理、一个反例，和一条
 比两者都活得久的规则。
@@ -249,8 +249,10 @@ verifier——让验证密钥与约束成为链上事实。
 
 ## 仓库导览
 
-这是一个大仓库（11 个 workspace crate、约 320 个一方 Rust 源文件，另有
-vendored 的 StarkWare proving 栈、25 个 Cairo 合约文件、33 个 Lean 文件）。
+这是一个大仓库（6 个 workspace crate、约 230 个一方 Rust 源文件，另有
+vendored 的 StarkWare proving 栈、25 个 Cairo 合约文件、43 个 Lean 文件；
+mental-poker 协议 crate 拆分在独立仓库
+[`poker_protocol`](https://github.com/linqining/poker_protocol)，见 ①）。
 自底向上分五层组织：
 
 ```mermaid
@@ -292,27 +294,32 @@ flowchart TD
 ```
 
 *运行时视图：浏览器验证收到的一切，服务端只搬运密文，链上只结算承诺。
-线下由 `poker_protocol_lean/` 机器验证上述密码学背后的重构定理。*
+线下由 [`poker_protocol_lean`](https://github.com/linqining/poker_protocol/tree/main/poker_protocol_lean)
+形式化库机器验证上述密码学背后的重构定理。*
 
 **先选一条阅读路径：**
 
 ```
 只想玩/看产品            → client/ + texas/               （或直接上在线 demo）
-想检查牌局是否公平        → poker_protocol*/ + client-wasm/ + poker_protocol_lean/
+想检查牌局是否公平        → poker_protocol 仓库 + client-wasm/
 想审计链上结算            → poker_contracts/ + docs/design/DUAL_PROOF_PROTOCOL.md
 关心证明技术/性能         → src/ + proving-tool/ + hand-bench/ + docs/PERFORMANCE.md
 ```
 
 **① 协议层——牌局为什么公平**（纯密码学，无 I/O）
 
-| 目录 | 职责 |
+协议 crate 拆分在独立仓库
+[`poker_protocol`](https://github.com/linqining/poker_protocol) 中，本仓库以
+git 依赖方式引用：
+
+| crate（位于 [`poker_protocol`](https://github.com/linqining/poker_protocol)） | 职责 |
 |---|---|
-| [`poker_protocol/`](poker_protocol/) | Mental-poker 编排：ElGamal 加密、联合洗牌、发牌 / 摊牌 / 离开 / 重建状态机 |
-| [`poker-protocol-core/`](poker-protocol-core/) | 曲线泛型密码后端——**Stark 曲线是唯一生产世界**（Plan D） |
-| [`poker-protocol-proofs/`](poker-protocol-proofs/) | Sigma 证明套件：shuffle、remask、leave、reveal、DLEq、unified sigma |
-| [`poker-protocol-bg/`](poker-protocol-bg/) | Bayer–Groth 洗牌论证（`bg_stark`） |
-| [`poker-protocol-abi/`](poker-protocol-abi/) | 字节级稳定的 Rust↔Cairo ABI——curve/transcript/payload 编码的单一事实源 |
-| [`poker_protocol_lean/`](poker_protocol_lean/) | Lean 4 + Mathlib 形式化：V2 反例、V3 定理 |
+| [`poker_protocol`](https://github.com/linqining/poker_protocol/tree/main/poker_protocol) | Mental-poker 编排：ElGamal 加密、联合洗牌、发牌 / 摊牌 / 离开 / 重建状态机 |
+| [`poker-protocol-core`](https://github.com/linqining/poker_protocol/tree/main/poker-protocol-core) | 曲线泛型密码后端——**Stark 曲线是唯一生产世界**（Plan D） |
+| [`poker-protocol-proofs`](https://github.com/linqining/poker_protocol/tree/main/poker-protocol-proofs) | Sigma 证明套件：shuffle、remask、leave、reveal、DLEq、unified sigma |
+| [`poker-protocol-bg`](https://github.com/linqining/poker_protocol/tree/main/poker-protocol-bg) | Bayer–Groth 洗牌论证（`bg_stark`） |
+| [`poker-protocol-abi`](https://github.com/linqining/poker_protocol/tree/main/poker-protocol-abi) | 字节级稳定的 Rust↔Cairo ABI——curve/transcript/payload 编码的单一事实源 |
+| [`poker_protocol_lean`](https://github.com/linqining/poker_protocol/tree/main/poker_protocol_lean) | Lean 4 + Mathlib 形式化：V2 反例、V3 定理 |
 | [`fuzz/`](fuzz/) | 协议 fuzz targets（独立 `cargo-fuzz` 工作区） |
 
 **② 证明层——G 层 STARK，从零手写**
@@ -358,7 +365,7 @@ flowchart TD
 - [docs/design/SETTLEMENT_PRIVACY_PLAN.md](docs/design/SETTLEMENT_PRIVACY_PLAN.md)——结算隐私方案
 - [docs/design/TEXAS_TAGGED_AIR.md](docs/design/TEXAS_TAGGED_AIR.md)——直接状态转移 AIR 路径
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md)——性能最终记录（基线、生产流水线、链上 gas、GPU 理论分析）
-- [poker_protocol_lean/SECURITY_RECONSTRUCTION.md](poker_protocol_lean/SECURITY_RECONSTRUCTION.md)——V2 反例与 V3 定理
+- [poker_protocol_lean/SECURITY_RECONSTRUCTION.md](https://github.com/linqining/poker_protocol/blob/main/poker_protocol_lean/SECURITY_RECONSTRUCTION.md)——V2 反例与 V3 定理
 - [poker_contracts/DEPLOYMENTS.md](poker_contracts/DEPLOYMENTS.md)——完整部署与接线史（devnet → Sepolia → 主网）
 - [CONTRIBUTING.md](CONTRIBUTING.md) · 已过时文档：[docs/archive/](docs/archive/)
 
@@ -371,9 +378,10 @@ flowchart TD
 - **CLI**：`proving-tool` 端到端证明并验证完整一手（Cairo1 → cairo-vm →
   Stwo prove → verify）——见 [proving-tool/README.md](proving-tool/README.md)。
 - **源码重建**：`cargo test --workspace`（Rust 栈）· `poker_contracts` 内
-  `snforge test`（91 个合约测试）· `poker_protocol_lean`（Lean 4 定理）·
-  `cargo test -p poker-protocol-proofs --release --test plan_d_perf -- --ignored`
-  （上表性能数字）。
+  `snforge test`（91 个合约测试）· 在 [`poker_protocol`](https://github.com/linqining/poker_protocol)
+  checkout 中：`cargo test --workspace`（sigma 套件）+ `poker_protocol_lean`
+  （Lean 4 定理）+ `cargo test -p poker-protocol-proofs --release --test
+  plan_d_perf -- --ignored`（上表性能数字）。
 - **链上 e2e 冒烟**（对 Sepolia 真实结算）：
   `STARKNET_SEPOLIA_SMOKE=1 cargo test -p texas --bin texas sepolia_settle_smoke -- --ignored --nocapture`
 - **浏览器优先**：本 README 每条主网主张都链到 Starkscan；

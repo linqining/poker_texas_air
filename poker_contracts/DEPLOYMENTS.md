@@ -536,3 +536,53 @@ chips −X / note +X 分文不丢。前端两动作删去自筹 withdraw 桥与�
 可覆盖宽限期，devnet 默认 3600）；Sepolia/主网部署脚本待随下一次批量
 部署补充。**本地 scarb 2.11.4 无法解析钉定的 starknet 2.19.4（既有环境
 限制），合约需在 scarb ≥2.19 工具链 `scarb build && snforge test` 验证。**
+
+## dual v6（SNIP-36 门修正 + create_proof 入口）——待部署
+
+源码已就绪（`poker_contracts/src/poker_dual_settlement.cairo`，snforge
+112/112 全绿），**尚未部署**（sepolia 与主网仍运行 v5）。相对 v5 的差异：
+
+1. **SNIP-36 门修正**：`facts[2]` 的绑定根从 `circuit_program_hash`
+   （v5 误绑本方电路哈希——真实 proof_facts[2] 是 Starknet 虚拟 OS
+   program hash）改为独立 owner 钉扎存储 `virtual_snos_program_hash`
+   （`set_virtual_snos_program_hash`，owner 门控）；门 = `facts[1] ==
+   "VIRTUAL_SNOS"` ∧ `facts[2] == virtual_snos_program_hash` ∧
+   `facts[8] == snip36_message_hash`。**v5 上真实 SNIP-36 交易会被拒
+   （只走 fact-registry 降级腿）——v6 部署前不要发真实 proved 交易。**
+2. **`emit_settlement_proof_message`**：create_proof 第一笔交易入口
+   （校验公开段 → 发 `to=0、payload=segment` 的 L2→L1 消息），与 v3
+   第二笔共享 `validate_settlement_segment`。
+3. **虚拟 SNOS 哈希参考值**：0.14.3 回归样本
+   `0x602b02cff498684fae3d66016137978fdad45a5036878a57257689d4f3f6ccb`；
+   **部署后须先 sepolia 实测真实 proof_facts 再钉扎**（`snops
+   dump-proof-facts` 对拍）。
+
+构建指纹（本机 scarb 2.19.4）：sierra_program 15,791 felts / 34 入口；
+casm 体积待 `snops declare` 时从 `--compiled` 记录。
+
+部署步骤（资金/节点就绪后执行；先 sepolia 后主网）：
+
+```bash
+# 0) 构建/验证（scarb ≥2.19 工具链）
+(cd poker_contracts && scarb build && snforge test)   # 112/112
+
+# 1) declare v6（类名仍 PokerDualSettlement；产出 CASM_CLASS_HASH 记入本表）
+snops --url $RPC --pk $OWNER_PK --addr $OWNER_ADDR declare \
+  --class poker_contracts/target/dev/poker_contracts_PokerDualSettlement.contract_class.json \
+  --compiled poker_contracts/target/dev/poker_contracts_PokerDualSettlement.compiled_contract_class.json
+
+# 2) deploy（构造参数与 v5 同形：[owner, vault, prover]）+ 接线
+snops --url $RPC --pk $OWNER_PK --addr $OWNER_ADDR deploy \
+  --class_hash $V6_CLASS_HASH --calldata "$OWNER,$VAULT,$PROVER"
+snops --url $RPC --pk $OWNER_PK --addr $OWNER_ADDR invoke --contract $DUAL_V6 --fn set_claim_helper --calldata $PAYOUT
+snops --url $RPC --pk $OWNER_PK --addr $OWNER_ADDR invoke --contract $DUAL_V6 --fn set_circuit_program_hash --calldata 0x744d16d382e7940b7b93c0a069ab0df04704c5b28d6476d23cca6c2370a7ad4
+# 3) 虚拟 OS 哈希钉扎（值以 sepolia 实测为准，先占位后修正亦可——门在 facts[8]）
+snops --url $RPC --pk $OWNER_PK --addr $OWNER_ADDR invoke --contract $DUAL_V6 --fn set_virtual_snos_program_hash --calldata 0x602b02cff498684fae3d66016137978fdad45a5036878a57257689d4f3f6ccb
+# 4) 回读核验：circuit_program_hash / virtual_snos_program_hash / claim_helper
+
+# 5) 切流：STARKNET_DUAL_SETTLEMENT_ADDRESS=$DUAL_V6 + STARKNET_DAPV_SETTLE_ENTRY=snip36
+#    + STARKNET_SNIP36_PROVER_URL=<内网 transaction-prover> 后重启服务
+```
+
+回退：env 指回 v5 地址即回 fact-registry 单腿（v5/v6 共享 vault/prover/
+claim_helper，无迁移）。

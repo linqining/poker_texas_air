@@ -21,7 +21,6 @@ client/node_modules/
 client/dist/
 client/.env*
 !.env.example
-poker_protocol_lean/.lake/
 texas/.env
 texas/.env.test
 texas/.env.dev.local
