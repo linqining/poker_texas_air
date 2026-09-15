@@ -9953,6 +9953,20 @@ pub fn prove_canonical_reveal_completion_batch(
     witnesses: &[CanonicalTransitionWitness],
     rules: &poker_l1::contracts::texas_poker::types::TableRules,
 ) -> TexasAirResult<ArchivedCanonicalTaggedProof> {
+    prove_canonical_reveal_completion_batch_with_pcs(
+        witnesses,
+        rules,
+        crate::prover_context::protocol_pcs_config(),
+    )
+}
+
+/// [`prove_canonical_reveal_completion_batch`] with an explicit PCS profile
+/// (see [`prove_canonical_tagged_batch_with_pcs`]).
+pub fn prove_canonical_reveal_completion_batch_with_pcs(
+    witnesses: &[CanonicalTransitionWitness],
+    rules: &poker_l1::contracts::texas_poker::types::TableRules,
+    config: stwo::core::pcs::PcsConfig,
+) -> TexasAirResult<ArchivedCanonicalTaggedProof> {
     let has_reveal_completion = witnesses.iter().any(|w| {
         w.kind == CanonicalTransitionKind::SubmitReveal
             && matches!(
@@ -9975,7 +9989,7 @@ pub fn prove_canonical_reveal_completion_batch(
             "reveal-completion composition requires ANTE_MODE_NONE".into(),
         ));
     }
-    let mut archive = prove_canonical_tagged_batch(witnesses)?;
+    let mut archive = prove_canonical_tagged_batch_with_pcs(witnesses, config)?;
     let expected = crate::canonical_rake_opening::blind_opening_of(rules);
     if archive.blind_opening != Some(expected) {
         return Err(TexasAirError::ConstraintUnsatisfied(
@@ -10184,12 +10198,36 @@ fn canonical_range_interaction(
     generator.finalize_last()
 }
 
+/// PCS profile types re-exported so downstream crates (texas) can pass
+/// explicit profiles to the `*_with_pcs` entry points.
+pub use stwo::core::pcs::PcsConfig;
+
+/// Production canonical PCS profile (40-bit conjectured security).
+pub fn protocol_pcs_config() -> PcsConfig {
+    crate::prover_context::protocol_pcs_config()
+}
+
+/// 128-bit (conjectured, stwo model) canonical PCS profile.
+pub fn security_128_pcs_config() -> PcsConfig {
+    crate::prover_context::security_128_pcs_config()
+}
+
 pub fn prove_canonical_tagged_batch(
     witnesses: &[CanonicalTransitionWitness],
 ) -> TexasAirResult<ArchivedCanonicalTaggedProof> {
+    prove_canonical_tagged_batch_with_pcs(witnesses, crate::prover_context::protocol_pcs_config())
+}
+
+/// [`prove_canonical_tagged_batch`] with an explicit PCS profile. Prover and
+/// verifier must pass the same profile (it is mixed into the Fiat--Shamir
+/// channel); use [`crate::prover_context::security_128_pcs_config`] for the
+/// 128-bit conjectured-security benchmark/adoption path.
+pub fn prove_canonical_tagged_batch_with_pcs(
+    witnesses: &[CanonicalTransitionWitness],
+    config: stwo::core::pcs::PcsConfig,
+) -> TexasAirResult<ArchivedCanonicalTaggedProof> {
     let (trace, mut archive) = trace_for(witnesses)?;
     let scope = scope_trace(&archive, trace.log_size);
-    let config = crate::prover_context::protocol_pcs_config();
     let twiddles =
         crate::prover_context::simd_twiddles(trace.log_size + config.fri_config.log_blowup_factor);
     let mut channel = Poseidon252Channel::default();
@@ -10248,10 +10286,23 @@ pub fn prove_canonical_tagged_batch_for_state_opening(
     witnesses: &[CanonicalTransitionWitness],
     state_opening: CanonicalStateOpeningScope,
 ) -> TexasAirResult<ArchivedCanonicalTaggedProof> {
+    prove_canonical_tagged_batch_for_state_opening_with_pcs(
+        witnesses,
+        state_opening,
+        crate::prover_context::protocol_pcs_config(),
+    )
+}
+
+/// [`prove_canonical_tagged_batch_for_state_opening`] with an explicit PCS
+/// profile (see [`prove_canonical_tagged_batch_with_pcs`]).
+pub fn prove_canonical_tagged_batch_for_state_opening_with_pcs(
+    witnesses: &[CanonicalTransitionWitness],
+    state_opening: CanonicalStateOpeningScope,
+    config: stwo::core::pcs::PcsConfig,
+) -> TexasAirResult<ArchivedCanonicalTaggedProof> {
     state_opening.validate()?;
     let (trace, mut archive) = trace_for_with_state_opening_scope(witnesses, state_opening)?;
     let scope = scope_trace(&archive, trace.log_size);
-    let config = crate::prover_context::protocol_pcs_config();
     let twiddles =
         crate::prover_context::simd_twiddles(trace.log_size + config.fri_config.log_blowup_factor);
     let mut channel = Poseidon252Channel::default();
@@ -10300,6 +10351,15 @@ pub fn prove_canonical_tagged_batch_for_state_opening(
 }
 
 pub fn verify_canonical_tagged_proof(archive: &ArchivedCanonicalTaggedProof) -> TexasAirResult<()> {
+    verify_canonical_tagged_proof_with_pcs(archive, crate::prover_context::protocol_pcs_config())
+}
+
+/// [`verify_canonical_tagged_proof`] with an explicit PCS profile (must match
+/// the prover's profile; see [`crate::prover_context::security_128_pcs_config`]).
+pub fn verify_canonical_tagged_proof_with_pcs(
+    archive: &ArchivedCanonicalTaggedProof,
+    config: stwo::core::pcs::PcsConfig,
+) -> TexasAirResult<()> {
     if archive.num_columns != NUM_COLUMNS as u32
         || archive.transition_count == 0
         || archive.transition_count as usize > (1usize << archive.log_size)
@@ -10314,7 +10374,7 @@ pub fn verify_canonical_tagged_proof(archive: &ArchivedCanonicalTaggedProof) -> 
     validate_reveal_timeout_cascade_archive_shape(archive)?;
     let (pre_image, _) = validate_state_image_bytes(archive)?;
     verify_canonical_rake_binding(archive, &pre_image)?;
-    verify_canonical_stark(archive)
+    verify_canonical_stark_with_pcs(archive, config)
 }
 
 /// Bind the public rake/blind openings to the pre rules commitment through
@@ -10362,6 +10422,13 @@ fn verify_canonical_rake_binding(
 }
 
 fn verify_canonical_stark(archive: &ArchivedCanonicalTaggedProof) -> TexasAirResult<()> {
+    verify_canonical_stark_with_pcs(archive, crate::prover_context::protocol_pcs_config())
+}
+
+fn verify_canonical_stark_with_pcs(
+    archive: &ArchivedCanonicalTaggedProof,
+    config: stwo::core::pcs::PcsConfig,
+) -> TexasAirResult<()> {
     let proof: StarkProof<Poseidon252MerkleHasher> = options()
         .deserialize(&archive.stark_proof_bytes)
         .map_err(|e| TexasAirError::SerializationError(e.to_string()))?;
@@ -10370,7 +10437,6 @@ fn verify_canonical_stark(archive: &ArchivedCanonicalTaggedProof) -> TexasAirRes
             "canonical Stark proof is missing scope or trace commitments".into(),
         ));
     }
-    let config = crate::prover_context::protocol_pcs_config();
     let scope = scope_trace(archive, archive.log_size);
     let twiddles = crate::prover_context::simd_twiddles(
         archive.log_size + config.fri_config.log_blowup_factor,
@@ -10508,7 +10574,35 @@ pub fn verify_canonical_tagged_batch(
             "canonical proof public scope mismatch".into(),
         ));
     }
-    verify_canonical_tagged_proof(archive)
+    verify_canonical_tagged_proof_with_pcs(archive, crate::prover_context::protocol_pcs_config())
+}
+
+/// [`verify_canonical_tagged_batch`] with an explicit PCS profile (must match
+/// the prover's profile).
+pub fn verify_canonical_tagged_batch_with_pcs(
+    witnesses: &[CanonicalTransitionWitness],
+    archive: &ArchivedCanonicalTaggedProof,
+    config: stwo::core::pcs::PcsConfig,
+) -> TexasAirResult<()> {
+    let (_, expected) = trace_for(witnesses)?;
+    if expected.table_id != archive.table_id
+        || expected.batch_digest != archive.batch_digest
+        || expected.pre_state_commitment != archive.pre_state_commitment
+        || expected.post_state_commitment != archive.post_state_commitment
+        || expected.pre_state_image_bytes != archive.pre_state_image_bytes
+        || expected.post_state_image_bytes != archive.post_state_image_bytes
+        || expected.first_transition_kind != archive.first_transition_kind
+        || expected.last_transition_kind != archive.last_transition_kind
+        || archive_root_scope(&expected) != archive_root_scope(archive)
+        || expected.state_object_key != archive.state_object_key
+        || expected.state_opening_epoch != archive.state_opening_epoch
+        || expected.transition_count != archive.transition_count
+    {
+        return Err(TexasAirError::SpecViolation(
+            "canonical proof public scope mismatch".into(),
+        ));
+    }
+    verify_canonical_tagged_proof_with_pcs(archive, config)
 }
 
 #[cfg(test)]

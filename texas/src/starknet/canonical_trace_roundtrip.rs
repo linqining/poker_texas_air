@@ -151,3 +151,72 @@ fn full_hand_control_trace_proves_through_showdown_display() {
     verify_canonical_tagged_batch(&witnesses, &archive)
         .expect("independent verification of the canonical proof");
 }
+
+/// 一手牌 canonical 证明性能基准（真实整手控制行链，release 跑测）：
+///
+/// ```text
+/// cargo test --release -p texas --bin texas bench_full_hand_prove -- --include-ignored --nocapture
+/// ```
+///
+/// 对照两条 PCS 档位（stwo 猜想安全模型 `pow + blowup × queries`）：
+/// - 生产 40-bit：pow10 + 1×30（`prover_context::protocol_pcs_config`）；
+/// - **128-bit**：pow8 + 4×30（`prover_context::security_128_pcs_config`）。
+/// 计时覆盖生产语义全程：行链构建 + host 校验（trace_for 内
+/// validate_batch）+ STARK prove + flock rules-hash + STARK verify。
+#[ignore = "performance benchmark; run explicitly with --include-ignored (release)"]
+#[test]
+fn bench_full_hand_prove_latency_security() {
+    use std::time::Instant;
+
+    use poker_texas_air::texas_canonical_air::{
+        protocol_pcs_config, prove_canonical_reveal_completion_batch_with_pcs,
+        security_128_pcs_config, verify_canonical_tagged_batch_with_pcs, PcsConfig,
+    };
+
+    let table_id = 424_280u32;
+    let table = RealHandDriver::new(table_id, 10_000).drive_to_showdown_display();
+    let mirror = table.vm_session.as_ref().expect("live VM session");
+    let records: Vec<poker_texas_air::canonical_dispatch_trace::DispatchRecord<'_>> = mirror
+        .vm_traces()
+        .iter()
+        .map(|trace| trace.as_record())
+        .collect();
+
+    // 1. 行链构建 + Rust 侧全量关系验证（fail-closed 门，计时单列）。
+    let t0 = Instant::now();
+    let witnesses = witnesses_from_dispatch_records(&records, u64::from(table_id))
+        .expect("full-hand row chain");
+    let rows = witnesses.len();
+    validate_batch(&witnesses).expect("rows satisfy the host relation");
+    let host_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let rules = records[0].pre.rules.clone();
+    let profiles: [(&str, PcsConfig); 2] = [
+        ("40bit(pow10+1x30)", protocol_pcs_config()),
+        ("128bit(pow8+4x30)", security_128_pcs_config()),
+    ];
+    eprintln!(
+        "hand proven: rows={rows} host_validate_ms={host_ms:.1}"
+    );
+    for (label, config) in profiles {
+        assert_eq!(
+            config.security_bits(),
+            if label.starts_with("40") { 40 } else { 128 }
+        );
+        // 2. prove（含 STARK + flock rules-hash）。
+        let t1 = Instant::now();
+        let archive = prove_canonical_reveal_completion_batch_with_pcs(&witnesses, &rules, config)
+            .expect("prove");
+        let prove_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        let proof_bytes = archive.stark_proof_bytes.len();
+        // 3. verify（独立全验证，含公共 scope 重建 + STARK verify）。
+        let t2 = Instant::now();
+        verify_canonical_tagged_batch_with_pcs(&witnesses, &archive, config)
+            .expect("verify");
+        let verify_ms = t2.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "{label}: log_size={} rows={rows} prove={prove_ms:.1}ms verify={verify_ms:.1}ms stark_bytes={proof_bytes}",
+            archive.log_size,
+        );
+    }
+}

@@ -130,3 +130,25 @@ Horner 折叠（无 ρ 幂表、无 mod-n 乘法）合计 **~600×**。回归：
 **§5 GPU 加速——仅理论分析、无实测**：证明负载由数据并行操作主导
 （FRI 域运算、批量 Poseidon、AIR 行求值），天然适合 GPU 映射；设计目标为
 递归流水线秒级证明。本文档任何数字均不依赖该目标。
+
+**§6 canonical 一手牌 STARK 证明延迟 + 128 位安全档（2026-09-15 实测，
+M4 Pro release 构建）**：整手控制行链（16 行 witness，log_size=8 域，
+含翻前盲注完成 → 三街窗口完成 → 摊牌完成，`bench_full_hand_prove_latency_security`
+出证验收）。两轮取稳定值：
+
+| PCS 档位（stwo 猜想模型 pow + blowup×queries） | prove | verify | proof |
+|---|---|---|---|
+| 生产 40-bit（pow10 + 1×30） | ~1.0 s | ~174 ms | ~1.17 MB |
+| **128-bit**（pow8 + 4×30） | **~1.9–2.2 s** | **~0.5 s** | ~1.23 MB |
+
+- 计时口径：`prove_canonical_reveal_completion_batch_with_pcs` 全程 =
+  host 校验（trace_for→validate_batch，单列 ~64–100 ms）+ canonical
+  STARK prove + flock rules-hash；verify 为独立全验证（公共 scope 重建
+  + STARK verify）。128 位档在 stwo 猜想安全模型下 `8 + 4×30 = 128`
+  bits（`prover_context::security_128_pcs_config`，prover/verifier 必须
+  同档原子切换——档位混入 Fiat–Shamir）。
+- 结论：128 位安全的整手证明 ~2 s/手、验证 ~0.5 s，证明开销相对生产
+  40-bit 档 ×2.1、验证 ×2.9、proof +5%——对异步结算流水线（§2 的
+  `spawn_blocking` 语义）完全可接受；生产切档只需
+  `protocol_pcs_config` 换指 `security_128_pcs_config` 并全量重跑
+  门禁。

@@ -40,10 +40,30 @@ static BASE_COLUMN_POOL: OnceLock<BaseColumnPool<SimdBackend>> = OnceLock::new()
 /// it local prevents an upstream default change from silently changing proof
 /// compatibility or soundness. Alternative equal-security FRI configurations
 /// must be benchmarked and adopted here atomically by prover and verifier.
+///
+/// Security budget (stwo conjectured model): `pow_bits + log_blowup ×
+/// n_queries = 10 + 1×30 = 40` bits.
 pub(crate) fn protocol_pcs_config() -> PcsConfig {
     PcsConfig {
         pow_bits: 10,
         fri_config: FriConfig::new(0, 1, 30, 1),
+        lifting_log_size: None,
+    }
+}
+
+/// 128-bit (conjectured, stwo model) PCS profile for one-hand canonical
+/// proofs: `8 PoW + 4 blowup × 30 queries = 128` bits.
+///
+/// The 4× LDE and 2^8 PoW grinding are negligible for the fixed small
+/// domains a single hand occupies (≤ 2^10 rows); the 30-query count keeps
+/// verifier work at the familiar production level. Prover and verifier MUST
+/// adopt the same profile atomically (the profile is mixed into the
+/// Fiat--Shamir channel), so this helper is the single source both sides
+/// pass to the `*_with_pcs` entry points.
+pub fn security_128_pcs_config() -> PcsConfig {
+    PcsConfig {
+        pow_bits: 8,
+        fri_config: FriConfig::new(0, 4, 30, 1),
         lifting_log_size: None,
     }
 }
@@ -104,6 +124,15 @@ mod tests {
     #[test]
     fn protocol_pcs_profile_stays_at_forty_bits() {
         assert_eq!(protocol_pcs_config().security_bits(), 40);
+    }
+
+    #[test]
+    fn security_128_profile_reaches_128_bits() {
+        let config = security_128_pcs_config();
+        assert_eq!(config.security_bits(), 128);
+        assert_eq!(config.fri_config.log_blowup_factor, 4);
+        assert_eq!(config.fri_config.n_queries, 30);
+        assert_eq!(config.pow_bits, 8);
     }
 
     #[test]
