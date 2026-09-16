@@ -671,7 +671,7 @@ fn hand_wallet_map(start: &super::prove_log::HandStartData) -> Vec<(poker_l1::Ad
         .iter()
         .filter_map(|p| {
             let addr = VmTable::addr_from_starknet(&p.wallet)?;
-            let felt = super::chain::parse_felt(&p.wallet)?;
+            let felt = super::chain::parse_wallet_felt(&p.wallet)?;
             Some((addr, felt))
         })
         .collect();
@@ -679,7 +679,7 @@ fn hand_wallet_map(start: &super::prove_log::HandStartData) -> Vec<(poker_l1::Ad
         for w in set.iter() {
             if let (Some(a), Some(f)) = (
                 VmTable::addr_from_starknet(w),
-                super::chain::parse_felt(w),
+                super::chain::parse_wallet_felt(w),
             ) {
                 out.push((a, f));
             }

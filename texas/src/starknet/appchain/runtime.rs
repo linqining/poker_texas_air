@@ -392,6 +392,18 @@ impl AppchainRuntime {
 /// 后台管线。失败（WAL 损坏等）返回 Err——调用方决定降级或拒绝启动。
 ///
 /// # Errors
+/// 嵌入式 sequencer 配置（new 与 WAL replay 必须同参，否则重放分叉）。
+///
+/// max_seats 抬到 1000：settle 只释放入池（total_bet>0）的 seat，未入池
+/// 玩家的 seat note 会随动态买卖（bots bust 重注入 / 真人不同额买入）在
+/// 账本累积，默认 10 在混桌几十手内必触 "table full"。生产多运营方部署
+/// 应改为按桌清算闲置 seat（v2 语义），此处与嵌入式 dev 模型对齐。
+fn sequencer_config() -> SequencerConfig {
+    let mut config = SequencerConfig::default();
+    config.max_seats = 1000;
+    config
+}
+
 /// WAL 目录不可创建 / WAL 重放失败 → 文本错误。
 pub fn init(config: AppchainConfig) -> Result<Arc<AppchainRuntime>, String> {
     std::fs::create_dir_all(&config.wal_dir)
@@ -402,10 +414,10 @@ pub fn init(config: AppchainConfig) -> Result<Arc<AppchainRuntime>, String> {
 
     // WAL 优先恢复（fail-closed 重放），空/不存在则全新内存态。
     let mut sequencer = if wal_path.exists() {
-        Sequencer::replay(&wal_path, seq_key.public, SequencerConfig::default(), Arc::clone(&metrics))
+        Sequencer::replay(&wal_path, seq_key.public, sequencer_config(), Arc::clone(&metrics))
             .map_err(|e| format!("appchain WAL replay failed: {e}"))?
     } else {
-        Sequencer::new(seq_key.clone(), SequencerConfig::default(), Arc::clone(&metrics))
+        Sequencer::new(seq_key.clone(), sequencer_config(), Arc::clone(&metrics))
     };
     sequencer
         .attach_wal(&wal_path)
@@ -502,7 +514,7 @@ pub fn init_for_test(
 ) -> Option<Arc<AppchainRuntime>> {
     let metrics = Arc::new(MetricsRegistry::new());
     let seq_key = SequencerKey::from_seed(&config.sequencer_seed);
-    let sequencer = Sequencer::new(seq_key, SequencerConfig::default(), Arc::clone(&metrics));
+    let sequencer = Sequencer::new(seq_key, sequencer_config(), Arc::clone(&metrics));
     let seq = Arc::new(Mutex::new(sequencer));
 
     let attestor = ed25519_dalek::SigningKey::from_bytes(&config.attestor_seed);

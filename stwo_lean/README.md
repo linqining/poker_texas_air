@@ -29,15 +29,23 @@ Lean 4 + Mathlib 形式化的 **Stwo（Starkware STARK prover）证明验证库*
 | `StwoLean.FriCore` | `core/fri.rs` + `core/fft.rs` | FRI 折叠核心方程：`ibutterfly`（`(f₀+f₁, (f₀-f₁)·x⁻¹)`）与 `foldPair`（`g + α·h`），即每层 `verify_and_fold` 的验证内核 | ✅ 绿 |
 | `StwoLean.CircleDomain` | `core/circle.rs` + `core/poly/line.rs` + `core/utils.rs` | CirclePointIndex（mod 2^31）、Coset（`at`/`double`）、LineDomain、`bitReverseIndex` | ✅ 绿 |
 | `StwoLean.FriVerifier` | `core/fri.rs` FriVerifier | 多层 FRI 折叠状态机：逐层 `friLayerVerifyAndFold`（merkle 路径核对 + foldPair 折叠）+ 末层多项式核对（Horner）；含 `inverseM31` 及 spec 引理 | ✅ 绿 |
-| （待做） | `core/pcs/quotients.rs` | DEEP 商多项式（OODS 抽样、`fri_answers`）、`PointSample` | ⏳ |
-| （待做） | `core/pcs/verifier.rs` | `CommitmentSchemeVerifier.verify_values` 全链（TreeVec 多树 + Lifted Merkle + POW + FRI 主循环编排） | ⏳ |
+| `StwoLean.LiftedMerkle` | `core/vcs_lifted/poseidon252_merkle.rs` + `vcs_lifted/verifier.rs` | PCS 实际使用的 lifted Merkle：3 槽 sponge 叶哈希（16-M31 块两半吸收 + finalize 填充）、多查询 `liftedVerify` 状态机（相邻对合并 + witness 顺序消费） | ✅ 绿 |
+| `StwoLean.Deep` | `core/pcs/quotients.rs` | DEEP 商：`PointSample`、复共轭直线系数、`denominator`（可计算 CM31 逆）、周期性采样 + `α^k` 流水、按点分批（IndexMap 首现序）、`accumulateRow`/`friAnswers`、`circleDomainAt`（±half_coset） | ✅ 绿 |
+| `StwoLean.Commitment` | `core/pcs/verifier.rs` + `core/queries.rs` + `core/fri.rs` | **泛化版** `verify_values`：多树/多查询/`foldStep` 参数化（子集折叠 `foldSubset`/`foldCosetGen`/`foldCircleSubset`）、packed leaf（`groupByLeaf` 复刻 `build_merkle_verification_inputs`）、首层圆→线折叠（`p.y⁻¹`）+ DEEP-ALI 替换语义、POW、drawQueries+排序去重、preparePP | ✅ 绿 |
+| `StwoLean.Verifier` | `core/verifier.rs` + `core/air/accumulation.rs` + `core/proof.rs` | **验证器主循环**：`random_coeff` 抽取 → 组合多项式承诺 → OODS 点（channel 驱动 `get_random_point`）→ **DEEP-ALI 核对**（`extract_composition_oods_eval` 左右半分解 + `PointEvaluationAccumulator` Horner 累加）→ `verify_values` | ✅ 绿 |
 
-向量（`StwoLean.Vectors`，55 条）：41 条 M31/CM31/QM31/Circle（decide）+
+向量（`StwoLean.Vectors`，72 条 = 52 decide + 21 native_decide，
+实际 1 条两者皆可）：41 条 M31/CM31/QM31/Circle（decide）+
 8 条 Poseidon/Channel（native_decide，含 stwo 测试金向量）+
-5 条 Merkle/FRI 折叠（decide）+
-1 条完整 3 层 FRI 实例 `friVerify`（native_decide：3 层 merkle 根链 +
-foldPair 折叠 + 末层多项式核对，位置 idx=5）+ 5 条 merkle 树节点值
-（2 个 stwo `hash_node` 金向量 + 4 叶树路径 + 3 叶数据）。
+6 条 Merkle/FRI 折叠（decide）+
+1 条完整 3 层 FRI 实例 `friVerify`（native_decide）+
+5 条 merkle 树节点值 + PCS 全链向量（泛化单查询 / 多树+多查询+packed / 主循环 DEEP-ALI 等）。PCS 金色值全部来自
+**真实 stwo 组件**：通道交互用 `Poseidon252Channel`，trace 树验证用
+`MerkleVerifierLifted::verify`（运行时自检通过），DEEP 商值用
+`fri_answers`，折叠链用 `fold_circle_into_line`/`fold_line`；端到端
+`pcsVerifyValues`（native_decide）覆盖
+mix_root → mix_felts → draw α → FRI 承诺 → POW → 查询抽取 →
+lifted Merkle 验证 → DEEP 商 → 首层圆→线折叠 → 内层链 → 末层核对。
 
 **对拍发现的真实语义陷阱**（对拍方法学的直接收益）：
 
@@ -52,6 +60,22 @@ foldPair 折叠 + 末层多项式核对，位置 idx=5）+ 5 条 merkle 树节�
 3. **打包 fold 起点**：Channel `mix_u32s`/`mix_felts` 的 Horner 从
    `ONE` 开始，而 Merkle 列值打包从 `0` 开始且仅末块注入块长——
    两个"看起来一样"的打包实际是不同的哈希域。
+4. **PCS 的叶哈希不是 `hash_node`**。`vcs_lifted` 的 lifted Merkle
+   用 3 槽 sponge（16-M31 满块两半各 8 打包成对吸收 + finalize 的
+   1 填充），与旧 `vcs/` 的 `hash_node`（单次 `hash_many` 打包表）
+   完全不同——FRI/PCS 承诺树全部走前者。
+5. **圆→线折叠的 twiddle 是 `p.y⁻¹` 不是 `p.x⁻¹`**：首层
+   `fold_circle_into_line` 把对径点对 `(f(p), f(-p))` 折到 x 投影，
+   查询对 `(2i, 2i+1)` 经 bit-reverse 映射恰好是 `±p` 对；线层之后
+   的 twiddle 才是 x 坐标逆元。
+6. **首层线域陪集 = `half_odds(L-1)`**（初值 `2^(30-L)`）：即
+   `CanonicCoset(L).circle_domain()` 的 half_coset 本身——圆域的
+   x 投影陪集与圆陪集共享初值索引与步长索引。
+7. **末层多项式的可满足性**：Fiat–Shamir 同时绑定 last_poly 与查询
+   位置，手工构造同时满足"低次一致"与"通道绑定"的末层多项式需要
+   完整 AIR 一致性（真实 prover 的职责）。对拍向量将 `PcsProof` 的
+   `lastPolyChannel`（通道绑定，占位）与 `lastPoly`（核对值，取自
+   实际折叠输出）显式解耦——验证器核对逻辑与 stwo 逐行一致。
 
 ## 分层信任模型
 
@@ -102,12 +126,13 @@ lake build
 
 ## 路线图
 
-- **Phase 2（证明系统层）— 剩余**：Merkle verifier（`vcs/poseidon252_merkle.rs`、
-  `vcs_lifted/`）→ circle FRI verifier（`core/fri.rs`）→ PCS 查询与 DEEP
-  （`core/pcs/`）→ verifier 主循环（`core/verifier.rs`）+ POW nonce 验证。
-  产出：**可执行的独立 stwo proof 验证器**（输入规范化 proof + 公开段，
-  输出接受/拒绝）。
+- **Phase 2（证明系统层）✅ 完成**：多树（TreeVec）/多查询/packed leaf
+  （`foldStep > 1` 时 `LOG_PACKED_LEAF_SIZE = 2` 叶打包）泛化 + verifier
+  主循环（`Verifier.verifyMain`：random_coeff → 组合承诺 → OODS →
+  DEEP-ALI → verify_values）全部落地并对拍。
   - 附带：二进制标量乘（double-and-add）以机器验证 secure gen 的完整阶。
+- **Phase 2.5（验证器收尾）**：`verifyMain` 接入真实 proof 反序列化
+  （`StarkProof` 完整字段）、组件 mask 结构参数化、Blake2s 通道变体。
 - **Phase 3（约束层桥接）**：`stwo-constraint-framework` 验证侧
   （LogUp、preprocessed columns、point 求值）+ 目标程序 AIR eval 的
   可执行化。对 `poker_texas_air` 项目：AIR 约束语义已有
@@ -125,11 +150,17 @@ stwo_lean/
 │   ├── CM31.lean        复扩张
 │   ├── QM31.lean        安全域
 │   ├── Circle.lean      圆群
+│   ├── CircleDomain.lean 圆域陪集 / LineDomain / bit-reverse
 │   ├── Poseidon252Params.lean  Starknet 域 + COMP 轮常数（脚本生成）
 │   ├── Poseidon252.lean Hades 排列 / Poseidon 哈希族
 │   ├── Channel.lean     Poseidon252Channel（Fiat–Shamir）
-│   ├── Merkle.lean      Poseidon252 Merkle 节点哈希 + 路径验证
+│   ├── Merkle.lean      旧 vcs/ Merkle 节点哈希 + 单路径验证
+│   ├── LiftedMerkle.lean vcs_lifted/ sponge 叶哈希 + 多查询树验证
 │   ├── FriCore.lean     FRI 折叠验证核心方程
+│   ├── FriVerifier.lean 多层 FRI 折叠状态机
+│   ├── Deep.lean        DEEP 商（quotients.rs）
+│   ├── Commitment.lean  verify_values 泛化编排（多树/多查询/packed）
+│   ├── Verifier.lean    验证器主循环（verifier.rs + DEEP-ALI + 累加器）
 │   └── Vectors.lean     对拍向量（自动生成，勿手改）
 ├── vector-gen/          测试向量生成器（Rust，独立 workspace）
 ├── scripts/             质量门脚本 + 常数提取脚本

@@ -15,7 +15,8 @@
 #                                   # devnet 重启后地址会变，勿混用）
 #   scripts/dev.sh --keep-devnet    # 脚本退出时不关 devnet
 #   scripts/dev.sh fund <地址> [n]   # 给任意地址充值 n 个 STRK（钱包联调用，
-#                                   # 需 devnet 已在运行；默认 100 STRK）
+#                                   # 需 devnet 已在运行；默认 100 STRK）。
+#                                   # 等价的独立脚本: scripts/fund_devnet.sh
 #   scripts/dev.sh --debug          # 服务器用 debug 构建（默认 release，
 #                                   # 递归证明在 debug 下极慢，仅排查用）
 #
@@ -54,25 +55,13 @@ NO_CLIENT=0
 # 钱包插件的智能账户（Argent/Ready）部署费从反事实账户地址自身余额扣，
 # 该地址随 passkey/盐随机生成，只能在连接后从钱包 UI 读到再充值：
 #   scripts/dev.sh fund <地址> [STRK数量]（默认 100 STRK）
+# 充值逻辑独立成 scripts/fund_devnet.sh（可脱离本脚本单独跑），这里委托；
 # 须在参数解析之前处理，避免被下面的开关白名单拒绝。
 if [[ "${1:-}" == "fund" ]]; then
   shift
-  TARGET="${1:-}"
-  [[ -n "$TARGET" ]] || { echo "用法: scripts/dev.sh fund <地址> [STRK数量]"; exit 1; }
-  AMT_STRK="${2:-100}"
-  AMT_FRI=$(python3 -c "print(int('$AMT_STRK') * 10**18)")
-  curl -sf "$DEVNET_URL/is_alive" >/dev/null 2>&1 || {
-    echo "devnet 未运行（${DEVNET_URL}）。先跑 scripts/dev.sh（加 --keep-devnet 保留）"; exit 1; }
-  if curl -sf "$DEVNET_URL" -X POST -H 'Content-Type: application/json' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"devnet_mint","params":{"address":"'"$TARGET"'","amount":'"$AMT_FRI"',"unit":"FRI"}}' \
-      >/dev/null 2>&1 \
-     || curl -sf -X POST "$DEVNET_URL/mint" -H 'Content-Type: application/json' \
-      -d '{"address":"'"$TARGET"'","amount":'"$AMT_FRI"'}' >/dev/null 2>&1; then
-    echo "[dev] 已向 $TARGET 充值 ${AMT_STRK} STRK"
-  else
-    echo "充值失败（devnet_mint 与 /mint 均不可用）"; exit 1
-  fi
-  exit 0
+  # DEVNET_URL/DEVNET_PORT 是本脚本的局部变量（未 export），显式传下去。
+  DEVNET_URL="$DEVNET_URL" DEVNET_PORT="$DEVNET_PORT" \
+    exec "$ROOT/scripts/fund_devnet.sh" "$@"
 fi
 
 for arg in "$@"; do

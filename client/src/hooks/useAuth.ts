@@ -7,6 +7,13 @@ import { useAccount, useConnect, useDisconnect } from '@starknet-react/core';
 import { getStrkBalance } from '../starknet/starknetGameActions';
 import { starknetConfig } from '../starknet/config';
 import { activeAccount, activeAddress } from '../starknet/devAccount';
+import {
+  zchainAddress,
+  zchainConnect,
+  zchainSignLogin,
+  clearZChainSession,
+  isZChainSession,
+} from '../starknet/zchainWallet';
 import type { AuthMethod } from '../context/auth/authContext';
 import { logger } from '../helpers/logger';
 
@@ -17,6 +24,7 @@ interface UseAuthReturn {
   walletAddress: string | null;
   disconnectWallet: () => void;
   authMethod: AuthMethod;
+  loginWithZChain: () => Promise<void>;
 }
 
 /** Typed-data domain for the login message (SNIP-12 revision 1). */
@@ -52,8 +60,12 @@ const useAuth = (): UseAuthReturn => {
   // Cartridge 文档模型：登出必须 disconnect Controller（断开 keychain 会话），
   // 否则连接仍在、自动重登立即登回同一账号，永远换不了用户。
   const { disconnect: disconnectConnector } = useDisconnect();
-  // 连接的钱包（Ready/Cartridge）优先，dev 直签仅作无钱包时的兜底。
-  const address = activeAddress(connectedAddress);
+  // ZChain 钱包会话：身份来自 window.zchain 扩展（无 Starknet account）。
+  // 无 Starknet 连接地址时才接管，避免与注入钱包互抢。
+  const [zchainAddr, setZchainAddr] = useState<string | null>(zchainAddress());
+  const zchainActive = !connectedAddress && zchainAddr !== null;
+  // 连接的钱包（Ready/Cartridge）优先，ZChain 扩展会话次之，dev 直签兜底。
+  const address = zchainActive ? zchainAddr : activeAddress(connectedAddress);
   const account = activeAccount(connectedAccount);
   const { connectAsync, connectors } = useConnect();
   // 登出过渡守卫：disconnect 是异步的，期间 address 尚未清空，自动重登
@@ -104,9 +116,14 @@ const useAuth = (): UseAuthReturn => {
     }
   }, [address]);
 
-  // Refresh STRK balance whenever the address changes
+  // Refresh STRK balance whenever the address changes（ZChain 会话无
+  // Starknet 链上余额，直接置空跳过查询）
   useEffect(() => {
     if (!address) {
+      setStrkBalance(null);
+      return;
+    }
+    if (isZChainSession()) {
       setStrkBalance(null);
       return;
     }
@@ -241,8 +258,41 @@ const useAuth = (): UseAuthReturn => {
     setIsLoading(false);
   };
 
-  const loadUser = async (token: string): Promise<void> => {
+  /**
+   * ZChain 钱包登录：连接扩展（弹窗确认）→ 结构化操作签名（弹窗确认）→
+   * 以摘要作为凭证走 /auth/wallet（服务端 dev 模式跳过链上验签；
+   * STARKNET_AUTH_STRICT=true 时需链上可验，ZChain 路径仅用于 dev 部署）。
+   */
+  const loginWithZChain = async (): Promise<void> => {
+    clearLoggedOutFlag();
+    setIsLoading(true);
     try {
+      const addr = await zchainConnect();
+      const digest = await zchainSignLogin(addr);
+      setZchainAddr(addr);
+      const res = await httpClient.post('/auth/wallet', {
+        address: addr,
+        messageHash: digest,
+        signature: [digest],
+        message: `zchain-login:${addr}:${Date.now()}`,
+      });
+      const backendToken = res.data.token;
+      if (backendToken) {
+        localStorage.setItem('token', backendToken);
+        setAuthToken(backendToken);
+        await loadUser(backendToken);
+        setAuthMethod('wallet');
+        localStorage.setItem('authMethod', 'wallet');
+      }
+    } catch (error) {
+      logger.error('[Auth] ZChain wallet login failed:', error);
+      const e = error as { code?: string; message?: string };
+      window.alert(`ZChain 钱包登录失败：${e?.code ? `${e.code}: ` : ''}${e?.message ?? error}`);
+    }
+    setIsLoading(false);
+  };
+
+  const loadUser = async (token: string): Promise<void> => {    try {
       const res = await httpClient.get('/auth');
       const { _id, name, address: userAddress, chipsAmount } = res.data;
       setIsLoggedIn(true);
@@ -268,6 +318,8 @@ const useAuth = (): UseAuthReturn => {
       localStorage.removeItem('token');
       localStorage.removeItem('walletAddress');
       localStorage.removeItem('authMethod');
+      clearZChainSession();
+      setZchainAddr(null);
       setAuthToken(null);
       setIsLoggedIn(false);
       setWalletAddress(null);
@@ -298,6 +350,9 @@ const useAuth = (): UseAuthReturn => {
         logger.error('wallet_logout backend call failed:', err);
       });
     }
+    // ZChain 钱包会话：清理本地会话状态（扩展侧授权由用户在扩展里管理）。
+    clearZChainSession();
+    setZchainAddr(null);
     // 登出三步，顺序关键：
     // 1) 先立"登出中"标记 + 清本地登录态——自动重登 effect 立即失效；
     // 2) 再异步断开钱包连接（disconnectConnector 是 Promise，不 await 会
@@ -355,6 +410,7 @@ const useAuth = (): UseAuthReturn => {
     walletAddress,
     disconnectWallet,
     authMethod,
+    loginWithZChain,
   };
 };
 

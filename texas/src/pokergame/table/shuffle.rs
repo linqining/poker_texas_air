@@ -451,6 +451,15 @@ impl Table {
         self.remove_player_by_pk(&shuffler_pk);
         self.shuffle_state.pending_players.retain(|p| *p != shuffler_pk);
 
+        // 立即清空当前洗牌者指针与计时器：下方任一提前返回路径（Waiting/
+        // active_count==0/1/shuffle 已不活跃）都必须让 check_shuffle_timeout
+        // 停止对同一玩家逐 tick 反复触发（否则 send_shuffle_notice 死循环、
+        // 后续 join/bot 读到 identity-c1 的半初始化牌组直接 panic）。
+        // 正常推进路径（rebuild_deck_and_shuffle + advance_shuffle 等）会
+        // 重新指派下一个洗牌者并重置计时器。
+        self.shuffle_state.current_player_pk = None;
+        self.shuffle_state.timeout_start = None;
+
         // remove_player_by_pk → stand_player_by_pk 在 Reconstruct 阶段（is_playing()==true）
         // 剩 1 人时会自动调用 end_without_showdown。若手牌已结束，直接返回避免重复结算。
         if !is_before_preflop && self.round_state() == RoundState::Waiting {

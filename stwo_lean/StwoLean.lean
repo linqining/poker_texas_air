@@ -6,6 +6,10 @@ import StwoLean.CircleDomain
 import StwoLean.Poseidon252
 import StwoLean.Channel
 import StwoLean.Merkle
+import StwoLean.LiftedMerkle
 import StwoLean.FriCore
 import StwoLean.FriVerifier
+import StwoLean.Deep
+import StwoLean.Commitment
+import StwoLean.Verifier
 import StwoLean.Vectors

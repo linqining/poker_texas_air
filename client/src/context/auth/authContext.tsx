@@ -9,6 +9,7 @@ export interface AuthContextType {
   walletAddress: string | null;
   disconnectWallet: () => void;
   authMethod: AuthMethod;
+  loginWithZChain: () => Promise<void>;
 }
 
 const authContext = createContext<AuthContextType | undefined>(undefined);

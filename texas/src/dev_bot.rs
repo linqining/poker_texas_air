@@ -354,6 +354,11 @@ pub async fn start_bot(
                     println!("[bot {seat_id}] shuffle submit failed: {e}");
                 } else {
                     println!("[bot {seat_id}] shuffle submitted");
+                    // Bot 走状态层直提，绕过了 socket SHUFFLE_SUBMIT 处理器里的
+                    // send_shuffle_notice——必须在此补发，否则下一个洗牌者若是
+                    // 真人 socket 客户端（如浏览器玩家）永远收不到 SHUFFLE_NOTICE，
+                    // 45s 超时被踢（纯 bot 桌无感知，混桌必现）。
+                    state.send_shuffle_notice(1).await;
                 }
                 continue;
             }

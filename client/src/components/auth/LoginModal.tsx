@@ -134,6 +134,8 @@ const READY_CHROME_STORE_URL =
 const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
   const isLoggedIn = useContext(authContext)!.isLoggedIn;
   const { getLocalizedString: t } = useContext(contentContext)!;
+  const { loginWithZChain } = useContext(authContext)!;
+  const [zchainPending, setZchainPending] = useState(false);
   const connected = useAccount();
   // 连接的钱包（Ready/Cartridge）优先，dev 直签账户仅作无钱包时兜底
   const address = activeAddress(connected.address);
@@ -214,6 +216,26 @@ const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
         <ModalHeading>{t('login_sign-in')}</ModalHeading>
 
         <LoginSection>
+          {/* ZChain Wallet：浏览器装了 zchain 扩展时的原生登录入口 */}
+          {typeof window !== 'undefined'
+            && (window as { zchain?: { isZChain?: boolean } }).zchain?.isZChain === true && (
+            <WalletButton
+              type="button"
+              data-testid="login-zchain"
+              disabled={zchainPending}
+              onClick={async () => {
+                setZchainPending(true);
+                try {
+                  await loginWithZChain();
+                } finally {
+                  setZchainPending(false);
+                }
+              }}
+            >
+              <span>⛓</span>
+              <span>ZChain Wallet</span>
+            </WalletButton>
+          )}
           {availableConnectors.map((connector) => (
             <WalletButton
               key={connector.id}

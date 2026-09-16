@@ -510,7 +510,7 @@ impl VmTable {
     /// [`chain::parse_felt`] 解出 felt 再 hex 化喂给权威实现，两条输入
     /// 路径最终落在同一公式上。
     pub fn addr_from_starknet(felt_str: &str) -> Option<poker_l1::Address> {
-        let felt = super::chain::parse_felt(felt_str)?;
+        let felt = super::chain::parse_wallet_felt(felt_str)?;
         wallet_to_address(&format!("{felt:#x}")).ok()
     }
 

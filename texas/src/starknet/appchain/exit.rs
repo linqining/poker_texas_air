@@ -310,7 +310,7 @@ fn project_snapshot(
             return Err("mirror seat without matching HandStart participant".into());
         };
         joined += 1;
-        let wallet_felt = crate::starknet::chain::parse_felt(&participant.wallet)
+        let wallet_felt = crate::starknet::chain::parse_wallet_felt(&participant.wallet)
             .ok_or_else(|| format!("wallet unparsable: {}", participant.wallet))?
             .to_bytes_be();
         total_bets[seat_idx] = seat_total_bet;
@@ -372,8 +372,13 @@ fn ensure_table(rt: &AppchainRuntime, table_id: u64, policy: FeePolicy) -> Resul
     policy
         .validate()
         .map_err(|e| format!("fee policy invalid: {e}"))?;
-    rt.submit_operation(Operation::OpenTable { table_id, policy })
+    let frame = rt
+        .submit_operation(Operation::OpenTable { table_id, policy })
         .map_err(|e| format!("open table rejected: {e}"))?;
+    // 嵌入式 dev 模型：host 背书的开桌帧即对账锚，立即证明化。若留在
+    // 软确认态，连续前缀水位永远过不了首帧——后续惰性铸出的余额 note
+    // 恒为 unproven，BuyIn 的 proven-only 准入从此全部被拒（死锁）。
+    rt.with_seq(|seq| seq.mark_proven(frame.frame.index));
     Ok(())
 }
 
@@ -448,6 +453,56 @@ fn ensure_seats(
                 ));
             }
         };
+        // 1.5 余额面额对齐：找出的余额 note 只保证 `>= stack`，而 BuyIn
+        // 铸出的 seat 面额 = 输入 note 面额之和——超额余额直接买入会铸出
+        // 面额更大的 seat，随后按 stack 面额的查找必然落空（"minted seat
+        // note not found"，整手回退无法结算）。先把余额拆成恰好 stack 的
+        // note（余款留回余额），再买入。
+        let balance = if balance.amount > *stack {
+            let outputs = vec![
+                poker_appchain::note::NoteSpec {
+                    asset_class,
+                    amount: *stack,
+                    owner,
+                    table_id: None,
+                    pot_index: 0,
+                    runout_index: 0,
+                },
+                poker_appchain::note::NoteSpec {
+                    asset_class,
+                    amount: balance.amount - *stack,
+                    owner,
+                    table_id: None,
+                    pot_index: 0,
+                    runout_index: 0,
+                },
+            ];
+            let effect = Operation::Transfer {
+                spends: vec![],
+                notes: vec![],
+                outputs: outputs.clone(),
+            }
+            .effect_digest();
+            let frame = rt
+                .submit_operation(Operation::Transfer {
+                    spends: vec![auth(&key, &secret, &balance, scope::TRANSFER, &effect)],
+                    notes: vec![balance],
+                    outputs,
+                })
+                .map_err(|e| format!("balance split rejected: {e}"))?;
+            rt.with_seq(|seq| seq.mark_proven(frame.frame.index));
+            rt.with_seq(|seq| {
+                seq.state()
+                    .notes
+                    .values()
+                    .find(|e| e.created_at_op == frame.frame.index && e.note.amount == *stack)
+                    .map(|e| e.note.clone())
+            })
+            .ok_or_else(|| "split balance note not found".to_string())?
+        } else {
+            balance
+        };
+
         // 2. BuyIn：余额 → seat note（stack 面额，桌绑定）。
         let seat_note_of_amount = |want: u64| -> Option<poker_appchain::note::Note> {
             rt.with_seq(|seq| {
@@ -474,13 +529,17 @@ fn ensure_seats(
                 }
                 .effect_digest();
                 let seat_owner = owner;
-                rt.submit_operation(Operation::BuyIn {
-                    table_id,
-                    spends: vec![auth(&key, &secret, &balance, scope::BUYIN, &effect)],
-                    notes: vec![balance],
-                    seat_owner,
-                })
-                .map_err(|e| format!("buy-in rejected: {e}"))?;
+                let frame = rt
+                    .submit_operation(Operation::BuyIn {
+                        table_id,
+                        spends: vec![auth(&key, &secret, &balance, scope::BUYIN, &effect)],
+                        notes: vec![balance],
+                        seat_owner,
+                    })
+                    .map_err(|e| format!("buy-in rejected: {e}"))?;
+                // 同 OpenTable/Deposit：host 背书即证明化，seat note 立即
+                // 满足 proven-only 准入（Transfer/Settle 前置）。
+                rt.with_seq(|seq| seq.mark_proven(frame.frame.index));
                 seat_note_of_amount(*stack)
                     .ok_or_else(|| "minted seat note not found".to_string())?
             }
@@ -518,12 +577,15 @@ fn ensure_seats(
                 outputs: outputs.clone(),
             }
             .effect_digest();
-            rt.submit_operation(Operation::Transfer {
-                spends: vec![auth(&key, &secret, &seat, scope::TRANSFER, &effect)],
-                notes: vec![seat],
-                outputs,
-            })
-            .map_err(|e| format!("seat split rejected: {e}"))?;
+            let frame = rt
+                .submit_operation(Operation::Transfer {
+                    spends: vec![auth(&key, &secret, &seat, scope::TRANSFER, &effect)],
+                    notes: vec![seat],
+                    outputs,
+                })
+                .map_err(|e| format!("seat split rejected: {e}"))?;
+            // 拆分帧同语义立即证明化（settle 花费的 note 须 proven）。
+            rt.with_seq(|seq| seq.mark_proven(frame.frame.index));
             seat_note_of_amount(*total_bet)
                 .ok_or_else(|| "split seat note not found".to_string())?
         };

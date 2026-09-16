@@ -2345,6 +2345,26 @@ mod tests {
     }
 
     #[test]
+    fn join_table_allows_sub_big_blind_buy_in() {
+        // 买入下限只在游戏层入座接受点（SIT_DOWN_V2）校验；VM join_table
+        // 不设下限——镜像每手开局对本手参与者重放 join_table，其中含续座
+        // 玩家：split-pot 等常规路径留下的不足大盲筹码（95 < 100）必须能
+        // 继续参与，否则镜像 bootstrap 拒载、整手 unprovable、牌桌开局
+        // 死循环（2026-09-16）。托管恒等式不放松：stack = buy_in、
+        // chip_pool 精确增加 buy_in。
+        let player: Address = [0x33; 20];
+        let ctx = make_context_as(player);
+        let mut table = make_table(); // big_blind = 100
+        let buy_in = 95u64;
+        let pool_before = table.chip_pool;
+        let join_bytes = borsh::to_vec(&join_args(player, buy_in, 3)).unwrap();
+        dispatch(&ctx, &mut table, &selectors::join_table(), &join_bytes).unwrap();
+        assert_eq!(table.occupied_count(), 1);
+        assert_eq!(table.seats[0].stack(), buy_in);
+        assert_eq!(table.chip_pool, pool_before + buy_in);
+    }
+
+    #[test]
     fn join_table_rejects_identity_key_and_invalid_ownership_proof_atomically() {
         let player = [0x11; 20];
         let context = make_context_as(player);

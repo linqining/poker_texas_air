@@ -31,6 +31,7 @@ import { useAccount } from '@starknet-react/core';
 import { submitBuyIn } from '../../starknet/starknetGameActions';
 import { ensureTxSessionPkHex } from '../../starknet/txSession';
 import { activeAccount } from '../../starknet/devAccount';
+import { isZChainSession, zchainSignBuyIn } from '../../starknet/zchainWallet';
 
 export interface UseGameActionsParams {
   socket: Socket | null;
@@ -276,6 +277,73 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
       addMessage('Cannot sit down: no wallet connected');
       return;
     }
+    // ----- ZChain 钱包买入：扩展弹窗签 buy_in 结构化操作（真实验名），
+    //       不走 Starknet 链上 vault.deposit（结算出口为 appchain→zchain 的
+    //       dev 部署，服务端对无 depositTxHash 的入座跳过链上核验）。 -----
+    if (isZChainSession()) {
+      const token = getToken();
+      if (!token || !walletAddress || !currentTableRef.current) {
+        addMessage('Cannot sit down: no wallet connected');
+        return;
+      }
+      let buyinDigest = '';
+      try {
+        addMessage('Confirming buy-in in ZChain Wallet...');
+        buyinDigest = await zchainSignBuyIn(walletAddress, Number(tableId));
+      } catch (e) {
+        const err = e as { code?: string; message?: string };
+        logger.error('[SitDown] ZChain buy_in signing failed:', err);
+        addMessage(`Sit down failed: ZChain Wallet ${err?.code ?? ''} ${err?.message ?? e}`);
+        return;
+      }
+      let pkProof: unknown;
+      try {
+        const proofRaw = wrapCryptoOp(() => keys.generate_pk_proof(), 'generate_pk_proof') as string | object;
+        pkProof = typeof proofRaw === 'string' ? JSON.parse(proofRaw) : proofRaw;
+      } catch (e) {
+        const err = e as Error;
+        logger.error('[SitDown] pk proof generation failed:', err);
+        addMessage(`Sit down failed: ${err.message || err}`);
+        return;
+      }
+      const outcome = await new Promise<{ failed: boolean; msg: string } | null>((resolve) => {
+        let settled = false;
+        const onErr = (data: { msg?: string; action?: string }) => {
+          if (data?.action !== 'sit_down' || settled) return;
+          settled = true;
+          socket?.off('error', onErr);
+          resolve({ failed: true, msg: data.msg ?? 'sit down rejected' });
+        };
+        socket?.on('error', onErr);
+        socket?.emit(SIT_DOWN_V2, {
+          token,
+          tableId,
+          seatId: seatIdNum,
+          amount,
+          pkHex,
+          pkProof,
+          // 扩展 buy_in 签名摘要作为买入凭证：携带 deposit 凭证即跳过
+          // 服务端余额预检，dev 结算模式下 verify_deposit 自动放行。
+          depositTxHash: buyinDigest ? `zchain-buyin:${buyinDigest}` : undefined,
+        });
+        setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            socket?.off('error', onErr);
+            resolve(null);
+          }
+        }, 6000);
+      });
+      if (outcome === null) {
+        addMessage('Joined table (ZChain Wallet buy-in confirmed)');
+        logger.log('[SitDown] zchain join accepted');
+        return;
+      }
+      addMessage(`Sit down failed: ${outcome.msg}`);
+      logger.error('[SitDown] zchain join rejected:', outcome.msg);
+      return;
+    }
+
     // 钱包账户可能还在水合（刷新后扩展回连有几秒延迟）——短暂等待
     // 而不是立刻失败；超时才提示重连。
     const readyAccount = await waitForAccount();

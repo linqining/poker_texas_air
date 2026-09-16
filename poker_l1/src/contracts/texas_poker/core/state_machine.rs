@@ -4373,9 +4373,13 @@ pub fn apply_create_table(
 }
 
 /// `join_table` 语义：WAITING 校验 → pk 三重校验（非恒等元 / 所有权证明 /
-/// 未注册）→ 会话交易公钥登记校验 → buy_in 下限与 chip_pool 上限 → 占首个
+/// 未注册）→ 会话交易公钥登记校验 → chip_pool 上限 → 占首个
 /// 空座（Waiting，等大盲）→ 资金入池 → deck contributor 登记 → PlayerJoined
 /// 事件。
+///
+/// 买入下限（buy_in >= big_blind）在游戏层买入入座接受点校验（SIT_DOWN_V2），
+/// VM 层不设：镜像每手开局对本手参与者重放 join_table，其中含续座玩家——
+/// split-pot 等场景留下的不足大盲筹码允许继续参与（真实规则），不得在此拦截。
 ///
 /// `caller == player` 的认证检查在 runtime dispatch 层；`tx_pk` 与链上 vault
 /// 登记（`set_session_tx_pk[_for]`）的一致性由游戏服务端在 join 接受点核验
@@ -4410,12 +4414,6 @@ pub fn apply_join_table(
         return Err(PokerL1Error::Serialization(
             "pk already registered at this table".into(),
         ));
-    }
-    if buy_in < table.big_blind {
-        return Err(PokerL1Error::Serialization(format!(
-            "buy_in {buy_in} < big_blind {}",
-            table.big_blind
-        )));
     }
     let post_chip_pool = table
         .chip_pool

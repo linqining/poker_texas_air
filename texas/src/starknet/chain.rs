@@ -175,6 +175,29 @@ pub fn parse_felt(s: &str) -> Option<Felt> {
     Felt::from_hex(s).ok().or_else(|| Felt::from_dec_str(s).ok())
 }
 
+/// 钱包标识 → felt（账户身份在所有账本层的统一解析入口）。
+///
+/// Starknet 钱包（≤31 字节地址）原样走 [`parse_felt`]；zchain 侧钱包是
+/// 33 字节 tagged pubkey（0x + 66 hex），超出 felt252 位宽——用 blake2s_256
+/// 确定性压缩（高 4 位清零保证落在域内）。镜像（vm_session）、结算钱包
+/// 映射（hooks::hand_wallet_map）、appchain 出口（exit）必须同用本函数，
+/// 同一钱包字符串才能在 VM 镜像与 appchain 账本落到同一身份。
+pub fn parse_wallet_felt(s: &str) -> Option<Felt> {
+    if let Some(f) = parse_felt(s) {
+        return Some(f);
+    }
+    let t = s.trim().trim_start_matches("0x");
+    let bytes = hex::decode(t).ok()?;
+    if bytes.len() != 33 {
+        return None;
+    }
+    // poker_appchain::keys::blake2s32 = Blake2s-256（与 appchain 账本派生
+    // 同一摘要原语，零新增依赖）。
+    let mut h = poker_appchain::keys::blake2s32(&[&bytes]).to_vec();
+    h[0] &= 0x0F; // 保证 < 2^252（felt 域）
+    Felt::from_bytes_be(&h.try_into().ok()?).into()
+}
+
 /// 合约入口名 → selector（`starknet_keccak`）。lock / chips 等 vault 调用共用。
 pub fn selector(name: &str) -> Felt {
     starknet::core::utils::starknet_keccak(name.as_bytes())

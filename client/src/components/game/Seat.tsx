@@ -30,7 +30,12 @@ import authContext from '../../context/auth/authContext';
 import { EmptySeat } from './seatStyles';
 import { getStrkBalance } from '../../starknet/starknetGameActions';  // getStrkBalance 已改读原生 STRK
 import { CHIPS_PER_STRK, STRK_DECIMALS, WEI_PER_CHIP } from '../../starknet/config';
+import { isZChainSession } from '../../starknet/zchainWallet';
 import { logger } from '../../helpers/logger';
+
+// ZChain 钱包会话（appchain→zchain 结算的 dev 部署）不入账链上筹码，
+// 入座额度按服务端结余 + 该 dev 常量放行。
+const ZCHAIN_DEV_BUYIN_CHIPS = 5000;
 
 const StyledSeat = styled.div`
   width: 200px;
@@ -154,7 +159,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
   const [strkBalanceWei, setStrkBalanceWei] = useState<bigint>(0n);
 
   const fetchBalance = useCallback(async () => {
-    if (!walletAddress) {
+    if (!walletAddress || isZChainSession()) {
       setStrkBalanceWei(0n);
       return;
     }
@@ -184,10 +189,12 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
   // 可买筹码 = max(服务端结余, 钱包 pSTRK 余额可兑换数量)。STRK20 模式下
   // 首次买入是链上 vault.deposit（按 WEI_PER_CHIP 换算），服务端 chipsAmount
   // 是历史结算存量（首次为 0）——只按它会永远挡住首次买入。
-  const availableChips = Math.max(
-    chipsAmount ?? 0,
-    Number(strkBalanceWei / BigInt(WEI_PER_CHIP)),
-  );
+  const availableChips = isZChainSession()
+    ? Math.max(chipsAmount ?? 0, ZCHAIN_DEV_BUYIN_CHIPS)
+    : Math.max(
+      chipsAmount ?? 0,
+      Number(strkBalanceWei / BigInt(WEI_PER_CHIP)),
+    );
 
   // 兑换指定筹码需要的 STRK 数量
   const strkCostForChips = (chips: number): number => chips / CHIPS_PER_STRK;

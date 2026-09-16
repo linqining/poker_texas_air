@@ -175,6 +175,30 @@ async fn validate_sit_down_request(
         return None;
     }
 
+    // 买入下限：入座买入须 ≥ 大盲（min_bet×2）。下限只在买入入座这一次
+    // 校验——VM join_table 不设下限，已入座的续座玩家允许以不足大盲的
+    // 筹码继续参与（split-pot 半盲筹码是常规路径，真实规则）。
+    let big_blind = {
+        let gs = state.state.read().await;
+        gs.tables
+            .get(&payload.table_id)
+            .map(|t| t.summary.min_bet.saturating_mul(2))
+    };
+    if let Some(big_blind) = big_blind {
+        if payload.amount < big_blind {
+            tracing::warn!(
+                "[SIT_DOWN_V2] buy-in below big blind: amount={}, big_blind={}",
+                payload.amount,
+                big_blind
+            );
+            let _ = s.emit(
+                "error",
+                &serde_json::json!({"msg": format!("Buy-in must be at least the big blind ({big_blind})")}),
+            );
+            return None;
+        }
+    }
+
     // E3 修复：使用 i64::try_from 避免 u64 -> i64 转换溢出
     let deduct = match i64::try_from(payload.amount) {
         Ok(v) => -v,
