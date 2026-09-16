@@ -12,7 +12,7 @@
 //!      `settle_hand`：主池/边池逐层派奖、平分池、抽水扣减、零和
 //!      守恒、不足 5 张公共牌的 F5 平分）；
 //!   3. **盲注定位与下注序列**（三人首手/跨手 dead-button 轨道、
-//!      dead small blind、min-raise 链、fold-win 翻前不抽水/翻后按
+//!      dead small blind 的前驱补位语义、min-raise 链、fold-win 翻前不抽水/翻后按
 //!      公式抽水、未跟注返还净额）。
 //!
 //! 纯表状态 + mental-poker 明牌直接注入（`playing_card` 字段是 reveal
@@ -779,9 +779,11 @@ mod blinds_betting_and_fold_win {
         assert_eq!(t.last_bb_seat(), 3);
     }
 
-    /// dead small blind：轮转基准座位 sitting out → 本手无小盲。
+    /// 轮转基准座位 sitting out：基准回退到其前驱参与者（环形——座 1
+    /// 低于全部参与者时环绕到最大座位 4）补位小盲，与镜像压缩 rank
+    /// 映射一致。
     #[test]
-    fn dead_small_blind_when_base_sits_out() {
+    fn departed_base_predecessor_posts_small_blind() {
         let mut t = make_table(40_203);
         seat_fake(&mut t, 1, 1000);
         seat_fake(&mut t, 2, 1000);
@@ -793,9 +795,9 @@ mod blinds_betting_and_fold_win {
         t.set_button(Some(2));
         t.set_last_bb_seat(Some(1));
         t.set_blinds();
-        assert_eq!(t.small_blind(), None, "基准座不参与 → 无小盲");
+        assert_eq!(t.small_blind(), Some(4), "基准座不参与 → 前驱参与者（环形环绕到座 4）交小盲");
         assert_eq!(t.big_blind(), Some(2), "BB = 基准后第一个参与者");
-        assert_eq!(t.pot(), 100, "只有大盲入池");
+        assert_eq!(t.pot(), 150, "小盲 50 + 大盲 100 入池");
     }
 
     /// 盲注 all-in 封顶：SB 不足额只投全部；BB 不足额投全部。

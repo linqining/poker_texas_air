@@ -8,7 +8,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-poker-protocol-core = { git = "ssh://git@github.com/linqining/poker_protocol.git" }
+poker-protocol-core = { git = "https://github.com/linqining/poker_protocol.git", rev = "45df5021afc72fcbf04eb9f79b08f064412bc04a" }
 crypto-bigint = "0.5.5"
 
 [profile.release]

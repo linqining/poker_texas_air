@@ -284,25 +284,28 @@ pub fn record_hand_start(table: &mut Table) {
 
 /// dead button 轮转基准的 rank 映射：把游戏层的上一手大盲座位映射为
 /// 参与者序列（按游戏座位号升序）中的序号。座位本身已离场时取其前驱
-/// 参与者（环形——游戏层从空座位顺时针扫描的落点即前驱之后第一人）；
-/// 无历史（0）时返回 [`NO_SEAT`]。
+/// 参与者（环形——游戏层 set_blinds 对同一场景做相同的回退，两层小盲
+/// 归属逐位一致）；无历史（0）时返回 [`NO_SEAT`]。
 fn rank_of_rotation_base(
     last_bb_seat: u32,
     plan: &[(u32, HandParticipant)],
 ) -> u8 {
+    rank_of_rotation_seat(last_bb_seat, &plan.iter().map(|(id, _)| *id).collect::<Vec<u32>>())
+}
+
+/// [`rank_of_rotation_base`] 的座位序列内核（跨层一致性测试直接对拍
+/// 游戏层 set_blinds 的前驱回退语义）。
+pub(crate) fn rank_of_rotation_seat(last_bb_seat: u32, sorted_seat_ids: &[u32]) -> u8 {
     use poker_l1::contracts::texas_poker::types::NO_SEAT;
     if last_bb_seat == 0 {
         return NO_SEAT;
     }
     // 严格 <=：座位在 plan 中 → 自身 rank；不在 → 前驱参与者 rank。
-    if let Some(rank) = plan
-        .iter()
-        .rposition(|(seat_id, _)| *seat_id <= last_bb_seat)
-    {
+    if let Some(rank) = sorted_seat_ids.iter().rposition(|seat_id| *seat_id <= last_bb_seat) {
         return rank as u8;
     }
     // 全部参与者座位号 > last_bb：前驱为环形意义上的最后一名参与者。
-    (plan.len().saturating_sub(1)) as u8
+    (sorted_seat_ids.len().saturating_sub(1)) as u8
 }
 
 /// 派彩前快照终局投入（摊牌/fold-win 两条终局路径各调用一次；重复调用

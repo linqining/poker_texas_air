@@ -1,5 +1,6 @@
 import Mathlib
 import StwoLean.Commitment
+import StwoLean.CircleDomain
 
 /-!
 # Verifier — STARK 证明验证器主循环
@@ -109,6 +110,38 @@ def verifyMain (cfg : PcsConfig) (components : List ComponentSpec)
   else
     -- 5. verify_values（通道状态延续）
     Commitment.verifyValuesGen cfg cols proof.pcs ch3
+
+/-! ### Phase 2.5：组件 mask 参数化 -/
+
+/-- `CanonicCoset::new(n).step()`：域生成元点（索引 `2^(31-n)`）。 -/
+def traceStepPt (maxLogDegreeBound : Nat) : StwoLean.CirclePoint StwoLean.M31 :=
+  StwoLean.cpiToPoint (2 ^ (31 - maxLogDegreeBound))
+
+/-- 参数化的组件规格：mask 偏移驱动采样点派生。 -/
+structure ComponentSpecP where
+  /-- 最大约束 log 度界 -/
+  maxConstraintLogDegreeBound : Nat
+  /-- 每列 mask 偏移（列数 = offsets 长度） -/
+  maskOffsets : List (List Int)
+  /-- 约束商在 OODS 采样点的项 -/
+  terms : List QM31
+
+/-- mask 采样点：`oods + traceStep.mul_signed(offset).into_ef()`。 -/
+def maskPoint (oods : StwoLean.CirclePoint StwoLean.QM31) (ts : StwoLean.CirclePoint StwoLean.M31) (offset : Int) :
+    StwoLean.CirclePoint StwoLean.QM31 :=
+  let stepLift : CirclePoint QM31 :=
+    ⟨StwoLean.QM31.ofU32 ts.x.val 0 0 0, StwoLean.QM31.ofU32 ts.y.val 0 0 0⟩
+  let rec foldAdd (base step : CirclePoint QM31) : Nat → CirclePoint QM31
+    | 0 => base
+    | k + 1 => StwoLean.CirclePoint.cpAdd (foldAdd base step k) step
+  if offset ≥ 0 then foldAdd oods stepLift offset.natAbs
+  else foldAdd oods (StwoLean.CirclePoint.antipode stepLift) (-offset).natAbs
+
+/-- 从 OODS 点 + 组件 mask 偏移派生采样点列表。 -/
+def deriveMaskPoints (oods : StwoLean.CirclePoint StwoLean.QM31) (maxLogDegreeBound : Nat)
+    (offsets : List (List Int)) : List (List (StwoLean.CirclePoint StwoLean.QM31)) :=
+  let ts := traceStepPt maxLogDegreeBound
+  offsets.map fun offs => offs.map fun o => maskPoint oods ts o
 
 end Verifier
 

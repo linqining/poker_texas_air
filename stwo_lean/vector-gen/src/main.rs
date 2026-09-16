@@ -11,7 +11,7 @@
 //! 都是内核对 `ZMod (2^31-1)` 运算的完整归约，单条约需数秒，
 //! 全量断言的编译时间随条目数线性增长。
 
-use stwo::core::channel::{Channel, Poseidon252Channel};
+use stwo::core::channel::{Blake2sChannel, Channel, Poseidon252Channel};
 use stwo::core::circle::{CirclePoint, M31_CIRCLE_GEN, SECURE_FIELD_CIRCLE_GEN};
 use stwo::core::fields::cm31::CM31;
 use stwo::core::fields::m31::{M31, P};
@@ -101,9 +101,11 @@ fn main() {
     println!("import StwoLean.LiftedMerkle");
     println!("import StwoLean.FriCore");
     println!("import StwoLean.FriVerifier");
+    println!("import StwoLean.Blake2s");
     println!("import StwoLean.Deep");
     println!("import StwoLean.Commitment");
     println!("import StwoLean.Verifier");
+    println!("import StwoLean.StarkProofJson");
     println!();
     println!("/-!");
     println!("# Vectors — 从真实 stwo 2.3.0 导出的对拍测试向量");
@@ -1816,9 +1818,283 @@ fn main() {
             felt252_lean(ch_after_commit)
         );
         println!("{}", stmt.split('\n').map(|l| l.trim()).collect::<Vec<_>>().join(" "));
+
+        // —— StarkProof serde JSON 导出 + Lean 解析对拍 ——
+        // 用真实 stwo 类型 + serde_json 序列化出 `CommitmentSchemeProof`
+        // 的 canonical serde 形态；`air` 段为验证器侧输入（组件约束项、
+        // OODS 采样、初始通道等，不属于 stwo proof 结构）。末层多项式按
+        // `PcsProofGen.lastPoly` 注释解耦：占位 [last_check, 0]。
+        {
+            use stwo::core::fri::{FriConfig, FriLayerProof, FriProof};
+            use stwo::core::pcs::PcsConfig;
+            use stwo::core::pcs::quotients::CommitmentSchemeProof;
+            use stwo::core::poly::line::LinePoly;
+
+            let limbs4 = |v: QM31| [v.0 .0, v.0 .1, v.1 .0, v.1 .1];
+            let fri0_cols: Vec<Vec<M31>> =
+                (0..4usize).map(|l| vec![limbs4(fri_full[q])[l]]).collect();
+            let fri1_cols: Vec<Vec<M31>> =
+                (0..4usize).map(|l| vec![limbs4(line0[p1])[l]]).collect();
+            let fri2_cols: Vec<Vec<M31>> =
+                (0..4usize).map(|l| vec![limbs4(line1[p2])[l]]).collect();
+            let csp = CommitmentSchemeProof::<LH> {
+                config: PcsConfig {
+                    pow_bits: POW_BITS,
+                    fri_config: FriConfig {
+                        log_blowup_factor: BLOWUP,
+                        log_last_layer_degree_bound: 0,
+                        n_queries: 1,
+                        fold_step: 1,
+                    },
+                    lifting_log_size: None,
+                },
+                commitments: TreeVec(vec![trace_root, comp_root, root_f0, root_f1, root_f2]),
+                sampled_values: TreeVec(vec![
+                    vec![vec![v0a, v0b], vec![v1a, v1b]],
+                    (0..8usize).map(|k| vec![comp_mask[k]]).collect::<Vec<_>>(),
+                ]),
+                decommitments: TreeVec(vec![
+                    MerkleDecommitmentLifted { hash_witness: trace_witness.clone() },
+                    MerkleDecommitmentLifted { hash_witness: comp_witness.clone() },
+                    MerkleDecommitmentLifted { hash_witness: first_witness.clone() },
+                    MerkleDecommitmentLifted { hash_witness: w_f1.clone() },
+                    MerkleDecommitmentLifted { hash_witness: w_f2.clone() },
+                ]),
+                queried_values: TreeVec(vec![
+                    vec![vec![c0v], vec![c1v]],
+                    (0..8usize).map(|k| vec![comp_row[k]]).collect::<Vec<_>>(),
+                    fri0_cols,
+                    fri1_cols,
+                    fri2_cols,
+                ]),
+                proof_of_work: nonce,
+                fri_proof: FriProof::<LH> {
+                    first_layer: FriLayerProof::<LH> {
+                        fri_witness: vec![fri_full[q ^ 1]],
+                        decommitment: MerkleDecommitmentLifted {
+                            hash_witness: first_witness.clone(),
+                        },
+                        commitment: root_f0,
+                    },
+                    inner_layers: vec![
+                        FriLayerProof::<LH> {
+                            fri_witness: vec![line0[p1 ^ 1]],
+                            decommitment: MerkleDecommitmentLifted {
+                                hash_witness: w_f1.clone(),
+                            },
+                            commitment: root_f1,
+                        },
+                        FriLayerProof::<LH> {
+                            fri_witness: vec![line1[p2 ^ 1]],
+                            decommitment: MerkleDecommitmentLifted {
+                                hash_witness: w_f2.clone(),
+                            },
+                            commitment: root_f2,
+                        },
+                    ],
+                    last_layer_poly: LinePoly::new(vec![
+                        last_check,
+                        QM31::from_m31_array([M31(0); 4]),
+                    ]),
+                },
+            };
+            let proof_json = serde_json::to_string(&csp).unwrap();
+            let qmj = |v: &QM31| serde_json::to_value(v).unwrap();
+            let ptj = |p: &CirclePoint<QM31>| {
+                serde_json::json!({ "x": qmj(&p.x), "y": qmj(&p.y) })
+            };
+            let colj = |log: u32, ss: Vec<(CirclePoint<QM31>, QM31)>| {
+                serde_json::json!({
+                    "log_size": log,
+                    "samples": ss.iter().map(|(p, v)| serde_json::json!({
+                        "point": ptj(p), "value": qmj(v)
+                    })).collect::<Vec<_>>()
+                })
+            };
+            let mut cols_json: Vec<serde_json::Value> = vec![
+                colj(TRACE_LOG, vec![(z0, v0a), (z1, v0b)]),
+                colj(TRACE_LOG, vec![(z0, v1a), (z1, v1b)]),
+            ];
+            for k in 0..8usize {
+                cols_json.push(colj(TRACE_LOG, vec![(oods, comp_mask[k])]));
+            }
+            let air = serde_json::json!({
+                "channel_init": serde_json::to_value(&ch_after_commit).unwrap(),
+                "first_layer_log": L,
+                "fold_step": 1u32,
+                "pow_bits": POW_BITS,
+                "n_queries": 1usize,
+                "pp_max_log": L,
+                "composition_log_degree_bound": TRACE_LOG,
+                "query_positions": [q],
+                "components": [{
+                    "max_log_degree_bound": 2u32,
+                    "terms": terms.iter().map(|t| qmj(t)).collect::<Vec<_>>(),
+                }],
+                "cols": cols_json,
+                "composition_commitment": serde_json::to_value(&comp_root).unwrap(),
+                "composition_mask": comp_mask.iter().map(|m| qmj(m)).collect::<Vec<_>>(),
+                "last_poly_channel": [qmj(&last_channel[0])],
+            });
+            let doc = format!("{{\"proof\":{},\"air\":{}}}", proof_json, air);
+            assert!(!doc.contains("\"#"), "JSON 不得含 r# 终止序列");
+            std::fs::create_dir_all("../vectors").unwrap();
+            std::fs::write("../vectors/proof.json", &doc).unwrap();
+
+            println!();
+            println!("section StarkProofJsonVec");
+            println!();
+            println!("open StwoLean.StarkProofJson");
+            println!();
+            println!("-- 同一份 proof.json 内嵌解析：parseProof → verifyMain 全链（内核归约）");
+            println!(
+                "def spj : Option StwoLean.StarkProofJson.ParsedProof :=");
+
+            println!("    StwoLean.StarkProofJson.parseProof r#\"{}\"#", doc);
+            println!();
+            println!("example : spj.isSome = true := by native_decide");
+            println!(
+                "theorem starkProofJsonVerify : StwoLean.StarkProofJson.verifyJson r#\"{}\"# = true := by native_decide",
+                doc
+            );
+            println!(
+                "example : ppRoot0 spj = {} := by native_decide",
+                felt252_lean(trace_root)
+            );
+            println!(
+                "example : ppRoot1 spj = {} := by native_decide",
+                felt252_lean(comp_root)
+            );
+            println!(
+                "example : ppNonce spj = {} := by native_decide",
+                nonce
+            );
+            println!();
+            println!("end StarkProofJsonVec");
+        }
     }
-    println!();
     println!("end Pcs");
     println!();
+
+    // —— Blake2s / Blake2sChannel：hashlib 交叉验证 + stwo `core/channel/blake2s.rs` 对拍 ——
+    println!("section Blake2s");
+    println!();
+
+    fn bytes_lean(bs: &[u8]) -> String {
+        bs.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", ")
+    }
+    fn words_lean(ws: &[u32]) -> String {
+        ws.iter().map(|w| w.to_string()).collect::<Vec<_>>().join(", ")
+    }
+
+    // 标准向量：Lean blake2s 与 stwo 的 Blake2sHasher（即 RFC 7693 BLAKE2s-256）直接对拍，
+    // 覆盖 单块短消息 / 空消息 / 恰满一块(t=64) / 两块(t=64→65)。
+    println!(
+        "example : Blake2s.blake2s [97, 98, 99] = [{}] := by native_decide",
+        bytes_lean(&stwo::core::vcs::blake2_hash::Blake2sHasher::hash(b"abc").0)
+    );
+    println!(
+        "example : Blake2s.blake2s [] = [{}] := by native_decide",
+        bytes_lean(&stwo::core::vcs::blake2_hash::Blake2sHasher::hash(b"").0)
+    );
+    println!(
+        "example : Blake2s.blake2s (List.replicate 64 0) = [{}] := by native_decide",
+        bytes_lean(&stwo::core::vcs::blake2_hash::Blake2sHasher::hash(&[0u8; 64]).0)
+    );
+    let b65: Vec<u8> = [120u8].into_iter().chain([0u8; 64]).collect();
+    println!(
+        "example : Blake2s.blake2s (120 :: List.replicate 64 0) = [{}] := by native_decide",
+        bytes_lean(&stwo::core::vcs::blake2_hash::Blake2sHasher::hash(&b65).0)
+    );
+    println!();
+
+    // mix_u32s / mix_u64：金值即 stwo 单元测试 test_mix_u32s / test_mix_u64 的断言摘要。
+    let mut ch = Blake2sChannel::default();
+    ch.mix_u32s(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    println!(
+        "example : (Blake2s.b2MixU32s [1, 2, 3, 4, 5, 6, 7, 8, 9] Blake2s.ch0).1 = [{}] := by native_decide",
+        bytes_lean(&ch.digest().0)
+    );
+    let mut ch = Blake2sChannel::default();
+    ch.mix_u64(0x1111222233334444);
+    println!(
+        "example : (Blake2s.b2MixU64 {} Blake2s.ch0).1 = [{}] := by native_decide",
+        0x1111222233334444u64,
+        bytes_lean(&ch.digest().0)
+    );
+    println!();
+
+    // mix_felts → draw_u32s → draw_secure_felt → verify_pow_nonce 全链。
+    let mut rngb = Lcg(0x20260920);
+    let (q0, q1) = (rngb.next_qm31(), rngb.next_qm31());
+
+    let mut ch = Blake2sChannel::default();
+    ch.mix_felts(&[q0, q1]);
+    println!(
+        "example : (Blake2s.b2MixFelts [{}, {}] Blake2s.ch0).1 = [{}] := by native_decide",
+        qm31_lean(q0),
+        qm31_lean(q1),
+        bytes_lean(&ch.digest().0)
+    );
+
+    let words = ch.draw_u32s();
+    println!(
+        "example : (Blake2s.b2DrawU32s (Blake2s.b2MixFelts [{}, {}] Blake2s.ch0)).1 = [{}] := by native_decide",
+        qm31_lean(q0),
+        qm31_lean(q1),
+        words_lean(&words)
+    );
+    println!(
+        "example : (Blake2s.b2DrawU32s (Blake2s.b2MixFelts [{}, {}] Blake2s.ch0)).2.2 = 1 := by decide",
+        qm31_lean(q0),
+        qm31_lean(q1)
+    );
+
+    // draw_secure_felt：统计重试轮数作为 Lean 侧燃料。
+    let mut rounds = 0usize;
+    let secure;
+    loop {
+        let ws = ch.draw_u32s();
+        rounds += 1;
+        if ws.iter().all(|&x| x < 2 * P) {
+            let r = |x: u32| M31::reduce(x as u64);
+            secure = QM31(CM31(r(ws[0]), r(ws[1])), CM31(r(ws[2]), r(ws[3])));
+            break;
+        }
+    }
+    println!(
+        "example : (Blake2s.b2DrawSecureFelt {} ((Blake2s.b2DrawU32s (Blake2s.b2MixFelts [{}, {}] Blake2s.ch0)).2)).1 = {} := by native_decide",
+        rounds,
+        qm31_lean(q0),
+        qm31_lean(q1),
+        qm31_lean(secure)
+    );
+
+    // verify_pow_nonce：搜一个 n_bits=4 的 nonce（真例），并断言 n_bits=30 同 nonce 为假。
+    let mut chp = Blake2sChannel::default();
+    chp.mix_felts(&[q0, q1]);
+    let mut nonce: u64 = 0;
+    while !chp.verify_pow_nonce(4, nonce) {
+        nonce += 1;
+    }
+    let big_ok = chp.verify_pow_nonce(30, nonce);
+    println!(
+        "example : Blake2s.b2VerifyPowNonce (Blake2s.b2MixFelts [{}, {}] Blake2s.ch0).1 4 {} = true := by native_decide",
+        qm31_lean(q0),
+        qm31_lean(q1),
+        nonce
+    );
+    println!(
+        "example : Blake2s.b2VerifyPowNonce (Blake2s.b2MixFelts [{}, {}] Blake2s.ch0).1 30 {} = {} := by native_decide",
+        qm31_lean(q0),
+        qm31_lean(q1),
+        nonce,
+        big_ok
+    );
+
+    println!();
+    println!("end Blake2s");
+    println!();
+
     println!("end StwoLean.Vectors");
 }

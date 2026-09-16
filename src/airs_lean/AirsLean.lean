@@ -16,6 +16,7 @@ top-level synthesis theorems and assumption registry.
 -/
 import AirsLean.Foundations
 import AirsLean.Soundness
+import AirsLean.ExecEval
 import AirsLean.Custody
 import AirsLean.Censorship
 import AirsLean.Top

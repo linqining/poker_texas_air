@@ -85,10 +85,12 @@ pub struct AppchainConfig {
     pub enabled: bool,
     /// WAL 目录（`TEXAS_APPCHAIN_WAL_DIR`，默认 /tmp/texas-appchain）。
     pub wal_dir: String,
-    /// sequencer 帧签名种子（`TEXAS_APPCHAIN_SEQUENCER_SEED`，64 hex）。
+    /// sequencer 帧签名种子（`TEXAS_APPCHAIN_SEQUENCER_SEED`，64 hex；
+    /// 缺省 `<wal_dir>/sequencer-seed` load-or-generate，无公开常量缺省）。
     pub sequencer_seed: [u8; 32],
-    /// attestor 签名种子（`TEXAS_APPCHAIN_ATTESTOR_SEED`，64 hex）——
-    /// `StarkRequired` 模式的钉扎公钥即由此派生。
+    /// attestor 签名种子（`TEXAS_APPCHAIN_ATTESTOR_SEED`，64 hex；缺省
+    /// `<wal_dir>/attestor-seed` load-or-generate）——`StarkRequired` 模式的
+    /// 钉扎公钥即由此派生。
     pub attestor_seed: [u8; 32],
     /// 结算资产类（`TEXAS_APPCHAIN_ASSET`：play（默认，devnet）/ real）。
     pub asset_class: AssetClass,
@@ -108,26 +110,53 @@ pub struct AppchainConfig {
     pub rake_cap: u64,
 }
 
-fn parse_seed_env(name: &str, fallback: [u8; 32]) -> [u8; 32] {
-    std::env::var(name)
-        .ok()
-        .and_then(|s| {
-            let s = s.trim().trim_start_matches("0x");
-            hex::decode(s).ok().and_then(|v| <[u8; 32]>::try_from(v).ok())
-        })
-        .unwrap_or(fallback)
+/// 签名种子装载：显式 env（64 hex）优先；否则 `<wal_dir>/<file_name>`
+/// load-or-generate（0600）。旧版本的公开常量缺省（`[0x5E;32]`/`[0xA7;32]`）
+/// 意味着未配置部署的帧签名密钥全球公开——任何人可伪造 SOFT_CONFIRM 帧
+/// 与 attestation；缺省必须随机生成并落盘，与 WAL 同生命周期。
+fn load_or_gen_seed(env_name: &str, wal_dir: &str, file_name: &str) -> [u8; 32] {
+    if let Ok(s) = std::env::var(env_name) {
+        let s = s.trim().trim_start_matches("0x");
+        if let Some(seed) = hex::decode(s).ok().and_then(|v| <[u8; 32]>::try_from(v).ok()) {
+            return seed;
+        }
+        tracing::warn!("[appchain] {env_name} invalid (expect 64 hex) — using persisted seed");
+    }
+    let path = std::path::Path::new(wal_dir).join(file_name);
+    if let Ok(bytes) = std::fs::read(&path) {
+        if let Ok(seed) = <[u8; 32]>::try_from(bytes) {
+            return seed;
+        }
+        tracing::warn!("[appchain] {} corrupt (expect 32 bytes) — regenerating", path.display());
+    }
+    let mut seed = [0u8; 32];
+    use rand::RngCore;
+    rand::thread_rng().fill_bytes(&mut seed);
+    if let Err(e) = super::keys::write_secret_0600(&path, &seed) {
+        tracing::error!(
+            "[appchain] cannot persist {file_name} ({e}) — in-memory seed lost on restart"
+        );
+    } else {
+        tracing::warn!(
+            "[appchain] generated new {file_name} at {} — soft-confirm/attestation \
+             identity is fresh (pre-existing pinned verifiers will not recognize it)",
+            path.display()
+        );
+    }
+    seed
 }
 
 impl AppchainConfig {
     /// 从环境解析（全部有 dev 缺省，无配置即可启动）。
     #[must_use]
     pub fn from_env() -> Self {
+        let wal_dir = std::env::var("TEXAS_APPCHAIN_WAL_DIR")
+            .unwrap_or_else(|_| "/tmp/texas-appchain".to_string());
         Self {
             enabled: std::env::var("TEXAS_APPCHAIN").ok().as_deref() != Some("0"),
-            wal_dir: std::env::var("TEXAS_APPCHAIN_WAL_DIR")
-                .unwrap_or_else(|_| "/tmp/texas-appchain".to_string()),
-            sequencer_seed: parse_seed_env("TEXAS_APPCHAIN_SEQUENCER_SEED", [0x5E; 32]),
-            attestor_seed: parse_seed_env("TEXAS_APPCHAIN_ATTESTOR_SEED", [0xA7; 32]),
+            sequencer_seed: load_or_gen_seed("TEXAS_APPCHAIN_SEQUENCER_SEED", &wal_dir, "sequencer-seed"),
+            attestor_seed: load_or_gen_seed("TEXAS_APPCHAIN_ATTESTOR_SEED", &wal_dir, "attestor-seed"),
+            wal_dir,
             asset_class: match std::env::var("TEXAS_APPCHAIN_ASSET")
                 .unwrap_or_default()
                 .to_ascii_lowercase()
@@ -408,6 +437,9 @@ fn sequencer_config() -> SequencerConfig {
 pub fn init(config: AppchainConfig) -> Result<Arc<AppchainRuntime>, String> {
     std::fs::create_dir_all(&config.wal_dir)
         .map_err(|e| format!("appchain wal dir {}: {e}", config.wal_dir))?;
+    // custody secret 装配（env 优先 / WAL 目录 load-or-generate）——必须在
+    // 任何 owner_key_of/spend_secret_of 派生（fee_policy、结算、桥）之前。
+    super::keys::init_custody_secret(std::path::Path::new(&config.wal_dir))?;
     let wal_path = std::path::Path::new(&config.wal_dir).join("sequencer.wal");
     let metrics = Arc::new(MetricsRegistry::new());
     let seq_key = SequencerKey::from_seed(&config.sequencer_seed);
@@ -512,6 +544,8 @@ pub fn init_for_test(
     config: AppchainConfig,
     provider: Arc<dyn VaultProvider>,
 ) -> Option<Arc<AppchainRuntime>> {
+    // 固定测试 custody secret（进程单例；不落盘、不依赖环境）。
+    super::keys::init_custody_secret_for_test([0x42; 32]);
     let metrics = Arc::new(MetricsRegistry::new());
     let seq_key = SequencerKey::from_seed(&config.sequencer_seed);
     let sequencer = Sequencer::new(seq_key, sequencer_config(), Arc::clone(&metrics));

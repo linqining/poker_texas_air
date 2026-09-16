@@ -677,12 +677,12 @@ dependencies = [
 [[package]]
 name = "poker-protocol-abi"
 version = "0.1.0"
-source = "git+ssh://git@github.com/linqining/poker_protocol.git#45df5021afc72fcbf04eb9f79b08f064412bc04a"
+source = "git+https://github.com/linqining/poker_protocol.git?rev=45df5021afc72fcbf04eb9f79b08f064412bc04a#45df5021afc72fcbf04eb9f79b08f064412bc04a"
 
 [[package]]
 name = "poker-protocol-bg"
 version = "0.1.0"
-source = "git+ssh://git@github.com/linqining/poker_protocol.git#45df5021afc72fcbf04eb9f79b08f064412bc04a"
+source = "git+https://github.com/linqining/poker_protocol.git?rev=45df5021afc72fcbf04eb9f79b08f064412bc04a#45df5021afc72fcbf04eb9f79b08f064412bc04a"
 dependencies = [
  "borsh",
  "poker-protocol-core",
@@ -692,7 +692,7 @@ dependencies = [
 [[package]]
 name = "poker-protocol-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/linqining/poker_protocol.git#45df5021afc72fcbf04eb9f79b08f064412bc04a"
+source = "git+https://github.com/linqining/poker_protocol.git?rev=45df5021afc72fcbf04eb9f79b08f064412bc04a#45df5021afc72fcbf04eb9f79b08f064412bc04a"
 dependencies = [
  "borsh",
  "crypto-bigint",
@@ -712,7 +712,7 @@ dependencies = [
 [[package]]
 name = "poker-protocol-proofs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/linqining/poker_protocol.git#45df5021afc72fcbf04eb9f79b08f064412bc04a"
+source = "git+https://github.com/linqining/poker_protocol.git?rev=45df5021afc72fcbf04eb9f79b08f064412bc04a#45df5021afc72fcbf04eb9f79b08f064412bc04a"
 dependencies = [
  "borsh",
  "lazy_static",
@@ -729,7 +729,7 @@ dependencies = [
 [[package]]
 name = "poker_protocol"
 version = "0.1.0"
-source = "git+ssh://git@github.com/linqining/poker_protocol.git#45df5021afc72fcbf04eb9f79b08f064412bc04a"
+source = "git+https://github.com/linqining/poker_protocol.git?rev=45df5021afc72fcbf04eb9f79b08f064412bc04a#45df5021afc72fcbf04eb9f79b08f064412bc04a"
 dependencies = [
  "hex",
  "poker-protocol-abi",

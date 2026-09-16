@@ -131,8 +131,27 @@ lake build
   主循环（`Verifier.verifyMain`：random_coeff → 组合承诺 → OODS →
   DEEP-ALI → verify_values）全部落地并对拍。
   - 附带：二进制标量乘（double-and-add）以机器验证 secure gen 的完整阶。
-- **Phase 2.5（验证器收尾）**：`verifyMain` 接入真实 proof 反序列化
-  （`StarkProof` 完整字段）、组件 mask 结构参数化、Blake2s 通道变体。
+- **Phase 2.5（验证器收尾）— 进行中**：
+  - 组件 mask 参数化 ✓：`ComponentSpecP` + `traceStepPt`（域生成元）+
+    `maskPoint`（`oods + traceStep.mul_signed(offset).into_ef()`）+
+    `deriveMaskPoints`（逐列派生采样点）——复刻
+    `component.rs::mask_points` 语义；
+  - Blake2s 通道 ✓：`Blake2s.lean`（RFC 7693 BLAKE2s-256 全量可计算实现 +
+    `blake2s.rs` 通道逐行移植）。定位并修复三处实现缺陷：轮函数消息词
+    索引（`m[s[i]]` 误写为 `s[i]`）、分块计数 off-by-one（多压一块）、
+    初始 digest 语义（`default()` 是 32 零字节而非空串）。与 stwo
+    `Blake2sHasher` 及 `Blake2sChannel` 全链对拍通过（blake2s 四个
+    边界向量、mix_u32s / mix_u64（金值即 stwo 单元测试断言）、
+    mix_felts → draw_u32s → draw_secure_felt、verify_pow_nonce 真假例）；
+  - `StarkProof` JSON 反序列化 ✓：`StarkProofJson.lean`——纯 Lean 可计算
+    JSON 解析器（RFC 8259 子集，带燃料、内核可归约）+ stwo serde schema
+    到验证器输入的完整映射。JSON 由 `vector-gen` 用**真实 stwo 类型**经
+    `serde_json` 序列化导出（`vectors/proof.json`，外层 `{"proof":…,
+    "air":…}`，Felt 为十进制串、QM31 为 `[[a,b],[c,d]]`）。对拍定理
+    `starkProofJsonVerify`：同一 JSON 内嵌解析 → `verifyMain` 全链
+    `native_decide` 通过，另钉树根 / nonce 一致性。
+    过程中修复解析器两处缺陷（obj/arr 终止路径漏收最后元素、
+    `first_layer_log` 归属错置）。
 - **Phase 3（约束层桥接）**：`stwo-constraint-framework` 验证侧
   （LogUp、preprocessed columns、point 求值）+ 目标程序 AIR eval 的
   可执行化。对 `poker_texas_air` 项目：AIR 约束语义已有
@@ -161,7 +180,10 @@ stwo_lean/
 │   ├── Deep.lean        DEEP 商（quotients.rs）
 │   ├── Commitment.lean  verify_values 泛化编排（多树/多查询/packed）
 │   ├── Verifier.lean    验证器主循环（verifier.rs + DEEP-ALI + 累加器）
+│   ├── Blake2s.lean     Blake2s 哈希 + Blake2sChannel（对拍 ✓）
+│   ├── StarkProofJson.lean  StarkProof serde schema JSON 解析（对拍 ✓）
 │   └── Vectors.lean     对拍向量（自动生成，勿手改）
+├── vectors/proof.json   真实 serde 序列化的 StarkProof 样例（vector-gen 导出）
 ├── vector-gen/          测试向量生成器（Rust，独立 workspace）
 ├── scripts/             质量门脚本 + 常数提取脚本
 ├── lakefile.lean

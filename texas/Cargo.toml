@@ -49,9 +49,15 @@ base64 = "0.22"
 # workspace 解析）；starknet-crypto 0.6（zchain 侧）与 0.8（本工作区）为
 # semver 不兼容双版本共存，Felt 类型不跨边界（poker-appchain 公开 API 全部
 # 用 [u8; 32] 字节形态，无跨 Felt 桥接）。
-poker-appchain = { path = "../../zchain/poker-appchain" }
+# 依赖走 https git + 钉 rev（不能用仓外 path：CI 托管 runner 上不存在
+# ../../zchain checkout）。本地开发如需跟随未推送的 zchain 改动，在根
+# Cargo.toml 追加：
+#   [patch."https://github.com/linqining/zchain.git"]
+#   poker-appchain = { path = "../zchain/poker-appchain" }
+#   poker-settlement-core = { path = "../zchain/poker-settlement-core" }
+poker-appchain = { git = "https://github.com/linqining/zchain.git", rev = "328bf80a4e08bf1db7a9032a5f6beed05aae5585" }
 # 结算语义唯一事实源：SettlementPlan / derive_settlement_plan / rake_for。
-poker-settlement-core = { path = "../../zchain/poker-settlement-core" }
+poker-settlement-core = { git = "https://github.com/linqining/zchain.git", rev = "328bf80a4e08bf1db7a9032a5f6beed05aae5585" }
 # attestation v2.1 签名（poker-appchain 同版本 2.1.1，同一实例）。
 ed25519-dalek = "2.1.1"
 # Poseidon（Plan D v2 reveal_commitment + settlement digest 重算）。

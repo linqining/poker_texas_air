@@ -305,7 +305,8 @@ impl VmTable {
         // button 对齐：游戏层按钮在参与座位中的 rank（VM post_blinds 据此
         // 计算盲注位置，与游戏层盲注玩家保持一致）。dead button 轮转轨道
         // last_bb_rank 一并注入：VM post_blinds 的轮转基准与游戏层
-        // set_blinds 同源，过渡手（dead small blind 等）逐位一致。
+        // set_blinds 同源（游戏层对离场基准回退到前驱参与者，与
+        // rank_of_rotation_base 的压缩映射一致），过渡手逐位一致。
         self.table.button = button_rank.min(self.table.max_players.saturating_sub(1) as u8);
         self.table.last_bb_seat = last_bb_rank;
 

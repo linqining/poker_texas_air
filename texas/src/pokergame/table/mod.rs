@@ -1008,9 +1008,10 @@ mod tests {
         }
 
         /// 大盲出局（剩 3 人）：按钮前进到空座（死按钮），上一手大盲座位
-        /// 空缺 → 本手无小盲（dead small blind），大盲轮转给下一位。
+        /// 空缺 → 轮转基准回退到其前驱参与者（座 2）补位小盲——与镜像
+        /// rank_of_rotation_base 的压缩映射一致；大盲轮转给下一位。
         #[test]
-        fn bb_busts_produces_dead_small_blind() {
+        fn bb_busts_predecessor_posts_small_blind() {
             let mut table = make_table_with_players(&[1, 2, 3, 4]);
             setup_after_hand_one(&mut table);
             // BB（座 3）出局离座。
@@ -1020,13 +1021,61 @@ mod tests {
             table.set_blinds();
 
             assert_eq!(table.button(), Some(2), "button lands on the vacated SB seat (dead button)");
-            assert_eq!(table.small_blind(), None, "previous BB seat is gone → dead small blind");
+            assert_eq!(table.small_blind(), Some(2), "departed base → predecessor participant posts SB");
             assert_eq!(table.big_blind(), Some(4), "BB rotation: next participating after seat 3");
             assert_eq!(table.last_bb_seat(), 4, "track advances to this hand's BB");
             let pot = table.pot();
-            assert_eq!(pot, 100, "only the big blind (100) enters the pot");
+            assert_eq!(pot, 150, "SB 50 + BB 100 enter the pot");
+            let sb_stack = table.local_seats.get(&2).unwrap().stack;
+            assert_eq!(sb_stack, 100000 - 50, "predecessor stack reduced by the small blind");
             let bb_stack = table.local_seats.get(&4).unwrap().stack;
             assert_eq!(bb_stack, 100000 - 100, "BB stack reduced by exactly the big blind");
+        }
+
+        /// 跨层一致性（P1 回归）：上一手大盲离场时，游戏层 set_blinds 的
+        /// 小盲/大盲归属必须与镜像压缩 rank 映射
+        ///（prove_log::rank_of_rotation_seat → VM post_blinds）逐位一致——
+        /// 否则镜像（结算 witness 来源）会凭空多收一笔游戏层从未收取的
+        /// 小盲，两层 pot/stack 分歧。
+        #[test]
+        fn departed_base_blinds_match_mirror_rank_mapping() {
+            // 参与者 1,2,4,6（座 3 上一手大盲，已离场；座 5 空）。
+            let mut table = make_table_with_players(&[1, 2, 4, 6]);
+            table.set_button(Some(1));
+            table.set_last_bb_seat(Some(3));
+
+            table.move_button();
+            table.set_blinds();
+
+            // plan（按座位升序）与镜像 rank 映射：前驱参与者 = 座 2。
+            let plan: Vec<u32> = vec![1, 2, 4, 6];
+            let rank =
+                crate::starknet::prove_log::rank_of_rotation_seat(3, &plan) as usize;
+            assert_eq!(rank, 1, "departed seat 3 → predecessor rank (seat 2)");
+            assert_eq!(
+                table.small_blind(),
+                Some(plan[rank]),
+                "game-layer SB must equal the mirror's rotation-base seat"
+            );
+            assert_eq!(
+                table.big_blind(),
+                Some(plan[(rank + 1) % plan.len()]),
+                "game-layer BB must equal the next participating rank after the base"
+            );
+
+            // 环绕场景：上一手大盲 = 座 1（低于全部参与者座位）→ 前驱 =
+            // 环形最后一名参与者（座 6），大盲环绕到最低座位。
+            let mut table = make_table_with_players(&[2, 4, 6]);
+            table.set_button(Some(2));
+            table.set_last_bb_seat(Some(1));
+            table.move_button();
+            table.set_blinds();
+            let plan: Vec<u32> = vec![2, 4, 6];
+            let rank =
+                crate::starknet::prove_log::rank_of_rotation_seat(1, &plan) as usize;
+            assert_eq!(rank, 2, "wrap case → last participant rank (seat 6)");
+            assert_eq!(table.small_blind(), Some(plan[rank]));
+            assert_eq!(table.big_blind(), Some(plan[(rank + 1) % plan.len()]));
         }
 
         /// 小盲出局（剩 3 人）：按钮落在空座位，小盲照常轮转（上一手大盲

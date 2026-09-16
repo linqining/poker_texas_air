@@ -67,8 +67,9 @@ async fn main() -> std::io::Result<()> {
     // B6/B7：嵌入式 appchain 运行时（sequencer WAL + 证明管道 + 出入金桥 +
     // 自动对账；TEXAS_APPCHAIN=0 显式关闭）。失败降级为遗留路径并告警
     // （服务器绝不因 appchain 装配失败拒绝服务）。
-    if starknet::appchain::AppchainConfig::from_env().enabled {
-        match starknet::appchain::runtime::init(starknet::appchain::AppchainConfig::from_env()) {
+    let appchain_config = starknet::appchain::AppchainConfig::from_env();
+    if appchain_config.enabled {
+        match starknet::appchain::runtime::init(appchain_config) {
             Ok(rt) => {
                 tracing::info!(
                     "Appchain runtime ready (attestor 0x{})",

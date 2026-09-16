@@ -148,8 +148,9 @@ impl Table {
     /// - **大盲**：上一手大盲座位（`last_bb_seat`；首手退化为 button）之后
     ///   顺时针第一个参与座位（active = 在座且非 sitting out / 非等待入局）。
     ///   轮转永不跳人、永不重复——无人连续两手交大盲。
-    /// - **小盲（非单挑）**：上一手大盲座位本身——该座位空缺 / 离场 / 等
-    ///   待时本手**无小盲**（dead small blind），不向其后顺延。
+    /// - **小盲（非单挑）**：上一手大盲座位本身；该座位已不参与本手
+    ///   （离场/sitting out/等待）时，**由其前驱参与者补位小盲**——
+    ///   见 [`Table::set_blinds`] 的回退说明。
     /// - **单挑（2 名参与者）**：大盲按轮转归属，小盲 = 大盲之外另一参与
     ///   玩家（承担 button 职责：翻牌前先行动、翻牌后后行动）。
     ///
@@ -159,15 +160,27 @@ impl Table {
         let is_heads_up = self.active_players().len() == 2;
         let button = self.button().unwrap_or(1);
         let last_bb = self.last_bb_seat();
-        let rotation_base = if last_bb > 0 && last_bb <= self.max_players() {
+        let has_rotation_history = last_bb > 0 && last_bb <= self.max_players();
+        let mut rotation_base = if has_rotation_history {
             last_bb
         } else {
             button
         };
+        // 上一手大盲座位已不参与本手时，轮转基准回退到其前驱参与者
+        //（环形）。这与镜像 prove_log::rank_of_rotation_base 的压缩 rank
+        // 映射逐位一致：镜像座位空间没有空座，空基准必然落在前驱参与者
+        // 的 rank 上（小盲由其承担、大盲落点不变）。Robert's Rules 的
+        // dead small blind（空座不补位、本手无小盲）在压缩镜像空间不可
+        // 表达——为保证游戏层与镜像（结算 witness 唯一来源）的资金状态
+        // 逐位一致，游戏层采用镜像可表达的同一语义。
+        // button 回退路径（无盲注轨道历史的首手）不在本回退范围内。
+        if has_rotation_history && !self.rotation_base_participating(rotation_base) {
+            rotation_base = self.predecessor_participant(rotation_base).unwrap_or(rotation_base);
+        }
         // 大盲：轮转基准之后第一个参与座位。
         let bb = self.next_active_player(rotation_base, 1).unwrap_or(rotation_base);
-        // 小盲：单挑 = 大盲之外另一参与者；非单挑 = 上一手大盲座位本身
-        //（仍参与且 != 大盲时），否则本手无小盲。
+        // 小盲：单挑 = 大盲之外另一参与者；非单挑 = 轮转基准座位本身
+        //（参与且 != 大盲时；基准已回退到前驱参与者，此时必参与）。
         let sb = if is_heads_up {
             self.next_active_player(bb, 1).or(Some(bb))
         } else if rotation_base != bb {
@@ -219,6 +232,29 @@ impl Table {
             // 全员 all-in，不设置 turn，start_betting_round 会跳过下注轮
             self.set_turn(None);
         }
+    }
+
+    /// 轮转基准座位是否参与本手。与 prove_log 手牌计划的参与者过滤严格
+    /// 一致：在座玩家且非 sitting out / 非等待入局。
+    fn rotation_base_participating(&self, seat_id: u32) -> bool {
+        self.seats().get(&seat_id).is_some_and(|s| {
+            s.player.is_some() && !s.sitting_out && !s.is_waiting
+        })
+    }
+
+    /// 轮转基准的前驱参与者（环形）：座位号小于 base 的最大参与者座位；
+    /// 不存在（base 低于全部参与者座位号）时环绕到全局最大参与者座位。
+    /// 与镜像 prove_log::rank_of_rotation_base 的压缩 rank 映射
+    ///（`rposition(seat_id <= base)` / 环绕 `len-1`）逐位一致。
+    fn predecessor_participant(&self, base: u32) -> Option<u32> {
+        let mut ids: Vec<u32> = self
+            .seats()
+            .iter()
+            .filter(|(_, s)| s.player.is_some() && !s.sitting_out && !s.is_waiting)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids.iter().rev().find(|id| **id < base).copied().or_else(|| ids.last().copied())
     }
 
     /// Set blinds using on-chain values (from BlindsPosted event).

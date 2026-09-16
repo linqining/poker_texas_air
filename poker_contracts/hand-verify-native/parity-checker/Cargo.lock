@@ -559,7 +559,7 @@ dependencies = [
 [[package]]
 name = "poker-protocol-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/linqining/poker_protocol.git#45df5021afc72fcbf04eb9f79b08f064412bc04a"
+source = "git+https://github.com/linqining/poker_protocol.git?rev=45df5021afc72fcbf04eb9f79b08f064412bc04a#45df5021afc72fcbf04eb9f79b08f064412bc04a"
 dependencies = [
  "crypto-bigint",
  "curve25519-dalek",

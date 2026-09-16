@@ -12,4 +12,5 @@ import StwoLean.FriVerifier
 import StwoLean.Deep
 import StwoLean.Commitment
 import StwoLean.Verifier
+import StwoLean.StarkProofJson
 import StwoLean.Vectors
