@@ -2307,7 +2307,6 @@ dependencies = [
 [[package]]
 name = "poker-appchain"
 version = "0.1.0"
-source = "git+https://github.com/linqining/zchain.git?rev=328bf80a4e08bf1db7a9032a5f6beed05aae5585#328bf80a4e08bf1db7a9032a5f6beed05aae5585"
 dependencies = [
  "bincode",
  "blake2",
@@ -2395,7 +2394,6 @@ dependencies = [
 [[package]]
 name = "poker-settlement-core"
 version = "0.1.0"
-source = "git+https://github.com/linqining/zchain.git?rev=328bf80a4e08bf1db7a9032a5f6beed05aae5585#328bf80a4e08bf1db7a9032a5f6beed05aae5585"
 dependencies = [
  "blake2",
  "borsh",

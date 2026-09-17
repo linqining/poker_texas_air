@@ -196,6 +196,20 @@ pub fn record_hand_start(table: &mut Table) {
         if seat.sitting_out || seat.is_waiting {
             continue;
         }
+        // 本手洗牌参与者一致性（2026-09-17 长跑复现的桌面死循环根因）：
+        // 入座但未参与本手 join_and_shuffle 的座位（bust 后重进、页面重载
+        // 换 pk——客户端 zk 身份本就随 localStorage 轮换）不在 mental_poker
+        // 注册表里。若放行：游戏层 reveal assignment 集合（mental players）
+        // 与 VM DealHole 窗口参与者集分歧，所有揭示提交被 VM 以
+        // "reveal set size mismatch" 拒绝 → 每手 45s 超时作废、死循环。
+        // 这里跳过该座位（本手等待；下一手洗牌轮转到达即自动注册归队）。
+        if !table.mental_poker_game.players.contains_key(player.pk_hex.as_str()) {
+            tracing::warn!(
+                "[prove-log] table {table_id} seat {seat_id} pk {} not registered in this hand's shuffle — skipped from hand (waiting for next shuffle)",
+                player.pk_hex
+            );
+            continue;
+        }
         let Some((pk_hex, proof, tx_pk_bytes)) = joins.as_ref().and_then(|j| {
             j.get(&(table_id, player.wallet_address.0.clone())).cloned()
         }) else {

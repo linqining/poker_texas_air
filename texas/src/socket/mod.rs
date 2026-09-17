@@ -614,18 +614,30 @@ impl SocketState {
                 let current_pk = table.shuffle_state.current_player_pk.clone();
                 let socket_id = if let Some(pk) = &current_pk {
                     if let Some(wallet_address) = table.players().get(pk) {
-                        let found = gs.players.values()
-                            .find(|p| &p.wallet_address == wallet_address)
-                            .map(|p| p.socket_id.clone());
-                        if found.is_none() {
+                        // 同一钱包可能残留多条 players 条目（页面重载后旧
+                        // socket 未清理）。必须投递"活 socket"：命中死条目时
+                        // notice 静默进死管道，玩家永远等不到洗牌轮转（实测
+                        // 长跑死循环根因之一）。
+                        let candidates: Vec<String> = gs.players.values()
+                            .filter(|p| &p.wallet_address == wallet_address)
+                            .map(|p| p.socket_id.clone())
+                            .collect();
+                        let live = candidates.iter().find_map(|sid| {
+                            sid.parse::<socketioxide::socket::Sid>()
+                                .ok()
+                                .and_then(|s| io.get_socket(s))
+                                .map(|_| sid.clone())
+                        });
+                        if live.is_none() {
                             tracing::warn!(
-                                "send_shuffle_notice: table {} pk {} wallet {} not found in gs.players (wallet_addr mismatch - possible proxy_address issue)",
+                                "send_shuffle_notice: table {} pk {} wallet {} has {} player entr(y/ies) but no live socket (wallet_addr mismatch or stale entries)",
                                 table_id,
                                 pk,
-                                wallet_address.0
+                                wallet_address.0,
+                                candidates.len()
                             );
                         }
-                        found
+                        live
                     } else {
                         None
                     }

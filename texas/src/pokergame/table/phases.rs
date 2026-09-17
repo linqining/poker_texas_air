@@ -298,8 +298,15 @@ impl Table {
             if let Some(seat) = self.local_seats.get_mut(&seat_id) {
                 if let Some(player) = &seat.player {
                     if !seat.sitting_out {
-                        tracing::info!("player {} is not sitting out, deal 2 to {}", player.name, seat_id);
-                        if let Err(e) = self.mental_poker_game.deal_to_player(&player.pk_hex.clone(), 2) {
+                        // 未注册进本手 mental_poker（bust 后重进/换 pk，洗牌
+                        // 未轮到）→ 本手无牌可发，等下一手洗牌注册归队。安静
+                        // 跳过（此前 ERROR 日志实为预期路径）。
+                        if !self.mental_poker_game.players.contains_key(player.pk_hex.as_str()) {
+                            tracing::warn!(
+                                "player {} (pk {}) seated but not registered in this hand's shuffle — no deal this hand, waits for next shuffle",
+                                player.name, player.pk_hex
+                            );
+                        } else if let Err(e) = self.mental_poker_game.deal_to_player(&player.pk_hex.clone(), 2) {
                             tracing::error!("[deal_preflop] deal_to_player failed for player {} seat {}: {:?}", player.name, seat_id, e);
                         }
                         seat.turn = is_turn;

@@ -445,9 +445,17 @@ pub fn init(config: AppchainConfig) -> Result<Arc<AppchainRuntime>, String> {
     let seq_key = SequencerKey::from_seed(&config.sequencer_seed);
 
     // WAL 优先恢复（fail-closed 重放），空/不存在则全新内存态。
+    // 撕裂尾帧容崩：生产方启动时把 WAL 截回有效前缀（强杀可能留下半帧，
+    // 严格重放会整链拒绝并让网关等消费方一起拒启）。消费方（网关）保持
+    // 严格重放——生产方治愈、消费方纪律不变。
     let mut sequencer = if wal_path.exists() {
-        Sequencer::replay(&wal_path, seq_key.public, sequencer_config(), Arc::clone(&metrics))
-            .map_err(|e| format!("appchain WAL replay failed: {e}"))?
+        let mut s = Sequencer::replay(&wal_path, seq_key.public, sequencer_config(), Arc::clone(&metrics))
+            .map_err(|e| format!("appchain WAL replay failed: {e}"))?;
+        // replay 实例携带占位签名密钥（重放只验签）。生产方继续追加出帧，
+        // 必须重设真实密钥——否则所有新帧签名无效，网关/桥整链拒绝
+        // （2026-09-17 长跑复现：每次重启后锚定冻结的终极根因）。
+        s.set_signing_key(seq_key.clone());
+        s
     } else {
         Sequencer::new(seq_key.clone(), sequencer_config(), Arc::clone(&metrics))
     };
@@ -525,6 +533,75 @@ pub fn init(config: AppchainConfig) -> Result<Arc<AppchainRuntime>, String> {
 
     // B7 后台管线（存款桥/提现执行/自动对账）。
     super::bridge::spawn_bridge_tasks(Arc::clone(&runtime));
+
+    // 崩溃恢复（2026-09-17 长跑复现）：上一进程若死于"Settle op 已落 WAL
+    // 但批次未出证"，该 op 会永久挡住 mark_proven 的连续前缀——之后所有
+    // 存款 note 停在 Unproven，每手 BuyIn 被 "note not proven" 拒绝，全部
+    // 回退 legacy 路径（结算不上 appchain），锚定冻结。启动时扫描水位之上
+    // 的 Settle op，重建 ProofJob 重新出证；水位一旦越过缺口，被挡的
+    // 存款/拆分 op 经 proven_marks 连续化自动归位（note 状态随之修复）。
+    {
+        let pending: Vec<u64> = runtime.with_seq(|seq| {
+            let wm = seq.proven_watermark();
+            seq.chain()
+                .iter()
+                .filter(|f| f.frame.index > wm)
+                .filter_map(|f| match &f.frame.op {
+                    Operation::Settle(_) => Some(f.frame.index),
+                    _ => None,
+                })
+                .collect()
+        });
+        if !pending.is_empty() {
+            tracing::info!(
+                "[appchain] recovery: {} unproven settle op(s) above watermark {} — resubmitting proofs",
+                pending.len(),
+                runtime.with_seq(|seq| seq.proven_watermark()),
+            );
+            let rt = Arc::clone(&runtime);
+            std::thread::spawn(move || {
+                for idx in pending {
+                    // 逐个取出 record 重新提交（chain 内记录即结算事实源）。
+                    let job_record = rt.with_seq(|seq| {
+                        seq.chain()
+                            .iter()
+                            .find(|f| f.frame.index == idx)
+                            .and_then(|f| match &f.frame.op {
+                                Operation::Settle(record) => Some((**record).clone()),
+                                _ => None,
+                            })
+                    });
+                    let Some(record) = job_record else { continue };
+                    let policy = rt.fee_policy();
+                    let priority = match record
+                        .inputs
+                        .first()
+                        .map(|i| i.note.asset_class)
+                        .unwrap_or(AssetClass::Play)
+                    {
+                        AssetClass::Real => poker_appchain::pipeline::Priority::Real,
+                        AssetClass::Play => poker_appchain::pipeline::Priority::Play,
+                    };
+                    if let Err(e) = rt.pipeline.submit(poker_appchain::pipeline::ProofJob {
+                        op_index: idx,
+                        table_id: record.table_id,
+                        record: std::sync::Arc::new(record),
+                        policy,
+                        priority,
+                    }) {
+                        tracing::warn!("[appchain] recovery: resubmit op {idx} rejected: {e}");
+                        continue;
+                    }
+                    match rt.await_proven(idx, rt.prove_timeout()) {
+                        Ok(()) => tracing::info!("[appchain] recovery: op {idx} proven (watermark advanced)"),
+                        Err(e) => tracing::warn!("[appchain] recovery: op {idx} proof pending after timeout: {e}"),
+                    }
+                }
+                tracing::info!("[appchain] recovery pass complete: watermark={}",
+                    rt.with_seq(|seq| seq.proven_watermark()));
+            });
+        }
+    }
 
     tracing::info!(
         "[appchain] runtime ready: wal={} asset={:?} provider={} attestor=0x{} reconcile={}s",
