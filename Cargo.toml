@@ -151,10 +151,3 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 3
 debug = false
-
-# 会话内本地覆盖（2026-09-17）：zchain 未提交改动 —— WAL 撕裂尾帧容崩、
-# set_signing_key（重启后签名密钥恢复）、note 证明化恢复配套。正式发布前
-# 应提交 zchain 改动并回写 git rev。
-[patch."https://github.com/linqining/zchain.git"]
-poker-appchain = { path = "/tmp/zchain-pin/poker-appchain" }
-poker-settlement-core = { path = "/tmp/zchain-pin/poker-settlement-core" }
