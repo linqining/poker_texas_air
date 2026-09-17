@@ -83,6 +83,17 @@ fn json_to_ct(json_str: &str) -> Result<ElGamalCiphertext, String> {
     })
 }
 
+fn convert_digest32(hex_str: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(hex_str).map_err(|e| format!("bad digest hex: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| "digest must be 32 bytes".to_string())
+}
+
+fn hex_encode_bytes32(bytes: &[u8; 32]) -> String {
+    hex::encode(bytes)
+}
+
 fn ct_vec_to_json(cts: &[ElGamalCiphertext]) -> String {
     let arr: Vec<String> = cts.iter().map(ct_to_json).collect();
     format!("[{}]", arr.join(","))
@@ -648,7 +659,7 @@ impl WasmClientPlayer {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| JsValue::from_str(&e))?;
 
-        self.inner.decrypt_readable_card(&ct, deck_plaintext)
+        self.inner.decrypt_owner_residual_carrier(&ct, deck_plaintext)
         .map(|card| card.to_string())
         .ok_or_else(|| {
             // 诊断信息：帮助定位连续打牌场景下的解密失败原因
@@ -663,11 +674,19 @@ impl WasmClientPlayer {
         })
     }
 
+    /// 新协议 reconstruction：输入服务端 ReconstructNotice 下发的
+    /// context_digest / epoch / prior_state_digest / 聚合钥与自己的
+    /// residual carriers，产出 statement + proof（JSON，与 texas 服务端
+    /// ReconstructionStatementJson/ReconstructProofJson 适配器逐字段对齐）。
+    #[allow(clippy::too_many_arguments)]
     pub fn reconstruct(
         &self,
         origin_cards_json: &str,
-        user_readable_cards_json: &str,
-        coefficient_hex: &str,
+        residual_carriers_json: &str,
+        context_digest_hex: &str,
+        reconstruction_epoch: u64,
+        prior_state_digest_hex: &str,
+        aggregate_pk_hex: &str,
     ) -> Result<JsValue, JsValue> {
         let origin_pt_arr: Vec<String> = serde_json::from_str(origin_cards_json)
             .map_err(|e| JsValue::from_str(&format!("JSON error: {}", e)))?;
@@ -676,52 +695,93 @@ impl WasmClientPlayer {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| JsValue::from_str(&e))?;
 
-        let user_readable_cards = json_to_ct_vec(user_readable_cards_json)
+        let residual_carriers = json_to_ct_vec(residual_carriers_json)
             .map_err(|e| JsValue::from_str(&e))?;
 
-        let coefficient = hex_to_scalar(coefficient_hex)
+        let context_digest = convert_digest32(context_digest_hex)
+            .map_err(|e| JsValue::from_str(&e))?;
+        let prior_state_digest = convert_digest32(prior_state_digest_hex)
             .map_err(|e| JsValue::from_str(&e))?;
 
-        let result = self.inner.reconstruct(&origin_cards, &user_readable_cards, &coefficient)
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        let aggregate_pk = hex_to_ecpoint(aggregate_pk_hex)
+            .map_err(|e| JsValue::from_str(&e))?;
 
-        fn chaum_pedersen_proof_to_json(proof: &poker_protocol::zk_shuffle::reconstruction::ChaumPedersenDLEQProof<DefaultCurve>) -> String {
+        let result = self.inner.reconstruct(
+            context_digest,
+            reconstruction_epoch,
+            prior_state_digest,
+            &origin_cards,
+            &residual_carriers,
+            &aggregate_pk,
+        ).map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        fn cross_key_proof_to_json(
+            proof: &poker_protocol::zk_shuffle::reconstruction::CrossKeyNegationProof<DefaultCurve>,
+        ) -> String {
             format!(
-                r#"{{"commitment_a_hex":"{}","commitment_b_hex":"{}","response_hex":"{}"}}"#,
-                ecpoint_to_hex(&proof.commitment_a),
-                ecpoint_to_hex(&proof.commitment_b),
-                scalar_to_hex(&proof.response)
+                r#"{{"commitment_owner_key_hex":"{}","commitment_contribution_c1_hex":"{}","commitment_joint_c2_hex":"{}","response_owner_sk_hex":"{}","response_contribution_randomness_hex":"{}"}}"#,
+                ecpoint_to_hex(&proof.commitment_owner_key),
+                ecpoint_to_hex(&proof.commitment_contribution_c1),
+                ecpoint_to_hex(&proof.commitment_joint_c2),
+                scalar_to_hex(&proof.response_owner_sk),
+                scalar_to_hex(&proof.response_contribution_randomness),
             )
         }
 
-        fn swap_out_card_proof_to_json(proof: &poker_protocol::zk_shuffle::reconstruction::SwapOutCardProof<DefaultCurve>) -> String {
+        fn slot_or_proof_to_json(
+            proof: &poker_protocol::zk_shuffle::reconstruction::SlotContributionOrProof<DefaultCurve>,
+        ) -> String {
+            let pt2 = |pts: &[EcPoint; 2]| -> String {
+                serde_json::to_string(&[
+                    ecpoint_to_hex(&pts[0]),
+                    ecpoint_to_hex(&pts[1]),
+                ]).unwrap_or_else(|_| "[]".to_string())
+            };
+            let sc2 = |scs: &[Scalar; 2]| -> String {
+                serde_json::to_string(&[
+                    scalar_to_hex(&scs[0]),
+                    scalar_to_hex(&scs[1]),
+                ]).unwrap_or_else(|_| "[]".to_string())
+            };
             format!(
-                r#"{{"user_readable_card":{},"swap_out_card":{},"chaum_pedersen_proof":{}}}"#,
-                ct_generic_to_json(&proof.user_readable_card),
-                ct_generic_to_json(&proof.swap_out_card),
-                chaum_pedersen_proof_to_json(&proof.chaum_pedersen_proof)
+                r#"{{"commitment_g":{},"commitment_pk":{},"challenges":{},"responses":{}}}"#,
+                pt2(&proof.commitment_g),
+                pt2(&proof.commitment_pk),
+                sc2(&proof.challenges),
+                sc2(&proof.responses),
             )
         }
 
-        let swap_out_proofs_json: Vec<String> = result.proof.swap_out_cards_proofs.iter()
-            .map(swap_out_card_proof_to_json).collect();
+        let cross_key_json: Vec<String> = result.proof.cross_key_proofs.iter()
+            .map(cross_key_proof_to_json).collect();
+        let slot_json: Vec<String> = result.proof.slot_membership_proofs.iter()
+            .map(slot_or_proof_to_json).collect();
 
-        let ordered = &result.proof.ordered_encryption_proof;
+        let statement_json = format!(
+            r#"{{"version":{},"context_digest":"{}","reconstruction_epoch":{},"prior_state_digest":"{}","aggregate_pk":"{}","owner_pk":"{}","cards":{},"residual_carriers":{},"contributions":{}}}"#,
+            result.statement.version,
+            hex_encode_bytes32(&result.statement.context_digest),
+            result.statement.reconstruction_epoch,
+            hex_encode_bytes32(&result.statement.prior_state_digest),
+            ecpoint_to_hex(&result.statement.aggregate_pk),
+            ecpoint_to_hex(&result.statement.owner_pk),
+            point_vec_to_json(&result.statement.cards),
+            ct_vec_to_json(&result.statement.residual_carriers),
+            ct_vec_to_json(&result.statement.contributions),
+        );
 
         let proof_json = format!(
-            r#"{{"version":2,"swap_out_cards_proofs":[{}],"padded_swap_cards":{},"padded_swap_shuffle_proof":{},"ordered_encryption_proof":{{"commitment_g_hex":{},"commitment_pk_hex":{},"responses_hex":{}}}}}"#,
-            swap_out_proofs_json.join(","),
-            ct_vec_to_json(&result.proof.padded_swap_cards),
-            bayer_groth_proof_to_json(&result.proof.padded_swap_shuffle_proof),
-            point_vec_to_json(&ordered.commitment_g),
-            point_vec_to_json(&ordered.commitment_pk),
-            scalar_vec_to_json(&ordered.responses),
+            r#"{{"version":{},"negative_contributions":{},"cross_key_proofs":[{}],"contribution_shuffle_proof":{},"slot_membership_proofs":[{}]}}"#,
+            poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_PROOF_VERSION,
+            ct_vec_to_json(&result.proof.negative_contributions),
+            cross_key_json.join(","),
+            bayer_groth_proof_to_json(&result.proof.contribution_shuffle_proof),
+            slot_json.join(","),
         );
 
         let s = format!(
-            r#"{{"output_cards":{},"swap_cards":{},"proof":{}}}"#,
-            ct_vec_to_json(&result.output_cards),
-            ct_vec_to_json(&result.swap_cards),
+            r#"{{"statement":{},"proof":{}}}"#,
+            statement_json,
             proof_json
         );
         Ok(json_val_to_jsvalue(s))

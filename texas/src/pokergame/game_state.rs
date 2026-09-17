@@ -4,7 +4,9 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use poker_protocol::z_poker::convert::{ecpoint_to_hex, hex_to_ecpoint, hex_to_scalar};
 
-use poker_protocol::crypto::{CurveScalar, ElGamalCiphertext, Plaintext, Scalar};
+use poker_protocol::crypto::{
+    CurveScalar, EcPoint, ElGamalCiphertext, Plaintext, Scalar,
+};
 use poker_protocol::z_poker::key_manager::PKOwnershipProof;
 use poker_protocol::z_poker::protocol::MaskAndShuffleRound;
 use poker_protocol::z_poker::protocol::LeaveGameRound;
@@ -18,7 +20,7 @@ use poker_protocol::zk_shuffle::bayer_groth::{
 use poker_protocol::zk_shuffle::versioned::VersionedShuffleProof;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::zk_shuffle::reconstruction::{
-    ChaumPedersenDLEQProof, OrderedEncryptionProof, ReconstructProof, SwapOutCardProof,
+    CrossKeyNegationProof, ReconstructProof, ReconstructionStatement, SlotContributionOrProof,
 };
 
 use crate::pokergame::player::GamePkHex;
@@ -220,13 +222,13 @@ pub struct PlayerRevealAssignment {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct PlayerReadableCard {
-    pub readable_cards: Vec<ElGamalCiphertext>,
+pub struct PlayerResidualCarriers {
+    pub residual_carriers: Vec<ElGamalCiphertext>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PlayerReadableCardJson {
-    pub readable_cards: Vec<ElGamalCiphertextJson>,
+pub struct PlayerResidualCarriersJson {
+    pub residual_carriers: Vec<ElGamalCiphertextJson>,
 }
 
 impl Serialize for PlayerRevealAssignment {
@@ -279,9 +281,17 @@ pub struct ReconstructState {
     pub timeout_seconds: u64,
     pub completed_players: Vec<GamePkHex>,
     pub pending_players: Vec<GamePkHex>,// 发起时的玩家列表
+    /// 本轮 reconstruct 的单调 epoch：进证明 statement 防跨轮重放。
+    /// reset() 不清零（跨手单调），仅 start_reconstruct 递增。
+    pub reconstruction_epoch: u64,
+    /// 应用域摘要：绑定 table id / hand id / 曲线域（镜像 poker_l1 utils）。
+    pub context_digest: [u8; 32],
+    /// 每个玩家的上一轮 residual-carrier 状态摘要（服务端重算，拒绝客户端自报）。
+    pub prior_state_digests: HashMap<GamePkHex, [u8; 32]>,
     pub cards: Vec<Plaintext>,
-    pub coefficient: Scalar, //公共变量
-    pub player_readable_cards: HashMap<GamePkHex, PlayerReadableCard>,
+    /// 玩家 → 上一轮 owner residual carriers（原 player_readable_cards）。
+    pub player_residual_carriers: HashMap<GamePkHex, PlayerResidualCarriers>,
+    /// 玩家 → 已验证的 contributions（on_complete_reconstruct 同态叠加进新 deck）。
     pub player_deck: HashMap<GamePkHex, Vec<ElGamalCiphertext>>,
 }
 
@@ -293,9 +303,11 @@ impl ReconstructState {
             timeout_seconds: 60,
             completed_players: Vec::new(),
             pending_players: Vec::new(),
+            reconstruction_epoch: 0,
+            context_digest: [0u8; 32],
+            prior_state_digests: HashMap::new(),
             cards: Vec::new(),
-            coefficient: Scalar::zero(),
-            player_readable_cards: HashMap::new(),
+            player_residual_carriers: HashMap::new(),
             player_deck: HashMap::new(),
         }
     }
@@ -306,8 +318,9 @@ impl ReconstructState {
         self.completed_players.clear();
         self.pending_players.clear();
         self.cards.clear();
-        self.coefficient = Scalar::zero();
-        self.player_readable_cards.clear();
+        // reconstruction_epoch 跨手单调，刻意不清零：epoch 回卷会让旧证明重放合法化。
+        self.prior_state_digests.clear();
+        self.player_residual_carriers.clear();
         self.player_deck.clear();
     }
 }
@@ -326,8 +339,15 @@ pub struct ReconstructPublicState {
     pub completed_players: Vec<GamePkHex>,
     pub pending_players: Vec<GamePkHex>,
     pub cards: Vec<String>,
-    pub coefficient_hex: String, //公共变量
-    pub player_readable_cards: HashMap<GamePkHex, PlayerReadableCardJson>,
+    /// 桌 epoch 聚合公钥（statement 绑定用）。
+    pub aggregate_pk: String,
+    /// 应用域摘要（statement.context_digest 回填用）。
+    pub context_digest: String,
+    /// 本轮 reconstruct epoch（statement.reconstruction_epoch 回填用）。
+    pub reconstruction_epoch: u64,
+    /// 玩家 → 上一轮 residual-carrier 状态摘要（statement.prior_state_digest 回填用）。
+    pub prior_state_digests: HashMap<GamePkHex, String>,
+    pub player_residual_carriers: HashMap<GamePkHex, PlayerResidualCarriersJson>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,55 +489,107 @@ impl GeneralizedSchnorrProofJson {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SwapOutCardProofJson {
-    pub user_readable_card: ElGamalCiphertextJson,
-    pub swap_out_card: ElGamalCiphertextJson,
-    pub chaum_pedersen_proof: ChaumPedersenDLEQProofJson,
+/// 跨密钥取负证明（residual carrier → aggregate-key 负明文贡献）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CrossKeyNegationProofJson {
+    pub commitment_owner_key_hex: String,
+    pub commitment_contribution_c1_hex: String,
+    pub commitment_joint_c2_hex: String,
+    pub response_owner_sk_hex: String,
+    pub response_contribution_randomness_hex: String,
 }
 
-impl SwapOutCardProofJson {
-    pub fn to_proof(&self) -> Result<SwapOutCardProof<DefaultCurve>, String> {
-        Ok(SwapOutCardProof {
-            user_readable_card: self.user_readable_card.to_ciphertext()?,
-            swap_out_card: self.swap_out_card.to_ciphertext()?,
-            chaum_pedersen_proof: self.chaum_pedersen_proof.to_proof()?,
+impl CrossKeyNegationProofJson {
+    fn to_proof(&self) -> Result<CrossKeyNegationProof<DefaultCurve>, String> {
+        Ok(CrossKeyNegationProof {
+            commitment_owner_key: hex_to_ecpoint(&self.commitment_owner_key_hex)?,
+            commitment_contribution_c1: hex_to_ecpoint(&self.commitment_contribution_c1_hex)?,
+            commitment_joint_c2: hex_to_ecpoint(&self.commitment_joint_c2_hex)?,
+            response_owner_sk: hex_to_scalar(&self.response_owner_sk_hex)?,
+            response_contribution_randomness: hex_to_scalar(
+                &self.response_contribution_randomness_hex,
+            )?,
         })
     }
 }
 
-hex_proof_adapter!(
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct ChaumPedersenDLEQProofJson => [ChaumPedersenDLEQProof::<DefaultCurve>] {
-        commitment_a_hex : commitment_a, commitment_b_hex : commitment_b,
-    }
-    scalar { response_hex : response }
-);
-
+/// 单槽贡献 {0, -card_i} 成员证明。
 #[derive(Debug, Clone, Deserialize)]
-pub struct OrderedEncryptionProofJson {
-    pub commitment_g_hex: Vec<String>,
-    pub commitment_pk_hex: Vec<String>,
-    pub responses_hex: Vec<String>,
+pub struct SlotContributionOrProofJson {
+    pub commitment_g: [String; 2],
+    pub commitment_pk: [String; 2],
+    pub challenges: [String; 2],
+    pub responses: [String; 2],
 }
 
-impl OrderedEncryptionProofJson {
-    fn to_proof(&self) -> Result<OrderedEncryptionProof<DefaultCurve>, String> {
-        Ok(OrderedEncryptionProof {
-            commitment_g: self
-                .commitment_g_hex
+impl SlotContributionOrProofJson {
+    fn to_proof(&self) -> Result<SlotContributionOrProof<DefaultCurve>, String> {
+        let points = |pair: &[String; 2]| -> Result<[EcPoint; 2], String> {
+            Ok([
+                hex_to_ecpoint(&pair[0])?,
+                hex_to_ecpoint(&pair[1])?,
+            ])
+        };
+        let scalars = |pair: &[String; 2]| -> Result<[Scalar; 2], String> {
+            Ok([
+                hex_to_scalar(&pair[0])?,
+                hex_to_scalar(&pair[1])?,
+            ])
+        };
+        Ok(SlotContributionOrProof {
+            commitment_g: points(&self.commitment_g)?,
+            commitment_pk: points(&self.commitment_pk)?,
+            challenges: scalars(&self.challenges)?,
+            responses: scalars(&self.responses)?,
+        })
+    }
+}
+
+/// reconstruction statement（新协议：context/epoch/prior-state 摘要 + 聚合钥 +
+/// residual carriers + 每 canonical slot 的 contribution）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReconstructionStatementJson {
+    pub version: u8,
+    pub context_digest: String,
+    pub reconstruction_epoch: u64,
+    pub prior_state_digest: String,
+    pub aggregate_pk: String,
+    pub owner_pk: String,
+    pub cards: Vec<String>,
+    pub residual_carriers: Vec<ElGamalCiphertextJson>,
+    pub contributions: Vec<ElGamalCiphertextJson>,
+}
+
+fn hex_to_digest32(hex_str: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(hex_str).map_err(|e| format!("bad digest hex: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| "digest must be 32 bytes".to_string())
+}
+
+impl ReconstructionStatementJson {
+    pub fn to_statement(&self) -> Result<ReconstructionStatement<DefaultCurve>, String> {
+        Ok(ReconstructionStatement {
+            version: self.version,
+            context_digest: hex_to_digest32(&self.context_digest)?,
+            reconstruction_epoch: self.reconstruction_epoch,
+            prior_state_digest: hex_to_digest32(&self.prior_state_digest)?,
+            aggregate_pk: hex_to_ecpoint(&self.aggregate_pk)?,
+            owner_pk: hex_to_ecpoint(&self.owner_pk)?,
+            cards: self
+                .cards
                 .iter()
-                .map(|value| hex_to_ecpoint(value))
+                .map(|h| hex_to_ecpoint(h))
                 .collect::<Result<Vec<_>, _>>()?,
-            commitment_pk: self
-                .commitment_pk_hex
+            residual_carriers: self
+                .residual_carriers
                 .iter()
-                .map(|value| hex_to_ecpoint(value))
+                .map(ElGamalCiphertextJson::to_ciphertext)
                 .collect::<Result<Vec<_>, _>>()?,
-            responses: self
-                .responses_hex
+            contributions: self
+                .contributions
                 .iter()
-                .map(|value| hex_to_scalar(value))
+                .map(ElGamalCiphertextJson::to_ciphertext)
                 .collect::<Result<Vec<_>, _>>()?,
         })
     }
@@ -526,10 +598,10 @@ impl OrderedEncryptionProofJson {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReconstructProofJson {
     pub version: u8,
-    pub swap_out_cards_proofs: Vec<SwapOutCardProofJson>,
-    pub padded_swap_cards: Vec<ElGamalCiphertextJson>,
-    pub padded_swap_shuffle_proof: BayerGrothShuffleProofJson,
-    pub ordered_encryption_proof: OrderedEncryptionProofJson,
+    pub negative_contributions: Vec<ElGamalCiphertextJson>,
+    pub cross_key_proofs: Vec<CrossKeyNegationProofJson>,
+    pub contribution_shuffle_proof: BayerGrothShuffleProofJson,
+    pub slot_membership_proofs: Vec<SlotContributionOrProofJson>,
 }
 
 impl ReconstructProofJson {
@@ -543,16 +615,16 @@ impl ReconstructProofJson {
             ));
         }
         Ok(ReconstructProof {
-            swap_out_cards_proofs: self.swap_out_cards_proofs.iter()
-                .map(|p| p.to_proof())
-                .collect::<Result<Vec<_>, _>>()?,
-            padded_swap_cards: self
-                .padded_swap_cards
-                .iter()
+            negative_contributions: self.negative_contributions.iter()
                 .map(ElGamalCiphertextJson::to_ciphertext)
                 .collect::<Result<Vec<_>, _>>()?,
-            padded_swap_shuffle_proof: self.padded_swap_shuffle_proof.to_proof()?,
-            ordered_encryption_proof: self.ordered_encryption_proof.to_proof()?,
+            cross_key_proofs: self.cross_key_proofs.iter()
+                .map(|p| p.to_proof())
+                .collect::<Result<Vec<_>, _>>()?,
+            contribution_shuffle_proof: self.contribution_shuffle_proof.to_proof()?,
+            slot_membership_proofs: self.slot_membership_proofs.iter()
+                .map(|p| p.to_proof())
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 }

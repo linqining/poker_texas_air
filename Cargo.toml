@@ -31,10 +31,10 @@ members = [
 # 失败）需推送到远端后才可被 CI/他人 fetch：
 #   git -C ../zchain push origin main   # 提交 328bf80（若已推送则忽略）
 [workspace.dependencies]
-poker_protocol = { git = "https://github.com/linqining/poker_protocol.git", rev = "45df5021afc72fcbf04eb9f79b08f064412bc04a", features = ["borsh", "ristretto-air"] }
-poker-protocol-core = { git = "https://github.com/linqining/poker_protocol.git", rev = "45df5021afc72fcbf04eb9f79b08f064412bc04a" }
-poker-protocol-proofs = { git = "https://github.com/linqining/poker_protocol.git", rev = "45df5021afc72fcbf04eb9f79b08f064412bc04a" }
-poker-protocol-bg = { git = "https://github.com/linqining/poker_protocol.git", rev = "45df5021afc72fcbf04eb9f79b08f064412bc04a" }
+poker_protocol = { git = "https://github.com/linqining/poker_protocol.git", tag = "v1.0.0", features = ["borsh", "ristretto-air"] }
+poker-protocol-core = { git = "https://github.com/linqining/poker_protocol.git", tag = "v1.0.0" }
+poker-protocol-proofs = { git = "https://github.com/linqining/poker_protocol.git", tag = "v1.0.0" }
+poker-protocol-bg = { git = "https://github.com/linqining/poker_protocol.git", tag = "v1.0.0" }
 rand_core = "0.6.4"
 vm-common = { path = "vm-common" }
 serde = { version = "1", features = ["derive"] }

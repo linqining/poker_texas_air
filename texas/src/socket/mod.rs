@@ -17,8 +17,8 @@ use crate::config::Config;
 use crate::models::Database;
 use crate::pokergame::actions;
 use crate::pokergame::deck::Card;
-use crate::pokergame::game_state::{ElGamalCiphertextJson, MaskAndShuffleRoundJson, ShuffleProofJson, PlayerReadableCardJson,
-    PkProofJson, ReconstructProofJson, RevealPhase, ShufflePublicState, LeaveGameRoundJson, SubmitRevealTokenJson};
+use crate::pokergame::game_state::{ElGamalCiphertextJson, MaskAndShuffleRoundJson, ShuffleProofJson, PlayerResidualCarriersJson,
+    PkProofJson, ReconstructionStatementJson, ReconstructProofJson, RevealPhase, ShufflePublicState, LeaveGameRoundJson, SubmitRevealTokenJson};
 use crate::pokergame::player::{Player, WalletAddress, GamePkHex};
 use crate::pokergame::table::{ActionRequest, ClientTable, JoinError, JoinResult, RoundState, Table};
 use poker_protocol::crypto::EcPoint;
@@ -245,8 +245,8 @@ pub(crate) struct RedealRequestPayload {
 pub(crate) struct ReconstructSubmitPayload {
     pub table_id: u32,
     pub pk_hex: GamePkHex,
-    pub output_cards: Vec<ElGamalCiphertextJson>,
-    pub swap_cards: Vec<ElGamalCiphertextJson>,
+    /// 新协议 reconstruction statement（服务端逐字段校验绑定）。
+    pub statement: ReconstructionStatementJson,
     pub proof: ReconstructProofJson,
 }
 
@@ -294,8 +294,15 @@ pub(crate) struct ReconstructNoticePayload {
     pub completed_players: Vec<GamePkHex>,
     pub pending_players: Vec<GamePkHex>,
     pub cards: Vec<String>,
-    pub coefficient_hex: String,
-    pub player_readable_cards: HashMap<GamePkHex, PlayerReadableCardJson>,
+    /// 桌 epoch 聚合公钥（statement 绑定用）。
+    pub aggregate_pk: String,
+    /// 应用域摘要（statement.context_digest 回填用）。
+    pub context_digest: String,
+    /// 本轮 reconstruct epoch（statement.reconstruction_epoch 回填用）。
+    pub reconstruction_epoch: u64,
+    /// 玩家 → 上一轮 residual-carrier 状态摘要（statement.prior_state_digest 回填用）。
+    pub prior_state_digests: HashMap<GamePkHex, String>,
+    pub player_residual_carriers: HashMap<GamePkHex, PlayerResidualCarriersJson>,
 }
 
 #[derive(Debug, Clone, Serialize)]

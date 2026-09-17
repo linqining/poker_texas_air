@@ -41,7 +41,7 @@
 //! DLEq receipt；复合状态变更另外绑定四段独立的 component STARK proof。
 
 use poker_protocol::precompile::{
-    build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
+    build_reconstruction_request, build_bls12381_shuffle_request,
 };
 use poker_protocol::precompile_abi::TranscriptId;
 use stwo::core::fields::m31::M31;
@@ -2208,8 +2208,8 @@ impl Orchestrator {
             pi.post_state_root,
             pi.dispatch_call_digest,
         );
-        let request = build_bls12381_reconstruction_v3_request(
-            poker_protocol::transcript_domains::RECONSTRUCT_V3_POSEIDON,
+        let request = build_reconstruction_request(
+            poker_protocol::transcript_domains::RECONSTRUCT_POSEIDON,
             &call_context,
             TranscriptId::Poseidon252,
             &args.statement,

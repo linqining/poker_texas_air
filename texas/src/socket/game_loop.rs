@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::pokergame::actions::action_sig_required;
+use crate::pokergame::game_state::PlayerResidualCarriersJson;
 use crate::pokergame::table::now_ms;
 
 pub(crate) async fn game_loop_task(io: SocketIo, state: Arc<SocketState>, table_id: u32, mut action_rx: tokio::sync::mpsc::Receiver<ActionRequest>, mut stop_rx: tokio::sync::watch::Receiver<bool>) {
@@ -76,15 +77,20 @@ pub(crate) async fn broadcast_reconstruct_notice_if_active(io: &SocketIo, state:
                 let completed_players = t.reconstruct_state.completed_players.clone();
                 let pending_players = t.reconstruct_state.pending_players.clone();
                 let cards = t.reconstruct_state.cards.iter().map(|c| ecpoint_to_hex(c)).collect();
-                let coefficient_hex = scalar_to_hex(&t.reconstruct_state.coefficient);
-                let player_readable_cards = t.reconstruct_state.player_readable_cards.iter()
+                let aggregate_pk = ecpoint_to_hex(&t.mental_poker_game.key_manager.get_aggregated_pk());
+                let context_digest = hex::encode(t.reconstruct_state.context_digest);
+                let reconstruction_epoch = t.reconstruct_state.reconstruction_epoch;
+                let prior_state_digests = t.reconstruct_state.prior_state_digests.iter()
+                    .map(|(k, v)| (k.clone(), hex::encode(v)))
+                    .collect();
+                let player_residual_carriers = t.reconstruct_state.player_residual_carriers.iter()
                     .map(|(k, v)| {
-                        (k.clone(), PlayerReadableCardJson {
-                            readable_cards: v.readable_cards.iter().map(ElGamalCiphertextJson::from_ciphertext).collect(),
+                        (k.clone(), PlayerResidualCarriersJson {
+                            residual_carriers: v.residual_carriers.iter().map(ElGamalCiphertextJson::from_ciphertext).collect(),
                         })
                     })
                     .collect();
-                ReconstructNoticePayload { table_id, completed_players, pending_players, cards, coefficient_hex, player_readable_cards }
+                ReconstructNoticePayload { table_id, completed_players, pending_players, cards, aggregate_pk, context_digest, reconstruction_epoch, prior_state_digests, player_residual_carriers }
             })
     };
     if let Some(notice) = reconstruct_notice {

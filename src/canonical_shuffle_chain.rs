@@ -55,8 +55,8 @@ use poker_protocol::crypto::types::{DefaultCurve, EcPoint, ElGamalCiphertext};
 use poker_protocol::transcript_domains;
 use poker_protocol::zk_shuffle::bayer_groth::BayerGrothShuffleProof;
 use poker_protocol::zk_shuffle::reconstruction::{
-    apply_reconstruction_contributions, canonical_base_deck, ReconstructProofV3,
-    ReconstructionV3Statement,
+    apply_reconstruction_contributions, canonical_base_deck, ReconstructProof,
+    ReconstructionStatement,
 };
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol_core::{
@@ -163,7 +163,7 @@ pub fn canonical_reveal_commitment(
 /// Stage-0 canonical reconstruction-commitment derivation (§6-Q3 proposal):
 /// Poseidon digest over the V3 statement's contribution vector.
 pub fn canonical_reconstruction_commitment(
-    statement: &ReconstructionV3Statement<DefaultCurve>,
+    statement: &ReconstructionStatement<DefaultCurve>,
 ) -> [u8; 32] {
     let mut material = Vec::with_capacity(96 + statement.contributions.len() * 64);
     material.extend_from_slice(SHUFFLE_CHAIN_STAGE0_DOMAIN);
@@ -245,9 +245,9 @@ pub struct ReconstructRowMaterial {
     /// Submitting seat; must equal the canonical row's `action.seat`.
     pub seat: u8,
     /// V3 public statement (contributions, cards, keys, digests).
-    pub statement: ReconstructionV3Statement<DefaultCurve>,
+    pub statement: ReconstructionStatement<DefaultCurve>,
     /// Lean-fixed V3 proof over the statement.
-    pub proof: ReconstructProofV3<DefaultCurve>,
+    pub proof: ReconstructProof<DefaultCurve>,
     /// Deck rebuilt from the canonical base plus the statement contributions
     /// (commitment = the completion row's `post.deck_commitment`).
     pub rebuilt_deck: Vec<ElGamalCiphertext>,
@@ -818,8 +818,8 @@ impl ShuffleChainBuilder {
         let readable_cards = readable_cards.to_vec();
         let cards = poker_l1::contracts::texas_poker::core::utils::generate_plaintext_cards();
         let mut transcript =
-            PoseidonFeltTranscript::new_domain(transcript_domains::RECONSTRUCT_V3_POSEIDON);
-        let (statement, proof) = ReconstructProofV3::<DefaultCurve>::prove(
+            PoseidonFeltTranscript::new_domain(transcript_domains::RECONSTRUCT_POSEIDON);
+        let (statement, proof) = ReconstructProof::<DefaultCurve>::prove(
             context_digest,
             reconstruction_epoch,
             prior_state_digest,
@@ -836,7 +836,7 @@ impl ShuffleChainBuilder {
         })?;
         // Fail-closed producer: verify before anchoring.
         let mut verify_transcript =
-            PoseidonFeltTranscript::new_domain(transcript_domains::RECONSTRUCT_V3_POSEIDON);
+            PoseidonFeltTranscript::new_domain(transcript_domains::RECONSTRUCT_POSEIDON);
         proof
             .verify(&statement, &mut verify_transcript)
             .map_err(|error| {
@@ -1062,7 +1062,7 @@ pub fn verify_canonical_batch_with_shuffle_chain(
                 let seat = witness.action.seat;
                 let material = sidecar.take_reconstruct(seat)?;
                 let mut transcript =
-                    PoseidonFeltTranscript::new_domain(transcript_domains::RECONSTRUCT_V3_POSEIDON);
+                    PoseidonFeltTranscript::new_domain(transcript_domains::RECONSTRUCT_POSEIDON);
                 material
                     .proof
                     .verify(&material.statement, &mut transcript)

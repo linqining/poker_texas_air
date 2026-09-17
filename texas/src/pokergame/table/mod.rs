@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use crate::pokergame::game_state::{ElGamalCiphertextJson, ShuffleProofJson,
-     ReconstructPublicState, MaskAndShuffleRoundJson, ReconstructState, ReconstructProofJson, PlayerReadableCard,
-     PkProofJson, PlayerReadableCardJson, PlayerRevealAssignment, RevealPhase, RevealTokenPublicState, ShufflePublicState, ShuffleState, RevealTokenState};
+     ReconstructPublicState, MaskAndShuffleRoundJson, ReconstructState, ReconstructProofJson, PlayerResidualCarriers,
+     PkProofJson, PlayerResidualCarriersJson, PlayerRevealAssignment, RevealPhase, RevealTokenPublicState, ShufflePublicState, ShuffleState, RevealTokenState};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -12,7 +12,7 @@ use crate::pokergame::side_pot::SidePot;
 use crate::pokergame::table_summary::TableSummaryV2;
 use poker_protocol::z_poker::{MentalPokerGame, GameConfig};
 use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Plaintext, Scalar};
-use poker_protocol::z_poker::convert::{ecpoint_to_hex, scalar_to_hex};
+use poker_protocol::z_poker::convert::{ecpoint_to_hex, hex_to_ecpoint, scalar_to_hex};
 use poker_protocol::crypto::CurvePoint;
 use poker_protocol::crypto::CurveScalar;
 /// 对齐 Move 合约 MIN_PLAYERS_TO_START = 2

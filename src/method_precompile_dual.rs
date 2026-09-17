@@ -20,10 +20,10 @@ use blake2::{
     digest::Update,
 };
 use poker_protocol::precompile::{
-    build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
+    build_reconstruction_request, build_bls12381_shuffle_request,
 };
 use poker_protocol::precompile_abi::{
-    RECONSTRUCTION_V3_ABI_VERSION, ReconstructionV3VerifyRequest, SHUFFLE_ABI_VERSION,
+    RECONSTRUCTION_ABI_VERSION, ReconstructionVerifyRequest, SHUFFLE_ABI_VERSION,
     ShuffleVerifyRequest, TranscriptId,
 };
 use stwo::core::proof::StarkProof;
@@ -463,7 +463,7 @@ fn prove_dual_proof_inner(
             let bundle = bundle_from_stark(
                 MethodKind::SubmitReconstructDeck,
                 PokerPrecompileId::ReconstructionV3,
-                RECONSTRUCTION_V3_ABI_VERSION,
+                RECONSTRUCTION_ABI_VERSION,
                 &proof.stark_proof,
                 request_bytes,
                 &proof.root_binding,
@@ -592,7 +592,7 @@ pub fn dual_proof_from_archived(
             } => (
                 MethodKind::SubmitReconstructDeck,
                 PokerPrecompileId::ReconstructionV3,
-                RECONSTRUCTION_V3_ABI_VERSION,
+                RECONSTRUCTION_ABI_VERSION,
                 request_bytes,
                 SubmitReconstructDeckAir::num_columns(),
                 air.log_size,
@@ -938,8 +938,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 ));
             }
             let call_context = call_context(task, *seat_index, &public_inputs);
-            let expected_request = build_bls12381_reconstruction_v3_request(
-                poker_protocol::transcript_domains::RECONSTRUCT_V3_POSEIDON,
+            let expected_request = build_reconstruction_request(
+                poker_protocol::transcript_domains::RECONSTRUCT_POSEIDON,
                 &call_context,
                 TranscriptId::Poseidon252,
                 &args.statement,
@@ -957,7 +957,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             })?;
             let request_bytes = require_expected_request(supplied_request, expected_bytes)?;
             let request =
-                ReconstructionV3VerifyRequest::decode(&request_bytes).map_err(|error| {
+                ReconstructionVerifyRequest::decode(&request_bytes).map_err(|error| {
                     TexasAirError::SpecViolation(format!(
                         "reconstruction V3 request canonical decode failed: {error}"
                     ))
@@ -1264,7 +1264,7 @@ fn validate_route(
         ) | (
             MethodKind::SubmitReconstructDeck,
             PokerPrecompileId::ReconstructionV3,
-            RECONSTRUCTION_V3_ABI_VERSION
+            RECONSTRUCTION_ABI_VERSION
         ) | (
             MethodKind::FoldWithProof,
             PokerPrecompileId::DleqLeave,

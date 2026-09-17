@@ -833,9 +833,9 @@ fn e2e_mixed_join_paths_materializes() {
             }
             assert!(
                 client
-                    .decrypt_readable_card(&readable, game.deck_plaintext.clone())
+                    .decrypt_owner_residual_carrier(&readable, game.deck_plaintext.clone())
                     .is_some(),
-                "client decrypt_readable_card must succeed"
+                "client decrypt_owner_residual_carrier must succeed"
             );
         }
     }

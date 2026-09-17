@@ -80,7 +80,7 @@ pub fn new_leave_transcript() -> PoseidonFeltTranscript {
 #[must_use]
 pub fn new_reconstruct_v3_transcript() -> PoseidonFeltTranscript {
     PoseidonFeltTranscript::new_domain(
-        poker_protocol::transcript_domains::RECONSTRUCT_V3_POSEIDON,
+        poker_protocol::transcript_domains::RECONSTRUCT_POSEIDON,
     )
 }
 
@@ -91,7 +91,7 @@ pub fn new_reconstruct_v3_transcript() -> PoseidonFeltTranscript {
 /// the shuffled `init_deck` lineage. Their deck indices do not reveal the
 /// hidden canonical plaintext-card mapping.
 #[must_use]
-pub fn reconstruction_v3_user_readable_cards(
+pub fn reconstruction_v3_residual_carriers(
     table: &super::types::TexasPokerTable,
     seat_index: u8,
 ) -> Vec<ElGamalCiphertext> {
@@ -115,7 +115,7 @@ pub fn reconstruction_v3_user_readable_cards(
 pub fn reconstruction_v3_context_digest(table: &super::types::TexasPokerTable) -> [u8; 32] {
     let mut material = Vec::with_capacity(96);
     material.extend_from_slice(
-        poker_protocol::transcript_domains::RECONSTRUCTION_V3_CONTEXT_DIGEST_DOMAIN,
+        poker_protocol::transcript_domains::RECONSTRUCTION_CONTEXT_DIGEST_DOMAIN,
     );
     material.extend_from_slice(&table.id.to_bytes());
     material.extend_from_slice(&table.hand_id.to_le_bytes());
@@ -143,7 +143,7 @@ pub fn reconstruction_v3_prior_state_digest(
     })?;
     let mut material = Vec::new();
     material.extend_from_slice(
-        poker_protocol::transcript_domains::RECONSTRUCTION_V3_PRIOR_STATE_DIGEST_DOMAIN,
+        poker_protocol::transcript_domains::RECONSTRUCTION_PRIOR_STATE_DIGEST_DOMAIN,
     );
     material.extend_from_slice(&table.id.to_bytes());
     material.extend_from_slice(&table.hand_id.to_le_bytes());

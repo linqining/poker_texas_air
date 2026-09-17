@@ -13,10 +13,10 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use poker_l1::contracts::texas_poker::types::{RevealTarget, seat_mask_contains};
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext, N_CARDS};
 use poker_protocol::precompile::{
-    NativeBls12381ReconstructionV3Verifier, NativeBls12381ShuffleVerifier,
+    NativeReconstructionVerifier, NativeBls12381ShuffleVerifier,
 };
 use poker_protocol::precompile_abi::{
-    RECONSTRUCTION_V3_ABI_VERSION, ReconstructionV3Verifier, ReconstructionV3VerifyRequest,
+    RECONSTRUCTION_ABI_VERSION, ReconstructionVerifier, ReconstructionVerifyRequest,
     SHUFFLE_ABI_VERSION, ShuffleVerifier, ShuffleVerifyRequest,
 };
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
@@ -457,15 +457,15 @@ impl PrecompileCallBinding {
 
     /// Verify and bind a canonical reconstruction V3 request with the native backend.
     pub fn verify_reconstruction_v3(
-        request: &ReconstructionV3VerifyRequest,
+        request: &ReconstructionVerifyRequest,
     ) -> TexasAirResult<Self> {
         let request_bytes = request.encode().map_err(precompile_error)?;
-        NativeBls12381ReconstructionV3Verifier
+        NativeReconstructionVerifier
             .verify(request)
             .map_err(precompile_error)?;
         Ok(Self::issue(
             PokerPrecompileId::ReconstructionV3,
-            RECONSTRUCTION_V3_ABI_VERSION,
+            RECONSTRUCTION_ABI_VERSION,
             request_bytes,
         ))
     }
@@ -506,7 +506,7 @@ impl PrecompileCallBinding {
                 Self::verify_leave_dleq(&request)?
             }
             PokerPrecompileId::ReconstructionV3 => {
-                let request = ReconstructionV3VerifyRequest::decode(&self.request_bytes)
+                let request = ReconstructionVerifyRequest::decode(&self.request_bytes)
                     .map_err(precompile_error)?;
                 Self::verify_reconstruction_v3(&request)?
             }
@@ -548,10 +548,10 @@ impl PrecompileCallBinding {
                 (LEAVE_DLEQ_ABI_VERSION, request.encode()?)
             }
             PokerPrecompileId::ReconstructionV3 => {
-                let request = ReconstructionV3VerifyRequest::decode(&self.request_bytes)
+                let request = ReconstructionVerifyRequest::decode(&self.request_bytes)
                     .map_err(precompile_error)?;
                 (
-                    RECONSTRUCTION_V3_ABI_VERSION,
+                    RECONSTRUCTION_ABI_VERSION,
                     request.encode().map_err(precompile_error)?,
                 )
             }

@@ -11,7 +11,7 @@ use starknet_crypto::Felt;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
 use poker_protocol::precompile::{
-    build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
+    build_reconstruction_request, build_bls12381_shuffle_request,
 };
 use poker_protocol::precompile_abi::TranscriptId;
 use stwo::core::channel::{Channel, Poseidon252Channel};
@@ -920,8 +920,8 @@ fn verify_crypto_receipt(
                         "submit reconstruct tagged receipt args: {error}"
                     ))
                 })?;
-            let request = build_bls12381_reconstruction_v3_request(
-                poker_protocol::transcript_domains::RECONSTRUCT_V3_POSEIDON,
+            let request = build_reconstruction_request(
+                poker_protocol::transcript_domains::RECONSTRUCT_POSEIDON,
                 &call_context,
                 TranscriptId::Poseidon252,
                 &args.statement,

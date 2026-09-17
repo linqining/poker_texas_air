@@ -1265,7 +1265,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             let mut gs = state.state.write().await;
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
 
-                let (is_complete, verified) = match table.submit_reconstruct_deck(&pk_hex, payload.output_cards.clone(), payload.swap_cards.clone(), payload.proof) {
+                let (is_complete, verified) = match payload.statement.to_statement().and_then(|st| payload.proof.to_proof().map(|pf| (st, pf))).and_then(|(st, pf)| table.submit_reconstruct_deck(&pk_hex, st, pf)) {
                     Ok(complete) => (complete, true),
                     Err(e) => {
                         tracing::error!("[RECONSTRUCT_SUBMIT] Error: {}", e);

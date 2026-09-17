@@ -112,7 +112,7 @@ pub(crate) async fn broadcast_to_table_with_snapshot(
         // 重连者的私人可读牌（pk 按钱包反查；旁观/未入座时为空）。
         let snapshot_cards = table
             .get_pk_hex_by_wallet_address(&reconnect_wallet.0)
-            .and_then(|pk| table.mental_poker_game.get_player_readable_tokens().remove(&pk.0))
+            .and_then(|pk| table.mental_poker_game.get_player_residual_carriers().remove(&pk.0))
             .map(|cards| cards.iter().map(ElGamalCiphertextJson::from_ciphertext).collect::<Vec<_>>());
         let deck_plaintext = table.deck_plaintext().iter().map(ecpoint_to_hex).collect::<Vec<String>>();
         (table_views, spectator_sids, spectator_view, snapshot_cards, deck_plaintext)
@@ -176,7 +176,7 @@ pub(crate) async fn join_table_push(io: &SocketIo, state: &Arc<SocketState>, tab
         // 与重连快照同一条单推送原则。
         let snapshot_cards = table
             .get_pk_hex_by_wallet_address(&wallet.0)
-            .and_then(|pk| table.mental_poker_game.get_player_readable_tokens().remove(&pk.0))
+            .and_then(|pk| table.mental_poker_game.get_player_residual_carriers().remove(&pk.0))
             .map(|cards| cards.iter().map(ElGamalCiphertextJson::from_ciphertext).collect::<Vec<_>>());
         let deck_plaintext = table.deck_plaintext().iter().map(ecpoint_to_hex).collect::<Vec<String>>();
         (sid, view, snapshot_cards, deck_plaintext)
@@ -218,7 +218,7 @@ impl SocketState {
                 Some(t) => t,
                 None => return,
             };
-            let player_cards = table.mental_poker_game.get_player_readable_tokens();
+            let player_cards = table.mental_poker_game.get_player_residual_carriers();
             // 同一钱包可能残留多条 players 条目（重连后的旧 socket），
             // find 单选会把 HAND_REVEAL_RESULT 发到僵尸 socket 上，
             // 客户端永远收不到自己的可读牌 → 自己的牌不显示。

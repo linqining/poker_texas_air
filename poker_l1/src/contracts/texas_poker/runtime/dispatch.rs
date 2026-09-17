@@ -32,7 +32,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
 use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
-use poker_protocol::zk_shuffle::reconstruction::{ReconstructProofV3, ReconstructionV3Statement};
+use poker_protocol::zk_shuffle::reconstruction::{ReconstructProof, ReconstructionStatement};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 
 use super::constants::{FOLD_REASON_FORCE_ADMIN, KICK_REASON_ADMIN};
@@ -574,9 +574,9 @@ pub struct SubmitReconstructDeckArgs {
     pub seat_index: u8,
     /// Complete V3 public statement. The hidden readable-to-canonical mapping
     /// is not serialized in this value.
-    pub statement: ReconstructionV3Statement<DefaultCurve>,
+    pub statement: ReconstructionStatement<DefaultCurve>,
     /// Reconstruction V3 proof for the exact statement above.
-    pub proof: ReconstructProofV3<DefaultCurve>,
+    pub proof: ReconstructProof<DefaultCurve>,
 }
 
 /// `raise` 参数。
@@ -658,8 +658,8 @@ struct CanonicalSubmitRevealTokensArgs {
 /// Canonical actor-less payload for `submit_reconstruct_deck`.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct CanonicalSubmitReconstructDeckArgs {
-    statement: ReconstructionV3Statement<DefaultCurve>,
-    proof: ReconstructProofV3<DefaultCurve>,
+    statement: ReconstructionStatement<DefaultCurve>,
+    proof: ReconstructProof<DefaultCurve>,
 }
 
 /// Canonical actor-less payload for `raise`.
@@ -3322,8 +3322,8 @@ mod tests {
     }
 
     fn empty_reconstruct_v3() -> (
-        ReconstructionV3Statement<DefaultCurve>,
-        ReconstructProofV3<DefaultCurve>,
+        ReconstructionStatement<DefaultCurve>,
+        ReconstructProof<DefaultCurve>,
     ) {
         use poker_protocol::zk_shuffle::bayer_groth::{
             BayerGrothShuffleProof, MultiExponentiationArgument, ProductArgument,
@@ -3389,7 +3389,7 @@ mod tests {
                 s_response: zero,
             },
         };
-        let statement = ReconstructionV3Statement {
+        let statement = ReconstructionStatement {
             version: 3,
             context_digest: [0; 32],
             reconstruction_epoch: 0,
@@ -3397,7 +3397,7 @@ mod tests {
             aggregate_pk,
             owner_pk,
             cards,
-            user_readable_cards: vec![readable_ciphertext],
+            residual_carriers: vec![readable_ciphertext],
             contributions,
         };
         let cross_key = CrossKeyNegationProof {
@@ -3413,7 +3413,7 @@ mod tests {
             challenges: [zero; 2],
             responses: [zero; 2],
         };
-        let proof = ReconstructProofV3 {
+        let proof = ReconstructProof {
             negative_contributions: vec![identity_ciphertext],
             cross_key_proofs: vec![cross_key],
             contribution_shuffle_proof,

@@ -55,9 +55,16 @@ export interface ReconstructNoticeData {
   completed_players: string[];
   pending_players: string[];
   cards: unknown[];
-  coefficient_hex: string;
-  player_readable_cards?: Record<string, {
-    readable_cards: unknown[];
+  /** 桌 epoch 聚合公钥（statement 绑定用）。 */
+  aggregate_pk: string;
+  /** 应用域摘要（statement.context_digest 回填用）。 */
+  context_digest: string;
+  /** 本轮 reconstruct epoch（statement.reconstruction_epoch 回填用）。 */
+  reconstruction_epoch: number;
+  /** 玩家 → 上一轮 residual-carrier 状态摘要（statement.prior_state_digest 回填用）。 */
+  prior_state_digests?: Record<string, string>;
+  player_residual_carriers?: Record<string, {
+    residual_carriers: unknown[];
   }>;
 }
 
@@ -86,9 +93,9 @@ export interface TableLeftPayload {
 export interface ReconstructSubmitPayload {
   table_id: string;
   pk_hex: string;
-  output_cards: string[][];
-  swap_cards: string[][];
-  proof: string;
+  /** 新协议 reconstruction statement（服务端逐字段校验绑定）。 */
+  statement: unknown;
+  proof: unknown;
 }
 
 export interface HandRevealReturn {
@@ -98,9 +105,8 @@ export interface HandRevealReturn {
 }
 
 export interface ReconstructResult {
-  output_cards: string[][];
-  swap_cards: string[][];
-  proof: string;
+  statement: unknown;
+  proof: unknown;
 }
 
 export interface JoinAndShuffleResult {

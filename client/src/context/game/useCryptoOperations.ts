@@ -474,7 +474,7 @@ export const useCryptoOperations = (
 
   const handleReconstructNotice = useCallback(async (data: ReconstructNoticeData): Promise<ReconstructSubmitPayload | void> => {
     logger.log(RECONSTRUCT_NOTICE, data);
-    const { table_id, completed_players, pending_players, cards, coefficient_hex, player_readable_cards } = data;
+    const { table_id, completed_players, pending_players, cards, aggregate_pk, context_digest, reconstruction_epoch, prior_state_digests, player_residual_carriers } = data;
     const keys = getRequiredKeys();
     if (!keys) {
       logger.warn('[Reconstruct] No player keys available for decryption');
@@ -486,30 +486,42 @@ export const useCryptoOperations = (
       return;
     }
 
-    const myReadableCards = player_readable_cards?.[pkHex!];
-    if (!myReadableCards || !myReadableCards.readable_cards || myReadableCards.readable_cards.length === 0) {
-      logger.warn('[Reconstruct] No readable cards assigned for my pk');
+    const myCarriers = player_residual_carriers?.[pkHex!];
+    if (!myCarriers || !myCarriers.residual_carriers || myCarriers.residual_carriers.length === 0) {
+      logger.warn('[Reconstruct] No residual carriers assigned for my pk');
+      return;
+    }
+
+    const priorStateDigest = prior_state_digests?.[pkHex!];
+    if (!priorStateDigest) {
+      logger.warn('[Reconstruct] No prior state digest assigned for my pk');
       return;
     }
 
     try {
       const originCardsJson = JSON.stringify(cards);
-      const userReadableCardsJson = JSON.stringify(myReadableCards.readable_cards);
+      const residualCarriersJson = JSON.stringify(myCarriers.residual_carriers);
 
       const result = wrapCryptoOp(() => {
-        const resultRaw = keys.reconstruct(originCardsJson, userReadableCardsJson, coefficient_hex);
+        const resultRaw = keys.reconstruct(
+          originCardsJson,
+          residualCarriersJson,
+          context_digest,
+          BigInt(reconstruction_epoch),
+          priorStateDigest,
+          aggregate_pk,
+        );
         if (!resultRaw) throw new Error('reconstruct returned null');
         return parseWasmResult<ReconstructResult>(resultRaw);
       }, 'reconstruct');
 
-      logger.log('RECONSTRUCT_NOTICE shuffle proof', result);
+      logger.log('RECONSTRUCT_NOTICE statement/proof', result);
       logger.log('[Reconstruct] Result:', result);
       addMessage(`Reconstruct submitted`);
       return {
         table_id,
         pk_hex: pkHex,
-        output_cards: result.output_cards,
-        swap_cards: result.swap_cards,
+        statement: result.statement,
         proof: result.proof,
       } as ReconstructSubmitPayload;
     } catch (e) {

@@ -211,7 +211,7 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
         if (reconstructState && reconstructState.is_active && pkHex
             && Array.isArray(reconstructState.pending_players)
             && reconstructState.pending_players.includes(pkHex)) {
-          const recKey = `${reconstructState.coefficient_hex}#${reconstructState.pending_players.length}`;
+          const recKey = `${reconstructState.context_digest}#${reconstructState.reconstruction_epoch}`;
           if (reconstructFallbackKeyRef.current !== recKey) {
             logger.log('[Reconstruct] TABLE_UPDATED fallback: player in pending, triggering handleReconstructNotice');
             void (async () => {
@@ -220,8 +220,11 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
                 completed_players: reconstructState.completed_players,
                 pending_players: reconstructState.pending_players,
                 cards: reconstructState.cards,
-                coefficient_hex: reconstructState.coefficient_hex,
-                player_readable_cards: reconstructState.player_readable_cards,
+                aggregate_pk: reconstructState.aggregate_pk,
+                context_digest: reconstructState.context_digest,
+                reconstruction_epoch: reconstructState.reconstruction_epoch,
+                prior_state_digests: reconstructState.prior_state_digests,
+                player_residual_carriers: reconstructState.player_residual_carriers,
               });
               if (result) {
                 reconstructFallbackKeyRef.current = recKey;

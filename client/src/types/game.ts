@@ -96,9 +96,12 @@ export interface ReconstructState {
   completed_players: string[];
   pending_players: string[];
   cards: string[];
-  coefficient_hex: string;
-  player_readable_cards?: Record<string, {
-    readable_cards: unknown[];
+  aggregate_pk: string;
+  context_digest: string;
+  reconstruction_epoch: number;
+  prior_state_digests?: Record<string, string>;
+  player_residual_carriers?: Record<string, {
+    residual_carriers: unknown[];
   }>;
 }
 

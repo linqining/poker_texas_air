@@ -31,7 +31,7 @@ use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
 use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
 use poker_protocol::zk_shuffle::reconstruction::{
-    ReconstructProofV3, ReconstructionV3Statement, apply_reconstruction_contributions,
+    ReconstructProof, ReconstructionStatement, apply_reconstruction_contributions,
     canonical_base_deck,
 };
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
@@ -2170,8 +2170,8 @@ fn materialize_completed_showdown_assignments(
 pub fn apply_submit_reconstruct_deck(
     table: &mut TexasPokerTable,
     seat_index: u8,
-    statement: ReconstructionV3Statement<DefaultCurve>,
-    proof: ReconstructProofV3<DefaultCurve>,
+    statement: ReconstructionStatement<DefaultCurve>,
+    proof: ReconstructProof<DefaultCurve>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if table.reconstruct_phase() != RECONSTRUCT_PHASE_COLLECTING {
@@ -2196,7 +2196,7 @@ pub fn apply_submit_reconstruct_deck(
         .ok_or_else(|| PokerL1Error::Serialization("reconstruct seat has no live key".into()))?
         .0;
     let expected_cards = generate_plaintext_cards();
-    let expected_readable = utils::reconstruction_v3_user_readable_cards(table, seat_index);
+    let expected_readable = utils::reconstruction_v3_residual_carriers(table, seat_index);
     let expected_context_digest = utils::reconstruction_v3_context_digest(table);
     let expected_prior_state_digest =
         utils::reconstruction_v3_prior_state_digest(table, seat_index)?;
@@ -2206,7 +2206,7 @@ pub fn apply_submit_reconstruct_deck(
     if statement.aggregate_pk != aggregate_pk.0
         || statement.owner_pk != expected_owner_pk
         || statement.cards != expected_cards
-        || statement.user_readable_cards != expected_readable
+        || statement.residual_carriers != expected_readable
         || statement.context_digest != expected_context_digest
         || statement.prior_state_digest != expected_prior_state_digest
         || statement.reconstruction_epoch != expected_epoch
@@ -4799,10 +4799,10 @@ mod tests {
             let prior_state_digest =
                 utils::reconstruction_v3_prior_state_digest(&table, seat_index as u8).unwrap();
             let readable_cards =
-                utils::reconstruction_v3_user_readable_cards(&table, seat_index as u8);
+                utils::reconstruction_v3_residual_carriers(&table, seat_index as u8);
             let mut transcript = utils::new_reconstruct_v3_transcript();
             let mut rng = StdRng::seed_from_u64(0xC0DE_0000 + seat_index as u64);
-            let (statement, proof) = ReconstructProofV3::prove(
+            let (statement, proof) = ReconstructProof::prove(
                 context_digest,
                 table.reconstruct_epoch_ms().unwrap(),
                 prior_state_digest,

@@ -9,7 +9,7 @@
 //!    `round_state`）；reconstruct 期间 `round_state` 保持不变（pre == post）。真正的
 //!    相位约束由 `INPUT_RECONSTRUCT_PHASE` 列承载（见 evaluate）。
 //! 2. `seat_index` 在 `reconstruct_assignments` 中
-//! 3. 提交 ReconstructProofV3；完整 statement 必须匹配 aggregate/owner key、固定
+//! 3. 提交 ReconstructProof；完整 statement 必须匹配 aggregate/owner key、固定
 //!    `init_deck` 明文点、重构 epoch，以及 pre-state 中该 seat 的上一轮未解手牌密文
 //! 4. 状态变更：
 //!    - verified contributions are folded into one 52-card streaming accumulator
@@ -244,7 +244,7 @@ pub fn validate_public_inputs(
     air: &SubmitReconstructDeckAir,
     public_inputs: &crate::public_inputs::TexasPublicInputs,
 ) -> crate::error::TexasAirResult<()> {
-    use poker_protocol::precompile_abi::ReconstructionV3VerifyRequest;
+    use poker_protocol::precompile_abi::ReconstructionVerifyRequest;
 
     if air.input.reconstruct_phase != RECONSTRUCT_PHASE_COLLECTING {
         return Err(crate::error::TexasAirError::SpecViolation(
@@ -268,7 +268,7 @@ pub fn validate_public_inputs(
         ));
     }
     let request =
-        ReconstructionV3VerifyRequest::decode(binding.request_bytes()).map_err(|error| {
+        ReconstructionVerifyRequest::decode(binding.request_bytes()).map_err(|error| {
             crate::error::TexasAirError::SpecViolation(format!(
                 "reconstruction V3 request canonical decode failed: {error}"
             ))

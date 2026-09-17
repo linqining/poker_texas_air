@@ -249,7 +249,7 @@ fn run_full_hand(table_id: u32, n: u64) {
     // 持有者本地解密（真实客户端流程）：HandReveal 后服务器把
     // readable_cards（c2 − 他人份额）发给持有者，持有者补自己的份额
     // （sk·c1）得到明文——服务器全程看不到明文。
-    let readable_map = table.mental_poker_game.get_player_readable_tokens();
+    let readable_map = table.mental_poker_game.get_player_residual_carriers();
     for p in &players {
         let rcs = readable_map
             .get(&*p.pk_hex)

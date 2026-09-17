@@ -1,13 +1,57 @@
 use super::*;
 use crate::pokergame::game_state::ShufflePhase;
-use rand::rngs::OsRng;
+use poker_protocol::crypto::DefaultCurve;
+use poker_protocol::transcript_domains::{
+    RECONSTRUCTION_CONTEXT_DIGEST_DOMAIN, RECONSTRUCTION_PRIOR_STATE_DIGEST_DOMAIN,
+};
+use poker_protocol::zk_shuffle::reconstruction::{ReconstructProof, ReconstructionStatement};
 
 impl Table {
+    /// reconstruction 上下文摘要：绑定 table id / hand id / 曲线域。
+    /// 域与材料布局镜像 poker_l1 `utils::reconstruction_v3_context_digest`。
+    fn reconstruction_context_digest(&self) -> [u8; 32] {
+        let mut material = Vec::with_capacity(96);
+        material.extend_from_slice(RECONSTRUCTION_CONTEXT_DIGEST_DOMAIN);
+        material.extend_from_slice(&self.summary.id.to_le_bytes());
+        material.extend_from_slice(&self.current_hand_id.to_le_bytes());
+        material.extend_from_slice(b"stark-curve-v1");
+        poker_protocol::poseidon_bytes_digest(&material)
+    }
+
+    /// 玩家 prior-state 摘要：吸收其上一轮 residual carriers 与桌台密钥状态。
+    /// 服务端重算（不信任客户端自报），域镜像 poker_l1
+    /// `utils::reconstruction_v3_prior_state_digest`。
+    fn reconstruction_prior_state_digest(
+        &self,
+        player_pk: &EcPoint,
+        epoch: u64,
+        aggregate_pk: &EcPoint,
+        residual_carriers: &[ElGamalCiphertext],
+    ) -> [u8; 32] {
+        let mut material = Vec::new();
+        material.extend_from_slice(RECONSTRUCTION_PRIOR_STATE_DIGEST_DOMAIN);
+        material.extend_from_slice(&self.summary.id.to_le_bytes());
+        material.extend_from_slice(&self.current_hand_id.to_le_bytes());
+        material.extend_from_slice(player_pk.compress().as_ref());
+        material.extend_from_slice(&epoch.to_le_bytes());
+        material.extend_from_slice(aggregate_pk.compress().as_ref());
+        material.extend_from_slice(&(residual_carriers.len() as u32).to_le_bytes());
+        for (slot, carrier) in residual_carriers.iter().enumerate() {
+            material.extend_from_slice(&(slot as u32).to_le_bytes());
+            material.extend_from_slice(carrier.c1.compress().as_ref());
+            material.extend_from_slice(carrier.c2.compress().as_ref());
+        }
+        poker_protocol::poseidon_bytes_digest(&material)
+    }
+
     pub fn start_reconstruct(&mut self) -> Result<(), String> {
         if self.reconstruct_state.is_active {
             return Err("Reconstruct already in progress".to_string());
         }
-        self.reconstruct_state.is_active = true;
+        // epoch 跨手单调递增（ReconstructState::reset 不清零）
+        self.reconstruct_state.reconstruction_epoch += 1;
+        let epoch = self.reconstruct_state.reconstruction_epoch;
+        self.reconstruct_state.context_digest = self.reconstruction_context_digest();
         self.reconstruct_state.timeout_start = Some(std::time::Instant::now());
         self.reconstruct_state.timeout_seconds = 10;
         self.reconstruct_state.completed_players.clear();
@@ -15,15 +59,28 @@ impl Table {
             .map(|k| GamePkHex::new(k.clone()))
             .collect();
         self.reconstruct_state.cards = self.mental_poker_game.deck_plaintext.clone();
-        let mut rng = OsRng;
-        self.reconstruct_state.coefficient = Scalar::random(&mut rng);
-        self.reconstruct_state.player_readable_cards.clear();
-        let player_readable_cards = self.mental_poker_game.get_player_readable_tokens();
-        for (pk, cards) in player_readable_cards {
-            self.reconstruct_state.player_readable_cards.insert(GamePkHex::new(pk.clone()), PlayerReadableCard{readable_cards: cards});
+        self.reconstruct_state.player_residual_carriers.clear();
+        self.reconstruct_state.prior_state_digests.clear();
+        let aggregate_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
+        let player_residual_carriers = self.mental_poker_game.get_player_residual_carriers();
+        for (pk, carriers) in player_residual_carriers {
+            let pk_point = hex_to_ecpoint(&pk)?;
+            let digest = self.reconstruction_prior_state_digest(
+                &pk_point,
+                epoch,
+                &aggregate_pk,
+                &carriers,
+            );
+            self.reconstruct_state.player_residual_carriers.insert(
+                GamePkHex::new(pk.clone()),
+                PlayerResidualCarriers { residual_carriers: carriers },
+            );
+            self.reconstruct_state
+                .prior_state_digests
+                .insert(GamePkHex::new(pk), digest);
         }
         self.reconstruct_state.player_deck.clear();
-        tracing::info!("[RECONSTRUCT] Reconstruct initiated for player {}", self.reconstruct_state.pending_players.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","));
+        tracing::info!("[RECONSTRUCT] Reconstruct initiated for players {} (epoch {})", self.reconstruct_state.pending_players.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","), epoch);
         // 通知前端 reconstruct 阶段已开始
         self.emit_event(crate::pokergame::table::events::TableEvent::ReconstructNotice);
         Ok(())
@@ -48,9 +105,8 @@ impl Table {
     pub fn submit_reconstruct_deck(
         &mut self,
         player_pk_hex: &GamePkHex,
-        output_cards: Vec<ElGamalCiphertextJson>,
-        swap_cards: Vec<ElGamalCiphertextJson>,
-        proof: ReconstructProofJson,
+        statement: ReconstructionStatement<DefaultCurve>,
+        proof: ReconstructProof<DefaultCurve>,
     ) -> Result<bool, String> {
         if !self.reconstruct_state.is_active {
             return Err("Reconstruct not active".to_string());
@@ -63,27 +119,54 @@ impl Table {
             .map(|p| p.pk)
             .ok_or("Player not found in mental poker game")?;
 
-        let output_cards = output_cards.iter()
-            .map(|c| c.to_ciphertext())
-            .collect::<Result<Vec<_>, _>>()?;
-        let swap_cards = swap_cards.iter()
-            .map(|c| c.to_ciphertext())
-            .collect::<Result<Vec<_>, _>>()?;
-        let proof = proof.to_proof()?;
-        let user_readable_cards = match self.reconstruct_state.player_readable_cards.get(player_pk_hex) {
-            Some(c) => c,
-            None => return Err("Player not found in reconstruct state".to_string()),
-        };
-        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript::new_domain(
-            poker_protocol::transcript_domains::RECONSTRUCT_V2_POSEIDON,
-        );
-        if proof.verify(&self.reconstruct_state.cards, &output_cards,
-        &swap_cards, &user_readable_cards.readable_cards,
-        &player, &mut transcript).is_err(){
-            return Err("Invalid reconstruct proof".to_string());
+        // statement 必须绑定服务端权威状态：statement 摘要字段一律服务端重算，
+        // 客户端仅提供证明本体。
+        let expected_carriers = self.reconstruct_state.player_residual_carriers
+            .get(player_pk_hex)
+            .ok_or("Player not found in reconstruct state")?;
+        let expected_prior = self.reconstruct_state.prior_state_digests
+            .get(player_pk_hex)
+            .ok_or("Player not found in reconstruct state")?;
+        if statement.version
+            != poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_PROOF_VERSION
+        {
+            return Err("Unsupported reconstruction statement version".to_string());
         }
+        if statement.owner_pk != player {
+            return Err("Statement owner key mismatch".to_string());
+        }
+        if statement.aggregate_pk != self.mental_poker_game.key_manager.get_aggregated_pk() {
+            return Err("Statement aggregate key mismatch".to_string());
+        }
+        if statement.cards != self.reconstruct_state.cards {
+            return Err("Statement card points mismatch".to_string());
+        }
+        if statement.residual_carriers != expected_carriers.residual_carriers {
+            return Err("Statement residual carriers mismatch".to_string());
+        }
+        if statement.reconstruction_epoch != self.reconstruct_state.reconstruction_epoch {
+            return Err("Statement epoch mismatch".to_string());
+        }
+        if statement.context_digest != self.reconstruct_state.context_digest {
+            return Err("Statement context digest mismatch".to_string());
+        }
+        if statement.prior_state_digest != *expected_prior {
+            return Err("Statement prior state digest mismatch".to_string());
+        }
+        statement
+            .validate()
+            .map_err(|e| format!("Invalid reconstruction statement: {e}"))?;
 
-        self.reconstruct_state.player_deck.insert(player_pk_hex.clone(), output_cards);
+        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript::new_domain(
+            poker_protocol::transcript_domains::RECONSTRUCT_POSEIDON,
+        );
+        proof
+            .verify(&statement, &mut transcript)
+            .map_err(|e| format!("Invalid reconstruct proof: {e}"))?;
+
+        self.reconstruct_state
+            .player_deck
+            .insert(player_pk_hex.clone(), statement.contributions);
         self.reconstruct_state.pending_players.retain(|p| p != player_pk_hex);
         self.reconstruct_state.completed_players.push(player_pk_hex.clone());
         let is_all_complete = self.reconstruct_state.pending_players.len()==0;
@@ -91,24 +174,36 @@ impl Table {
         Ok(is_all_complete)
     }
 
-    /// 镜像 Move on_complete_reconstruct：reconstruct 完成后重建牌组并重新洗牌
+    /// 镜像 Move on_complete_reconstruct：reconstruct 完成后重建牌组并重新洗牌。
+    ///
+    /// 新协议：从 canonical base deck（公牌点 × 聚合钥）出发，同态叠加每个
+    /// 已验证玩家的 contributions。
     pub fn on_complete_reconstruct(&mut self) {
-        // 重建牌组（从 player_deck 构建）
         let init_deck = self.mental_poker_game.deck_plaintext.clone();
-        let deck_len = init_deck.len();
-        let mut reconstruct_deck = init_deck.iter().map(|c| ElGamalCiphertext {
-            c1: EcPoint::identity(),
-            c2: c.clone(),
-        }).collect::<Vec<_>>();
-        for (_, deck) in self.reconstruct_state.player_deck.iter() {
-            for (i, card) in deck.iter().enumerate() {
-                if i < deck_len {
-                    reconstruct_deck[i].c1 = reconstruct_deck[i].c1 + card.c1;
-                    reconstruct_deck[i].c2 = reconstruct_deck[i].c2 + card.c2 - init_deck[i];
+        let aggregate_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
+        let mut deck = match poker_protocol::zk_shuffle::reconstruction::canonical_base_deck(
+            &init_deck,
+            &aggregate_pk,
+        ) {
+            Ok(deck) => deck,
+            Err(e) => {
+                tracing::error!("[RECONSTRUCT] canonical base deck failed: {e}");
+                return;
+            }
+        };
+        for (_, contributions) in self.reconstruct_state.player_deck.iter() {
+            match poker_protocol::zk_shuffle::reconstruction::apply_reconstruction_contributions(
+                &deck,
+                contributions,
+            ) {
+                Ok(next) => deck = next,
+                Err(e) => {
+                    tracing::error!("[RECONSTRUCT] apply contributions failed: {e}");
+                    return;
                 }
             }
         }
-        self.mental_poker_game.deck_encrypted = reconstruct_deck;
+        self.mental_poker_game.deck_encrypted = deck;
         // 重建 + 全员重洗后的 deck 是全新发牌序列：发牌游标归零，
         // 此后 deal/redeal 从新 deck 位置 0 起步（z_poker todo 收口）。
         self.mental_poker_game.note_deck_reconstructed();
@@ -120,8 +215,7 @@ impl Table {
         self.reconstruct_state.completed_players.clear();
         self.reconstruct_state.pending_players.clear();
         self.reconstruct_state.cards.clear();
-        self.reconstruct_state.coefficient = Scalar::zero();
-        self.reconstruct_state.player_readable_cards.clear();
+        self.reconstruct_state.player_residual_carriers.clear();
 
         // 进入洗牌阶段（RECONSTRUCT phase，对齐 Move shuffle_phase_reconstruct）
         self.shuffle_state.phase = ShufflePhase::Reconstruct;
@@ -190,10 +284,15 @@ impl Table {
                 completed_players: self.reconstruct_state.completed_players.clone(),
                 pending_players: self.reconstruct_state.pending_players.clone(),
                 cards: self.reconstruct_state.cards.iter().map(|c| ecpoint_to_hex(c)).collect(),
-                coefficient_hex: scalar_to_hex(&self.reconstruct_state.coefficient),
-                player_readable_cards: self.reconstruct_state.player_readable_cards.iter().map(|(k, v)| {
-                    (k.clone(), PlayerReadableCardJson {
-                        readable_cards: v.readable_cards.iter().map(ElGamalCiphertextJson::from_ciphertext).collect(),
+                aggregate_pk: ecpoint_to_hex(&self.mental_poker_game.key_manager.get_aggregated_pk()),
+                context_digest: hex::encode(self.reconstruct_state.context_digest),
+                reconstruction_epoch: self.reconstruct_state.reconstruction_epoch,
+                prior_state_digests: self.reconstruct_state.prior_state_digests.iter()
+                    .map(|(k, v)| (k.clone(), hex::encode(v)))
+                    .collect(),
+                player_residual_carriers: self.reconstruct_state.player_residual_carriers.iter().map(|(k, v)| {
+                    (k.clone(), PlayerResidualCarriersJson {
+                        residual_carriers: v.residual_carriers.iter().map(ElGamalCiphertextJson::from_ciphertext).collect(),
                     })
                 }).collect(),
             })
