@@ -55,9 +55,9 @@ base64 = "0.22"
 #   [patch."https://github.com/linqining/zchain.git"]
 #   poker-appchain = { path = "../zchain/poker-appchain" }
 #   poker-settlement-core = { path = "../zchain/poker-settlement-core" }
-poker-appchain = { git = "https://github.com/linqining/zchain.git", rev = "328bf80a4e08bf1db7a9032a5f6beed05aae5585" }
+poker-appchain = { git = "https://github.com/linqining/zchain.git", tag = "appchain-sdk-v0.1" }
 # 结算语义唯一事实源：SettlementPlan / derive_settlement_plan / rake_for。
-poker-settlement-core = { git = "https://github.com/linqining/zchain.git", rev = "328bf80a4e08bf1db7a9032a5f6beed05aae5585" }
+poker-settlement-core = { git = "https://github.com/linqining/zchain.git", tag = "appchain-sdk-v0.1" }
 # attestation v2.1 签名（poker-appchain 同版本 2.1.1，同一实例）。
 ed25519-dalek = "2.1.1"
 # Poseidon（Plan D v2 reveal_commitment + settlement digest 重算）。

@@ -369,6 +369,9 @@ impl AppchainRuntime {
             },
             note: note.clone(),
             request_id,
+            // P1 审计字段：收款人进效果摘要并被 spend 签名覆盖——请求方
+            // 显式传入的 payout_address 即打款目标。
+            payout_recipient: payout_address,
         }
         .effect_digest();
         let nf = poker_appchain::felt::felt_to_bytes32(&note.nullifier(&secret));
@@ -387,6 +390,7 @@ impl AppchainRuntime {
                 },
                 note: note.clone(),
                 request_id,
+                payout_recipient: payout_address,
             })
             .map_err(|e| format!("withdraw burn rejected: {e}"))?;
         // provenance 消费后保留（note_origins）+ finality 证据快照。
