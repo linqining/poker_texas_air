@@ -94,5 +94,5 @@ client/.env.production:    VITE_POKER_VAULT_ADDRESS=<新 vault>
 
 | 门 | 内容 | 处置 |
 | --- | --- | --- |
-| G2（SNIP-36） | dual 的 `virtual_snos_program_hash` 当前为占位值 `0x602b02cf…`；真实 proved 交易前须以主网实测 proof_facts 修正（`snops dump-proof-facts` 对拍） | 本批照部署；`STARKNET_DAPV_SETTLE_ENTRY` 保持 `v2`（fact-registry 腿，行为与 v5 等价）；过 G2 后再切 `snip36` |
+| G2（SNIP-36） | dual 的 `virtual_snos_program_hash` 当前为占位值 `0x602b02cf…`；真实 proved 交易前须以主网实测 proof_facts 修正（`snops dump-proof-facts` 对拍） | 本批照部署；`STARKNET_DAPV_SETTLE_ENTRY` 保持 `v2`（fact-registry 腿，行为与 v5 等价）；过 G2 后再切 `snip36`。**transaction-prover 镜像需 Linux x86_64 主机**（`docker run -d -p 3000:3000 -e RPC_URL=<v0.10 节点> ghcr.io/starkware-libs/starknet-privacy/transaction-prover:PRIVACY-0.14.3-RC.2`；Apple Silicon Mac 上 arm64/amd64 二进制均 SIGILL，实测 2026-09-19）；服务不可达时结算自动回退 v2 腿，不中断 |
 | 私密领取 156 | Ready X / Avnu paymaster 对私密交易（含钱包原生 Shield）代发失败，交易不上链；Sepolia fork 测试证明合约腿健康，9-08 同流程曾成功 | 钱包侧问题，非本批合约阻塞项；私密出金 UX 暂以 Public withdrawal 兜底，进展见 DEPLOYMENTS.md 2026-09-19 章节 |
