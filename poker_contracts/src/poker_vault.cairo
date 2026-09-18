@@ -715,7 +715,7 @@ pub mod PokerVault {
 
 // ============================================================
 // Tests (snforge)：#33 在局锁定 — 取款门 / 结算扣款顺序 / 超时自助解锁 /
-// 非 helper 直调拒绝。结构与 cashout_unshield_helper 一致。
+// 非 helper 直调拒绝。withdraw_to 与 burn_chips 分别只放行 unshield/authorized helper。
 // ============================================================
 
 #[cfg(test)]

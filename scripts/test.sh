@@ -125,8 +125,9 @@ if [[ "$NO_CLIENT" != 1 ]]; then
     cat > "$CLIENT_ENV" <<EOF
 # 由 scripts/test.sh sepolia 生成（Sepolia 联调配置，覆盖 client/.env.development）。
 # 不注入任何测试账户：身份一律来自真实连接的钱包。
+# 注意：不要把 blastapi 加进列表——已停服且无 CORS 头（2026-09）。
 VITE_STARKNET_RPC_URL=$RPC
-VITE_STARKNET_RPC_URLS=$RPC,https://starknet-sepolia.public.blastapi.io
+VITE_STARKNET_RPC_URLS=$RPC
 VITE_STARKNET_CHAIN_ID=0x534e5f5345504f4c4941
 # 筹码锚定规范 STRK（pSTRK 已退役；与 texas/.env.test 同源）
 VITE_STRK_TOKEN_ADDRESS=${STARKNET_STRK_ADDRESS:-0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d}

@@ -1,6 +1,6 @@
 // ABIs for the Starknet contracts the zgame client interacts with.
 //
-// The Cairo contracts (poker_token.cairo, poker_vault.cairo, poker_settlement.cairo)
+// The Cairo contracts (poker_vault.cairo, poker_settlement.cairo)
 // live in poker_texas_air/poker_contracts. Only the external surface that the
 // client calls is exposed here; the vault is the only entry point for chip
 // buy-in, and the settlement contract is read-only from the client side.

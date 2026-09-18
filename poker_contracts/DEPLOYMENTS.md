@@ -1,5 +1,9 @@
 # Poker 合约部署清单
 
+> ⚡ **下一次主网部署的执行手册：[MAINNET_RUNBOOK.md](MAINNET_RUNBOOK.md)**
+> （2026-09-19 整理：现状盘点、P1-2 类漂移说明、一键脚本
+> `scripts/deploy_mainnet_v6.sh`、切换/验证/迁移/回退与开放门槛）。
+>
 > 上主网前的部署参考。所有地址以 `strk20.json`（Sepolia）与本文档为准，
 > 部署新环境后**必须**回填本文档与 `strk20.json`。
 
@@ -603,12 +607,58 @@ PokerTableRegistry（`STARKNET_TABLE_REGISTRY_ADDRESS`）；`STARKNET_DAPV_SETTL
 真实 proof_facts 实测钉扎）。服务器启动冒烟 ✓（registry 引导 `create_table`
 TX `0x43bbad03...` → registry id 1，链上 `is_open(1)=true` 回读 ✓）。
 
-### 主网迁移清单（sepolia 重测通过后执行）
+## ✅ P1-2 类漂移重部署：vault + anonymizer + dual 实例（Sepolia，2026-09-19）
+
+**根因**：客户端买入 multicall 自 P1-2（9108a…/9fdde1d0，2026-09-10）起携带
+`vault.set_session_tx_pk`（会话委托同笔登记），而在网 vault 类是 2026-09-04
+部署的 `0x2c829f5c...`——无该入口 → 买入交易
+`argent/multicall-failed → ENTRYPOINT_NOT_FOUND`（线上实测，桌面买入全挂）。
+anonymizer 在网类（9-07 `0x525646bd...`）同样早于 `privacy_invoke_with_session`。
+**主网（vault 9-07 / anonymizer 9-07）同样缺 P1-2 入口，上主网前须同批重部署。**
+
+| 项 | 值 |
+| --- | --- |
+| 新 vault 类 | `0x6de64f9a3388e8224b17b21094f7a4e1435e6026868c8298146bbda17f0c60b`（declare TX `0x35ec65f4...`） |
+| 新 anonymizer 类 | `0x6dbb1f827f488beef4d18f2d5535c170d04babed6087776ca7d611a2c750966`（TX `0x49f710fd...`，compiled-hash `Actual 0x3010a6dd...` 显式重试） |
+| 新 vault 地址 | `0x1b1b7b37a14ac3b53930d2c5704a08c482d1d6b800626011f799b29f1549438`（deploy TX `0x319b254b...`，构造 `[owner, canonical STRK, 0]`） |
+| 新 anonymizer 地址 | `0x335db85a326271f23e7c199b464e67200d8c9fa7570da9807f50ed31fcddf4e`（TX `0x12f903ce...`，构造 `[owner, 新vault, 池 0x0254a6b...]`） |
+| 新 dual v6 实例 | `0x66daeeeeb47fdf756d57c24aa64c392441f8b9eb2bab74928c945cfac034a80`（TX `0x3139ad47...`；dual 无 set_vault，换 vault 必须重部署实例；类仍 `0x255cafe3...`） |
+| 接线 | vault.settlement=新dual（`0x53172c21...`）、unshield/authorized=新anonymizer（`0x267c38a5...`/`0xf838e6a3...`）；dual.claim_helper/circuit/虚拟OS 占位 三笔（`0x7a299872...`/`0x2b24d1fe...`/`0x7e064ff3...`）全部 SUCCEEDED，视图回读核验 ✓（`session_tx_pk` 入口已存在） |
+| 结算冒烟 | 新绑定上 `SEPOLIA_SETTLE_SMOKE_OK`（TX `0x42644423...`，l2_gas 8,070,480） |
+
+**迁移**：旧 vault `0x0629385f...`（total_chips ≈10.38 STRK）保留可提——玩家
+自行 `withdraw` 后在新 vault 重新买入；旧 dual 实例 `0x7481ddcd...` 与旧
+anonymizer `0x7ee059dd...` 原地保留不再接线。
+
+env：`texas/.env`、`texas/.env.test`、`client/.env.development`（vault +
+anonymizer）均已切换。
+
+**遗留（另案）**：私密领取经 Ready 钱包的 Avnu paymaster 提交报
+`PaymasterV2Error 156 TRANSACTION_EXECUTION_ERROR`（交易不上链，无 revert 可查）。
+合约腿已被 Sepolia fork 测试证明健康（`poker_contracts/tests/unshield_fork.cairo`），
+同流程 2026-09-08 曾成功（TX `0x3970a9d6...`）；客户端已加干跑二分诊断
+（`strk20PrepareInvoke` 失败路径自动区分钱包层/paymaster 层）。
+**2026-09-19 根因实锤**（Avnu paymaster 响应 `data.execution_error`，由 Ready
+Shield 实测取得）：
+`Invalid proof facts: Virtual OS config hash mismatch. Computed
+780173824077612199657331940007038546159930121571926143361206405091891673285
+(0x1b9900f7...), expected 155353494348665658624236724160728902643094265960890343456308270214333914199
+(0x57ed4d5e...)` —— Ready X 证明器的虚拟 OS 配置哈希与验证端钉扎值版本错位，
+属钱包/基础设施侧问题（钱包原生 Shield 同样 156；直付非代发的池交易正常）。
+→ 已反馈 Ready/Avnu；期间私密出金以 Public withdrawal 兜底。
+**G2 旁证**：本次实测同时给出当前活跃证明器的 virtual OS config hash 真实样本
+`0x1b9900f7...`（与我们的占位 `0x602b02cf...`、验证端 `0x57ed4d5e...` 均不同）
+——正式钉扎仍须以**本方 settle 流程**的 `snops dump-proof-facts` 实测为准。
+
+## 主网迁移清单（sepolia 重测通过后执行）
 
 1. `CONFIRM_MAINNET=yes ./scripts/deploy_mainnet.sh` 流程基础上新增 v6 步骤：
    declare（同 sepolia，prepared 资金 ≥ 60 STRK 余量即可，仅 declare+deploy+接线）
    → deploy `[owner, vault, prover]` → set_claim_helper / set_circuit_program_hash
    / set_virtual_snos_program_hash → vault `set_settlement_contract(v6)`。
+   **另须同批重部署 vault + anonymizer（P1-2 类漂移，主网在网类为 9-07 之前的
+   旧类，缺 `set_session_tx_pk` → 桌面买入必挂）+ 重部署 dual v6 实例绑新
+   vault + 全套接线；主网 vault 存量玩家余额需公告自提后在新 vault 重买。**
 2. **先满足 G2**：sepolia 上用真实 SNIP-36 proved 交易实测 proof_facts
    （`snops dump-proof-facts`），修正 `virtual_snos_program_hash` 后再切主网
    `STARKNET_DAPV_SETTLE_ENTRY=snip36`；在此之前主网 v6 仅走 fact-registry 腿

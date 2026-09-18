@@ -201,12 +201,24 @@ export function compareVersions(a: string, b: string): number {
  */
 export function walletErrText(e: unknown): string {
   if (typeof e === 'string') return e;
-  const rec = e as { message?: unknown; code?: unknown; data?: unknown } | null;
+  const rec = e as {
+    message?: unknown; code?: unknown; data?: unknown; detail?: unknown;
+  } | null;
   if (rec && typeof rec === 'object') {
     const parts: string[] = [];
     if (typeof rec.code !== 'undefined') parts.push(`code ${String(rec.code)}`);
     if (typeof rec.message === 'string' && rec.message) parts.push(rec.message);
     if (typeof rec.data === 'string' && rec.data) parts.push(rec.data);
+    // 钱包/扩展抛的错误常把原始 payload 挂在非 data 字段：Ready 的
+    // PaymasterV2Error 按 SNIP-29 规范把 Avnu 响应整包挂在 .detail
+    // （其中 data.execution_error = revert 调用链）——逐个字符串化，
+    // 避免弹窗里只剩一行 156 摘要无法归因。
+    for (const key of ['data', 'detail'] as const) {
+      const v = rec[key];
+      if (v && typeof v === 'object') {
+        try { parts.push(`${key}: ${JSON.stringify(v)}`); } catch { /* 循环引用等忽略 */ }
+      }
+    }
     if (parts.length) return parts.join(' ');
     try { return JSON.stringify(e) ?? String(e); } catch { /* fallthrough */ }
   }
@@ -398,6 +410,8 @@ interface Strk20V6Account {
   address: string;
   strk20InvokeTransaction: (actions: unknown[]) => Promise<{ transaction_hash: string }>;
   strk20Balances: (tokens: string[]) => Promise<Array<{ token: string; balance: string | bigint }>>;
+  /** starknet ≥10.4 官方干跑：证明 + 池校验但不提交/不经 paymaster。 */
+  strk20PrepareInvoke?: (actions: unknown[], simulate: boolean) => Promise<unknown>;
 }
 
 let v6AccountPromise: Promise<Strk20V6Account | null> | null = null;
@@ -690,6 +704,30 @@ export async function claimRewardsPrivate(
     // 119 屏蔽余额不足 / 114 schema 校验失败 / 162 api_version 不支持 /
     // 163 钱包内部失败（映射与文案统一在 friendlyWalletError）。
     const msg = walletErrText(err);
+    // paymaster 类失败（如 Avnu 156 TRANSACTION_EXECUTION_ERROR）只有一行
+    // 摘要、不上链、查不到 revert。用钱包官方干跑（strk20PrepareInvoke，
+    // 完成证明 + 池校验但不提交、不经 paymaster）二分定位：
+    //   干跑也失败 → 钱包/池层拒绝（错误文本即根因）；
+    //   干跑通过   → 合约/池/证明全正常，失败在 paymaster 提交层（找 Avnu/Ready）。
+    if (/paymaster|\b156\b|TRANSACTION_EXECUTION_ERROR/i.test(msg)) {
+      try {
+        const v6 = await getStrk20WalletAccount();
+        const prepare = v6?.strk20PrepareInvoke;
+        if (typeof prepare === 'function') {
+          await prepare.call(v6, actions, true);
+          const diag =
+            '干跑（证明+池校验，不经 paymaster）通过 → 合约/池/证明均正常，' +
+            '失败发生在 paymaster 提交层（Avnu/Ready 侧），请附带本条日志向钱包/Avnu 反馈。';
+          logger.warn('[strk20] private claim dry-run:', diag);
+          return { hash: '', success: false, error: `${friendlyWalletError(msg) ?? msg} ｜ ${diag}` };
+        }
+      } catch (pe) {
+        const pmsg = walletErrText(pe);
+        const diag = `干跑（不经 paymaster）复现失败 → 钱包/池层拒绝，根因：${pmsg.slice(0, 300)}`;
+        logger.warn('[strk20] private claim dry-run:', diag);
+        return { hash: '', success: false, error: `${friendlyWalletError(msg) ?? msg} ｜ ${diag}` };
+      }
+    }
     return { hash: '', success: false, error: friendlyWalletError(msg) ?? msg };
   }
 }

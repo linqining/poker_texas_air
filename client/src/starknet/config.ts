@@ -27,13 +27,17 @@ export const CHIPS_PER_STRK = 1_000;
 export const chipsToStrkText = (chips: number): string =>
   (Number(BigInt(Math.max(0, Math.floor(chips))) * WEI_PER_CHIP) / 1e18).toFixed(4);
 
+// 公共端点黑名单记录：Blast API 已于 2026-09 停服（starknet-sepolia/
+// starknet-mainnet.public.blastapi.io 一律 403 "no longer available"，
+// 且无 CORS 头——浏览器侧表现为 preflight CORS 报错 + failover 熔断被
+// 污染）。1rpc/nethermind-free/lava/thirdweb/redefine 当前均不收无钥
+// starknet 流量；需要第二节点时在 VITE_STARKNET_RPC_URLS 里自行加
+// 私有端点（如 Alchemy）。
 const DEFAULT_SEPOLIA_RPCS = [
   'https://starknet-sepolia-rpc.publicnode.com',
-  'https://starknet-sepolia.public.blastapi.io',
 ];
 const DEFAULT_MAINNET_RPCS = [
   'https://starknet-rpc.publicnode.com',
-  'https://starknet-mainnet.public.blastapi.io',
 ];
 
 const MAINNET_CHAIN_ID = '0x534e5f4d41494e';

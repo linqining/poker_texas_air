@@ -1,4 +1,3 @@
-mod poker_token;
 mod poker_vault;
 /// STRK20 privacy-pool anonymizer (Plan B): private buy-ins via privacy_invoke.
 mod poker_vault_anonymizer;
@@ -14,10 +13,9 @@ mod poker_dual_settlement;
 /// payouts privately via secp256k1-signed STRK20 pool claims.
 mod settlement_payout_anonymizer;
 
-/// #25 全链路私密提现（unshield 方向第二个 anonymizer）：vault 筹码 →
-/// STRK20 池 open note，不经玩家公开钱包。
-mod cashout_unshield_helper;
-
 /// 桌台注册表：合约分配 table_id + 不可变 params_hash + 只追加的
 /// Open→Closed 生命周期。"关桌后不开新手"的链上权威信号源。
 mod poker_table_registry;
+// 已退役并删除（2026-09-19）：poker_token（pSTRK 下线，筹码锚定规范 STRK）、
+// cashout_unshield_helper（被 anonymizer v4 的 withdraw_to 守恒出金取代）。
+// 历史地址见 strk20.json retired_contracts 与 DEPLOYMENTS.md。

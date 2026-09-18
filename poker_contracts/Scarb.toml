@@ -33,3 +33,9 @@ dual_legacy_tests = []
 [profile.dev.cairo]
 unstable-add-statements-code-locations-debug-info = true
 unstable-add-statements-functions-debug-info = true
+
+# Sepolia fork 测试（tests/unshield_fork.cairo 等链上状态复现类测试用）
+[[tool.snforge.fork]]
+name = "SEPOLIA_LATEST"
+url = "https://starknet-sepolia-rpc.publicnode.com"
+block_id.tag = "latest"
