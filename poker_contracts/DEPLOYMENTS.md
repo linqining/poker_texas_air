@@ -532,15 +532,28 @@ chips −X / note +X 分文不丢。前端两动作删去自筹 withdraw 桥与�
 - 客户端：`closed` 快照字段 → 坐下按钮替换为"本桌已关闭"提示 + `sitDown`
   本地拦截。
 
-部署：devnet `local_deploy.sh` 已加 PokerTableRegistry（`REGISTRY_GRACE`
-可覆盖宽限期，devnet 默认 3600）；Sepolia/主网部署脚本待随下一次批量
-部署补充。**本地 scarb 2.11.4 无法解析钉定的 starknet 2.19.4（既有环境
+部署：devnet `local_deploy.sh` 已加 PokerTableRegistry（`REGISTRY_GRACE` 可覆盖
+宽限期，devnet 默认 3600）。
+
+### ✅ Sepolia 部署（2026-09-19，随 dual v6 同批）
+
+| 项 | 值 |
+| --- | --- |
+| class | `0x7cc910b5cf79132f02479b264a4a792d90f97508b8c76253557b752d405c0bb`（declare TX `0x7056bcff...`，compiled-hash 自动重试同坑） |
+| 地址 | `0x39b3531d4a48245d56f6cec89a4434d688b01fa26f5b2a317efdcb99da6fdaf`（deploy TX `0x2f0ae628...`） |
+| 构造 | `(owner=deployer 0x6e37...c782, close_grace_secs=604800)`（生产口径 7 天） |
+| 引导 | 服务器 test 模式启动 `create_table` TX `0x43bbad03...` → registry id 1，`is_open(1)=true` 链上回读 ✓ |
+
+env：`STARKNET_TABLE_REGISTRY_ADDRESS` 已写入 `texas/.env` / `texas/.env.test`。
+主网部署随 v6 迁移批次一起执行（同脚本补一段 declare+deploy 即可）。
+
+**本地 scarb 2.11.4 无法解析钉定的 starknet 2.19.4（既有环境
 限制），合约需在 scarb ≥2.19 工具链 `scarb build && snforge test` 验证。**
 
-## dual v6（SNIP-36 门修正 + create_proof 入口）——待部署
+## dual v6（SNIP-36 门修正 + create_proof 入口）——✅ 已部署 Sepolia（2026-09-19），主网待部署
 
-源码已就绪（`poker_contracts/src/poker_dual_settlement.cairo`，snforge
-112/112 全绿），**尚未部署**（sepolia 与主网仍运行 v5）。相对 v5 的差异：
+源码 `poker_contracts/src/poker_dual_settlement.cairo`，snforge 112/112 全绿。
+Sepolia 已部署并完成接线 + 真实结算冒烟；**主网仍运行 v5，待 sepolia 重测通过后迁移**。相对 v5 的差异：
 
 1. **SNIP-36 门修正**：`facts[2]` 的绑定根从 `circuit_program_hash`
    （v5 误绑本方电路哈希——真实 proof_facts[2] 是 Starknet 虚拟 OS
@@ -558,31 +571,47 @@ chips −X / note +X 分文不丢。前端两动作删去自筹 withdraw 桥与�
    dump-proof-facts` 对拍）。
 
 构建指纹（本机 scarb 2.19.4）：sierra_program 15,791 felts / 34 入口；
-casm 体积待 `snops declare` 时从 `--compiled` 记录。
+casm **37,411 felts**（v5 为 36,508，上限 81,226 余量充足）。
 
-部署步骤（资金/节点就绪后执行；先 sepolia 后主网）：
+### ✅ Sepolia 部署（2026-09-19）
 
-```bash
-# 0) 构建/验证（scarb ≥2.19 工具链）
-(cd poker_contracts && scarb build && snforge test)   # 112/112
+| 项 | 值 |
+| --- | --- |
+| class（sierra） | `0x255cafe369c7c9d496096ac07585df49f98a1b86eca70e1b66c634538a03041` |
+| declare TX | `0x15e1d926...`（节点重算 compiled hash `Actual 0x5f0ea583...`，snops 自动以 Actual 重试落地，已知坑复现） |
+| 地址 | `0x7481ddcd830c5e23f81a15db52774992c343be618d04f00366600efe7da2c94` |
+| deploy TX | `0x70b8b9e7...`（构造 `[owner, vault v3, prover=owner]`，与 v5 同形） |
+| set_claim_helper | `0x60a4c474...` TX `0x95d7bf5b...` |
+| set_circuit_program_hash | `0x744d16d3...` TX `0x4929b832...` |
+| set_virtual_snos_program_hash | 占位 `0x602b02cf...` TX `0x63756494...`（**G2 门：首个真实 proved 交易前须以 sepolia 实测 proof_facts 修正**，`snops dump-proof-facts` 对拍） |
+| vault v3 `set_settlement_contract(v6)` | TX `0x13d524d3...`（切换点；vault 无 settlement getter，切回 v5 需显式重绑） |
+| 回执 | 以上全部 ACCEPTED_ON_L2 SUCCEEDED；`circuit/virtual_snos/claim_helper/vault` 四视图回读核验 ✓ |
 
-# 1) declare v6（类名仍 PokerDualSettlement；产出 CASM_CLASS_HASH 记入本表）
-snops --url $RPC --pk $OWNER_PK --addr $OWNER_ADDR declare \
-  --class poker_contracts/target/dev/poker_contracts_PokerDualSettlement.contract_class.json \
-  --compiled poker_contracts/target/dev/poker_contracts_PokerDualSettlement.compiled_contract_class.json
+本轮（declare+deploy+接线+registry）总花费 ≈ 57.3 STRK（operator 余额 304.5 → 247.2）。
 
-# 2) deploy（构造参数与 v5 同形：[owner, vault, prover]）+ 接线
-snops --url $RPC --pk $OWNER_PK --addr $OWNER_ADDR deploy \
-  --class_hash $V6_CLASS_HASH --calldata "$OWNER,$VAULT,$PROVER"
-snops --url $RPC --pk $OWNER_PK --addr $OWNER_ADDR invoke --contract $DUAL_V6 --fn set_claim_helper --calldata $PAYOUT
-snops --url $RPC --pk $OWNER_PK --addr $OWNER_ADDR invoke --contract $DUAL_V6 --fn set_circuit_program_hash --calldata 0x744d16d382e7940b7b93c0a069ab0df04704c5b28d6476d23cca6c2370a7ad4
-# 3) 虚拟 OS 哈希钉扎（值以 sepolia 实测为准，先占位后修正亦可——门在 facts[8]）
-snops --url $RPC --pk $OWNER_PK --addr $OWNER_ADDR invoke --contract $DUAL_V6 --fn set_virtual_snos_program_hash --calldata 0x602b02cff498684fae3d66016137978fdad45a5036878a57257689d4f3f6ccb
-# 4) 回读核验：circuit_program_hash / virtual_snos_program_hash / claim_helper
+**Sepolia 真实结算冒烟（dual v6，2026-09-19）**：
+`STARKNET_SEPOLIA_SMOKE=1 cargo test -p texas --bin texas sepolia_settle_smoke -- --ignored --nocapture`
+→ `SEPOLIA_SETTLE_SMOKE_OK hand_id=7`；prefund TX `0x332ae29e...`、
+register+settle TX `0x3c8a66d2...`（SUCCEEDED，l2_gas 8,070,480 + l1_data 800）。
+随冒烟修复一处**过时断言**（e2e_tests.rs：`proved.settle_calldata` 自 6684d4ef
+起改为提交期填充，构建期刻意留空——断言仍按旧行为查长度导致冒烟必挂，已改为
+`is_empty()`）。
 
-# 5) 切流：STARKNET_DUAL_SETTLEMENT_ADDRESS=$DUAL_V6 + STARKNET_DAPV_SETTLE_ENTRY=snip36
-#    + STARKNET_SNIP36_PROVER_URL=<内网 transaction-prover> 后重启服务
-```
+**registry + env 切换**：`texas/.env` 与 `texas/.env.test` 已指向 dual v6 +
+PokerTableRegistry（`STARKNET_TABLE_REGISTRY_ADDRESS`）；`STARKNET_DAPV_SETTLE_ENTRY`
+保持 `v2`（fact-registry 腿），切 `snip36` 入口待 G2 门（内网 transaction-prover +
+真实 proof_facts 实测钉扎）。服务器启动冒烟 ✓（registry 引导 `create_table`
+TX `0x43bbad03...` → registry id 1，链上 `is_open(1)=true` 回读 ✓）。
 
-回退：env 指回 v5 地址即回 fact-registry 单腿（v5/v6 共享 vault/prover/
-claim_helper，无迁移）。
+### 主网迁移清单（sepolia 重测通过后执行）
+
+1. `CONFIRM_MAINNET=yes ./scripts/deploy_mainnet.sh` 流程基础上新增 v6 步骤：
+   declare（同 sepolia，prepared 资金 ≥ 60 STRK 余量即可，仅 declare+deploy+接线）
+   → deploy `[owner, vault, prover]` → set_claim_helper / set_circuit_program_hash
+   / set_virtual_snos_program_hash → vault `set_settlement_contract(v6)`。
+2. **先满足 G2**：sepolia 上用真实 SNIP-36 proved 交易实测 proof_facts
+   （`snops dump-proof-facts`），修正 `virtual_snos_program_hash` 后再切主网
+   `STARKNET_DAPV_SETTLE_ENTRY=snip36`；在此之前主网 v6 仅走 fact-registry 腿
+   （与 v5 行为等价，无需急于切）。
+3. 回退：主网 env 指回 v5 `0x1d39b80b...` + vault 重绑回 v5（两笔 owner invoke）。
+4. 回填 strk20.json（mainnet 块）/ 本文档 / server-client env。

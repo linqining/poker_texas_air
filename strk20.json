@@ -8,7 +8,27 @@
     "chain_id": "SN_SEPOLIA",
     "rpc_url": "https://starknet-sepolia-rpc.publicnode.com",
     "explorer_url": "https://sepolia.starkscan.co",
-    "note": "Testnet history (devnet → Sepolia) in poker_contracts/DEPLOYMENTS.md; all submission transactions are mainnet."
+    "note": "Testnet history (devnet → Sepolia) in poker_contracts/DEPLOYMENTS.md; all submission transactions are mainnet.",
+    "deployed": "2026-09-19 (dual v6 + registry redeploy; vault v3 / legacy settlement / claim helper unchanged)",
+    "deployer_owner": "0x6e37d33462f7319261396d7d7f669d147e40cdef91c6a8305cfde771805c782",
+    "contracts": {
+      "poker_vault": "0x0629385f1e3b43684828cf46488fbd0ef2b1ec0dc27c7827ecbe6b2f15c7fa13",
+      "poker_settlement_legacy": "0x76a0b49a40c706d438c5f8675165d462de5a0a7d5183183e8b4746b955b5194",
+      "poker_dual_settlement_v6": "0x7481ddcd830c5e23f81a15db52774992c343be618d04f00366600efe7da2c94",
+      "poker_dual_settlement_v5_retired": "0x29bdc970330f545c8be2d78fdcd8a92cc0378dff4b6d7464257df9b4fdd47d6",
+      "settlement_payout_anonymizer": "0x60a4c47416de31056cdca968001df0c199d663842c9372e0409d4c60b397871",
+      "poker_table_registry": "0x39b3531d4a48245d56f6cec89a4434d688b01fa26f5b2a317efdcb99da6fdaf"
+    },
+    "class_hashes": {
+      "PokerDualSettlement_v6": "0x255cafe369c7c9d496096ac07585df49f98a1b86eca70e1b66c634538a03041",
+      "PokerTableRegistry": "0x7cc910b5cf79132f02479b264a4a792d90f97508b8c76253557b752d405c0bb"
+    },
+    "wiring_verified": {
+      "vault.settlement_contract": "poker_dual_settlement_v6 (rebind TX 0x13d524d3...)",
+      "dual.claim_helper": "settlement_payout_anonymizer",
+      "dual.circuit_program_hash": "0x744d16d3...",
+      "dual.virtual_snos_program_hash": "0x602b02cf... placeholder — re-measure with real sepolia proof_facts before first proved tx (G2 gate)"
+    }
   },
   "retired_contracts": {
     "poker_token": "pSTRK test token 0x4bfad561... (class 0x5d745b51...) — retired 2026-09: chips anchor to canonical STRK directly; vault v3 token() = canonical STRK.",

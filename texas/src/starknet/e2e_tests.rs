@@ -294,10 +294,9 @@ fn play_full_hand_artifacts(
     assert_eq!(dual.settle_calldata.len(), expect_len);
     assert_ne!(dual.proved.p_batch_commitment, starknet_crypto::Felt::ZERO);
     assert_eq!(dual.proved.register_calldata.len(), 9);
-    assert_eq!(
-        dual.proved.settle_calldata.len(),
-        expect_len - (1 + dual.batch_words.len()) + 2
-    );
+    // proved settle calldata 由 submit_dual_settlement 在提交期按
+    // proved_private 公开段填充（6684d4ef 起），构建期刻意留空。
+    assert!(dual.proved.settle_calldata.is_empty());
 
     // 宿主折叠 parity（链上 fold_and_check 的同构镜像）
     let hb_bytes = dual.hand_binding.to_bytes_be();
