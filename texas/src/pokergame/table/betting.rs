@@ -46,7 +46,7 @@ impl Table {
             }
             Some(Err(e)) => {
                 self.refresh_from_vm();
-                tracing::debug!("[betting-authority] table {} fold rejected by VM: {e}", self.summary.id);
+                tracing::warn!("[betting-authority] table {} fold rejected by VM: {e}", self.summary.id);
                 None
             }
             None => {
@@ -82,7 +82,7 @@ impl Table {
             }
             Some(Err(e)) => {
                 self.refresh_from_vm();
-                tracing::debug!("[betting-authority] table {} call rejected by VM: {e}", self.summary.id);
+                tracing::warn!("[betting-authority] table {} call rejected by VM: {e}", self.summary.id);
                 None
             }
             None => {
@@ -110,7 +110,7 @@ impl Table {
             }
             Some(Err(e)) => {
                 self.refresh_from_vm();
-                tracing::debug!("[betting-authority] table {} check rejected by VM: {e}", self.summary.id);
+                tracing::warn!("[betting-authority] table {} check rejected by VM: {e}", self.summary.id);
                 None
             }
             None => {
@@ -142,7 +142,7 @@ impl Table {
             }
             Some(Err(e)) => {
                 self.refresh_from_vm();
-                tracing::debug!("[betting-authority] table {} raise rejected by VM: {e}", self.summary.id);
+                tracing::warn!("[betting-authority] table {} raise rejected by VM: {e}", self.summary.id);
                 None
             }
             None => {
@@ -305,8 +305,39 @@ impl Table {
             }
             return None;
         }
-        // 对齐 Move on_betting_timeout：超时一律 fold（Move 中不区分 needs_to_call）
+        // 对齐 Move on_betting_timeout：超时一律 fold（Move 中不区分 needs_to_call）。
+        // handle_fold 被 VM 拒绝（陈旧/错位镜像）时降级强吃 fold：超时代打
+        // 必须收敛，否则每 8s 重试被拒 → 桌面永久卡死（2026-09-18 长跑
+        // PreFlop 死锁）。镜像侧 force_fold 同步离场（无镜像跳过），游戏层
+        // 标记弃牌并推进 turn，牌局继续（fold-win 结算路径不受影响）。
         let pk = pk_hex?;
-        self.handle_fold(&pk)
+        match self.handle_fold(&pk) {
+            Some(res) => Some(res),
+            None => {
+                tracing::warn!(
+                    "[betting-timeout] table {} seat {turn_seat_id}: fold rejected by VM — degrading to forced fold",
+                    self.summary.id
+                );
+                if let Some(wallet) = self.players().get(&pk) {
+                    self.vm_force_fold(&wallet.0);
+                }
+                if let Some(seat) = self.local_seats.get_mut(&turn_seat_id) {
+                    seat.folded = true;
+                    seat.has_acted = true;
+                }
+                self.set_turn(self.next_unfolded_player(turn_seat_id, 1));
+                self.set_betting_started_at(now_ms());
+                let current_turn = self.turn();
+                for i in 1..=self.max_players() {
+                    if let Some(seat) = self.local_seats.get_mut(&i) {
+                        seat.turn = current_turn == Some(i);
+                    }
+                }
+                Some(ActionResult {
+                    seat_id: turn_seat_id,
+                    message: "timeout forced fold (VM degraded path)".to_string(),
+                })
+            }
+        }
     }
 }

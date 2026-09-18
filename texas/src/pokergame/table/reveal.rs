@@ -1,13 +1,29 @@
 use super::*;
 
 impl Table {
+    /// 本手揭示参与者（与 record_hand_start 的 VM 计划同源过滤）：活跃座位
+    /// （非 sitting_out / 非 is_waiting）且有玩家且已注册进 mental_poker。
+    ///
+    /// 此前 preflop/community 揭示直接用 `mental_poker_game.players.keys()`
+    /// 全集：断线转 sitting_out 的玩家、残留注册都进了 pending_players——
+    /// 他们永不提交揭示份额，游戏层只能等 45s 超时踢人重开整手；而 VM
+    /// 镜像的 reveal 窗口按 VM 计划座位构建，两边参与者集失配后镜像窗口
+    /// 推进错位、陈旧镜像跨手残留，最终表现为"betting 被拒：not in
+    /// betting round"死锁（2026-09-18 500 手长跑首小时复现）。showdown
+    /// 揭示自始使用同款过滤，preflop/community 对齐之。
+    fn reveal_participant_pks(&self) -> Vec<GamePkHex> {
+        self.seats().values()
+            .filter(|s| !s.sitting_out && !s.is_waiting)
+            .filter_map(|s| s.player.as_ref().map(|p| p.pk_hex.clone()))
+            .filter(|pk| self.mental_poker_game.players.contains_key(pk.as_str()))
+            .collect()
+    }
+
     pub fn start_preflop_reveal_phase(&mut self) {
         if self.reveal_token_state.is_active(){
             return;
         }
-        let player_pks: Vec<GamePkHex> = self.mental_poker_game.players.keys()
-            .map(|k| GamePkHex::new(k.clone()))
-            .collect();
+        let player_pks: Vec<GamePkHex> = self.reveal_participant_pks();
         let mut player_assignments = HashMap::new();
         for pk in &player_pks {
             let mut hand_cards = Vec::new();
@@ -45,9 +61,7 @@ impl Table {
             return;
         }
 
-        let player_pks: Vec<GamePkHex> = self.mental_poker_game.players.keys()
-            .map(|k| GamePkHex::new(k.clone()))
-            .collect();
+        let player_pks: Vec<GamePkHex> = self.reveal_participant_pks();
 
         let unreveal_cards = self.mental_poker_game.list_unreveal_community_cards_encrypted();
         let community_cards: Vec<ElGamalCiphertext> = unreveal_cards.iter().map(|c| c.encrypted_card.clone()).collect();
@@ -350,7 +364,7 @@ impl Table {
         // 无实时镜像 = 不可证明手 → fail-closed 拒绝（本地兜底已删除）。
         match self.vm_try_reveal(player_pk.0.as_str(), &tokens) {
             Some(Err(e)) => {
-                tracing::debug!("[reveal-authority] table {} reveal rejected by VM: {e}", self.summary.id);
+                tracing::warn!("[reveal-authority] table {} reveal rejected by VM: {e}", self.summary.id);
                 return Err(format!("reveal rejected by VM: {e}"));
             }
             Some(Ok(view)) => {
@@ -622,6 +636,48 @@ mod reveal_invariant_tests {
                 );
             }
         }
+    }
+
+    /// 回归（2026-09-18 长跑死锁根因）：preflop/community 揭示的参与者集
+    /// 必须与 record_hand_start 的 VM 计划同源（活跃座位 ∩ mental 注册）。
+    /// sitting_out 玩家（断线未归）留在 mental 注册表里，但绝不进揭示
+    /// pending——否则他永不提交份额，游戏层 45s 超时重开 + VM 镜像窗口
+    /// 与计划失配，最终演化为 "not in betting round" 永久死锁。
+    #[test]
+    fn reveal_pending_excludes_sitting_out_players() {
+        let mut table = make_test_table();
+        let pks: Vec<String> = (1..=3).map(|i| register_and_seat(&mut table, i)).collect();
+        deal_hands(&mut table);
+
+        // 玩家 3 断线转 sitting_out（局中掉线、下一手仍未归）。
+        if let Some(seat) = table.local_seats.get_mut(&3) {
+            seat.sitting_out = true;
+        }
+        // mental 注册仍在（注册表跨手保留）——这正是现场条件。
+        assert!(
+            table.mental_poker_game.players.contains_key(&pks[2]),
+            "fixture: pk3 must remain registered while sitting out"
+        );
+
+        table.start_preflop_reveal_phase();
+        let state = table.reveal_token_state.clone();
+        assert!(state.pending_players.contains(&GamePkHex::new(pks[0].clone())));
+        assert!(state.pending_players.contains(&GamePkHex::new(pks[1].clone())));
+        assert!(
+            !state.pending_players.contains(&GamePkHex::new(pks[2].clone())),
+            "sitting_out player must not be a preflop reveal participant"
+        );
+
+        // community 揭示同款过滤。
+        table.reveal_token_state.reset();
+        table.mental_poker_game.deal_community_cards_encrypted(5);
+        table.start_community_reveal_phase();
+        let state = table.reveal_token_state.clone();
+        assert!(state.pending_players.contains(&GamePkHex::new(pks[0].clone())));
+        assert!(
+            !state.pending_players.contains(&GamePkHex::new(pks[2].clone())),
+            "sitting_out player must not be a community reveal participant"
+        );
     }
 
     /// 回归（2026-09-07 线上 hand 1788801359）：揭牌仪式期间 betting_round

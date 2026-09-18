@@ -169,6 +169,12 @@ fn abort_unprovable_hand(table: &mut Table, reason: &str, offender_seat: Option<
             seat.sitting_out = true;
         }
     }
+    // 丢弃本手 VM 镜像：abort 后桌面立即重开下一手，若沿用上一手的镜像，
+    // 新手的全部下注/揭示都会撞在陈旧状态机上被拒（"not in betting
+    // round" / "reveal from unknown pk"），超时代打同样被拒 → 永久死锁
+    // （2026-09-18 500 手长跑首小时复现）。镜像只在 record_hand_start
+    // 成功时随新快照重建。
+    table.vm_session = None;
     table.reset_for_next_hand();
     table.emit_event(crate::pokergame::table::events::TableEvent::TableUpdated {
         message: Some("牌局已中止：本手无法证明（缺少有效入座证明），已重置".to_string()),
@@ -274,6 +280,14 @@ pub fn record_hand_start(table: &mut Table) {
     // post_blinds 从该 rank 顺时针扫描，与游戏层从空座位扫描的落点一致。
     let last_bb_rank = rank_of_rotation_base(table.last_bb_seat(), &plan);
 
+    tracing::info!(
+        "[prove-log] hand {} plan: {} participant(s): {}",
+        table.current_hand_id,
+        plan.len(),
+        plan.iter().map(|(seat, p)| format!("seat{}={}", seat, p.pk_hex))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     table.hand_proof_log = HandProofLog {
         start: Some(HandStartData {
             hand_id: table.current_hand_id,
