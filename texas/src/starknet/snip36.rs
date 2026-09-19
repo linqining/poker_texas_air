@@ -233,7 +233,14 @@ pub struct Snip36ProverClient {
 
 impl Snip36ProverClient {
     pub fn new(endpoint: impl Into<String>) -> Self {
-        Self { endpoint: endpoint.into(), http: reqwest::Client::new() }
+        // 虚拟执行出证实测 ≈2 分钟/笔：显式放宽整体超时到 10 分钟
+        // （悬挂兜底），连接阶段 30 秒快速失败。
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("reqwest client");
+        Self { endpoint: endpoint.into(), http }
     }
 
     /// 对参考区块虚拟执行 `invoke` 并产出证明。

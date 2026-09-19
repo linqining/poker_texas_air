@@ -1294,7 +1294,11 @@ pub async fn submit_dual_settlement(
     let operator = chain.operator().await.ok_or("operator account unavailable")?;
 
     // 模式决策（proved → 尝试 prover → 失败回退 linear）。
-    let mode = if chain.config.settle_mode == SettleMode::Proved {
+    // entry=snip36：证明源 = create_proof 交易的虚拟 SNOS 证明（自托管
+    // prover），不依赖 settlement_private 电路 prover/batch attestation——
+    // 只要隐私公开段就绪（全体赢家 payout commitment 齐备）即具备提交条件。
+    let snip36_engaged = chain.config.dapv_settle_entry() == "snip36";
+    let mode = if chain.config.settle_mode == SettleMode::Proved || snip36_engaged {
         export_prover_workload(dual, std::path::Path::new(&chain.config.prover_work_dir));
         // prover 走向开关（shadow::prover_mode）：dev 本地模式在进程内
         // 校验并出具 attestation（fact 由 operator 直登），生产 remote
@@ -1312,7 +1316,7 @@ pub async fn submit_dual_settlement(
             let settlement_prover = super::settlement_prover::HttpSettlementProver::new(
                 if local_prover { None } else { chain.config.prover_url.clone() },
             );
-            if local_prover || settlement_prover.configured() {
+            if local_prover || settlement_prover.configured() || snip36_engaged {
                 match super::settlement_prover::prepare_request(
                     dual.hand_id,
                     dual.hand_binding,
@@ -1351,7 +1355,7 @@ pub async fn submit_dual_settlement(
                                     "[settlement-private] local fact registration failed (non-fatal): {e}"
                                 ),
                             }
-                        } else {
+                        } else if settlement_prover.configured() {
                             match settlement_prover.prove_settlement_private(&req).await {
                                 Ok(att) => tracing::info!(
                                     "[settlement-private] attested (program {})",
@@ -1400,6 +1404,11 @@ pub async fn submit_dual_settlement(
                 }
             }
         }
+        // entry=snip36：公开段就绪即视为 Proved（协议内 SNOS 证明承载证明）；
+        // batch attestation 保持观测性输出，不作门槛。
+        if snip36_engaged && proved_settle.is_some() {
+            resolved = SettleMode::Proved;
+        }
         (resolved, proved_settle)
     } else {
         (SettleMode::Linear, None)
@@ -1416,11 +1425,12 @@ pub async fn submit_dual_settlement(
     let use_private =
         settle_private && winners_registered(players_remapped, deltas).await;
 
-    let (register_selector, register_calldata, settle_selector, settle_calldata) =
+    let mut snip36_fallback_linear = false;
+    let (mut register_selector, mut register_calldata, mut settle_selector, mut settle_calldata) =
         match mode {
             SettleMode::Proved => {
                 let (selector, calldata) =
-                    proved_settle.unwrap_or_else(|| {
+                    proved_settle.clone().unwrap_or_else(|| {
                         // 上面的 segment 门保证 Proved 时必有 calldata；
                         // 兜底空集（链上会拒绝），不静默改道。
                         (
@@ -1453,18 +1463,108 @@ pub async fn submit_dual_settlement(
     // prover → 携带 proof/proof_facts 的 v3 原始广播）；任何失败（prover 未
     // 部署/拒绝、服务忙、链上拒收）都回退 v2 fact-registry 腿——同一份
     // calldata，绝不卡结算。回退的前提是 fact 已由证明运营侧登记。
-    let mut settle_selector = settle_selector;
-    if mode == SettleMode::Proved && chain.config.dapv_settle_entry() == "snip36" {
+    if mode == SettleMode::Proved
+        && chain.config.dapv_settle_entry() == "snip36"
+        && proved_settle.is_some()
+    {
+        // 0) 注册先行：create_proof / v3 的公开段断言读已注册 digest——
+        //    register 独立成笔（公开），已注册则幂等吞掉。
+        match operator
+            .execute_v3(vec![Call {
+                to: contract,
+                selector: starknet_keccak(b"register_hand"),
+                calldata: dual.register_calldata.clone(),
+            }])
+            .send()
+            .await
+        {
+            Ok(r) => tracing::info!("[snip36] register_hand tx={:#x}", r.transaction_hash),
+            Err(e) => {
+                let t = format!("{e}");
+                if !(t.contains("already registered") || t.contains("Binding already")) {
+                    return Err(format!("[snip36] register_hand failed: {e}"));
+                }
+                tracing::info!("[snip36] register_hand already done");
+            }
+        }
+        // 注册可见轮询（同 Proved 两步路径；45s 上限）。
+        {
+            let selector = starknet_keccak("hand_binding".as_bytes());
+            let binding_felt = super::chain::parse_felt(&format!("{:#x}", dual.hand_binding))
+                .ok_or("invalid hand binding felt")?;
+            let mut visible = false;
+            for _ in 0..45 {
+                if let Ok(felts) = chain
+                    .call_contract(contract, selector, vec![binding_felt])
+                    .await
+                {
+                    if felts.get(2).map(|f| *f == Felt::ONE).unwrap_or(false) {
+                        visible = true;
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            }
+            if !visible {
+                return Err("hand_binding registration not visible on-chain within 45s".into());
+            }
+        }
+        // 1-2) 两笔 SNIP-36 提交：create_proof（不广播）→ 自托管 prover
+        //      虚拟执行出证（实测 ≈2 分钟）→ v3 结算携 proof/proof_facts。
+        //      证明期间 create/v3 共用同一 nonce 且不可加速——并发 operator
+        //      提交会让 proved 交易被拒，此时回退公开线性腿，结算恒可落地。
         match try_snip36_submit(chain, settle_calldata.clone()).await {
             Ok(hash) => {
                 tracing::info!("[snip36] in-protocol proved settle submitted tx={hash}");
+                // 赢额重锁不进 v3 交易：单笔 best-effort 跟进（离桌释放与
+                // 续钟由调用方收尾：flush_leave_releases + refresh）。
+                if let Some(vault) = super::chain::parse_felt(&chain.config.vault_address) {
+                    let treasury = chain.config.treasury_address.to_lowercase();
+                    let mut calls = Vec::new();
+                    for (p, d) in players_remapped.iter().zip(deltas.iter()) {
+                        if *d <= 0 {
+                            continue;
+                        }
+                        let wallet = super::lock::wallet_of_felt(p);
+                        if wallet == treasury {
+                            continue;
+                        }
+                        if let Some(wei) = (*d as i128)
+                            .checked_mul(super::config::WEI_PER_CHIP as i128)
+                            .and_then(|w| u128::try_from(w).ok())
+                        {
+                            let (lo, hi) = super::lock::wei_to_u256_felts(wei);
+                            calls.push(Call {
+                                to: vault,
+                                selector: starknet_keccak(b"lock"),
+                                calldata: vec![*p, lo, hi],
+                            });
+                        }
+                    }
+                    if !calls.is_empty() {
+                        let n_calls = calls.len();
+                        match operator.execute_v3(calls).send().await {
+                            Ok(r) => tracing::info!(
+                                "[snip36] post-settle win-relock tx={:#x} ({} calls)",
+                                r.transaction_hash,
+                                n_calls
+                            ),
+                            Err(e) => tracing::warn!(
+                                "[snip36] post-settle win-relock failed (non-fatal): {e}"
+                            ),
+                        }
+                    }
+                }
                 return Ok((hash.clone(), hash));
             }
             Err(e) => {
                 tracing::warn!(
-                    "[snip36] in-protocol submit failed — falling back to v2 fact-registry leg: {e}"
+                    "[snip36] in-protocol submit failed ({e}) — falling back to public linear leg"
                 );
-                settle_selector = "verify_and_settle_dapv_stark_private_v2";
+                // 主网 fact-registry 未登记事实：v2 私密腿的 fact 断言必拒。
+                // 回退必须走公开线性 bundle（register 已落，bundle 内
+                // "already registered" 重试会吸收），结算恒可落地。
+                snip36_fallback_linear = true;
             }
         }
     }
@@ -1477,9 +1577,19 @@ pub async fn submit_dual_settlement(
     // - 注册对结算可见（省掉两步提交的落地轮询）；
     // - 赢额回锁与结算原子落地（消除"结算落地→回锁落地"的异步逃单窗口）；
     // - 离桌玩家的 force_unlock 随最后一手结算同笔释放。
+    // SNIP-36 在线腿失败（prover 拒绝/超时/链上拒收）时的公开线性兜底：
+    // register 用线性 register_hand（已注册则 bundle 内重试吸收），settle
+    // 用公开 verify_and_settle_dapv_stark——恒可落地，与 entry=v2 等价。
+    if snip36_fallback_linear {
+        register_selector = "register_hand";
+        register_calldata = dual.register_calldata.clone();
+        settle_selector = "verify_and_settle_dapv_stark";
+        settle_calldata = dual.settle_calldata.clone();
+    }
+
     // 任一子调用 revert 则整笔 revert——回锁/续钟只对确有 session/余额
     // 的玩家追加，避免无关断言拖垮结算。
-    if mode == SettleMode::Linear {
+    if mode == SettleMode::Linear || snip36_fallback_linear {
         let vault = super::chain::parse_felt(&chain.config.vault_address)
             .ok_or("invalid vault address in config")?;
         let treasury = chain.config.treasury_address.to_lowercase();
