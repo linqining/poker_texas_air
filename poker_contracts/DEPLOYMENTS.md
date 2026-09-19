@@ -15,6 +15,13 @@
 > preimage，其名下 escrow 的抽水**无法私密领取**；生产修复=钱包内用正式
 > secret 重新 `register_payout_commitment` 覆盖（latest-wins）。
 > 玩家侧：`0x00cbd16d…` / `0x05eb38f6…` 已注册真 commitment（UI Claim 弹窗）。
+> **2026-09-19 SNIP-36 首次在线实测**：接线后首次真实结算（hand 1789786774）
+> 走到 `register_hand`（tx `0x545dddc8…`）→ prover 接受请求形状并开始出证
+> （`Starting transaction proving`）→ **证明期 ~40s 进程内存死亡** → 自动回退
+> 公开线性（tx `0x18a1e38a…` SUCCEEDED，departed-released=2）。结论：链路
+> 代码正确，瓶颈 = **transaction-prover 证明期内存超出 7.3GB 主机**（需升配
+> 16G 或独立主机）。入口已暂回 **v2**（2026-09-19），重新启用清单见
+> MAINNET_RUNBOOK.md 开放门槛表。
 >
 > ✅ **2026-09-19 主网 v6 批次已执行**（`deploy_mainnet_v6.sh`，deployer
 > 204.81 STRK 起跑）：declare×4（类与 sepolia 同哈希：vault `0x6de64f9a…` /
