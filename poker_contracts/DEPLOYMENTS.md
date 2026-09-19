@@ -4,6 +4,17 @@
 > （2026-09-19 整理：现状盘点、P1-2 类漂移说明、一键脚本
 > `scripts/deploy_mainnet_v6.sh`、切换/验证/迁移/回退与开放门槛）。
 >
+> ✅ **2026-09-19 主网 v6 批次已执行**（`deploy_mainnet_v6.sh`，deployer
+> 204.81 STRK 起跑）：declare×4（类与 sepolia 同哈希：vault `0x6de64f9a…` /
+> anonymizer `0x6dbb1f82…` / dual v6 `0x255cafe3…` / registry `0x7cc910b5…`）
+> → 新 vault `0x3821e794…e2502`、新 anonymizer `0x6149b13d…000d0`、
+> 新 dual v6 实例 `0x268df800…40a57`（绑新 vault）、registry
+> `0x234b4dfc…7a62b`（table_count 0）；接线 7 笔全 SUCCEEDED，回读核验 ✓
+> （`session_tx_pk` 入口在、token=canonical STRK、claim_helper=payout、
+> 两个 program hash + 虚拟 OS 占位 `0x602b02cf…`）。服务器
+> （ssh stark）同步切新地址 + snip36 入口 + 自托管 transaction-prover。
+> 旧 vault `0x3f4ef706…` 存量 9.47 STRK 等待玩家自提迁移。
+>
 > 上主网前的部署参考。所有地址以 `strk20.json`（Sepolia）与本文档为准，
 > 部署新环境后**必须**回填本文档与 `strk20.json`。
 
