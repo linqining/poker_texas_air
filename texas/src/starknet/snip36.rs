@@ -161,15 +161,18 @@ impl ProvedInvokeV3 {
             "nonce": felt_hex(&self.nonce),
             "tip": format!("{:#x}", self.tip),
             "resource_bounds": {
-                "L1_GAS": {
+                // 键必须小写：节点 add_invoke_transaction 与 transaction-prover
+                // 的 serde 都按 RPC 规范小写解析（大写 L1_GAS 会报
+                // "missing field l1_gas"——2026-09-19 主网实测）。
+                "l1_gas": {
                     "max_amount": format!("{:#x}", self.l1_gas.0),
                     "max_price_per_unit": format!("{:#x}", self.l1_gas.1),
                 },
-                "L1_DATA_GAS": {
+                "l1_data_gas": {
                     "max_amount": format!("{:#x}", self.l1_data_gas.0),
                     "max_price_per_unit": format!("{:#x}", self.l1_data_gas.1),
                 },
-                "L2_GAS": {
+                "l2_gas": {
                     "max_amount": format!("{:#x}", self.l2_gas.0),
                     "max_price_per_unit": format!("{:#x}", self.l2_gas.1),
                 },
