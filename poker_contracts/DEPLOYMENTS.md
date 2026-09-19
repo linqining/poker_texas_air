@@ -4,6 +4,18 @@
 > （2026-09-19 整理：现状盘点、P1-2 类漂移说明、一键脚本
 > `scripts/deploy_mainnet_v6.sh`、切换/验证/迁移/回退与开放门槛）。
 >
+> ⚠️⚠️ **高隐蔽性前置（2026-09-19 主网实测踩坑）**：SNIP-36 v3 / proved / private
+> 等一切**隐私结算入口**要求"所有正 delta 地址"都注册 payout commitment——
+> **包括 treasury（抽水接收方）**：rake 是正 delta，会被当作赢家校验。
+> 漏注册 treasury 的症状极其隐蔽：每手仅一条
+> `[settlement-private] request build failed (non-fatal): winner 0x<treasury> has no payout commitment`
+> WARN，随后**自动回退公开线性结算、玩家侧一切正常**——私密腿静默失效。
+> **已执行**：给主网 treasury/operator `0x412e4d43…` 注册了**测试占位
+> commitment `0x7e57c0de7e57c0de`**（TX `0x46e3778e…`）——该占位无已知
+> preimage，其名下 escrow 的抽水**无法私密领取**；生产修复=钱包内用正式
+> secret 重新 `register_payout_commitment` 覆盖（latest-wins）。
+> 玩家侧：`0x00cbd16d…` / `0x05eb38f6…` 已注册真 commitment（UI Claim 弹窗）。
+>
 > ✅ **2026-09-19 主网 v6 批次已执行**（`deploy_mainnet_v6.sh`，deployer
 > 204.81 STRK 起跑）：declare×4（类与 sepolia 同哈希：vault `0x6de64f9a…` /
 > anonymizer `0x6dbb1f82…` / dual v6 `0x255cafe3…` / registry `0x7cc910b5…`）

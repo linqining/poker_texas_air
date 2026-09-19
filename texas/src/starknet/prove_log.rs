@@ -175,6 +175,10 @@ fn abort_unprovable_hand(table: &mut Table, reason: &str, offender_seat: Option<
     // （2026-09-18 500 手长跑首小时复现）。镜像只在 record_hand_start
     // 成功时随新快照重建。
     table.vm_session = None;
+    // 中止手永远不会有 settle——本手的挂起离桌释放在此触发，否则滞留到
+    // TTL（2026-09-19 主网：hand 1789784494 中止后两位离桌玩家的锁定
+    // 滞留，需 operator 手动 force_unlock）。
+    super::lock::abort_flush_leave_releases(table.current_hand_id);
     table.reset_for_next_hand();
     table.emit_event(crate::pokergame::table::events::TableEvent::TableUpdated {
         message: Some("牌局已中止：本手无法证明（缺少有效入座证明），已重置".to_string()),
