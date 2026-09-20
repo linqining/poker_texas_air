@@ -100,6 +100,22 @@ impl Table {
         }
         self.register_waiting_players();
         self.clear_waiting_flags();
+        // 上一手被钉出的座位（计划外重连抖动；见 reveal.rs 盲注权威复核）
+        // 在 socket 仍存活（未断线）时召回本手：正常参与发牌。玩家主动
+        // 坐出（SITTING_OUT）不在钉出名单，不受影响（仍需显式 SITTING_IN）。
+        if !self.hand_excluded_seats.is_empty() {
+            let excluded = std::mem::take(&mut self.hand_excluded_seats);
+            for seat_id in excluded {
+                if let Some(seat) = self.local_seats.get_mut(&seat_id) {
+                    if seat.player.is_some() && !seat.disconnected && seat.sitting_out {
+                        seat.sitting_out = false;
+                        tracing::info!(
+                            "[SHUFFLE] seat {seat_id} returns from last hand's exclusion pin (socket alive)"
+                        );
+                    }
+                }
+            }
+        }
 
         // 开局统一重建牌组基线 (G, m + agg)：
         // 1) register_waiting_players 之后 agg 才含全部本手玩家，必须用当前

@@ -193,6 +193,48 @@ impl Table {
                 // 对齐 Move check_reveal_phase_complete: post_blinds THEN start_betting_round(true)
                 // set_blinds 已包含首行动作设置（对齐 Move post_blinds），无需再调用 init_turn
                 self.set_blinds();
+                // 盲注唯一权威复核（2026-09-19 hand 1789813453 千手长跑复现）：
+                // 计划冻结（record_hand_start）与此处盲注计算之间的窗口里，
+                // 座位标志可被并发事件翻转——reconnect_player 无条件清
+                // sitting_out，翻牌前重连抖动会让 set_blinds 把无牌座位重新
+                // 计入轮转（单挑判定/盲注落点整体偏移），与 VM 按冻结计划
+                // 所发盲注反向 → 本手全部动作被 VM 拒绝且永不收敛（超时
+                // 代打被拒后强吃 fold 也无法对齐），桌面永久卡死。VM 在
+                // bootstrap 已按冻结计划发盲：此处直接以 VM 视图覆写本地
+                // 盲注账本（bets/stack/pot/turn/call_amount），并把计划外
+                // 座位钉回 sitting_out（清掉 set_blinds 可能挂上的幻影注额
+                // /turn 残影），两层从首动作起逐位一致。
+                let vm_view = self.vm_session.as_ref().map(|sh| sh.current_view());
+                if let Some(view) = vm_view {
+                    if view.in_betting {
+                        self.apply_betting_view(&view);
+                        let in_vm: std::collections::HashSet<&str> =
+                            view.seats.iter().map(|s| s.pk_hex.as_str()).collect();
+                        for (seat_id, seat) in self.local_seats.iter_mut() {
+                            let Some(player) = seat.player.as_ref() else { continue };
+                            if in_vm.contains(player.pk_hex.0.as_str()) {
+                                continue;
+                            }
+                            let residue = seat.bet != 0 || seat.turn;
+                            if residue || !seat.sitting_out {
+                                tracing::warn!(
+                                    "[blinds-authority] seat {seat_id} in-seat but not in frozen plan — pinned out for this hand (residue bet={}, turn={})",
+                                    seat.bet, seat.turn
+                                );
+                            }
+                            seat.bet = 0;
+                            seat.total_bet = 0;
+                            seat.turn = false;
+                            seat.has_acted = false;
+                            if !seat.sitting_out {
+                                seat.sitting_out = true;
+                                if !self.hand_excluded_seats.contains(seat_id) {
+                                    self.hand_excluded_seats.push(*seat_id);
+                                }
+                            }
+                        }
+                    }
+                }
                 self.start_betting_round(true);
             }
             RevealPhase::CommunityReveal => {

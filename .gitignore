@@ -31,3 +31,4 @@ poker_contracts/hand-verify-native/output/
 deploy/
 .idea/
 fact-verify/target*
+stwo_lean/charon-demo/*

@@ -181,6 +181,7 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     handleCommunityRevealResult,
     resetRevealDedup,
     stopActionLoading,
+    shuffleLoadingRef,
   });
 
   return (

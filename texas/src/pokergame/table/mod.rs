@@ -207,6 +207,12 @@ pub struct Table {
     /// 结算时 take。挂在 Table 上而非全局表——无跨桌串流。
     #[serde(skip)]
     pub vm_session: Option<crate::starknet::vm_session::VmSession>,
+    /// 本手被钉出的座位（在座但不在冻结计划里：计划冻结后座位标志被
+    /// 重连等并发事件翻转的座位）。本手内 sitting_out 钉住；下一手开局
+    /// 时 socket 仍在（未断线）的座位据此召回——玩家主动坐出
+    /// （SITTING_OUT）不经此名单，仍需显式 SITTING_IN。
+    #[serde(skip)]
+    pub hand_excluded_seats: Vec<u32>,
     /// 关桌标志（终态）：置位后不再开局（game_loop 跳过 auto-start）、
     /// 不再接受入座（SIT_DOWN 拒绝）。"关桌后不开新手"的服务端权威执行点。
     #[serde(skip)]
@@ -537,6 +543,7 @@ impl Table {
             action_log: Vec::new(),
             hand_proof_log: crate::starknet::prove_log::HandProofLog::default(),
             vm_session: None,
+            hand_excluded_seats: Vec::new(),
             hand_log_start: 0,
             current_hand_id: 0,
             closed: false,

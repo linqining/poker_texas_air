@@ -116,6 +116,20 @@ fn join_buffer() -> &'static std::sync::Mutex<
 /// 该参与者的 VM 层签名路径未激活——mirror 注入不受影响，runtime 签名
 /// 路径 fail-closed）。核验在 join 接受点完成（vault
 /// `active_session_tx_pk` view 对拍），本函数只存结论。
+/// 回滚一次 record_join（仅当缓冲仍是同一 pk 时移除）：bot 入座失败/
+/// PlayerAlreadyInGame 时调用——预写的 join 缓冲若不回滚，下一手计划
+/// 会采信「没坐下的 pk」，与座位/注册表/揭示 assignment 分叉
+/// （2026-09-20 "reveal from unknown pk" 踢人循环的触发源）。
+pub fn rollback_join(table_id: u32, wallet: &str, pk_hex: &str) {
+    if let Ok(mut g) = join_buffer().lock() {
+        let key = (table_id, wallet.to_string());
+        let is_same = g.get(&key).map(|(pk, _, _)| pk == pk_hex).unwrap_or(false);
+        if is_same {
+            g.remove(&key);
+        }
+    }
+}
+
 pub fn record_join(
     table_id: u32,
     wallet: &str,
@@ -201,6 +215,8 @@ pub fn record_hand_start(table: &mut Table) {
     let mut plan: Vec<(u32, HandParticipant)> = Vec::new();
     let mut missing_proof = false;
     let mut offender_seat: Option<u32> = None;
+    // join 缓冲与座位 pk 失配的座位（循环外统一踢出退款，见下方注释）。
+    let mut misaligned_seats: Vec<String> = Vec::new();
     for (seat_id, seat) in table.seats() {
         let Some(player) = seat.player.as_ref() else { continue };
         if seat.sitting_out || seat.is_waiting {
@@ -230,6 +246,21 @@ pub fn record_hand_start(table: &mut Table) {
             offender_seat = Some(seat_id);
             break;
         };
+        // join 缓冲 pk 必须与座位当前玩家 pk 一致（2026-09-20 千手联调复现）：
+        // bot 重注入在「旧玩家仍占座」时预写新 pk（record_join 先于入座），
+        // 计划若采信缓冲 pk 会与座位/注册表/揭示 assignment 分叉 → VM
+        // "reveal from unknown pk"、45s 揭示超时踢人循环。仅跳过会让失配
+        // 永久滞留（在座 pk 永远等不到自己的缓冲项）——收集后踢座退款，
+        // 驱动层（bot 注入循环/浏览器重入座）3s 内带新 pk 重进即恢复对齐。
+        if pk_hex != player.pk_hex.0 {
+            tracing::warn!(
+                "[prove-log] table {table_id} seat {seat_id} buffered join pk {} != seated pk {} — removing misaligned seat for re-join realignment",
+                &pk_hex[..12.min(pk_hex.len())],
+                &player.pk_hex.0[..12.min(player.pk_hex.0.len())],
+            );
+            misaligned_seats.push(player.pk_hex.0.clone());
+            continue;
+        }
         let pk = match poker_protocol::z_poker::convert::hex_to_ecpoint(&pk_hex)
             .map(|zp| super::vm_session::conv::ec_point(&poker_protocol::crypto::types::ECPoint(zp)))
         {
@@ -259,6 +290,12 @@ pub fn record_hand_start(table: &mut Table) {
             // 盲注未扣：seat.stack 即本手开始真相（跨手结转，含此前输赢）
             stack: seat.stack,
         }));
+    }
+    // 失配座位踢出（退款）：本手已按「不在计划」处理；不踢则座位上的旧 pk
+    // 永远等不到自己的 join 缓冲项（被后来者覆盖），每手都被跳过 → 桌面
+    // 卡在「不足 2 人可证明」的 abort 循环。踢出后驱动层重进即对齐。
+    for pk in misaligned_seats.drain(..) {
+        table.remove_player_by_pk(&crate::pokergame::player::GamePkHex::new(pk));
     }
     if missing_proof {
         table.hand_proof_log = HandProofLog::default();

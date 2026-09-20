@@ -122,7 +122,26 @@ pub async fn start_bot(
     let pk_proof_obj = player.generate_pk_proof();
     let proof_bytes = crate::relayer::proof_bytes::serialize_pk_ownership_proof(&pk_proof_obj);
     let pk_hex = poker_protocol::z_poker::convert::ecpoint_to_hex(&player.pk);
-    crate::starknet::prove_log::record_join(1, &wallet, &pk_hex, proof_bytes, None);
+    // 写入守卫（2026-09-20 联调风暴根因）：钱包已有**不同 pk** 在座时不预写
+    // join 缓冲——在座 pk 的缓冲项是其下一手计划的唯一证明来源，重注入
+    // 任务在「旧玩家仍占座」时覆盖缓冲，会让 计划↔座位/注册表/揭示
+    // assignment 三方分叉（VM "reveal from unknown pk" / 失配踢座活锁）。
+    // 座位空闲（或就是本 pk）才允许预写；等真正在座后下一手自然对齐。
+    let seated_pk_conflict = {
+        let gs = state.state.read().await;
+        let seated_pk = gs.tables.get(&1)
+            .and_then(|t| {
+                t.seats().values()
+                    .find(|s| s.player.as_ref().map_or(false, |p| p.wallet_address.0 == wallet))
+                    .and_then(|s| s.player.as_ref().map(|p| p.pk_hex.0.clone()))
+            });
+        seated_pk.map(|seated| seated != pk_hex).unwrap_or(false)
+    };
+    if !seated_pk_conflict {
+        crate::starknet::prove_log::record_join(1, &wallet, &pk_hex, proof_bytes, None);
+    } else {
+        eprintln!("[bot {seat_id}] skip join-buffer prewrite: wallet seated with a different pk (reinject race)");
+    }
 
     // 真实链上买入交易已发生（verify_deposit 通过）；
     // SIT_DOWN_V2 路径的入座（与 WS handler 相同的 state 方法）。
@@ -216,6 +235,9 @@ pub async fn start_bot(
         Ok(j) => Some(j),
         Err(e) if format!("{e:?}").contains("PlayerAlreadyInGame") => {
             println!("[bot {seat_id}] already in game — reattaching drive loop");
+            // 不回滚 join 缓冲：本任务的 pk 已预写，旧玩家被移除后重注入
+            // 会覆盖为更新的 pk；失配由 record_hand_start 的对齐守卫踢座
+            // 收敛（回滚会把缓冲整条删掉，留下「有玩家无证明」的死座）。
             None
         }
         Err(e) => return Err(format!("join: {e:?}")),

@@ -325,6 +325,116 @@ fn run_full_hand(table_id: u32, n: u64) {
     );
 }
 
+/// 2026-09-19 hand 1789813453（千手长跑）复现的盲注反向回归：
+/// 计划冻结（record_hand_start）与盲注计算（HandReveal 完成）之间，
+/// 计划外座位被 reconnect_player 翻回 active（无条件清 sitting_out）——
+/// 修复前 set_blinds 按翻转后的 3 座走非单挑路径发盲，与 VM 按冻结 2 人
+/// 计划所发盲注反向：本手全部动作被 VM 以 "not player's turn" /
+/// "cannot check: bet < current_bet" 拒绝且永不收敛（超时代打被拒后
+/// 强吃 fold 也无法对齐），桌面永久卡死。
+#[test]
+fn reconnect_flap_between_plan_freeze_and_blinds_cannot_invert_blinds() {
+    let table_id = 981_345u32;
+    let mut table = Table::new(table_id, "flap".to_string(), 10000, 9, String::new());
+    let players = seat_players(&mut table, 3);
+    table.mental_poker_game.encrypt_deck();
+
+    table.start_hand();
+    // 开局断线转换：seat1 转 sitting_out（deal 与 record_hand_start 都会
+    // 跳过它 → 冻结计划只剩 seat2/seat3 两人单挑）。它的 pk 仍在洗牌
+    // 注册表且照常完成洗牌——与事故现场一致。
+    if let Some(seat) = table.local_seats.get_mut(&1) {
+        seat.sitting_out = true;
+    }
+    while table.shuffle_state.is_active() && !table.shuffle_state.pending_players.is_empty() {
+        let current = table
+            .shuffle_state
+            .current_player_pk
+            .clone()
+            .expect("current shuffler set");
+        let player = players
+            .iter()
+            .find(|p| p.pk_hex == current)
+            .expect("current shuffler seated");
+        submit_real_shuffle(&mut table, player);
+    }
+    table.advance_shuffle();
+    assert_eq!(table.round_state(), RoundState::PreFlop);
+    // 冻结计划 = 2 人（seat1 被跳过）。
+    assert_eq!(
+        table
+            .hand_proof_log
+            .start
+            .as_ref()
+            .expect("hand start recorded")
+            .participants
+            .len(),
+        2,
+        "frozen plan must exclude the sitting-out seat"
+    );
+
+    // 事故现场的重连抖动：计划冻结后、盲注计算前，websocket 重连把
+    // sitting_out 清掉（reconnect_player 无条件清除）。
+    let seat1_wallet = table
+        .local_seats
+        .get(&1)
+        .and_then(|s| s.player.as_ref())
+        .map(|p| p.wallet_address.0.clone())
+        .expect("seat1 player");
+    assert!(table.reconnect_player(&seat1_wallet), "reconnect must hit seat1");
+    assert!(
+        !table.local_seats.get(&1).unwrap().sitting_out,
+        "flap clears sitting_out (pre-fix divergence vector)"
+    );
+
+    // HandReveal：只有计划内 2 人有 assignment。
+    assert_eq!(table.reveal_token_state.phase, RevealPhase::HandReveal);
+    drive_reveal_phase(&mut table, &players);
+
+    // ===== 修复断言：盲注账本以 VM 为权威 =====
+    let vm_view = table
+        .vm_session
+        .as_ref()
+        .expect("live mirror bootstrapped")
+        .current_view();
+    assert!(vm_view.in_betting, "VM posted blinds at bootstrap");
+    let vm_turn_pk = vm_view.current_turn_pk.clone().expect("VM current turn");
+    let turn_seat = table.turn().expect("game-layer turn after blinds");
+    let turn_pk = table
+        .local_seats
+        .get(&turn_seat)
+        .and_then(|s| s.player.as_ref())
+        .map(|p| p.pk_hex.0.clone())
+        .expect("turn seat player");
+    assert_eq!(turn_pk, vm_turn_pk, "game-layer turn must equal VM authority");
+    // HU 翻牌前 SB 先行动：行动者 street bet == 小盲 50。
+    assert_eq!(
+        table.local_seats.get(&turn_seat).unwrap().bet,
+        50,
+        "first actor is the small blind"
+    );
+    // 计划外座位被钉回 sitting_out，且无幻影注额/turn 残影。
+    let s1 = table.local_seats.get(&1).unwrap();
+    assert!(s1.sitting_out, "non-plan seat pinned out for this hand");
+    assert_eq!(s1.bet, 0, "no phantom blind on non-plan seat");
+    assert!(!s1.turn, "no phantom turn on non-plan seat");
+    assert!(
+        table.hand_excluded_seats.contains(&1),
+        "exclusion recorded for next-hand re-admission"
+    );
+
+    // ===== 收敛性：首行动者 call → 另一家 check → 进翻牌圈 =====
+    // （修复前：游戏层 turn 与 VM 反向，handle_call 被 VM 拒绝返回 None，
+    //  expect("call") 直接 panic——即事故现场的永久卡死。）
+    act_and_advance(&mut table, &players);
+    act_and_advance(&mut table, &players);
+    assert_eq!(
+        table.round_state(),
+        RoundState::Flop,
+        "hand must progress past preflop (permanent livelock before fix)"
+    );
+}
+
 #[test]
 fn full_hand_2_players_everyone_shuffles_and_reveals() {
     run_full_hand(9101, 2);

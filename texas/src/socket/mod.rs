@@ -767,6 +767,10 @@ impl SocketState {
         let pk_proof_bytes = pk_proof_json.to_proof()
             .map(|p| crate::relayer::proof_bytes::serialize_pk_ownership_proof(&p))
             .unwrap_or_default();
+        // 权威覆写用的证明字节副本（下方预写会 move 原值；入座成功后
+        // 在写锁内覆写 join 缓冲为实际在座 pk，见 JoinedAndShuffled/
+        // JoinedWaiting 分支）。
+        let pk_proof_bytes_auth = pk_proof_bytes.clone();
         let socket_id = player.socket_id.clone();
         let pk_hex = GamePkHex::new(ecpoint_to_hex(&player_pk));
         let player_wallet_address = player.wallet_address.clone();
@@ -800,6 +804,20 @@ impl SocketState {
         match &result {
             Ok(JoinResult::JoinedAndShuffled) => {
                 let mut gs = self.state.write().await;
+                // 权威覆写（2026-09-20 竞态终局修复）：入座已在同一写锁内
+                // 落定，此刻把 join 缓冲覆写为「实际在座 pk + 证明」。上方
+                // 预写发生在入座之前，重注入并发任务（后续 SeatAlready-
+                // Occupied / PlayerAlreadyInGame 失败退出）会留下与座位不
+                // 一致的预写 → 计划↔座位/揭示分叉（VM "reveal from
+                // unknown pk" 风暴 + 失配踢座活锁）。座位与缓冲同锁落定
+                // 后，record_hand_start 读到的恒为对齐值。
+                crate::starknet::prove_log::record_join(
+                    table_id,
+                    &player_wallet_address,
+                    pk_hex.0.as_str(),
+                    pk_proof_bytes_auth.clone(),
+                    None,
+                );
                 let already_exists = gs.players.values().any(|p| p.wallet_address == player_wallet_address);
                 if !already_exists {
                     gs.players.insert(socket_id.clone(), Player {
@@ -825,6 +843,20 @@ impl SocketState {
             }
             Ok(JoinResult::JoinedWaiting) => {
                 let mut gs = self.state.write().await;
+                // 权威覆写（2026-09-20 竞态终局修复）：入座已在同一写锁内
+                // 落定，此刻把 join 缓冲覆写为「实际在座 pk + 证明」。上方
+                // 预写发生在入座之前，重注入并发任务（后续 SeatAlready-
+                // Occupied / PlayerAlreadyInGame 失败退出）会留下与座位不
+                // 一致的预写 → 计划↔座位/揭示分叉（VM "reveal from
+                // unknown pk" 风暴 + 失配踢座活锁）。座位与缓冲同锁落定
+                // 后，record_hand_start 读到的恒为对齐值。
+                crate::starknet::prove_log::record_join(
+                    table_id,
+                    &player_wallet_address,
+                    pk_hex.0.as_str(),
+                    pk_proof_bytes_auth.clone(),
+                    None,
+                );
                 let already_exists = gs.players.values().any(|p| p.wallet_address.0 == player_wallet_address.0);
                 if !already_exists {
                     gs.players.insert(socket_id.clone(), Player {

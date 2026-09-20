@@ -61,6 +61,8 @@ export interface UseGameSocketParams {
   handleCommunityRevealResult: (data: CommunityRevealResultData) => void;
   resetRevealDedup: () => void;
   stopActionLoading: () => void;
+  /** 洗牌 in-flight 标记（与 useCryptoOperations 共享）：fallback 据此把同一轮让位给直推路径。 */
+  shuffleLoadingRef: MutableRefObject<boolean>;
 }
 
 function translateKickReason(reason: string): string {
@@ -102,6 +104,7 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
     handleCommunityRevealResult,
     resetRevealDedup,
     stopActionLoading,
+    shuffleLoadingRef,
   } = params;
   const { walletAddress } = useContext(authContext)!;
   const { getLocalizedString } = useContentContext();
@@ -245,24 +248,33 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
             ? shuffleState.completed_players.length : 0;
           const done = shuffleFallbackDoneRef.current;
           if (!done || done.phase !== (shuffleState.phase || '') || done.completed !== completedCount) {
-            logger.log('[Shuffle] TABLE_UPDATED fallback: it is my turn (phase=' + shuffleState.phase + '), triggering handleShuffleNotice');
-            void (async () => {
-              const result = await handleShuffleNotice({
-                tableId: String(table.id),
-                shuffleState: shuffleState as ShuffleState,
-              });
-              if (result) {
-                shuffleFallbackDoneRef.current = { phase: shuffleState.phase || '', completed: completedCount };
-                socket?.emit(SHUFFLE_SUBMIT, {
-                  table_id: Number(result.tableId),
-                  pk_hex: result.pkHex,
-                  output_cards: result.shuffleResult.output_cards,
-                  shuffle_proof: result.shuffleResult.shuffle_proof ?? undefined,
-                  mask_and_shuffle_round: result.maskAndShuffleRound ?? undefined,
+            // 直推 SHUFFLE_NOTICE 正在处理同一轮（in-flight）时，本轮由直推
+            // 负责提交：记 dedup 键并跳过，防止该轮后续同键 TABLE_UPDATED
+            // 在直推完成后（in-flight 清零）再次补交 → 双重提交（第二次被
+            // 服务端以 "Not current player"/"Shuffle not active" 拒绝）。
+            if (shuffleLoadingRef.current) {
+              logger.log('[Shuffle] TABLE_UPDATED fallback: direct path in-flight, defer to it (phase=' + shuffleState.phase + ')');
+              shuffleFallbackDoneRef.current = { phase: shuffleState.phase || '', completed: completedCount };
+            } else {
+              logger.log('[Shuffle] TABLE_UPDATED fallback: it is my turn (phase=' + shuffleState.phase + '), triggering handleShuffleNotice');
+              void (async () => {
+                const result = await handleShuffleNotice({
+                  tableId: String(table.id),
+                  shuffleState: shuffleState as ShuffleState,
                 });
-                addMessage(`Shuffle submitted (${result.shuffleResult.output_cards.length} cards)`);
-              }
-            })();
+                if (result) {
+                  shuffleFallbackDoneRef.current = { phase: shuffleState.phase || '', completed: completedCount };
+                  socket?.emit(SHUFFLE_SUBMIT, {
+                    table_id: Number(result.tableId),
+                    pk_hex: result.pkHex,
+                    output_cards: result.shuffleResult.output_cards,
+                    shuffle_proof: result.shuffleResult.shuffle_proof ?? undefined,
+                    mask_and_shuffle_round: result.maskAndShuffleRound ?? undefined,
+                  });
+                  addMessage(`Shuffle submitted (${result.shuffleResult.output_cards.length} cards)`);
+                }
+              })();
+            }
           }
         }
       });
@@ -322,6 +334,15 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
         resetRevealDedup();
         const result = await handleShuffleNotice(data);
         if (result) {
+          // 直推已提交本轮 shuffle → 同步 fallback 的 dedup 键：迟到的同轮
+          // TABLE_UPDATED 不再触发补交（双重提交会被服务端拒绝并刷日志）。
+          const st = data.shuffleState as (ShuffleState & { phase?: string }) | undefined;
+          if (st) {
+            shuffleFallbackDoneRef.current = {
+              phase: st.phase || '',
+              completed: Array.isArray(st.completed_players) ? st.completed_players.length : 0,
+            };
+          }
           logger.log('SHUFFLE_NOTICE shuffle proof', result.shuffleResult.shuffle_proof);
           socket.emit(SHUFFLE_SUBMIT, {
             table_id: Number(result.tableId),
