@@ -1,16 +1,18 @@
 import React from 'react';
 import styled from 'styled-components';
-import { Shield, ChevronDown, ChevronUp } from 'lucide-react';
+import { Shield, ChevronDown, ChevronUp, CheckCircle2, XCircle, Clock } from 'lucide-react';
 import CryptoEventStream from '../crypto/CryptoEventStream';
 import NarrationOverlay from '../crypto/NarrationOverlay';
 import { useContentContext } from '../../context/content/contentContext';
-import type { CryptoEvent, Table } from '../../types/game';
+import type { CryptoEvent, Table, SettlementReceipt } from '../../types/game';
 
 interface CryptoPanelProps {
   cryptoEvents: CryptoEvent[];
   currentTable: Table | null;
   showCryptoPanel: boolean;
   onToggle: () => void;
+  /** D4 结算终局回执（handId → 最新；T4「已上链结算」印章实时数据源） */
+  settlementReceipts?: Record<number, SettlementReceipt>;
 }
 
 // ZK 密码学事件浮动面板（可收起，位于右上角，不遮挡牌桌核心区域）
@@ -69,13 +71,47 @@ const PanelContent = styled.div`
   gap: 0.4rem;
 `;
 
+const SettlementStamp = styled.div<{ $status: 'settled' | 'refused' | 'failed' }>`
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-family: 'JetBrains Mono', monospace;
+  border: 1px solid
+    ${({ $status }) =>
+      $status === 'settled' ? 'rgba(16,185,129,0.45)' : 'rgba(239,68,68,0.45)'};
+  background: ${({ $status }) =>
+    $status === 'settled' ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)'};
+  color: ${({ $status }) => ($status === 'settled' ? '#047857' : '#b91c1c')};
+  flex-wrap: wrap;
+`;
+
+const StampMeta = styled.span`
+  color: #64748b;
+  font-size: 0.66rem;
+`;
+
 export const CryptoPanel: React.FC<CryptoPanelProps> = ({
   cryptoEvents,
   currentTable,
   showCryptoPanel,
   onToggle,
+  settlementReceipts,
 }) => {
   const { getLocalizedString } = useContentContext();
+  // 洗牌层总数 N = 在座非 sitting_out 人数（洗牌发生在开局，此时无人弃牌）
+  const shuffleParticipants = currentTable
+    ? Object.values(currentTable.seats).filter((s) => s?.player && !s.sittingOut)
+        .length || undefined
+    : undefined;
+
+  // D4/T4：当前手的最新结算回执（ClientTable.handId 对齐；无回执 = 待上链）
+  const currentSettlement =
+    settlementReceipts && currentTable?.handId
+      ? settlementReceipts[currentTable.handId]
+      : Object.values(settlementReceipts ?? {}).slice(-1)[0];
 
   return (
     <PanelContainer>
@@ -104,8 +140,46 @@ export const CryptoPanel: React.FC<CryptoPanelProps> = ({
               cryptoEventCount={cryptoEvents.length}
             />
           )}
+          {/* D4/T4：结算印章（settled/refused/failed 三态；无回执 = 待上链不渲染） */}
+          {currentSettlement && (
+            <SettlementStamp $status={currentSettlement.status}>
+              {currentSettlement.status === 'settled' ? (
+                <CheckCircle2 size={13} style={{ flexShrink: 0 }} />
+              ) : (
+                <XCircle size={13} style={{ flexShrink: 0 }} />
+              )}
+              <strong>
+                {getLocalizedString(
+                  currentSettlement.status === 'settled'
+                    ? 'settlement_settled-stamp'
+                    : currentSettlement.status === 'refused'
+                      ? 'settlement_refused-stamp'
+                      : 'settlement_failed-stamp',
+                )}
+              </strong>
+              <StampMeta>
+                hand #{currentSettlement.handSeq ?? currentSettlement.handId} ·{' '}
+                {currentSettlement.exit}
+              </StampMeta>
+              {currentSettlement.blockNumber != null && (
+                <StampMeta>
+                  <Clock size={10} style={{ verticalAlign: -1, marginRight: 2 }} />
+                  #{currentSettlement.blockNumber.toLocaleString()}
+                </StampMeta>
+              )}
+              {currentSettlement.gasFee && <StampMeta>{currentSettlement.gasFee}</StampMeta>}
+              {currentSettlement.reason && (
+                <StampMeta style={{ flexBasis: '100%' }}>{currentSettlement.reason}</StampMeta>
+              )}
+            </SettlementStamp>
+          )}
           {/* 紧凑版密码学事件流 */}
-          <CryptoEventStream events={cryptoEvents} compact compactMaxItems={6} />
+          <CryptoEventStream
+            events={cryptoEvents}
+            compact
+            compactMaxItems={6}
+            shuffleParticipants={shuffleParticipants}
+          />
         </PanelContent>
       )}
     </PanelContainer>

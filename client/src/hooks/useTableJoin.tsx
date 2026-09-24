@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { NavigateFunction } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import { FETCH_LOBBY_INFO, RECEIVE_LOBBY_INFO } from '../pokergame/actions';
 import { getToken } from '../helpers/getToken';
 import { logger } from '../helpers/logger';
@@ -56,7 +57,6 @@ export const useTableJoin = ({
 
   const reconnectAttemptRef = useRef(0);
   const hasShownLostModalRef = useRef(false);
-  const isUnmountingRef = useRef(false);
   // 重试计数器：进入 /play 后若 currentTable 一直为空，则重试 FETCH_LOBBY_INFO + joinTable
   const joinRetryRef = useRef(0);
   // 用 ref 在 join effect 中读取最新的 currentTable，避免将其加入依赖数组导致频繁重跑
@@ -89,11 +89,24 @@ export const useTableJoin = ({
     }
   }, [isConnected]);
 
+  // 真实路由离开 /play 时向服务器离桌。
+  // 取代旧的 isUnmountingRef cleanup 模式：StrictMode（dev）挂载即双执行
+  // cleanup 会把标志毒化为 true，join effect 的依赖（socket/isConnected/
+  // lobbyReady）一变就在伪卸载 cleanup 里误发 LEAVE_TABLE——服务器随即移除
+  // 座位，客户端 currentTable 被清空、join 重试，形成弹回首页死循环。
+  // StrictMode 重挂载不改变 pathname；页面关闭/刷新仍由 pagehide 兜底。
+  const location = useLocation();
+  const lastPathRef = useRef(location.pathname);
   useEffect(() => {
-    return () => {
-      isUnmountingRef.current = true;
-    };
-  }, []);
+    const prevPath = lastPathRef.current;
+    lastPathRef.current = location.pathname;
+    if (prevPath === '/play' && location.pathname !== '/play') {
+      void leaveTable(false, pkHex || undefined, true);
+      setHasJoined(false);
+    }
+    // leaveTable 由调用方以稳定回调传入；仅真实路径迁移才触发动作
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname, pkHex]);
 
   // join effect：等 lobby ready 后再 emit JOIN_TABLE。
   // 根因：WebSocketProvider 在 socket connect 时 emit FETCH_LOBBY_INFO（注册 player 到服务器），
@@ -126,16 +139,8 @@ export const useTableJoin = ({
     logger.log('[Play] lobby ready, emitting JOIN_TABLE');
     joinTable(1, pkHex || '');
     setHasJoined(true);
-
-    return () => {
-      // 仅在组件真正卸载时 leaveTable，断线重连场景不触发
-      if (isUnmountingRef.current) {
-        // 组件卸载时不需要等待完成，直接触发即可
-        leaveTable(false, pkHex || undefined, true);
-        setHasJoined(false);
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // 离桌触发已迁移至上方 useLocation 路由守卫（含 pagehide 兜底）：
+    // cleanup 不再做业务动作，避免 StrictMode 伪卸载误发 LEAVE_TABLE。
   }, [socket, isConnected, lobbyReady]);
 
   // 重试机制：lobbyReady 后若 currentTable 仍为空，重置 lobbyReady 触发重新走

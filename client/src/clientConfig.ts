@@ -11,11 +11,14 @@ const config: Config = {
   contentfulSpaceId: import.meta.env.VITE_CONTENTFUL_SPACE_ID,
   contentfulAccessToken: import.meta.env.VITE_CONTENTFUL_ACCESS_TOKEN,
   googleAnalyticsTrackingId: import.meta.env.VITE_GOOGLE_ANALYTICS_TRACKING_ID,
-  // dev 前缀端口可由 VITE_SERVER_PORT 覆盖（scripts/dev.sh 生成
-  // client/.env.development.local 时注入）；缺省仍是本地 9001。
-  socketURI: import.meta.env.PROD
-    ? import.meta.env.VITE_SERVER_URI
-    : `http://${window.location.hostname}:${import.meta.env.VITE_SERVER_PORT ?? 9001}/`,
+  // dev 与 prod 统一支持 VITE_SERVER_URI 绝对地址（远程联调：游戏服务器
+  // 与前端不同源时必须直连绝对地址）；未提供时 dev 回退到
+  // http://<页面host>:VITE_SERVER_PORT（本地 9001，scripts/dev.sh 注入）。
+  socketURI:
+    import.meta.env.VITE_SERVER_URI ??
+    (import.meta.env.PROD
+      ? import.meta.env.VITE_SERVER_URI
+      : `http://${window.location.hostname}:${import.meta.env.VITE_SERVER_PORT ?? 9001}/`),
 };
 
 export default config;

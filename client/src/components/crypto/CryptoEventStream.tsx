@@ -11,6 +11,8 @@ interface CryptoEventStreamProps {
   compact?: boolean
   /** 紧凑模式下展示的最大条数，默认 6 */
   compactMaxItems?: number
+  /** 洗牌参与人数（层总数 N）；缺省用事件流中 shuffle/remask 总数 */
+  shuffleParticipants?: number
 }
 
 // 事件类型 → 图标映射（lucide-react）
@@ -33,10 +35,23 @@ export default function CryptoEventStream({
   events,
   onSelect,
   selectedTimestamp,
+  shuffleParticipants,
 }: CryptoEventStreamProps) {
   const { getLocalizedString: t } = useContentContext()
   // 最新事件在顶部：倒序展示
   const sorted = [...events].reverse()
+
+  // 洗牌层号（设计稿 T6/G1「层 i / N」）：events 为时间升序追加，
+  // shuffle/remask 按出现顺序编号；N 取参与人数（缺省用事件流内计数）
+  const shuffleLayer = new Map<CryptoEvent, number>()
+  let layerIdx = 0
+  for (const ev of events) {
+    if (ev.event_type === 'shuffle' || ev.event_type === 'remask') {
+      layerIdx += 1
+      shuffleLayer.set(ev, layerIdx)
+    }
+  }
+  const layerTotal = shuffleParticipants && shuffleParticipants > 0 ? shuffleParticipants : layerIdx
 
   return (
     <div
@@ -140,6 +155,18 @@ export default function CryptoEventStream({
                   <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
                     {truncatePk(ev.player_pk)}
                   </span>
+                  {/* 洗牌层号（层 i / N） */}
+                  {shuffleLayer.has(ev) && layerTotal > 0 && (
+                    <span
+                      style={{
+                        fontSize: '0.68rem',
+                        color: '#8b5cf6',
+                        fontWeight: 600,
+                      }}
+                    >
+                      {t('crypto_layer-lbl')} {shuffleLayer.get(ev)}/{layerTotal}
+                    </span>
+                  )}
                   {/* 卡片索引 */}
                   {ev.card_index !== null && ev.card_index !== undefined && (
                     <span
@@ -162,6 +189,18 @@ export default function CryptoEventStream({
                   >
                     {ev.verified ? t('crypto_verified') : t('crypto_failed')}
                   </span>
+                  {/* 链下验证：等待上链（tx_digest 为空时） */}
+                  {!ev.tx_digest && ev.verified && (
+                    <span
+                      style={{
+                        fontSize: '0.66rem',
+                        color: '#f59e0b',
+                        fontWeight: 600,
+                      }}
+                    >
+                      {t('crypto_pending-onchain')}
+                    </span>
+                  )}
                   {/* 链上交易 digest：点击跳转区块浏览器 */}
                   {ev.tx_digest && (
                     <span

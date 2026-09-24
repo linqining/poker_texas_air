@@ -56,13 +56,37 @@ export const GameStateInfo: React.FC<GameStateInfoProps> = ({ currentTable, comm
         />
       )}
 
+      {/* 待跟总额（设计稿 T2 彩池拆解行）：下注中且有人下注时显示 */}
+      {!!currentTable.callAmount && !currentTable.handOver && (
+        <InfoPill>
+          {getLocalizedString('game_state-info_call')}:{' '}
+          {currentTable.callAmount}
+        </InfoPill>
+      )}
+
       {currentTable.sidePots.length > 0 &&
         currentTable.sidePots.map((sidePot, index) => (
-          <ChipsAmountPill
+          <div
             key={index}
-            chipsAmount={sidePot.amount}
-            style={{ minWidth: '150px' }}
-          />
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: '0.15rem',
+            }}
+          >
+            <ChipsAmountPill
+              chipsAmount={sidePot.amount}
+              style={{ minWidth: '150px' }}
+            />
+            {/* 边池归属（服务端 SidePot.players 下发时）：可争该池的座位 */}
+            {sidePot.players && sidePot.players.length > 0 && (
+              <InfoPill>
+                {getLocalizedString('game_sidepot-eligible-lbl')}{' '}
+                {sidePot.players.length}
+              </InfoPill>
+            )}
+          </div>
         ))}
     </Wrapper>
   );

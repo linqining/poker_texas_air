@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, RefreshCw, AlertCircle, ChevronRight, ChevronDown, X, Eye } from 'lucide-react'
 import api, { GameState } from '../api/secretPokerClient'
+import type { HandProofResponse } from '../api/secretPokerClient'
 import { PlayerName } from '../components/game/PlayerName'
 import { gameWsClient } from '../api/wsClient'
 import { CryptoEvent } from '../types/game'
@@ -72,6 +73,8 @@ export default function GameTable() {
   const [selectedEvent, setSelectedEvent] = useState<CryptoEvent | null>(null)
   const [showPanel, setShowPanel] = useState(false)
   const [showRawLog, setShowRawLog] = useState(false)
+  // D1 证明通道：当前手的证明留存（layers + settlement + chain 元数据）
+  const [handProof, setHandProof] = useState<HandProofResponse | null>(null)
 
   const addLog = useCallback((msg: string) => {
     setLogs(prev => [...prev.slice(-19), `[${new Date().toLocaleTimeString()}] ${msg}`])
@@ -124,6 +127,39 @@ export default function GameTable() {
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [showPanel])
+
+  // D1 证明通道：shuffle 事件流入/选中时拉取本手证明留存。
+  // 先查当前手（hand_seq=0 = 进行中），无则回退最新终局记录。
+  useEffect(() => {
+    if (!gameId) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        let resp: HandProofResponse | null = null
+        try {
+          resp = await api.getHandProof(gameId, 0)
+          if (resp.layers.length === 0) resp = null
+        } catch {
+          resp = null
+        }
+        if (!resp) {
+          const records = await api.getHandHistory(gameId)
+          const latest = records[0]
+          if (latest) {
+            resp = await api.getHandProof(gameId, latest.handSeq)
+          }
+        }
+        if (!cancelled) setHandProof(resp)
+      } catch (e) {
+        if (!cancelled) setHandProof(null)
+        logger.log('[HandProof] unavailable:', e)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // cryptoEvents.length：新一层洗牌验证落账后重拉（当前手层增量）
+  }, [gameId, cryptoEvents.length])
 
   function formatPhase(phase: string) {
     return phase.replace(/([A-Z])/g, ' $1').trim()
@@ -325,7 +361,24 @@ export default function GameTable() {
                   </EventTypeRow>
 
                   {selectedEvent.event_type === 'shuffle' && (
-                    <ShuffleProofVisualizer proof={null} verified={selectedEvent.verified} />
+                    <ShuffleProofVisualizer
+                      layer={
+                        handProof?.layers.find(
+                          l =>
+                            selectedEvent.player_pk &&
+                            l.playerPk.toLowerCase() === selectedEvent.player_pk.toLowerCase(),
+                        ) ?? handProof?.layers[handProof.layers.length - 1] ?? null
+                      }
+                      meta={{
+                        aggregatePk: handProof?.aggregatePk ?? null,
+                        deckSize: handProof?.deckSize ?? null,
+                        totalRounds: handProof?.layers.length ?? null,
+                      }}
+                      settlement={handProof?.settlement ?? null}
+                      chain={handProof?.chain ?? null}
+                      verified={selectedEvent.verified}
+                      failureReason={selectedEvent.message}
+                    />
                   )}
 
                   {selectedEvent.event_type === 'reveal_token' && (

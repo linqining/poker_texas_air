@@ -629,7 +629,7 @@ impl ReconstructProofJson {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegacyShuffleProofJson {
     pub sum_c1_commit_hex: String,
     pub sum_c2_commit_hex: String,
@@ -652,7 +652,7 @@ impl LegacyShuffleProofJson {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiExponentiationArgumentJson {
     pub c_alpha_hex: String,
     pub c_beta_hex: String,
@@ -683,7 +683,7 @@ impl MultiExponentiationArgumentJson {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductArgumentJson {
     pub c_d_hex: String,
     pub c_delta_hex: String,
@@ -712,7 +712,7 @@ impl ProductArgumentJson {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BayerGrothShuffleProofJson {
     pub c_permutation_hex: String,
     pub c_permuted_powers_hex: String,
@@ -731,7 +731,7 @@ impl BayerGrothShuffleProofJson {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BayerGrothShuffleProofEnvelopeJson {
     pub version: u8,
     pub proof: BayerGrothShuffleProofJson,
@@ -740,7 +740,7 @@ pub struct BayerGrothShuffleProofEnvelopeJson {
 /// Accepts the explicit V2 envelope and can still decode the historical V1
 /// object shape. The latter is wrapped as `LegacyV1` and is rejected by the
 /// production verifier.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ShuffleProofJson {
     BayerGrothV2(BayerGrothShuffleProofEnvelopeJson),
@@ -759,6 +759,14 @@ impl ShuffleProofJson {
             Self::LegacyV1(proof) => Ok(VersionedShuffleProof::LegacyV1(
                 proof.to_legacy_proof()?,
             )),
+        }
+    }
+
+    /// 证明 wire 版本（1 = LegacyV1，2 = Bayer-Groth V2）。证明通道下发用。
+    pub fn proof_version(&self) -> u8 {
+        match self {
+            Self::BayerGrothV2(envelope) => envelope.version,
+            Self::LegacyV1(_) => 1,
         }
     }
 }

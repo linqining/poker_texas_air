@@ -102,36 +102,62 @@ export interface ElGamalCiphertextJson {
   c3_hex: string;
 }
 
-export interface ShuffleProofJson {
-  zk_consistency: ZKConsistencyProofJson;
-  triple_dleq: TripleDLEqProofJson;
-  product_arg: ProductArgumentV2Json;
-  global_challenge_hex: string;
+// ============ 洗牌证明 TS 镜像（服务端 game_state.rs untagged V1/V2）============
+// 旧 zk_consistency/triple_dleq 孤儿类型已删除（与两侧实现都对不上，
+// 见 design/table/data-gaps-onchain.md D1）：以服务端结构为准。
+
+export interface GeneralizedSchnorrProofJson {
+  commitment_hex: string;
+  responses_hex: string[];
+}
+
+/** V1（Legacy）：生产验证器 fail-closed，仅老回放仍可能出现 */
+export interface LegacyShuffleProofJson {
+  sum_c1_commit_hex: string;
+  sum_c2_commit_hex: string;
+  combined_schnorr_proof: GeneralizedSchnorrProofJson;
+  sum_c1_schnorr_proof: GeneralizedSchnorrProofJson;
+  sum_c2_schnorr_proof: GeneralizedSchnorrProofJson;
   nonce_hex: string;
 }
 
-export interface ZKConsistencyProofJson {
-  d1_hex: string;
-  d2_hex: string;
-  a_g_hex: string;
-  a_pk_hex: string;
-  s_hex: string;
+export interface MultiExponentiationArgumentJson {
+  c_alpha_hex: string;
+  c_beta_hex: string;
+  ciphertext_0: ElGamalCiphertextJson;
+  ciphertext_1: ElGamalCiphertextJson;
+  alpha_response_hex: string[];
+  commitment_response_hex: string;
+  beta_hex: string;
+  beta_blinding_response_hex: string;
+  rerandomization_response_hex: string;
 }
 
-export interface TripleDLEqProofJson {
-  a_g_hex: string;
-  a_pk_hex: string;
-  a_h_hex: string;
-  s_hex: string;
+export interface ProductArgumentJson {
+  c_d_hex: string;
+  c_delta_hex: string;
+  c_capital_delta_hex: string;
+  a_response_hex: string[];
+  b_response_hex: string[];
+  r_response_hex: string;
+  s_response_hex: string;
 }
 
-export interface ProductArgumentV2Json {
-  a_hex: string;
-  b_hex: string;
-  c_hex: string;
-  d_hex: string;
-  s_hex: string;
-  t_hex: string;
+export interface BayerGrothShuffleProofJson {
+  c_permutation_hex: string;
+  c_permuted_powers_hex: string;
+  multi_exponentiation: MultiExponentiationArgumentJson;
+  product: ProductArgumentJson;
+}
+
+/** 服务端 serde(untagged)：V2 显式信封（含 version=2）或历史 V1 形状 */
+export type ShuffleProofJson =
+  | { version: 2; proof: BayerGrothShuffleProofJson }
+  | LegacyShuffleProofJson;
+
+/** untagged 判别：V2 信封带 version 字段 */
+export function isV2Proof(p: ShuffleProofJson): p is { version: 2; proof: BayerGrothShuffleProofJson } {
+  return (p as { version?: number }).version === 2;
 }
 
 export interface RemaskProofJson {
@@ -305,6 +331,91 @@ class ApiClient {
   async getHandRecord(tableId: number | string, handSeq: number): Promise<HandHistoryRecord> {
     return this.request(`/tables/${tableId}/history/${handSeq}`);
   }
+
+  /**
+   * D1 洗牌证明通道：按手查每层证明本体 + verified/tx + V1 布局投影。
+   * `handId` 缺省按 hand_seq 映射；传 ClientTable.handId 可查进行中的手
+   * （还没进 history）。
+   */
+  async getHandProof(
+    tableId: number | string,
+    handSeq: number,
+    handId?: number,
+  ): Promise<HandProofResponse> {
+    const suffix = handId && handId > 0 ? `?handId=${handId}` : '';
+    return this.request(`/tables/${tableId}/hands/${handSeq}/proof${suffix}`);
+  }
+}
+
+/** D1 证明通道：单层洗牌证明留存（服务端 ShuffleLayerRecord，camelCase） */
+export interface ShuffleLayerRecord {
+  /** 手内轮次（含开局洗牌与 reconstruct 重加密轮） */
+  round: number;
+  seat: number;
+  playerPk: string;
+  playerName: string;
+  /** 1 = LegacyV1，2 = Bayer-Groth V2 */
+  proofVersion: number;
+  proof: ShuffleProofJson;
+  /** V1 布局展示投影（方案 b：V2 行为派生摘要时 derived=true） */
+  display: {
+    sumC1Commit: string | null;
+    sumC2Commit: string | null;
+    combinedSchnorrProof: string | null;
+    sumC1SchnorrProof: string | null;
+    sumC2SchnorrProof: string | null;
+    nonce: string | null;
+    derived: boolean;
+  };
+  /** V2：验证后 transcript squeeze 的全局挑战；V1 无 */
+  globalChallenge?: string;
+  verified: boolean;
+  txDigest?: string | null;
+  ts: number;
+}
+
+/** D4 结算回执（服务端 HandSettleReceipt，camelCase） */
+export interface HandSettleReceipt {
+  tableId: number;
+  handId: number;
+  handSeq?: number;
+  status: 'settled' | 'refused' | 'failed';
+  exit: 'appchain' | 'dual' | 'legacy';
+  handBinding?: string;
+  aggregateDigest?: string;
+  txDigests: string[];
+  blockNumber?: number;
+  gasFee?: string;
+  contract?: string;
+  verifier?: string;
+  settleOpIndex?: number;
+  batchRoot?: string;
+  proven?: boolean;
+  reason?: string;
+  tsMs: number;
+}
+
+/** D3 链上元数据（服务端 ChainMeta，camelCase） */
+export interface ChainMeta {
+  exit: string;
+  contract: string | null;
+  dualSettlement: string | null;
+  settlement: string | null;
+  vault: string | null;
+  verifier: string | null;
+  gateway: string | null;
+}
+
+/** D1 证明通道响应 */
+export interface HandProofResponse {
+  tableId: number;
+  handSeq: number;
+  handId: number;
+  aggregatePk: string | null;
+  deckSize: number;
+  layers: ShuffleLayerRecord[];
+  settlement: HandSettleReceipt | null;
+  chain: ChainMeta;
 }
 
 /** 单手牌终局记录（服务器 HandHistoryRecord，camelCase） */
@@ -314,7 +425,7 @@ export interface HandHistoryRecord {
   wentToShowdown: boolean;
   grossPot: number;
   rakeCollected: number;
-  sidePots: { amount: number }[];
+  sidePots: { amount: number; players?: number[] }[];
   board: { suit: string; rank: string }[];
   /** 已亮出的玩家手牌（seat → 两张底牌；仅摊牌亮牌座位） */
   holeCards: Record<string, { suit: string; rank: string }[]>;
@@ -325,6 +436,24 @@ export interface HandHistoryRecord {
     stack: number;
   }>;
   streets: unknown[];
+  /** 开局时间（epoch ms；服务端 hand_started_at，用于「用时」） */
+  handStartedAt?: number;
+  /** 摊牌各家牌型（服务端 Vec<ShowdownHandRank>；fold-win 手为空） */
+  showdownHandRanks?: Array<{ seat: number; rank: string }>;
+  /** 每家净结果（[seat, net] 元组数组，正 = 赢） */
+  nets?: Array<[number, number]>;
+  /** 逐动作流水（服务端 actions：seat/player/action/amount/street/ts/auto） */
+  actions?: Array<{
+    seat: number;
+    player?: string | null;
+    action: string;
+    amount: number;
+    street?: string;
+    ts?: number;
+    auto?: boolean;
+  }>;
+  /** 本手 id（证明通道 / 结算回执的映射锚点；0 = 旧记录未记录） */
+  handId?: number;
 }
 
 export const api = new ApiClient();

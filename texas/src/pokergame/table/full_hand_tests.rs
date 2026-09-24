@@ -1823,3 +1823,260 @@ impl RealHandDriver {
         }
     }
 }
+
+// ===========================================================================
+// D1 洗牌证明通道：真实 V2 证明经 submit_verified_shuffle 验证后的留存
+//（design/table/data-gaps-onchain.md D1 验收：证明本体 + verified/tx +
+// transcript challenge + 方案 b 投影，V1/V2 形状均可序列化下发）。
+// ===========================================================================
+
+/// typed Bayer-Groth V2 证明 → 客户端 wire JSON（与真实客户端提交同构）。
+fn bg_proof_to_json(proof: &poker_protocol::zk_shuffle::ShuffleProof) -> crate::pokergame::game_state::ShuffleProofJson {
+    use poker_protocol::zk_shuffle::versioned::VersionedShuffleProof;
+    let poker_protocol::zk_shuffle::versioned::VersionedShuffleProof::BayerGrothV2(bg) = proof
+    else {
+        panic!("test only builds V2 proofs");
+    };
+    let _ = VersionedShuffleProof::<poker_protocol::crypto::DefaultCurve>::LegacyV1; // 引用检查
+    use poker_protocol::z_poker::convert::{ecpoint_to_hex, scalar_to_hex};
+    use crate::pokergame::game_state::{
+        BayerGrothShuffleProofEnvelopeJson, BayerGrothShuffleProofJson,
+        ElGamalCiphertextJson, MultiExponentiationArgumentJson, ProductArgumentJson,
+    };
+    let m = &bg.multi_exponentiation;
+    let p = &bg.product;
+    crate::pokergame::game_state::ShuffleProofJson::BayerGrothV2(BayerGrothShuffleProofEnvelopeJson {
+        version: 2,
+        proof: BayerGrothShuffleProofJson {
+            c_permutation_hex: ecpoint_to_hex(&bg.c_permutation),
+            c_permuted_powers_hex: ecpoint_to_hex(&bg.c_permuted_powers),
+            multi_exponentiation: MultiExponentiationArgumentJson {
+                c_alpha_hex: ecpoint_to_hex(&m.c_alpha),
+                c_beta_hex: ecpoint_to_hex(&m.c_beta),
+                ciphertext_0: ElGamalCiphertextJson::from_ciphertext(&m.ciphertext_0),
+                ciphertext_1: ElGamalCiphertextJson::from_ciphertext(&m.ciphertext_1),
+                alpha_response_hex: m.alpha_response.iter().map(scalar_to_hex).collect(),
+                commitment_response_hex: scalar_to_hex(&m.commitment_response),
+                beta_hex: scalar_to_hex(&m.beta),
+                beta_blinding_response_hex: scalar_to_hex(&m.beta_blinding_response),
+                rerandomization_response_hex: scalar_to_hex(&m.rerandomization_response),
+            },
+            product: ProductArgumentJson {
+                c_d_hex: ecpoint_to_hex(&p.c_d),
+                c_delta_hex: ecpoint_to_hex(&p.c_delta),
+                c_capital_delta_hex: ecpoint_to_hex(&p.c_capital_delta),
+                a_response_hex: p.a_response.iter().map(scalar_to_hex).collect(),
+                b_response_hex: p.b_response.iter().map(scalar_to_hex).collect(),
+                r_response_hex: scalar_to_hex(&p.r_response),
+                s_response_hex: scalar_to_hex(&p.s_response),
+            },
+        },
+    })
+}
+
+/// typed V2 证明 → wire JSON Value（join 轮次构造用）。
+fn bg_proof_to_json_value(proof: &poker_protocol::zk_shuffle::ShuffleProof) -> serde_json::Value {
+    serde_json::to_value(bg_proof_to_json(proof)).expect("v2 proof serializes")
+}
+
+#[test]
+fn verified_shuffle_retains_proof_layers() {
+    let table_id = 9301u32;
+    let mut table = Table::new(table_id, "proof-ledger".to_string(), 10000, 9, String::new());
+    let players = seat_players(&mut table, 3);
+    table.mental_poker_game.encrypt_deck();
+    table.start_hand();
+    assert!(table.shuffle_state.is_active(), "shuffle phase active");
+    let hand_id = table.current_hand_id;
+    assert!(hand_id > 0, "hand id assigned at hand start");
+
+    let mut rounds = 0;
+    while table.shuffle_state.is_active() && !table.shuffle_state.pending_players.is_empty() {
+        let current = table
+            .shuffle_state
+            .current_player_pk
+            .clone()
+            .expect("current shuffler set");
+        let player = players
+            .iter()
+            .find(|p| p.pk_hex == current)
+            .expect("current shuffler seated");
+        // 与真实客户端一致的服务端验证路径（BG V2 Fiat-Shamir 全量验证 +
+        // D1 留存），而非测试直连 mental_poker_game.submit_shuffle。
+        let deck = table.mental_poker_game.deck_encrypted.clone();
+        let agg_pk = table.mental_poker_game.key_manager.get_aggregated_pk();
+        let mut transcript = PoseidonFeltTranscript::new_domain(
+            poker_protocol::transcript_domains::SHUFFLE_V2_POSEIDON,
+        );
+        let round =
+            ShuffleRound::execute_random(&deck, &agg_pk, &mut transcript, &mut OsRng)
+                .expect("random shuffle round");
+        let proof_json = bg_proof_to_json(&round.proof);
+        let output_json: Vec<ElGamalCiphertextJson> = round
+            .output_cards
+            .iter()
+            .map(ElGamalCiphertextJson::from_ciphertext)
+            .collect();
+        table
+            .submit_verified_shuffle(&player.pk_hex, output_json, proof_json)
+            .expect("verified shuffle with retention");
+        // socket 层同语义：提交成功后推进轮转指针（否则 current_shuffler
+        // 不变，重复提交同一玩家）。
+        table.advance_turn_pointer_only();
+        rounds += 1;
+    }
+    assert_eq!(rounds, 3, "every player shuffles once");
+
+    let entry = table.proof_ledger.get(hand_id).expect("hand proof entry");
+    assert_eq!(entry.layers.len(), 3);
+    assert_eq!(entry.table_id, table_id);
+    assert_eq!(entry.deck_size, 52);
+    assert!(!entry.aggregate_pk.is_empty());
+    for (i, layer) in entry.layers.iter().enumerate() {
+        assert!(layer.verified, "layer {} verified", i);
+        assert_eq!(layer.proof_version, 2);
+        assert_eq!(layer.round as usize, i + 1, "轮次 1 起单调");
+        assert!(
+            layer.global_challenge.is_some(),
+            "V2 层留存 transcript challenge"
+        );
+        assert!(layer.display.derived, "方案 b 投影标注派生");
+        assert!(layer.display.sum_c1_commit.is_some(), "Σc1 派生摘要");
+        assert!(layer.display.sum_c2_commit.is_some(), "Σc2 派生摘要");
+        assert!(layer.display.nonce.is_none(), "V2 无 nonce 字段");
+        assert!((1..=3).contains(&layer.seat), "seat 在座（洗牌顺序非座位序）");
+        assert!(!layer.player_name.is_empty());
+    }
+    // 三层分属三个不同座位（每人恰好洗一次）
+    let mut seats: Vec<u32> = entry.layers.iter().map(|l| l.seat).collect();
+    seats.sort();
+    seats.dedup();
+    assert_eq!(seats, vec![1, 2, 3], "三个座位各一层");
+
+    // REST 通道响应形状：serde camelCase 可序列化，证明本体 V2 原样回显。
+    let json = serde_json::to_value(entry).expect("entry serializes");
+    let layers = json.get("layers").and_then(|v| v.as_array()).expect("layers array");
+    assert_eq!(layers.len(), 3);
+    assert!(layers[0].get("globalChallenge").is_some());
+    assert_eq!(
+        layers[0].get("proofVersion").and_then(|v| v.as_u64()),
+        Some(2)
+    );
+    assert!(layers[0].get("proof").unwrap().get("version").is_some());
+    assert!(json.get("aggregatePk").is_some());
+}
+
+/// join 洗牌层（开局前 Waiting 阶段，真实 join_player_and_shuffle 路径）
+/// 进 pending 桶、开局收编进本手。
+#[test]
+fn join_shuffle_layer_pending_then_adopted() {
+    use crate::pokergame::player::Player;
+    let table_id = 9302u32;
+    let mut table = Table::new(table_id, "join-ledger".to_string(), 10000, 9, String::new());
+    seat_players(&mut table, 2);
+    table.mental_poker_game.encrypt_deck();
+    // Waiting 阶段（未 start_hand）：current_hand_id 仍为 0 → pending 桶。
+    assert_eq!(table.current_hand_id, 0);
+
+    // 第三个玩家走真实 join 路径入座（remask + shuffle 两步证明验证）。
+    let joiner = ClientPlayer::new_with_wallet_address("0x9302a");
+    let deck = table.mental_poker_game.deck_encrypted.clone();
+    let agg_pk = table.mental_poker_game.key_manager.get_aggregated_pk();
+    let round = joiner
+        .join_game_and_shuffle(&deck, &agg_pk, crate::pokergame::random_user_permute())
+        .expect("simulated user join shuffle");
+    let ms = &round.mask_and_shuffle_round;
+    let ec_hex = |p: &poker_protocol::crypto::EcPoint| {
+        poker_protocol::z_poker::convert::ecpoint_to_hex(p)
+    };
+    let sc_hex = |s: &poker_protocol::crypto::Scalar| {
+        poker_protocol::z_poker::convert::scalar_to_hex(s)
+    };
+    let ct_json = |ct: &poker_protocol::crypto::ElGamalCiphertext| {
+        serde_json::json!({"c1_hex": ec_hex(&ct.c1), "c2_hex": ec_hex(&ct.c2)})
+    };
+    let round_json: crate::pokergame::game_state::MaskAndShuffleRoundJson =
+        serde_json::from_value(serde_json::json!({
+            "mask_cards": ms.mask_cards.iter().map(ct_json).collect::<Vec<_>>(),
+            "output_cards": ms.output_cards.iter().map(ct_json).collect::<Vec<_>>(),
+            "remask_proof": {
+                "per_card_commitments_hex": ms.remask_proof.per_card_commitments.iter().map(ec_hex).collect::<Vec<_>>(),
+                "commitment_pk_hex": ec_hex(&ms.remask_proof.commitment_pk),
+                "response_hex": sc_hex(&ms.remask_proof.response),
+                "nonce_hex": sc_hex(&ms.remask_proof.nonce),
+            },
+            "shuffle_proof": bg_proof_to_json_value(&ms.proof),
+        }))
+        .expect("mask and shuffle json");
+    let pk_proof_json: crate::pokergame::game_state::PkProofJson =
+        serde_json::from_value(serde_json::json!({
+            "commitment_hex": ec_hex(&round.pk_ownership_proof.commitment),
+            "response_hex": sc_hex(&round.pk_ownership_proof.response),
+        }))
+        .expect("pk proof json");
+    let player = Player {
+        socket_id: "test".to_string(),
+        id: "joiner".to_string(),
+        name: "joiner".to_string(),
+        bankroll: 100000,
+        wallet_address: WalletAddress("0x9302a".to_string()),
+    };
+    table
+        .join_player_and_shuffle(
+            player,
+            joiner.pk,
+            pk_proof_json,
+            Some(round_json),
+            3,
+            100000,
+        )
+        .expect("join and shuffle in waiting phase");
+
+    // pending 桶有一条层；开局后第一条 in-hand 层触发收编。
+    assert!(
+        table.proof_ledger.get(0).is_some_and(|e| e.layers.len() == 1),
+        "waiting 层进 pending 桶"
+    );
+
+    table.start_hand();
+    let hand_id = table.current_hand_id;
+    while table.shuffle_state.is_active() && !table.shuffle_state.pending_players.is_empty() {
+        let current = table
+            .shuffle_state
+            .current_player_pk
+            .clone()
+            .expect("current shuffler set");
+        let deck = table.mental_poker_game.deck_encrypted.clone();
+        let agg_pk = table.mental_poker_game.key_manager.get_aggregated_pk();
+        let mut transcript = PoseidonFeltTranscript::new_domain(
+            poker_protocol::transcript_domains::SHUFFLE_V2_POSEIDON,
+        );
+        let round =
+            ShuffleRound::execute_random(&deck, &agg_pk, &mut transcript, &mut OsRng)
+                .expect("random shuffle round");
+        let proof_json = bg_proof_to_json(&round.proof);
+        let output_json: Vec<ElGamalCiphertextJson> = round
+            .output_cards
+            .iter()
+            .map(ElGamalCiphertextJson::from_ciphertext)
+            .collect();
+        // 服务端模拟视角：证明构造不依赖洗牌者身份，直接对 current 提交。
+        table
+            .submit_verified_shuffle(&current, output_json, proof_json)
+            .expect("verified shuffle");
+        table.advance_turn_pointer_only();
+    }
+    let entry = table.proof_ledger.get(hand_id).expect("hand entry");
+    assert_eq!(
+        entry.layers.len(),
+        4,
+        "pending join 层（收编为首层）+ 开局 3 层（含 joiner 的开局洗牌）= 4"
+    );
+    assert!(
+        table.proof_ledger.get(0).is_none(),
+        "pending 桶清空"
+    );
+    // 收编的首层就是 join 层（座位 3 / joiner）
+    assert_eq!(entry.layers[0].seat, 3);
+    assert_eq!(entry.layers[0].player_name, "joiner");
+}

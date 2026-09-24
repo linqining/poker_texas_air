@@ -32,6 +32,8 @@ import { getStrkBalance } from '../../starknet/starknetGameActions';  // getStrk
 import { CHIPS_PER_STRK, STRK_DECIMALS, WEI_PER_CHIP } from '../../starknet/config';
 import { isZChainSession } from '../../starknet/zchainWallet';
 import { logger } from '../../helpers/logger';
+import { blindRoles } from '../../helpers/tableDerived';
+import { evaluateBestHand, rankLabel } from '../../helpers/handEval';
 
 // ZChain 钱包会话（appchain→zchain 结算的 dev 部署）不入账链上筹码，
 // 入座额度按服务端结余 + 该 dev 常量放行。
@@ -145,11 +147,150 @@ interface SeatProps {
   sitDown: (tableId: string, seatId: number, amount: number) => Promise<void>;
 }
 
+interface BuyinFormProps {
+  minBuyIn: number;
+  maxBuyin: number;
+  buyinStep: number;
+  availableChips: number;
+  strkCostForChips: (chips: number) => number;
+  shortAddress: string;
+  strkBalanceInStrk: number;
+  confirmLabel: string;
+  onConfirm: (amount: number) => void;
+}
+
+// 买入档位按钮：从 minBuyIn 起按步进取至多 4 档（设计稿 T5 的 1,000/2,000/3,000/4,000）
+const PresetRow = styled.div`
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+
+  button {
+    flex: 1;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid ${({ theme }) => theme.colors.brandBlueAlpha20};
+    border-radius: ${({ theme }) => theme.radius.sm};
+    background: transparent;
+    color: ${({ theme }) => theme.colors.fontColorDark};
+    font-size: 0.8rem;
+    cursor: pointer;
+
+    &.on {
+      background: ${({ theme }) => theme.colors.brandBlueAlpha08};
+      border-color: ${({ theme }) => theme.colors.brandBlue};
+      font-weight: 600;
+    }
+  }
+`;
+
+/**
+ * 买入/再次买入共用单据表单：受控金额输入 + 档位 + 实时「本次转换成本 /
+ * 转换后余额」两行复核（设计稿 T5），替代原先的裸 number input。
+ * 校验规则与原实现一致：min ≤ amount ≤ min(availableChips, maxBuyin) 且为步进整数倍。
+ */
+const BuyinForm: React.FC<BuyinFormProps> = ({
+  minBuyIn,
+  maxBuyin,
+  buyinStep,
+  availableChips,
+  strkCostForChips,
+  shortAddress,
+  strkBalanceInStrk,
+  confirmLabel,
+  onConfirm,
+}) => {
+  const { getLocalizedString } = useContext(contentContext)!;
+  const [amount, setAmount] = useState<number>(minBuyIn);
+  const effectiveMax = Math.min(availableChips, maxBuyin);
+  const presets: number[] = [];
+  for (
+    let v = minBuyIn;
+    v <= effectiveMax && presets.length < 4;
+    v += buyinStep
+  ) {
+    presets.push(v);
+  }
+
+  return (
+    <Form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (
+          amount &&
+          amount >= minBuyIn &&
+          amount % buyinStep === 0 &&
+          amount <= availableChips &&
+          amount <= maxBuyin
+        ) {
+          onConfirm(amount);
+        }
+      }}
+    >
+      <BuyinInfo>
+        <BuyinInfoRow>
+          <span>{getLocalizedString('seat_wallet-address-label')}</span>
+          <strong>{shortAddress || '-'}</strong>
+        </BuyinInfoRow>
+        <BuyinInfoRow>
+          <span><img src="/strk-logo.svg" alt={getLocalizedString('seat_strk-logo-alt')} />{getLocalizedString('seat_strk-balance-label')}</span>
+          <strong>{strkBalanceInStrk.toLocaleString(undefined, { maximumFractionDigits: 4 })} STRK</strong>
+        </BuyinInfoRow>
+        <BuyinInfoRow>
+          <span>{getLocalizedString('seat_redeemable-chips-label')}</span>
+          <strong>{availableChips.toLocaleString()}</strong>
+        </BuyinInfoRow>
+        <BuyinInfoRow>
+          <span>{getLocalizedString('seat_conversion-cost-label')}</span>
+          <strong>{strkCostForChips(amount || minBuyIn).toLocaleString(undefined, { maximumFractionDigits: 4 })} STRK</strong>
+        </BuyinInfoRow>
+        <BuyinInfoRow>
+          <span>{getLocalizedString('seat_post-buyin-balance-label')}</span>
+          <strong>{Math.max(availableChips - (amount || 0), 0).toLocaleString()}</strong>
+        </BuyinInfoRow>
+        <ExchangeRate>{getLocalizedString('seat_exchange-rate-label').replace('{rate}', CHIPS_PER_STRK.toLocaleString())}</ExchangeRate>
+      </BuyinInfo>
+      <FormGroup>
+        <Label htmlFor="amount">{getLocalizedString('seat_buyin-amount-label')}</Label>
+        <Input
+          id="amount"
+          type="number"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          min={minBuyIn}
+          max={effectiveMax}
+          step={buyinStep}
+          value={amount}
+          onChange={(e) => setAmount(+(e.target as HTMLInputElement).value)}
+        />
+      </FormGroup>
+      {presets.length > 1 && (
+        <PresetRow>
+          {presets.map((v) => (
+            <button
+              key={v}
+              type="button"
+              className={amount === v ? 'on' : ''}
+              onClick={() => setAmount(v)}
+            >
+              {v.toLocaleString()}
+            </button>
+          ))}
+        </PresetRow>
+      )}
+      <ButtonGroup>
+        <ConfirmButton primary type="submit" fullWidth>
+          {confirmLabel}
+        </ConfirmButton>
+      </ButtonGroup>
+    </Form>
+  );
+};
+
 export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSeated, sitDown }) => {
   const { openModal, closeModal } = useContext(modalContext)!;
   const navigate = useNavigate();
   const { chipsAmount } = useContext(globalContext)!;
-  const { standUp, seatId, rebuy } = useContext(gameContext)!;
+  const { standUp, seatId, rebuy, communityCards } = useContext(gameContext)!;
   const { getLocalizedString } = useContext(contentContext)!;
   const { isLoggedIn, walletAddress } = useContext(authContext)!;
   const hasWallet = !!walletAddress;
@@ -176,9 +317,18 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
   }, [fetchBalance]);
 
   const seat = currentTable.seats[seatNumber];
-  // limit 在链上同步场景可能为 0（链上 BCS 不含此字段），回退到 bigBlind * 100
-  const maxBuyin = 5000;
-  const minBuyIn = Math.max(currentTable.minBet * 2 * 10, 1000);
+  // 买入上下限：优先用服务端下发的真值（ClientTable.minBuyIn/maxBuyIn）；
+  // 旧服务端不下发时回退 limit / 盲注推导（链上同步场景 limit 可能为 0）
+  const maxBuyin =
+    currentTable.maxBuyIn && currentTable.maxBuyIn > 0
+      ? currentTable.maxBuyIn
+      : currentTable.limit > 0
+        ? currentTable.limit
+        : currentTable.bigBlind * 100 || 5000;
+  const minBuyIn =
+    currentTable.minBuyIn && currentTable.minBuyIn > 0
+      ? currentTable.minBuyIn
+      : Math.max(currentTable.minBet * 2 * 10, 1000);
   const BUYIN_STEP = 1000;
 
   // 1 STRK = 1_000 chips → 1 chip = 0.001 STRK
@@ -242,6 +392,30 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
     logger.log('[Seat] seatNumber:', seatNumber, 'seatId:', seatId, 'hand:', seat.hand);
   }
 
+  // 盲注角色（小盲/大盲；BTN 已有独立图标，不重复标注）
+  const roles = blindRoles(currentTable);
+  const blindRoleLabel =
+    roles[seatNumber] === 'sb'
+      ? getLocalizedString('game_seat-sb-lbl')
+      : roles[seatNumber] === 'bb'
+        ? getLocalizedString('game_seat-bb-lbl')
+        : null;
+
+  // 自己手牌牌型标注（仅本人座位；底牌 + 公共牌 ≥5 张才可评）
+  const isHeroSeat = seatId !== null && seat?.id === seatId;
+  const handEval = (() => {
+    if (!isHeroSeat || !seat) return null;
+    const cards = [...seat.hand, ...(communityCards ?? [])];
+    return evaluateBestHand(cards);
+  })();
+  const handEvalLabel = handEval
+    ? `${getLocalizedString(handEval.i18nKey)}${
+        handEval.category === 'flush' || handEval.category === 'royal-flush'
+          ? ''
+          : ` ${rankLabel(handEval.mainRank)}`
+      }`
+    : null;
+
   useEffect(() => {
     if (
       currentTable &&
@@ -258,68 +432,20 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
         fetchBalance();
         openModal(
           () => (
-            <Form
-              onSubmit={(e) => {
-                e.preventDefault();
-
-                const amount = +(document.getElementById('amount') as HTMLInputElement).value;
-
-                if (
-                  amount &&
-                  amount >= minBuyIn &&
-                  amount % BUYIN_STEP === 0 &&
-                  amount <= availableChips &&
-                  amount <= maxBuyin
-                ) {
-                  rebuy(currentTable.id, seatNumber, parseInt(String(amount)));
-                  closeModal();
-                }
+            <BuyinForm
+              minBuyIn={minBuyIn}
+              maxBuyin={maxBuyin}
+              buyinStep={BUYIN_STEP}
+              availableChips={availableChips}
+              strkCostForChips={strkCostForChips}
+              shortAddress={shortAddress}
+              strkBalanceInStrk={strkBalanceInStrk}
+              confirmLabel={getLocalizedString('game_rebuy-modal_confirm')}
+              onConfirm={(amount) => {
+                rebuy(currentTable.id, seatNumber, parseInt(String(amount)));
+                closeModal();
               }}
-            >
-              <BuyinInfo>
-                <BuyinInfoRow>
-                  <span>{getLocalizedString('seat_wallet-address-label')}</span>
-                  <strong>{shortAddress || '-'}</strong>
-                </BuyinInfoRow>
-                <BuyinInfoRow>
-                  <span><img src="/strk-logo.svg" alt={getLocalizedString('seat_strk-logo-alt')} />{getLocalizedString('seat_strk-balance-label')}</span>
-                  <strong>{strkBalanceInStrk.toLocaleString(undefined, { maximumFractionDigits: 4 })} STRK</strong>
-                </BuyinInfoRow>
-                <BuyinInfoRow>
-                  <span>{getLocalizedString('seat_redeemable-chips-label')}</span>
-                  <strong>{availableChips.toLocaleString()}</strong>
-                </BuyinInfoRow>
-                <BuyinInfoRow>
-                  <span>{getLocalizedString('seat_conversion-cost-label')}</span>
-                  <strong>{strkCostForChips(minBuyIn).toLocaleString(undefined, { maximumFractionDigits: 4 })} STRK</strong>
-                </BuyinInfoRow>
-                <ExchangeRate>{getLocalizedString('seat_exchange-rate-label').replace('{rate}', CHIPS_PER_STRK.toLocaleString())}</ExchangeRate>
-              </BuyinInfo>
-              <FormGroup>
-                <Label htmlFor="amount">{getLocalizedString('seat_buyin-amount-label')}</Label>
-                <Input
-                  id="amount"
-                  type="number"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  min={minBuyIn}
-                  max={availableChips <= maxBuyin ? availableChips : maxBuyin}
-                  step={BUYIN_STEP}
-                  defaultValue={minBuyIn}
-                />
-              </FormGroup>
-              <ButtonGroup>
-                <ConfirmButton primary type="submit" fullWidth>
-                  {getLocalizedString('game_rebuy-modal_confirm')}
-                </ConfirmButton>
-                {/* 水龙头选项移除：测试网 STRK 由 swap/服务端渠道获取 */}
-                {faucetMsg && (
-                  <Text textAlign="center" style={{ fontSize: '0.8rem' }}>
-                    {faucetMsg}
-                  </Text>
-                )}
-              </ButtonGroup>
-            </Form>
+            />
           ),
           getLocalizedString('game_rebuy-modal_header'),
           getLocalizedString('game_rebuy-modal_cancel'),
@@ -380,66 +506,24 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
                   fetchBalance();
                   openModal(
                     () => (
-                      <Form
-                        onSubmit={(e) => {
-                          e.preventDefault();
-
-                          const amount = +(document.getElementById('amount') as HTMLInputElement).value;
-
-                          if (
-                            amount &&
-                            amount >= minBuyIn &&
-                            amount % BUYIN_STEP === 0 &&
-                            amount <= availableChips &&
-                            amount <= maxBuyin
-                          ) {
-                            sitDown(
-                              currentTable.id,
-                              seatNumber,
-                              parseInt(String(amount)),
-                            );
-                            closeModal();
-                          }
+                      <BuyinForm
+                        minBuyIn={minBuyIn}
+                        maxBuyin={maxBuyin}
+                        buyinStep={BUYIN_STEP}
+                        availableChips={availableChips}
+                        strkCostForChips={strkCostForChips}
+                        shortAddress={shortAddress}
+                        strkBalanceInStrk={strkBalanceInStrk}
+                        confirmLabel={getLocalizedString('game_buyin-modal_confirm')}
+                        onConfirm={(amount) => {
+                          sitDown(
+                            currentTable.id,
+                            seatNumber,
+                            parseInt(String(amount)),
+                          );
+                          closeModal();
                         }}
-                      >
-                        <BuyinInfo>
-                          <BuyinInfoRow>
-                            <span>{getLocalizedString('seat_wallet-address-label')}</span>
-                            <strong>{shortAddress || '-'}</strong>
-                          </BuyinInfoRow>
-<BuyinInfoRow>
-                          <span><img src="/strk-logo.svg" alt={getLocalizedString('seat_strk-logo-alt')} />{getLocalizedString('seat_strk-balance-label')}</span>
-                          <strong>{strkBalanceInStrk.toLocaleString(undefined, { maximumFractionDigits: 4 })} STRK</strong>
-                        </BuyinInfoRow>
-                          <BuyinInfoRow>
-                            <span>{getLocalizedString('seat_redeemable-chips-label')}</span>
-                            <strong>{availableChips.toLocaleString()}</strong>
-                          </BuyinInfoRow>
-                          <BuyinInfoRow>
-                            <span>{getLocalizedString('seat_conversion-cost-label')}</span>
-                            <strong>{strkCostForChips(minBuyIn).toLocaleString(undefined, { maximumFractionDigits: 4 })} STRK</strong>
-                          </BuyinInfoRow>
-                          <ExchangeRate>{getLocalizedString('seat_exchange-rate-label').replace('{rate}', CHIPS_PER_STRK.toLocaleString())}</ExchangeRate>
-                        </BuyinInfo>
-                        <FormGroup>
-                          <Label htmlFor="amount">{getLocalizedString('seat_buyin-amount-label')}</Label>
-                          <Input
-                            id="amount"
-                            type="number"
-                            inputMode="numeric"
-                            pattern="[0-9]*"
-                            min={minBuyIn}
-                            max={availableChips <= maxBuyin ? availableChips : maxBuyin}
-                            defaultValue={minBuyIn}
-                          />
-                        </FormGroup>
-                        <ButtonGroup>
-                          <ConfirmButton primary type="submit" fullWidth>
-                            {getLocalizedString('game_buyin-modal_confirm')}
-                          </ConfirmButton>
-                          {/* 水龙头选项移除 */}
-                        </ButtonGroup>
-                      </Form>
+                      />
                     ),
                     getLocalizedString('game_buyin-modal_header'),
                     getLocalizedString('game_buyin-modal_cancel'),
@@ -480,6 +564,18 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
               <NameTag>
                 <ColoredText primary textAlign="center">
                   <PlayerName name={seat.player!.name} />
+                  {blindRoleLabel && (
+                    <span
+                      style={{
+                        fontSize: '0.7rem',
+                        fontWeight: 600,
+                        color: '#94a3b8',
+                        marginLeft: '0.3rem',
+                      }}
+                    >
+                      · {blindRoleLabel}
+                    </span>
+                  )}
                   <br />
                   {seat.stack && (
                     <ColoredText secondary>
@@ -493,7 +589,16 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
               </NameTag>
             </PositionedUISlot>
             <PositionedUISlot>
-              <OccupiedSeat seatNumber={seatNumber} hasTurn={seat.turn} />
+              <OccupiedSeat
+                seatNumber={seatNumber}
+                hasTurn={seat.turn}
+                deadlineMs={
+                  currentTable.bettingStartedAt && currentTable.bettingTimeoutMs
+                    ? currentTable.bettingStartedAt + currentTable.bettingTimeoutMs
+                    : null
+                }
+                totalMs={currentTable.bettingTimeoutMs ?? null}
+              />
             </PositionedUISlot>
             <PositionedUISlot
               left="4vh"
@@ -538,6 +643,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
               {!currentTable.handOver && seat.lastAction && (
                 <InfoPill>{seat.lastAction}</InfoPill>
               )}
+              {handEvalLabel && <InfoPill>{handEvalLabel}</InfoPill>}
             </PositionedUISlot>
           </motion.div>
         )}

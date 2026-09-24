@@ -23,6 +23,7 @@ pub mod game_state;
 pub mod hand_rank;
 pub mod history_store;
 pub mod player;
+pub mod proof_ledger;
 pub mod rake;
 pub mod seat;
 pub mod side_pot;

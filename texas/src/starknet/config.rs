@@ -95,6 +95,9 @@ pub struct StarknetConfig {
     /// `appchain` = 嵌入式 sequencer 软确认链 + 本地出证（失败回退本枚举
     /// 的另一侧）；`starknet` = 遗留路径（行为与改造前逐字节一致）。
     pub settlement_exit: String,
+    /// explorer gateway 基址（D4：`/api/v1/settlement/{binding}` 详情与
+    /// `/api/v1/proof/{binding_hex}` attestation 的前缀；空 = 未部署不下发）。
+    pub gateway_base_url: String,
     // 抽水参数不在本结构：链上/链下同一来源
     // `crate::pokergame::rake::rake_params`（STARKNET_RAKE_BPS/CAP）。
 }
@@ -155,6 +158,7 @@ impl StarknetConfig {
             table_registry_address: std::env::var("STARKNET_TABLE_REGISTRY_ADDRESS")
                 .unwrap_or_default(),
             settlement_exit: std::env::var("STARKNET_SETTLEMENT_EXIT").unwrap_or_default(),
+            gateway_base_url: std::env::var("STARKNET_GATEWAY_URL").unwrap_or_default(),
         }
     }
 

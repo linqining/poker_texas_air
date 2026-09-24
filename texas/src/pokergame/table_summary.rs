@@ -8,6 +8,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::pokergame::side_pot::SidePot;
 
+/// 摊牌牌型条目（seat → HandRank 显示名）。
+/// 用结构体而非 (u32, String) 元组：serde 把元组序列化成 JSON 数组，
+/// 前端要的是带字段名的对象。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ShowdownHandRank {
+    pub seat: u32,
+    pub rank: String,
+}
+
 /// 链上 Table 的元数据快照，对应 Move 合约的 TableSummaryMeta
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TableSummaryMeta {
@@ -109,6 +118,11 @@ pub struct TableSummaryState {
 
 /// 链上 Table 的扩展快照（V2），对应合约中 get_table_summary_v2 的返回值。
 /// 由于合约部署原因，crypto 字段移至独立的 V2 结构体（与 Move TableSummaryV2 对齐）。
+///
+/// 注意：`id`/`limit`/`call_amount` 等以下扩展字段是本地运行时状态，
+/// 不在链上 struct 中（链上路径走 `TableSummaryV2Chain` + `From` 转换，
+/// 新增字段缺省为 Default）。**不要**把新字段加进 meta/state/crypto 三个
+/// 子结构——它们参与链上 BCS 反序列化，字段数变更会导致解析失败。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TableSummaryV2 {
     pub meta: TableSummaryMeta,
@@ -134,6 +148,18 @@ pub struct TableSummaryV2 {
     pub rake_collected: u64,
     /// 历史操作记录
     pub history: Vec<serde_json::Value>,
+    /// 本手开局时间（epoch ms；start_hand 设置，终局记录用）
+    #[serde(default)]
+    pub hand_started_at: u64,
+    /// 摊牌各家牌型（determine_winner 时填充，新一手开局清零）。
+    /// 供 ClientTable / 牌史看板下发。
+    #[serde(default)]
+    pub showdown_hand_ranks: Vec<ShowdownHandRank>,
+    /// 本手逐动作展示流水（record_action 追加；start_hand 清零）。
+    /// 与 #18 的 action_log（Poseidon 审计链）并行——这里只做展示，
+    /// 不参与任何摘要/证明。
+    #[serde(default)]
+    pub actions: Vec<serde_json::Value>,
 }
 
 /// 链上 BCS 反序列化专用结构体，仅包含 Move 合约 `get_table_summary_v2` 返回的字段。

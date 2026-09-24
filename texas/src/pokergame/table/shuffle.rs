@@ -3,6 +3,20 @@ use crate::pokergame::game_state::ShufflePhase;
 use crate::pokergame::player::truncate_name;
 use poker_protocol::zk_shuffle::transcript_ext::PoseidonFeltTranscript;
 
+/// 验证后从生产域 transcript squeeze 展示用全局挑战（hex）。
+///
+/// V2 的 Fiat-Shamir 挑战散布在协议各阶段（`bg12_*` label），无单一
+/// "global challenge" 字段；此处对**验证完成后的完整 transcript 状态**
+/// 取一次确定性摘要——G2「global_challenge」行的数据源（同一证明恒同值，
+/// 绑定全部语句与承诺）。
+fn squeeze_display_challenge(transcript: &mut PoseidonFeltTranscript) -> Option<String> {
+    use poker_protocol_core::CryptoTranscript as _;
+    let challenge = transcript
+        .challenge::<poker_protocol::crypto::DefaultCurve>(b"bg12_global_challenge")
+        .scalar;
+    Some(poker_protocol::z_poker::convert::scalar_to_hex(&challenge))
+}
+
 impl Table {
     pub fn is_all_players_shuffled(&self) -> bool {
         self.shuffle_state.pending_players.is_empty()
@@ -185,8 +199,10 @@ impl Table {
 
         let wants_shuffle = is_join_before_start && round_json.is_some();
         if wants_shuffle {
+            let round_json = round_json
+                .expect("checked above");
+            let shuffle_proof_json = round_json.shuffle_proof.clone();
             let round = round_json
-                .expect("checked above")
                 .to_mask_and_shuffle_round()
                 .map_err(|e| JoinError::Crypto(e))?;
             // 2026-09 Poseidon epoch：remask + shuffle 共享生产域 transcript。
@@ -213,9 +229,16 @@ impl Table {
 
             let pk_hex_game = GamePkHex::new(pk_hex.clone());
             self.mental_poker_game.register_player(pk_hex.clone(), player_pk, pk_proof);
+            // D1 留存需要输出牌组快照（deck 所有权随后移交给 mental_poker_game）。
+            let deck_for_ledger = round.output_cards.clone();
             self.mental_poker_game.deck_encrypted = round.output_cards;
             let _ = self.add_player(GamePkHex::new(pk_hex.clone()), player.wallet_address.clone());
             let _ = self.sit_player(player_for_seat, actual_seat_id, amount, false);
+            // D1 证明通道：join 洗牌层留存（须在 sit_player 之后——座位映射
+            // 已落定；current_hand_id 为上一手/0 时进 pending 桶，开局创建
+            // 本手条目时收编）。
+            let global_challenge = squeeze_display_challenge(&mut transcript);
+            self.record_shuffle_proof_layer(&pk_hex, &shuffle_proof_json, &deck_for_ledger, global_challenge);
 
             if self.round_state() == RoundState::Waiting {
                 self.shuffle_state.completed_players.push(pk_hex_game.clone());
@@ -271,6 +294,10 @@ impl Table {
         ).is_err() {
             return Err("Invalid shuffle proof".to_string());
         }
+        // D1 证明通道：验证成功即留存（V2 顺手 squeeze 全局挑战——完整
+        // transcript 状态的确定性摘要，非协议独立字段）。
+        let global_challenge = squeeze_display_challenge(&mut transcript);
+        self.record_shuffle_proof_layer(player_pk_hex, &shuffle_proof, &output_cards, global_challenge);
         self.mental_poker_game.deck_encrypted = output_cards;
         self.shuffle_state.completed_players.push(player_pk_hex.clone());
         self.shuffle_state.pending_players.retain(|p| p != player_pk_hex);

@@ -58,6 +58,8 @@ export interface Seat {
   lastAction: string | null;
   /** 玩家是否已 fold（与后端 ClientSeat.folded 对齐，camelCase 序列化） */
   folded?: boolean;
+  /** 本手累计投入（后端 ClientSeat.totalBet；旧服务端不下发时缺省） */
+  totalBet?: number;
 }
 
 export interface ShuffleState {
@@ -107,10 +109,14 @@ export interface ReconstructState {
 
 export interface SidePot {
   amount: number;
+  /** 可争该池的座位列表（后端 SidePot.players；旧服务端不下发时缺省） */
+  players?: number[];
 }
 
 export interface Table {
   id: string;
+  /** 桌名（后端 ClientTable.name 已下发；缺省时 UI 回退显示 id） */
+  name?: string;
   /** Optional chain-side table id. Not used by the client in the Starknet flow
    * (per-hand poker actions are off-chain through the game server), but kept
    * so downstream code can still reference it when wired up. */
@@ -147,6 +153,20 @@ export interface Table {
   winMessages: string[];
   /** 本手已收台费（摊牌结算时按链上口径收取，0 = 未抽水） */
   rakeCollected: number;
+  /** 台费费率（万分比，后端 RakeParams.rake_bps；缺省不显示费率） */
+  rakeBps?: number;
+  /** 台费单手上限（后端 RakeParams.rake_cap；缺省不显示上限） */
+  rakeCap?: number;
+  /** 当前回合计时起点（epoch ms，后端 betting_started_at；随每次行动重置） */
+  bettingStartedAt?: number;
+  /** 回合超时总时长（ms，后端 config.betting_timeout_secs；缺省客户端回退 15s） */
+  bettingTimeoutMs?: number;
+  /** 上一手终局时间（epoch ms，后端 hand_complete_at；用于"下一手"倒计时） */
+  handCompleteAt?: number;
+  /** 终局到下一手开局的等待时长（ms，后端 hand_complete_wait_secs） */
+  handCompleteWaitMs?: number;
+  /** 摊牌各家牌型（仅摊牌手有值；服务端 Vec<ShowdownHandRank>） */
+  showdownHandRanks?: Array<{ seat: number; rank: string }>;
   /** 桌台已关闭（终态）：服务端不再开局、不再接受入座。 */
   closed?: boolean;
 }
@@ -167,6 +187,8 @@ export interface GameContextType {
   communityCards: Card[];
   kickNotification: string | null;
   cryptoEvents: CryptoEvent[];
+  /** D4 结算终局回执（handId → 最新回执；`settlement_result` WS 事件维护） */
+  settlementReceipts: Record<number, SettlementReceipt>;
   leaveDeferred: boolean;
   setLeaveDeferred: (value: boolean) => void;
   /** 当玩家在手牌进行中且未 fold 时点击离开，置为 true 以触发确认弹窗（Task 7 渲染弹窗） */
@@ -207,4 +229,25 @@ export interface CryptoEvent {
   verified: boolean;
   timestamp: number;
   message?: string;
+}
+
+/** D4 结算终局回执（服务端 HandSettleReceipt 镜像，camelCase） */
+export interface SettlementReceipt {
+  tableId: number;
+  handId: number;
+  handSeq?: number;
+  status: 'settled' | 'refused' | 'failed';
+  exit: 'appchain' | 'dual' | 'legacy';
+  handBinding?: string;
+  aggregateDigest?: string;
+  txDigests: string[];
+  blockNumber?: number;
+  gasFee?: string;
+  contract?: string;
+  verifier?: string;
+  settleOpIndex?: number;
+  batchRoot?: string;
+  proven?: boolean;
+  reason?: string;
+  tsMs: number;
 }

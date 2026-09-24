@@ -4,6 +4,12 @@ import Button from '../buttons/Button';
 import { BetSlider } from './BetSlider';
 import { UIWrapper } from './UIWrapper';
 import { Table } from '../../types/game';
+import {
+  potOdds,
+  percentOfStack,
+  raisePresets,
+  toCallAmount,
+} from '../../helpers/tableDerived';
 
 interface GameUIProps {
   currentTable: Table;
@@ -29,15 +35,92 @@ export const GameUI: React.FC<GameUIProps> = ({
   isActionLoading = false,
 }) => {
   const { getLocalizedString } = useContext(contentContext)!;
+  const seat = currentTable.seats[seatId];
+  const fmt = new Intl.NumberFormat(document.documentElement.lang);
+
+  // 决策信息（设计稿 T3）：全部由现有 Table 字段推导
+  const toCall = toCallAmount(currentTable, seatId);
+  const odds = potOdds(currentTable, seatId);
+  const callPct = percentOfStack(currentTable, seatId, toCall);
+  const invested = seat?.totalBet;
+  const presets = raisePresets(currentTable, seatId);
+  // 滑杆以「本轮增量」为值域（raise(bet + seat.bet) 同口径），档位为加注到总额
+  const maxDelta = Math.min(seat?.stack ?? 0, currentTable.limit);
+  const applyPreset = (raiseTo: number) =>
+    setBet(Math.max(Math.min(raiseTo - seat.bet, maxDelta), 0));
 
   return (
     <UIWrapper>
-      <BetSlider
-        currentTable={currentTable}
-        seatId={seatId}
-        bet={bet}
-        setBet={setBet}
-      />
+      {/* 决策信息行：需跟 / 底池赔率 / 跟注占余量 / 本手已投入 */}
+      <div
+        style={{
+          gridColumn: '1 / -1',
+          display: 'flex',
+          gap: '0.6rem',
+          justifyContent: 'center',
+          flexWrap: 'wrap',
+          fontSize: '0.75rem',
+          color: '#5b4a2f',
+        }}
+      >
+        <span>
+          {getLocalizedString('game_ui_to-call-lbl')}{' '}
+          <strong>{fmt.format(toCall)}</strong>
+        </span>
+        {odds != null && (
+          <span>
+            · {getLocalizedString('game_ui_pot-odds-lbl')}{' '}
+            <strong>{odds} : 1</strong>
+          </span>
+        )}
+        {callPct != null && (
+          <span>
+            · {getLocalizedString('game_ui_call-pct-lbl')}{' '}
+            <strong>{callPct}%</strong>
+          </span>
+        )}
+        {invested != null && invested > 0 && (
+          <span>
+            · {getLocalizedString('game_ui_invested-lbl')}{' '}
+            <strong>{fmt.format(invested)}</strong>
+          </span>
+        )}
+      </div>
+
+      <div style={{ gridColumn: '1 / -1' }}>
+        <BetSlider
+          currentTable={currentTable}
+          seatId={seatId}
+          bet={bet}
+          setBet={setBet}
+        />
+      </div>
+
+      {/* 加注四档位：最小 / 半池 / 底池 / 全下（均为「加注到」总额） */}
+      {presets && maxDelta > 0 && (
+        <div
+          style={{
+            gridColumn: '1 / -1',
+            display: 'grid',
+            gridTemplateColumns: 'repeat(4, 1fr)',
+            gap: '0.4rem',
+          }}
+        >
+          <Button small secondary disabled={isActionLoading} onClick={() => applyPreset(presets.min)}>
+            {getLocalizedString('game_ui_preset-min')} {fmt.format(presets.min)}
+          </Button>
+          <Button small secondary disabled={isActionLoading} onClick={() => applyPreset(presets.halfPot)}>
+            {getLocalizedString('game_ui_preset-half')} {fmt.format(presets.halfPot)}
+          </Button>
+          <Button small secondary disabled={isActionLoading} onClick={() => applyPreset(presets.pot)}>
+            {getLocalizedString('game_ui_preset-pot')} {fmt.format(presets.pot)}
+          </Button>
+          <Button small secondary disabled={isActionLoading} onClick={() => applyPreset(presets.allIn)}>
+            {getLocalizedString('game_ui_preset-allin')} {fmt.format(presets.allIn)}
+          </Button>
+        </div>
+      )}
+
       <Button small disabled={isActionLoading} onClick={() => raise(bet + currentTable.seats[seatId].bet)}>
         {getLocalizedString('game_ui_bet')} {bet}
       </Button>

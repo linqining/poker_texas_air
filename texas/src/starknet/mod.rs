@@ -45,6 +45,9 @@ mod canonical_trace_roundtrip;
 pub mod paymaster;
 pub mod prove_log;
 pub mod settlement_prover;
+/// D2/D3/D4：结算回执注册表（block/gas 回填、合约元数据下发、
+/// hand_binding ↔ (table, hand) 映射与 `settlement_result` 广播）。
+pub mod settle_receipt;
 pub mod snip36;
 pub mod submit;
 /// 桌台注册表锚定（PokerTableRegistry：合约分配 id + Open→Closed 生命周期）。

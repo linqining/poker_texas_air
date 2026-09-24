@@ -51,7 +51,6 @@ export interface UseGameSocketParams {
   setKickNotification: (notification: string | null) => void;
   setCryptoEvents: Dispatch<SetStateAction<CryptoEvent[]>>;
   setLeaveDeferred: Dispatch<SetStateAction<boolean>>;
-  isUnmountingRef: MutableRefObject<boolean>;
   pkHex: string | null;
   leaveTable: (shouldNavigate?: boolean, pkHex?: string, fireAndForget?: boolean) => Promise<void>;
   handleShuffleNotice: (data: ShuffleNoticeData) => Promise<ShuffleHandleResult | null>;
@@ -94,7 +93,6 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
     setKickNotification,
     setCryptoEvents,
     setLeaveDeferred,
-    isUnmountingRef,
     pkHex,
     leaveTable,
     handleShuffleNotice,
@@ -121,12 +119,10 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
   const reconstructFallbackKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    // StrictMode dev 双挂载会把 isUnmountingRef 置 true 且无人复位，导致
-    // 之后每次依赖变化（服务端 TABLE_UPDATED 广播）的 cleanup 都误发
-    // STAND_UP，玩家在牌局中被服务端反复移座。effect 重新激活即视为挂载。
-    isUnmountingRef.current = false;
     // pagehide 取代已废弃的 unload（ unload 在移动端/前进后退缓存下不可靠，
-    // pagehide 是标准替代，导航与关页都会触发；'close' 并非 window 事件）
+    // pagehide 是标准替代，导航与关页都会触发；'close' 并非 window 事件）。
+    // 真实路由离开 /play 的离桌由 GameState 的 useLocation 路由守卫负责
+    // （isUnmountingRef cleanup 模式在 StrictMode 下无法区分伪卸载，已移除）。
     const onUnload = () => leaveTable(false, pkHex || undefined, true);
     window.addEventListener('pagehide', onUnload);
 
@@ -467,9 +463,9 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       socket?.off(REDEAL_RESULT);
       socket?.off(CRYPTO_EVENT);
       socket?.off('error');
-      if (isUnmountingRef.current) {
-        leaveTable(true, pkHex || undefined, true);
-      }
+      // 离桌触发已迁移：真实路由离开 → GameState 的 useLocation 守卫；
+      // 页面关闭/刷新 → 上方 pagehide 监听。cleanup 不再做业务动作
+      // （React 18 StrictMode 挂载双执行会调用 cleanup，无法区分伪卸载）。
     };
-  }, [socket, handleShuffleNotice, handleRevealNotice, handleReconstructNotice, handleHandRevealResult, handleCommunityRevealResult, resetRevealDedup, stopActionLoading, addMessage, currentTableRef, leaveTable, pkHex, setCommunityCards, setCryptoEvents, setCurrentTable, setDecryptedHandCards, setKickNotification, setLeaveDeferred, setMessages, isUnmountingRef]);
+  }, [socket, handleShuffleNotice, handleRevealNotice, handleReconstructNotice, handleHandRevealResult, handleCommunityRevealResult, resetRevealDedup, stopActionLoading, addMessage, currentTableRef, leaveTable, pkHex, setCommunityCards, setCryptoEvents, setCurrentTable, setDecryptedHandCards, setKickNotification, setLeaveDeferred, setMessages]);
 }

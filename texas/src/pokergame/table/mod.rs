@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::pokergame::deck::{Card, EncryptedDeck};
-use crate::pokergame::player::{GamePlayer, Player, PlayerWithProof, WalletAddress, GamePkHex};
+use crate::pokergame::player::{GamePlayer, Player, PlayerWithProof, WalletAddress, GamePkHex, truncate_name};
 use crate::pokergame::seat::{ClientSeat,Seat};
 use crate::pokergame::side_pot::SidePot;
 use crate::pokergame::table_summary::TableSummaryV2;
@@ -144,6 +144,34 @@ pub struct ClientTable {
     /// 客户端动作签名（snip36 递归证明材料）从这里取 hand_id。
     #[serde(default)]
     pub hand_id: u32,
+    /// 最小买入（= max(min_bet × 20, 1000)，与客户端历史校验规则同源）。
+    #[serde(default)]
+    pub min_buy_in: u64,
+    /// 最大买入（limit > 0 ? limit : big_blind × 100）。此前客户端硬编码
+    /// 5000，与桌台 limit 脱节。
+    #[serde(default)]
+    pub max_buy_in: u64,
+    /// 台费费率（basis points；rake_params() 与链上环境变量同源）。
+    #[serde(default)]
+    pub rake_bps: u16,
+    /// 台费单手上限（rake_params()）。
+    #[serde(default)]
+    pub rake_cap: u64,
+    /// 当前回合计时锚点（epoch ms；= summary.state.betting_started_at，
+    /// 每次行动/换手重置）。客户端线性倒计时与超时自动弃牌以此为准。
+    #[serde(default)]
+    pub betting_started_at: u64,
+    /// 回合计时总长（ms；0 = 未配置，客户端回退本地 15s）。
+    #[serde(default)]
+    pub betting_timeout_ms: u64,
+    /// 上一手终局时间（epoch ms）与到下一手开局的等待时长（ms）。
+    #[serde(default)]
+    pub hand_complete_at: u64,
+    #[serde(default)]
+    pub hand_complete_wait_ms: u64,
+    /// 摊牌各家牌型（仅摊牌手有值）。
+    #[serde(default)]
+    pub showdown_hand_ranks: Vec<crate::pokergame::table_summary::ShowdownHandRank>,
     pub shuffle_state: Option<ShufflePublicState>,
     pub reveal_token_state: Option<RevealTokenPublicState>,
     pub reconstruct_state: Option<ReconstructPublicState>,
@@ -226,6 +254,22 @@ pub struct Table {
     /// （投盲注时）更新；空桌重置为 0。座位号 1 起始，与 button 一致。
     #[serde(skip)]
     pub last_bb_seat: u32,
+    /// 回合行动计时（ms）：与 config.betting_timeout_secs 同源（Table::new
+    /// 后由 main 经 with_timeouts 注入）。0 = 未配置（客户端回退本地 15s）。
+    #[serde(skip)]
+    pub turn_timeout_ms: u64,
+    /// 终局到下一手开局的等待时长（ms）：与 config.hand_complete_wait_secs
+    /// 同源。与 hand_complete_at 一起下发，客户端用于「下一手」倒计时。
+    #[serde(skip)]
+    pub hand_complete_wait_ms: u64,
+    /// 本手开局各座位 stack 快照（start_hand 记录）。终局 net =
+    /// 终局 stack − 快照；win_hand 会清零 total_bet，故不能由投入推导赢家 net。
+    #[serde(skip)]
+    pub hand_start_stacks: HashMap<u32, u64>,
+    /// 洗牌证明留存（D1 证明通道）：验证点留存证明本体 + verified/挑战值，
+    /// REST `/api/tables/:id/hands/:seq/proof` 的数据源。有界 FIFO。
+    #[serde(skip)]
+    pub proof_ledger: crate::pokergame::proof_ledger::ProofLedger,
 }
 
 impl Table {
@@ -400,6 +444,21 @@ impl Table {
             big_blind,
             sig,
         });
+        // 展示流水（设计稿 T6 ACTION LOG）：与 #18 审计链并行，只做下发，
+        // 不参与摘要。street 取当下 round_state，玩家名便于前端直读。
+        let player = self
+            .local_seats
+            .get(&seat)
+            .and_then(|s| s.player.as_ref().map(|p| p.name.clone()));
+        self.summary.actions.push(serde_json::json!({
+            "seat": seat,
+            "player": player,
+            "action": action,
+            "amount": amount,
+            "street": format!("{:?}", self.round_state()),
+            "ts": now_ms(),
+            "auto": auto,
+        }));
     }
 
     /// 座位当前 accepted seq（无记录为 0）。
@@ -452,6 +511,19 @@ impl Table {
             history: self.summary.history.clone(),
             round_state: self.round_state(),
             hand_id: self.current_hand_id,
+            min_buy_in: self.summary.min_bet.saturating_mul(20).max(1000),
+            max_buy_in: if self.summary.limit > 0 {
+                self.summary.limit
+            } else {
+                self.summary.meta.big_blind.saturating_mul(100)
+            },
+            rake_bps: crate::pokergame::rake::rake_params().rake_bps,
+            rake_cap: crate::pokergame::rake::rake_params().rake_cap,
+            betting_started_at: self.betting_started_at(),
+            betting_timeout_ms: self.turn_timeout_ms,
+            hand_complete_at: self.hand_complete_at(),
+            hand_complete_wait_ms: self.hand_complete_wait_ms,
+            showdown_hand_ranks: self.summary.showdown_hand_ranks.clone(),
             shuffle_state: self.get_shuffle_public_state(),
             reveal_token_state: self.get_reveal_token_public_state(),
             reconstruct_state: self.get_reconstruct_public_state(),
@@ -549,7 +621,19 @@ impl Table {
             closed: false,
             registry_table_id: None,
             last_bb_seat: 0,
+            turn_timeout_ms: 0,
+            hand_complete_wait_ms: 0,
+            hand_start_stacks: HashMap::new(),
+            proof_ledger: crate::pokergame::proof_ledger::ProofLedger::default(),
         }
+    }
+
+    /// 注入回合计时配置（main 启动时调用；与 config 的 *_secs 同源）。
+    /// builder 风格，避免 Table::new 签名变更波及测试。
+    pub fn with_timeouts(mut self, turn_timeout_ms: u64, hand_complete_wait_ms: u64) -> Self {
+        self.turn_timeout_ms = turn_timeout_ms;
+        self.hand_complete_wait_ms = hand_complete_wait_ms;
+        self
     }
 
     /// 关桌（终态，幂等）：置位后 game_loop 不再开局、SIT_DOWN 被拒。
@@ -763,8 +847,69 @@ impl Table {
             win_messages: self.summary.win_messages.clone(),
             seats: self.clean_seats_for_history(),
             streets: self.summary.history.clone(),
+            // 凭证数据（设计稿 T6）：开局时间 / 摊牌牌型 / 每家净结果 / 行动流水
+            hand_started_at: self.summary.hand_started_at,
+            showdown_hand_ranks: self.summary.showdown_hand_ranks.clone(),
+            nets: self.seats().iter()
+                .filter_map(|(id, s)| {
+                    let start = self.hand_start_stacks.get(id).copied()?;
+                    Some((*id, s.stack as i64 - start as i64))
+                })
+                .collect(),
+            actions: self.summary.actions.clone(),
+            // 证明通道 / 结算回执的 (hand_seq ↔ hand_id) 映射锚点。
+            hand_id: self.current_hand_id,
         };
         crate::pokergame::history_store::global_store().append(self.summary.id, record);
+    }
+
+    /// 验证成功后留存一层洗牌证明（D1 证明通道）。调用点：开局洗牌
+    /// （`submit_verified_shuffle`）与入座 join 洗牌（`join_player_and_shuffle`），
+    /// 均在证明验证通过之后。`global_challenge` 为 V2 验证后从生产域
+    /// transcript squeeze 的展示值（V1 传 None）。
+    pub fn record_shuffle_proof_layer(
+        &mut self,
+        player_pk_hex: &str,
+        proof: &crate::pokergame::game_state::ShuffleProofJson,
+        output_deck: &[ElGamalCiphertext],
+        global_challenge: Option<String>,
+    ) {
+        let pk = GamePkHex::new(player_pk_hex.to_lowercase());
+        let seat = self.pk_to_seat.get(&pk).copied().unwrap_or(0);
+        let player_name = self
+            .local_seats
+            .get(&seat)
+            .and_then(|s| s.player.as_ref())
+            .map(|p| p.name.clone())
+            .or_else(|| {
+                self.seats()
+                    .values()
+                    .find(|s| s.player.as_ref().is_some_and(|p| p.pk_hex == pk))
+                    .and_then(|s| s.player.as_ref().map(|p| p.name.clone()))
+            })
+            .unwrap_or_else(|| truncate_name(player_pk_hex, 8));
+        let round = self.proof_ledger.next_round(self.current_hand_id);
+        let display = crate::pokergame::proof_ledger::build_display(proof, output_deck);
+        let aggregate_pk = ecpoint_to_hex(&self.mental_poker_game.key_manager.get_aggregated_pk());
+        self.proof_ledger.push_layer(
+            self.summary.id,
+            self.current_hand_id,
+            &aggregate_pk,
+            output_deck.len().max(1),
+            crate::pokergame::proof_ledger::ShuffleLayerRecord {
+                round,
+                seat,
+                player_pk: player_pk_hex.to_owned(),
+                player_name,
+                proof_version: proof.proof_version(),
+                proof: proof.clone(),
+                display,
+                global_challenge,
+                verified: true,
+                tx_digest: None,
+                ts: now_ms(),
+            },
+        );
     }
 
     pub fn clean_seats_for_history(&self) -> serde_json::Value {

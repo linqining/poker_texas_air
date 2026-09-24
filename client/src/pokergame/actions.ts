@@ -39,6 +39,10 @@ export const REDEAL_REQUEST = 'REDEAL_REQUEST' as const;
 // ZK 密码学事件（与后端 actions::CRYPTO_EVENT 对应的 socket.io 事件名）
 export const CRYPTO_EVENT = 'crypto_event' as const;
 
+// D4 结算终局事件（settled / refused / failed + hand_binding + 区块/gas；
+// 与后端 actions::SETTLEMENT_RESULT 对应的 socket.io 事件名）
+export const SETTLEMENT_RESULT = 'settlement_result' as const;
+
 // 后端在 on-chain 模式下 emit 的签名请求事件，前端收到后执行 sponsored tx 签名流程
 export const ACTION_SIGNING_REQUEST = 'action_signing_request' as const;
 

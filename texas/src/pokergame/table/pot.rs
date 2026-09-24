@@ -293,6 +293,18 @@ impl Table {
             .into_iter()
             .filter(|(id, _)| eligible_ids.contains(id))
             .collect();
+        // 摊牌牌型快照（主池/边池逐池调用，按座位去重合并）：
+        // 供 ClientTable 下发与终局 HandHistoryRecord 落账。
+        for (id, rank) in &eligible_results {
+            if !self.summary.showdown_hand_ranks.iter().any(|h| h.seat == *id) {
+                self.summary.showdown_hand_ranks.push(
+                    crate::pokergame::table_summary::ShowdownHandRank {
+                        seat: *id,
+                        rank: rank.name().to_string(),
+                    },
+                );
+            }
+        }
         if eligible_results.is_empty() {
             // F5 fix: No reveal cards available — split evenly among all eligible
             // instead of silently dropping the pot.

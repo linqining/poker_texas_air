@@ -147,6 +147,7 @@ impl Seat {
             last_action: self.last_action.clone(),
             sitting_out: self.sitting_out,
             is_waiting: self.is_waiting,
+            total_bet: self.total_bet,
         }
     }
 }
@@ -169,4 +170,8 @@ pub struct ClientSeat {
     pub sitting_out: bool,
     #[serde(default)]
     pub is_waiting: bool,
+    /// 本手累计投入（含以往街；赢家派彩后清零）。供前端「你已投入 /
+    /// 本手投入」显示。#[serde(default)] 兼容旧记录反序列化。
+    #[serde(default)]
+    pub total_bet: u64,
 }

@@ -47,6 +47,26 @@ pub struct HandHistoryRecord {
     pub seats: serde_json::Value,
     /// 手内过程快照（发牌/各街/结算，见 `Table::update_history`）。
     pub streets: Vec<serde_json::Value>,
+    /// 开局时间（epoch ms；0 = 旧记录未记录，用时不可算）。
+    #[serde(default)]
+    pub hand_started_at: u64,
+    /// 摊牌各家牌型（seat → HandRank 显示名；fold-win 手为空）。
+    #[serde(default)]
+    pub showdown_hand_ranks: Vec<crate::pokergame::table_summary::ShowdownHandRank>,
+    /// 每家净结果（seat → 终局 stack − 期初 stack；正 = 赢）。
+    /// 期初快照在 start_hand 打（投盲注前），中途入座者无基线、不记。
+    /// serde 序列化为 [seat, net] 元组数组。
+    #[serde(default)]
+    pub nets: Vec<(u32, i64)>,
+    /// 逐动作展示流水（seat/player/action/amount/street/ts/auto），
+    /// 与 #18 Poseidon 审计链（action_log）并行，仅用于前端凭证展示。
+    #[serde(default)]
+    pub actions: Vec<serde_json::Value>,
+    /// 本手 id（开局分配，动作签名域 / 结算记账 / 证明留存同源）。
+    /// 0 = 旧记录未记录。证明通道按 (hand_seq → hand_id → proof_ledger)
+    /// 索引，结算回执注册表按 (table_id, hand_id) 索引，本字段是两边的桥。
+    #[serde(default)]
+    pub hand_id: u32,
 }
 
 /// 牌局记录存储抽象。实现需线程安全（在服务器异步上下文中调用）。
@@ -61,6 +81,18 @@ pub trait HandHistoryStore: Send + Sync {
     fn len(&self, table_id: u32) -> usize;
     /// 精确取单手记录。
     fn get(&self, table_id: u32, hand_seq: u64) -> Option<HandHistoryRecord>;
+
+    /// 按 hand_id（证明留存 / 结算回执的键）反查 hand_seq。
+    /// 默认实现线性扫描最近记录；0 = 旧记录未记录 hand_id，视为无映射。
+    fn find_seq_by_hand_id(&self, table_id: u32, hand_id: u32) -> Option<u64> {
+        if hand_id == 0 {
+            return None;
+        }
+        self.list_by_table(table_id, DEFAULT_CAPACITY)
+            .into_iter()
+            .find(|r| r.hand_id == hand_id)
+            .map(|r| r.hand_seq)
+    }
 }
 
 /// 进程内实现：每桌一个 FIFO 队列，超出容量淘汰最旧记录。
@@ -152,6 +184,11 @@ mod tests {
             win_messages: vec!["A wins $95.00".into()],
             seats: serde_json::json!({}),
             streets: vec![],
+            hand_started_at: 0,
+            showdown_hand_ranks: vec![],
+            nets: vec![],
+            actions: vec![],
+            hand_id: 0,
         }
     }
 

@@ -1,4 +1,4 @@
-import React, { useContext, useEffect, useState } from 'react';
+import React, { useContext, useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useTheme } from 'styled-components';
 import Container from '../components/layout/Container';
@@ -30,6 +30,7 @@ import { useTableJoin } from '../hooks/useTableJoin';
 import { CryptoPanel } from '../components/game/CryptoPanel';
 import { KickNotification } from '../components/game/KickNotification';
 import HandHistoryPanel from '../components/game/HandHistoryPanel';
+import { api } from '../api/secretPokerClient';
 import { ActionLoadingOverlay, LeavingOverlay, LeaveDeferredBanner } from './Play.styles';
 
 
@@ -72,6 +73,7 @@ const Play: React.FC = () => {
     kickNotification,
     clearKickNotification,
     cryptoEvents,
+    settlementReceipts,
     isActionLoading,
     startActionLoading,
     leaveDeferred,
@@ -92,6 +94,9 @@ const Play: React.FC = () => {
   const [showCryptoPanel, setShowCryptoPanel] = useState(false);
   // 牌局记录看板开关（P0-2）
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
+  // 空桌等待时的上一手结算摘要（来自 /history 末条记录）
+  const [lastHandSummary, setLastHandSummary] = useState<string | null>(null);
+  const lastHandFetchedRef = useRef<string>('');
 
   /**
    * Portrait detection: supplements the CSS-only <RotateDevicePrompt /> with
@@ -140,6 +145,43 @@ const Play: React.FC = () => {
       setBet(Math.max(currentBet - seatBet, 0));
     }
   }, [currentTable, seatId]);
+
+  // 空桌等待时拉取上一手结算摘要（桌面消息条，T1）。同一手只拉一次；
+  // 看板接口失败时静默降级，不影响牌桌。
+  const waitingForNextHand =
+    !!currentTable &&
+    currentTable.roundState === 'waiting' &&
+    (!currentTable.winMessages || currentTable.winMessages.length === 0);
+  useEffect(() => {
+    if (!currentTable || !waitingForNextHand) return;
+    const fetchKey = `${currentTable.id}-${currentTable.handId ?? 0}`;
+    if (lastHandFetchedRef.current === fetchKey) return;
+    lastHandFetchedRef.current = fetchKey;
+    let cancelled = false;
+    api
+      .getHandHistory(Number(currentTable.id))
+      .then((records) => {
+        if (cancelled) return;
+        const last = records[0];
+        if (!last) return;
+        const parts = [`#${last.handSeq}`];
+        const win = last.winMessages?.[0];
+        if (win) parts.push(win);
+        if (last.rakeCollected > 0) {
+          parts.push(
+            `${getLocalizedString('game_rake-collected_lbl')}: $${Number(last.rakeCollected).toFixed(2)}`,
+          );
+        }
+        setLastHandSummary(`${getLocalizedString('game_last-hand-lbl')} ${parts.join(' · ')}`);
+      })
+      .catch(() => {
+        /* 看板不可用：保留上一次摘要或空 */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTable?.id, currentTable?.handId, currentTable?.roundState, waitingForNextHand]);
 
   const wrappedFold = () => {
     startActionLoading();
@@ -296,6 +338,7 @@ const Play: React.FC = () => {
         currentTable={currentTable}
         showCryptoPanel={showCryptoPanel}
         onToggle={() => setShowCryptoPanel((v) => !v)}
+        settlementReceipts={settlementReceipts}
       />
       {currentTable &&
         ReactDOM.createPortal(
@@ -327,6 +370,39 @@ const Play: React.FC = () => {
         )}
         {currentTable && (
           <>
+            {/* 票据抬头数据：桌名 / 手数 / 最小加注 / 盲注（对齐设计稿 T1–T3 抬头） */}
+            <PositionedUISlot
+              top="1vh"
+              left="1.5rem"
+              scale="0.65"
+              style={{ zIndex: '50', pointerEvents: 'none' }}
+            >
+              <TableInfoWrapper>
+                <Text>
+                  <strong>{currentTable.name || currentTable.id}</strong>
+                  {' | '}
+                  {getLocalizedString('game_header-hand-lbl')} #{currentTable.handId ?? '—'}
+                  {!!currentTable.minRaise && (
+                    <>
+                      {' | '}
+                      {getLocalizedString('game_info_min-raise-lbl')}{' '}
+                      {new Intl.NumberFormat(document.documentElement.lang).format(
+                        currentTable.minRaise,
+                      )}
+                    </>
+                  )}
+                  {' | '}
+                  {getLocalizedString('game_info_blinds-lbl')}{' '}
+                  {new Intl.NumberFormat(document.documentElement.lang).format(
+                    currentTable.smallBlind,
+                  )}{' '}
+                  /{' '}
+                  {new Intl.NumberFormat(document.documentElement.lang).format(
+                    currentTable.bigBlind,
+                  )}
+                </Text>
+              </TableInfoWrapper>
+            </PositionedUISlot>
             <PositionedUISlot
               bottom="2vh"
               left="1.5rem"
@@ -430,9 +506,9 @@ const Play: React.FC = () => {
                 )}
               </PositionedUISlot>
               <PositionedUISlot bottom="8%" scale="0.60" origin="bottom center">
-                {messages && messages.length > 0 && (
+                {(messages.length > 0 || (waitingForNextHand && lastHandSummary)) && (
                   <>
-                    <InfoPill>{messages[messages.length - 1].text}</InfoPill>
+                    {messages.length > 0 && <InfoPill>{messages[messages.length - 1].text}</InfoPill>}
                     {!isPlayerSeated && (
                       <InfoPill>{getLocalizedString('game_sitdown-prompt')}</InfoPill>
                     )}
@@ -445,6 +521,9 @@ const Play: React.FC = () => {
                       <InfoPill>
                         {`${getLocalizedString('game_rake-collected_lbl')}: $${Number(currentTable.rakeCollected).toFixed(2)}`}
                       </InfoPill>
+                    )}
+                    {waitingForNextHand && lastHandSummary && !isPlayerSeated && (
+                      <InfoPill>{lastHandSummary}</InfoPill>
                     )}
                   </>
                 )}

@@ -195,6 +195,92 @@ pub async fn get_table_hand(
     }
 }
 
+/// D1 洗牌证明通道：`GET /api/tables/:table_id/hands/:hand_seq/proof`。
+///
+/// 返回该手每一层的证明本体（V1/V2 原样，untagged）+ verified/txDigest +
+/// 方案 b 的 V1 布局投影（`display`，派生行 `derived: true` 诚实标注），
+/// 并附 D2/D3/D4 的结算回执（settlement 段）与链上元数据（chain 段）。
+/// 老回放（hand_id=0 的升级前记录）没有留存 → 404。
+///
+/// `?handId=N`：跳过 hand_seq 映射直查该手（进行中的手还没进 history，
+/// ClientTable.handId 下发后客户端用它查当前手）。
+pub async fn get_table_hand_proof(
+    Extension(state): Extension<Arc<AppState>>,
+    Path((table_id, hand_seq)): Path<(String, String)>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+) -> Response {
+    let (table_id, hand_seq) = match (parse_id(&table_id), hand_seq.parse::<u64>()) {
+        (Some(t), Ok(s)) => (t, s),
+        _ => return err_resp(StatusCode::BAD_REQUEST, "Invalid table_id or hand_seq"),
+    };
+    let query_hand_id = raw_query
+        .as_deref()
+        .and_then(|q| q.split('&').find(|p| p.starts_with("handId=")))
+        .and_then(|p| p.strip_prefix("handId="))
+        .and_then(|v| v.parse::<u32>().ok());
+    // hand_seq=0 = 当前手（进行中，还没进 history；锁内直读 current_hand_id）。
+    let (hand_id, hand_seq) = if hand_seq == 0 && query_hand_id.is_none() {
+        let gs = state.socket_state.state.read().await;
+        let cur = gs.tables.get(&table_id).map(|t| t.current_hand_id).unwrap_or(0);
+        if cur == 0 {
+            return err_resp(StatusCode::NOT_FOUND, "No active hand");
+        }
+        (cur, 0)
+    } else if let Some(hand_id) = query_hand_id.filter(|v| *v > 0) {
+        let seq = crate::pokergame::history_store::global_store()
+            .find_seq_by_hand_id(table_id, hand_id);
+        (hand_id, seq.unwrap_or(hand_seq))
+    } else {
+        let Some(record) = crate::pokergame::history_store::global_store().get(table_id, hand_seq)
+        else {
+            return err_resp(StatusCode::NOT_FOUND, "Hand record not found");
+        };
+        let hand_id = record.hand_id;
+        if hand_id == 0 {
+            return err_resp(
+                StatusCode::NOT_FOUND,
+                "No proof data for hand (pre-upgrade record)",
+            );
+        }
+        (hand_id, hand_seq)
+    };
+    let (entry, current_aggregate_pk) = {
+        let gs = state.socket_state.state.read().await;
+        let table = gs.tables.get(&table_id);
+        (
+            table.and_then(|t| t.proof_ledger.get(hand_id).cloned()),
+            table.map(|t| {
+                poker_protocol::z_poker::convert::ecpoint_to_hex(
+                    &t.mental_poker_game.key_manager.get_aggregated_pk(),
+                )
+            }),
+        )
+    };
+    let layers = entry
+        .as_ref()
+        .map(|e| e.layers.clone())
+        .unwrap_or_default();
+    let aggregate_pk = entry
+        .as_ref()
+        .map(|e| e.aggregate_pk.clone())
+        .filter(|pk| !pk.is_empty())
+        .or(current_aggregate_pk);
+    let deck_size = entry.as_ref().map(|e| e.deck_size).unwrap_or(52);
+    let settlement = crate::starknet::settle_receipt::get(table_id, hand_id);
+    let chain = crate::starknet::settle_receipt::ChainMeta::from_config();
+    let body = serde_json::json!({
+        "tableId": table_id,
+        "handSeq": hand_seq,
+        "handId": hand_id,
+        "aggregatePk": aggregate_pk,
+        "deckSize": deck_size,
+        "layers": layers,
+        "settlement": settlement,
+        "chain": chain,
+    });
+    (StatusCode::OK, Json(body)).into_response()
+}
+
 /// 关桌（终态）：置 closed 标志 → 广播 → 释放会话锁 + 链上注册表关桌。
 /// 鉴权：`Authorization: Bearer <OPERATOR_ADMIN_TOKEN>`；未配置 token 时
 /// 仅 debug 构建（本地联调）放行，release 构建一律 403。

@@ -33,6 +33,8 @@ pub const REDEAL_NOTICE: &str = "REDEAL_NOTICE";
 pub const REDEAL_RESULT: &str = "REDEAL_RESULT";
 pub const REDEAL_REQUEST: &str = "REDEAL_REQUEST";
 pub const CRYPTO_EVENT: &str = "crypto_event";
+/// D4：结算终局事件（settled / refused / failed + hand_binding + 区块/gas）。
+pub const SETTLEMENT_RESULT: &str = "settlement_result";
 
 
 /// #16 动作签名（抗审查）：客户端以牌局身份 SK 对动作签名后随消息附上。

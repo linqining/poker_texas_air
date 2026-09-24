@@ -83,7 +83,16 @@ async fn main() -> std::io::Result<()> {
     let db = Database::new();
 
     let mut initial_tables = HashMap::new();
-    initial_tables.insert(1, Table::new(1, "Table 1".to_string(), 10000, config.max_players_per_table, config.default_chain_table_id.clone()));
+    initial_tables.insert(
+        1,
+        Table::new(1, "Table 1".to_string(), 10000, config.max_players_per_table, config.default_chain_table_id.clone())
+            // 回合计时/下一手等待下发客户端（T2 线性倒计时、T4 下一手倒计时）；
+            // 与 check_betting_timeout 用的 config 同源，避免两处漂移。
+            .with_timeouts(
+                config.betting_timeout_secs.saturating_mul(1000),
+                config.hand_complete_wait_secs.saturating_mul(1000),
+            ),
+    );
     // initial_tables.insert(2, Table::new(2, "Table 2".to_string(), 20000, config.max_players_per_table, "".to_string()));
     // initial_tables.insert(3, Table::new(3, "Table 3".to_string(), 50000, config.max_players_per_table, "".to_string()));
     for table in initial_tables.values_mut() {
@@ -160,6 +169,8 @@ async fn main() -> std::io::Result<()> {
         // P0-2 牌局记录看板：最近手牌列表 + 单手详情
         .route("/tables/:table_id/history", routing::get(handlers::get_table_history))
         .route("/tables/:table_id/history/:hand_seq", routing::get(handlers::get_table_hand))
+        // D1 洗牌证明通道：按手查每层证明本体 + verified/tx + 结算/链上元数据
+        .route("/tables/:table_id/hands/:hand_seq/proof", routing::get(handlers::get_table_hand_proof))
         .route("/games/:game_id/join", routing::post(handlers::join_game))
         .route("/games/:game_id/action", routing::post(handlers::player_action))
         .route("/games/:game_id/reveal-token", routing::post(handlers::submit_reveal_token));

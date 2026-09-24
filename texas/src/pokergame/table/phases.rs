@@ -35,6 +35,17 @@ impl Table {
         // #18：标记本手动作日志窗口起点（审计摘要只覆盖本手）。
         self.hand_log_start = self.action_log.len();
 
+        // 终局净结果与凭证用的本手快照：开局时间 / 各座位期初 stack /
+        // 展示流水与摊牌牌型清零（上一手的数据已在 record_hand_history 落账）。
+        self.summary.hand_started_at = now_ms();
+        self.summary.actions = Vec::new();
+        self.summary.showdown_hand_ranks = Vec::new();
+        self.hand_start_stacks = self
+            .local_seats
+            .iter()
+            .map(|(id, s)| (*id, s.stack))
+            .collect();
+
         // 动作签名域 v2：开局分配本手 id（客户端经 shuffleState.hand_id
         // 获得，签名与服务端 verify_action_sig / 结算记账同源）。
         self.current_hand_id = crate::starknet::prove_log::next_hand_id(self.summary.id);
