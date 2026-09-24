@@ -175,6 +175,34 @@ def _inline(text: str) -> str:
     return text
 
 
+_NUM_UNIT = (
+    r"(?:%|‰|x|倍|位|项|条|个|次|手|桌|人|家|篇|节|级|档|元|"
+    r"ms|us|ns|s|分钟|小时|秒|天|周|月|年|bps|gas|STRK|PLAY|TPS|QPS)?"
+)
+_NUM_CELL = re.compile(rf"^[<>=~]?\s*[\d,]*\.?\d+\s*{_NUM_UNIT}\s*[)）]?\+?$")
+
+
+def _is_num_cell(raw: str) -> bool:
+    """判断一个 Markdown 表格单元是否为"量"（可贴右），而不是"标识符"。
+
+    0x… 开头的哈希与含省略号的地址必须留在左对齐：它们是被查的键，不是被加的数。
+    """
+    t = raw.strip().strip("`").strip()
+    if not t or t.lower().startswith("0x") or "…" in t or "..." in t:
+        return False
+    return bool(_NUM_CELL.match(t))
+
+
+def numeric_columns(thead: list[str], rows: list[list[str]]) -> set[int]:
+    """整列每个非空单元格都是数字时，该列下标进入集合。"""
+    num: set[int] = set()
+    for i in range(len(thead)):
+        vals = [r[i] for r in rows if i < len(r) and r[i].strip()]
+        if vals and all(_is_num_cell(v) for v in vals):
+            num.add(i)
+    return num
+
+
 def render_markdown(src: str) -> str:
     lines = src.replace("\r\n", "\n").split("\n")
     out: list[str] = []
@@ -192,14 +220,21 @@ def render_markdown(src: str) -> str:
         nonlocal thead
         if thead is None:
             return
-        parts = ["<table>", "<thead><tr>"]
-        parts += ["<th>" + _inline(c) + "</th>" for c in thead]
-        parts.append("</tr></thead>")
         rows = pending_rows()
+        num = numeric_columns(thead, rows)
+
+        def cell(tag: str, i: int, text: str) -> str:
+            cls = f' class="num"' if i in num else ""
+            return f"<{tag}{cls}>" + _inline(text) + f"</{tag}>"
+
+        parts = ["<table>", "<thead><tr>"]
+        parts += [cell("th", i, c) for i, c in enumerate(thead)]
+        parts.append("</tr></thead>")
         if rows:
             parts.append("<tbody>")
             for r in rows:
-                parts.append("<tr>" + "".join("<td>" + _inline(c) + "</td>" for c in r) + "</tr>")
+                parts.append(
+                    "<tr>" + "".join(cell("td", i, c) for i, c in enumerate(r)) + "</tr>")
             parts.append("</tbody>")
         parts.append("</table>")
         out.append("".join(parts))
@@ -244,11 +279,16 @@ def render_markdown(src: str) -> str:
             i += 1
             continue
 
-        # raw HTML block（行首为 < 的连续行原样输出）
+        # raw HTML block：从行首为 < 的那行起，吃到空行（或下一个 Markdown 块）为止。
+        # 旧口径只吃"连续以 < 开头的行"，于是 <li> 内部软换行的续行会截断这个块，
+        # 剩下的文本被当成新段落，行尾的 </li> 被转义成页面上的字面量（proofs 页就是这样）。
         if line.lstrip().startswith("<"):
             flush_para(); flush_table(); flush_list()
             block: list[str] = []
-            while i < n and lines[i].lstrip().startswith("<"):
+            while i < n and lines[i].strip():
+                s = lines[i].lstrip()
+                if block and (s.startswith("#") or s.startswith("```")):
+                    break
                 block.append(lines[i])
                 i += 1
             out.append("\n".join(block))

@@ -12,8 +12,8 @@ v1 无 portal 后端。以下表单为接口就绪的静态层：生产环境将
 
 <form class="card" action="#" method="get" onsubmit="return false;">
   <p><label for="hand-id">hand id 或 proof digest</label></p>
-  <p><input id="hand-id" name="hand_id" type="text" placeholder="例如：0x00f6fae93ff03c440c1136a5d8b5eab742f07c268c52536d4932ce4171933c52" style="width:100%;max-width:560px;background:#0d1710;color:#e9f2ec;border:1px solid #2a4233;border-radius:8px;padding:9px 12px;"></p>
-  <p><button type="submit" disabled style="opacity:0.6;border-radius:8px;padding:8px 16px;">验证（portal 服务上线后开放）</button></p>
+  <p><input id="hand-id" name="hand_id" class="input" type="text" placeholder="例如：0x00f6fae93ff03c440c1136a5d8b5eab742f07c268c52536d4932ce4171933c52"></p>
+  <p><button type="submit" class="btn" disabled>验证（portal 服务上线后开放）</button></p>
   <p class="kv">当前状态：v1 静态层 &#183; SAMPLE DATA / devnet &#183; 查询接口待 portal 服务</p>
 </form>
 
