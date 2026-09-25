@@ -46,23 +46,23 @@ const Card = styled.div`
   font-size: 3rem;
   box-shadow:
     0 10px 40px rgba(0, 0, 0, 0.5),
-    0 0 60px rgba(102, 126, 234, 0.15),
+    0 0 60px rgba(11, 107, 69, 0.1),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(102, 126, 234, 0.2);
+  border: 1px solid rgba(11, 107, 69, 0.2);
   backface-visibility: hidden;
 
   &::before {
     content: '';
     position: absolute;
     inset: 8px;
-    border: 1px solid rgba(102, 126, 234, 0.1);
+    border: 1px solid rgba(11, 107, 69, 0.1);
     border-radius: 6px;
   }
 
   &::after {
     content: '🃏';
     font-size: 3.5rem;
-    filter: drop-shadow(0 2px 8px rgba(102, 126, 234, 0.3));
+    filter: drop-shadow(0 2px 8px rgba(11, 107, 69, 0.2));
   }
 `;
 

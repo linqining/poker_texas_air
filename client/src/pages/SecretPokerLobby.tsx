@@ -1,10 +1,6 @@
 import { useContext } from 'react';
 import { useNavigate } from 'react-router-dom';
 import styled from 'styled-components';
-import jackImg from '../assets/img/jack-rounded-img@2x.png';
-import kingImg from '../assets/img/king-rounded-img@2x.png';
-import queenImg from '../assets/img/queen-rounded-img@2x.png';
-import queen2Img from '../assets/img/queen2-rounded-img@2x.png';
 import { useGlobalContext } from '../context/global/globalContext';
 import { useContentContext } from '../context/content/contentContext';
 import { useModalContext } from '../context/modal/modalContext';
@@ -44,7 +40,7 @@ const WelcomeHeading = styled.h2`
   letter-spacing: -0.02em;
 
   span {
-    background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2);
+    background: ${({ theme }) => theme.colors.primaryCta};
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -99,11 +95,11 @@ const MenuCard = styled.button`
   text-align: center;
   font-family: inherit;
   cursor: pointer;
-  background: rgba(255, 255, 255, 0.85);
-  border: 1px solid rgba(226, 232, 240, 0.9);
-  border-radius: 16px;
+  background: ${({ theme }) => theme.colors.lightestBg};
+  border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
+  border-radius: ${({ theme }) => theme.radius.sm};
   padding: 1.5rem 2rem;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.06);
+  box-shadow: none;
   transition:
     border-color 0.35s cubic-bezier(0.22, 1, 0.36, 1),
     transform 0.35s cubic-bezier(0.22, 1, 0.36, 1),
@@ -119,7 +115,7 @@ const MenuCard = styled.button`
   }
 
   &:hover {
-    border-color: rgba(102, 126, 234, 0.4);
+    border-color: rgba(11, 107, 69, 0.4);
     transform: translateY(-3px);
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
   }
@@ -170,6 +166,84 @@ const MenuCard = styled.button`
   }
 `;
 
+
+/* 大厅菜单图形（design/client C2 改动 #1）：人物 PNG → 牌面字面。
+   A♠ K♠ Q♠ J♠ 与牌桌稿同一套符号——零图片、零加载、零版权资产。 */
+const CardFaceWrap = styled.span<{ $red: boolean }>`
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 120px;
+  height: 128px;
+  margin: 1rem;
+  background: ${({ theme }) => theme.colors.lightestBg};
+  border: 1px solid ${({ theme }) => theme.colors.borderMuted};
+  border-radius: 6px;
+  box-shadow: ${({ theme }) => theme.other.cardDropShadow};
+  color: ${({ $red, theme }) => ($red ? theme.colors.danger : theme.colors.fontColorDark)};
+  flex: none;
+
+  @media screen and (max-width: 468px) {
+    width: 64px;
+    height: 72px;
+    margin: 0.4rem;
+    .rank {
+      font-size: 1.5rem;
+    }
+    .suit {
+      font-size: 1.1rem;
+    }
+  }
+`;
+const CardRank = styled.span`
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-variant-numeric: tabular-nums;
+  font-size: 2.6rem;
+  font-weight: 700;
+  line-height: 1;
+`;
+const CardSuit = styled.span`
+  font-size: 1.8rem;
+  line-height: 1.15;
+`;
+
+const CardDesc = styled.p`
+  margin: 0.25rem 0 0;
+  font-size: 0.8rem;
+  color: ${({ theme }) => theme.colors.mutedText};
+  line-height: 1.5;
+`;
+
+const CardFoot = styled.span`
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: ${({ theme }) => theme.colors.success};
+  border-top: 1px solid ${({ theme }) => theme.colors.borderSubtle};
+  margin-top: 0.75rem;
+  padding-top: 0.55rem;
+  width: 100%;
+`;
+
+const LobbyMeta = styled.div`
+  margin-top: 1.5rem;
+  text-align: center;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: ${({ theme }) => theme.colors.softerText};
+`;
+
+const MenuCardFace: React.FC<{ rank: string; suit: string; red?: boolean }> = ({ rank, suit, red }) => (
+  <CardFaceWrap $red={!!red} aria-hidden>
+    <CardRank className="rank">{rank}</CardRank>
+    <CardSuit className="suit">{suit}</CardSuit>
+  </CardFaceWrap>
+);
+
 /* ===== Component ===== */
 
 export default function Lobby() {
@@ -206,13 +280,17 @@ export default function Lobby() {
 
       <MenuGrid>
         <MenuCard type="button" onClick={requireAuthAndNavigate}>
-          <img src={kingImg} alt={getLocalizedString('lobby_join-table-alt')} width={196} height={210} loading="lazy" />
+          <MenuCardFace rank="A" suit="♠" />
           <h3>{getLocalizedString('main_page-join_table').toUpperCase()}</h3>
+          <CardDesc>{getLocalizedString('lobby_desc-join_table')}</CardDesc>
+          <CardFoot>{getLocalizedString('lobby_foot-join_table')}</CardFoot>
         </MenuCard>
 
         <MenuCard type="button" onClick={requireAuthAndNavigate}>
-          <img src={queen2Img} alt={getLocalizedString('lobby_quick-game-alt')} width={196} height={206} loading="lazy" />
+          <MenuCardFace rank="K" suit="♠" />
           <h3>{getLocalizedString('main_page-quick_game').toUpperCase()}</h3>
+          <CardDesc>{getLocalizedString('lobby_desc-quick_game')}</CardDesc>
+          <CardFoot>{getLocalizedString('lobby_foot-quick_game')}</CardFoot>
         </MenuCard>
 
         <MenuCard
@@ -229,15 +307,20 @@ export default function Lobby() {
             );
           }}
         >
-          <img src={jackImg} alt={getLocalizedString('lobby_shop-alt')} />
+          <MenuCardFace rank="Q" suit="♥" red />
           <h3>{getLocalizedString('main_page-open_shop').toUpperCase()}</h3>
+          <CardDesc>{getLocalizedString('lobby_desc-open_shop')}</CardDesc>
+          <CardFoot>{getLocalizedString('lobby_foot-open_shop')}</CardFoot>
         </MenuCard>
 
         <MenuCard type="button" onClick={() => navigate('/game-rules')}>
-          <img src={queenImg} alt={getLocalizedString('lobby_rules-alt')} width={196} height={206} loading="lazy" />
+          <MenuCardFace rank="J" suit="♣" />
           <h3>{getLocalizedString('main_page-open_rules').toUpperCase()}</h3>
+          <CardDesc>{getLocalizedString('lobby_desc-open_rules')}</CardDesc>
+          <CardFoot>{getLocalizedString('lobby_foot-open_rules')}</CardFoot>
         </MenuCard>
       </MenuGrid>
+      <LobbyMeta>{getLocalizedString('lobby_meta-connected')} · {window.location.host}</LobbyMeta>
     </PageWrapper>
   );
 }

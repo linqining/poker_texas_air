@@ -12,19 +12,18 @@ const PageWrapper = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #f1f5f9;
+  /* 账簿纸白（原冷灰 #f1f5f9 残留清除） */
+  background: ${({ theme }) => theme.colors.lightBg};
   padding: 2rem;
 `;
 
 const DashboardCard = styled.div`
   width: 100%;
   max-width: 600px;
-  background: rgba(255, 255, 255, 0.85);
-  border: 1px solid rgba(226, 232, 240, 0.9);
-  border-radius: 20px;
+  background: ${({ theme }) => theme.colors.lightestBg};
+  border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
+  border-radius: ${({ theme }) => theme.radius.sm};
   padding: 2.5rem 2rem;
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
 `;
 
 const LogoWrapper = styled.div`
@@ -78,7 +77,7 @@ const StyledInput = styled(Input)`
 
   &:focus {
     border-color: ${({ theme }) => theme.colors.secondaryCta} !important;
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
+    box-shadow: 0 0 0 3px rgba(11, 107, 69, 0.15);
   }
 `;
 
@@ -97,7 +96,7 @@ const BackButton = styled(Button)`
     color 0.25s ease !important;
 
   &:hover {
-    border-color: rgba(102, 126, 234, 0.4) !important;
+    border-color: rgba(11, 107, 69, 0.4) !important;
     color: ${({ theme }) => theme.colors.secondaryCta} !important;
   }
 `;

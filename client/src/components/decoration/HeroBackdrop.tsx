@@ -87,7 +87,7 @@ const SuitParticle = styled.span<{
   opacity: 0.22;
   pointer-events: none;
   user-select: none;
-  filter: drop-shadow(0 4px 16px rgba(102, 126, 234, 0.18));
+  filter: none;
   animation: ${({ $anim }) => $anim} ${({ $duration }) => $duration} ease-in-out infinite;
   animation-delay: ${({ $delay }) => $delay};
   will-change: transform;
@@ -131,7 +131,7 @@ interface SuitSpec {
 }
 
 const SUIT_SPECS: SuitSpec[] = [
-  // Spade — top-left, brand purple
+  // Spade — top-left, ledger real-gold
   {
     Icon: Spade,
     $anim: floatA,
@@ -140,7 +140,7 @@ const SUIT_SPECS: SuitSpec[] = [
     $size: 64,
     $delay: '0s',
     $duration: '14s',
-    $color: 'rgba(118, 75, 162, 0.95)',
+    $color: 'rgba(125, 83, 8, 0.55)',
   },
   // Heart — top-right, indigo
   {
@@ -151,9 +151,9 @@ const SUIT_SPECS: SuitSpec[] = [
     $size: 56,
     $delay: '-3s',
     $duration: '16s',
-    $color: 'rgba(102, 126, 234, 0.95)',
+    $color: 'rgba(11, 107, 69, 0.5)',
   },
-  // Diamond — bottom-right, brand purple lighter
+  // Diamond — bottom-right, ledger real-gold light
   {
     Icon: Diamond,
     $anim: floatC,
@@ -162,7 +162,7 @@ const SUIT_SPECS: SuitSpec[] = [
     $size: 52,
     $delay: '-6s',
     $duration: '18s',
-    $color: 'rgba(167, 139, 219, 0.95)',
+    $color: 'rgba(125, 83, 8, 0.35)',
   },
   // Club — bottom-left, indigo
   {
@@ -173,7 +173,7 @@ const SUIT_SPECS: SuitSpec[] = [
     $size: 60,
     $delay: '-9s',
     $duration: '15s',
-    $color: 'rgba(102, 126, 234, 0.9)',
+    $color: 'rgba(75, 72, 64, 0.45)',
   },
 ]
 

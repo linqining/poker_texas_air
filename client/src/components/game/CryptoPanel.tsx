@@ -18,8 +18,8 @@ interface CryptoPanelProps {
 // ZK 密码学事件浮动面板（可收起，位于右上角，不遮挡牌桌核心区域）
 const PanelContainer = styled.div`
   position: fixed;
-  top: 1rem;
-  right: 1rem;
+  top: 7.6rem;
+  right: 0.8rem;
   z-index: 900;
   max-width: 320px;
   width: calc(100vw - 2rem);
@@ -32,8 +32,7 @@ const ToggleButton = styled.button<{ $expanded: boolean }>`
   gap: 0.4rem;
   width: 100%;
   justify-content: space-between;
-  background: ${({ $expanded }) =>
-    $expanded ? 'rgba(15, 23, 42, 0.92)' : 'rgba(59, 130, 246, 0.92)'};
+  background: ${({ $expanded }) => ($expanded ? '#14130f' : '#15507f')};
   color: #fff;
   border: none;
   border-radius: ${({ $expanded }) => ($expanded ? '8px 8px 0 0' : '8px')};

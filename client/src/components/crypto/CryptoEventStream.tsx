@@ -71,7 +71,7 @@ export default function CryptoEventStream({
         // 空状态
         <div
           style={{
-            color: '#94a3b8',
+            color: '#8a8578',
             fontStyle: 'italic',
             textAlign: 'center',
             padding: '1.5rem 0',
@@ -99,7 +99,7 @@ export default function CryptoEventStream({
                 cursor: onSelect ? 'pointer' : 'default',
                 // 选中项加蓝色左边框高亮
                 borderLeft: isSelected
-                  ? '3px solid #3b82f6'
+                  ? '3px solid #15507f'
                   : '3px solid transparent',
                 boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
                 transition: 'background 0.15s ease',
@@ -113,7 +113,7 @@ export default function CryptoEventStream({
                   height: 28,
                   borderRadius: 6,
                   background: 'rgba(59,130,246,0.1)',
-                  color: '#3b82f6',
+                  color: '#15507f',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -145,14 +145,14 @@ export default function CryptoEventStream({
                     style={{
                       fontWeight: 700,
                       fontSize: '0.78rem',
-                      color: '#0f172a',
+                      color: '#14130f',
                       letterSpacing: '0.04em',
                     }}
                   >
                     {ev.event_type.toUpperCase()}
                   </span>
                   {/* 玩家 pk 截断显示 */}
-                  <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                  <span style={{ fontSize: '0.72rem', color: '#5f5b50' }}>
                     {truncatePk(ev.player_pk)}
                   </span>
                   {/* 洗牌层号（层 i / N） */}
@@ -160,7 +160,7 @@ export default function CryptoEventStream({
                     <span
                       style={{
                         fontSize: '0.68rem',
-                        color: '#8b5cf6',
+                        color: '#7d5308',
                         fontWeight: 600,
                       }}
                     >
@@ -172,7 +172,7 @@ export default function CryptoEventStream({
                     <span
                       style={{
                         fontSize: '0.72rem',
-                        color: '#3b82f6',
+                        color: '#15507f',
                         fontWeight: 600,
                       }}
                     >
@@ -184,7 +184,7 @@ export default function CryptoEventStream({
                     style={{
                       fontSize: '0.7rem',
                       fontWeight: 600,
-                      color: ev.verified ? '#10b981' : '#ef4444',
+                      color: ev.verified ? '#0b6b45' : '#a83226',
                     }}
                   >
                     {ev.verified ? t('crypto_verified') : t('crypto_failed')}
@@ -194,7 +194,7 @@ export default function CryptoEventStream({
                     <span
                       style={{
                         fontSize: '0.66rem',
-                        color: '#f59e0b',
+                        color: '#825510',
                         fontWeight: 600,
                       }}
                     >
@@ -220,7 +220,7 @@ export default function CryptoEventStream({
                   <div
                     style={{
                       fontSize: '0.7rem',
-                      color: '#64748b',
+                      color: '#5f5b50',
                       whiteSpace: 'nowrap',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
@@ -236,7 +236,7 @@ export default function CryptoEventStream({
                 style={{
                   flexShrink: 0,
                   fontSize: '0.7rem',
-                  color: '#94a3b8',
+                  color: '#8a8578',
                   alignSelf: 'flex-start',
                 }}
               >

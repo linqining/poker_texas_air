@@ -1,6 +1,6 @@
 import 'styled-components';
 
-interface ThemeColors {
+export interface ThemeColors {
   // === Primary Brand Colors ===
   primaryCta: string;
   primaryCtaDarker: string;
@@ -215,106 +215,119 @@ declare module 'styled-components' {
 const up = (bp: number) => `@media (min-width: ${bp}px)`;
 const down = (bp: number) => `@media (max-width: ${bp - 1}px)`;
 
+// ============================================================================
+// 账簿 Ledger 主题（design/figma/tokens.json paper 逐字同源）。
+//
+// 映射原则：保持既有 Theme 接口形状（全部存量 styled-components 零改动编译），
+// 把牌桌稿/客户端稿的账簿令牌映射到语义槽位：
+//   primaryCta   紫 #4f46e5 → felt 翡翠 #0b6b45（一屏只允许一个实底）
+//   brandGradient → felt 实底（账簿无渐变）
+//   surfaceGlass → cd 纸白 #fffdf7（零玻璃拟态）
+//   radius 2rem  → 3px/6px 方角
+//   success/danger/warning/info → felt/bad/amb/play 四个语义色
+//   gold（筹码）→ real 托管金（--real 只用于托管/真实资产语义）
+// 零 webfont：system-ui 栈 + ui-monospace（tokens.json font.ui / font.mono）。
+// ============================================================================
 const theme: Theme = {
   // Colors
   colors: {
-    // Primary Brand Colors
-    primaryCta: '#4f46e5',
-    primaryCtaDarker: '#4338ca',
-    secondaryCta: '#667eea',
-    secondaryCtaDarker: '#5a67d8',
-    secondaryCtaDarkest: '#4f46e5',
-    // Brand Purple
-    brandPurple: '#764ba2',
-    brandPurpleHover: '#8559ad',
-    brandPurpleLight: '#a78bdb',
-    brandPurpleRgb: '118, 75, 162',
-    brandPurpleAlpha04: 'rgba(118, 75, 162, 0.04)',
-    brandPurpleAlpha10: 'rgba(118, 75, 162, 0.10)',
-    brandPurpleAlpha15: 'rgba(118, 75, 162, 0.15)',
-    brandGradient: 'linear-gradient(135deg, #667eea, #764ba2)',
-    brandGradientHover: 'linear-gradient(135deg, #7b8ff0, #8559ad)',
-    // Brand Indigo
-    brandIndigo: '#667eea',
-    brandIndigoRgb: '102, 126, 234',
-    brandIndigoAlpha06: 'rgba(102, 126, 234, 0.06)',
-    brandIndigoAlpha10: 'rgba(102, 126, 234, 0.10)',
-    brandIndigoAlpha12: 'rgba(102, 126, 234, 0.12)',
-    brandIndigoAlpha15: 'rgba(102, 126, 234, 0.15)',
-    brandIndigoAlpha20: 'rgba(102, 126, 234, 0.20)',
-    brandIndigoAlpha25: 'rgba(102, 126, 234, 0.25)',
-    brandIndigoAlpha35: 'rgba(102, 126, 234, 0.35)',
-    // Brand Blue
-    brandBlue: '#4DA2FF',
-    brandBlueAlpha08: 'rgba(77, 162, 255, 0.08)',
-    brandBlueAlpha20: 'rgba(77, 162, 255, 0.20)',
-    // Backgrounds
-    darkBg: '#e2e8f0',
-    lightBg: '#f1f5f9',
-    lightestBg: '#ffffff',
-    // Font Colors
-    fontColorLight: '#f8fafc',
-    fontColorDark: '#0f172a',
-    fontColorDarkLighter: '#334155',
-    mutedText: '#475569',
-    softText: '#64748b',
-    softerText: '#94a3b8',
-    // Surfaces
-    surfaceGlass: 'rgba(255, 255, 255, 0.95)',
-    surfaceMuted: 'rgba(241, 245, 249, 0.8)',
-    surfaceSubtle: 'rgba(241, 245, 249, 0.9)',
-    surfaceMutedPlain: '#f1f5f9',
-    surfaceMutedPlainRgb: '241, 245, 249',
-    // Borders
-    borderSubtle: 'rgba(226, 232, 240, 0.9)',
-    borderSubtleRgb: '226, 232, 240',
-    borderMuted: 'rgba(203, 213, 225, 0.8)',
-    borderMutedRgb: '203, 213, 225',
-    // Status Colors
-    success: '#10b981',
-    successStrong: '#059669',
-    successAlpha06: 'rgba(16, 185, 129, 0.06)',
-    successAlpha12: 'rgba(16, 185, 129, 0.12)',
-    successAlpha20: 'rgba(16, 185, 129, 0.20)',
-    danger: '#ef4444',
-    dangerStrong: '#dc2626',
-    dangerLighter: 'hsl(0, 100%, 56%)',
-    dangerBase: 'hsl(0, 100%, 46%)',
-    dangerAlpha06: 'rgba(239, 68, 68, 0.06)',
-    dangerAlpha95: 'rgba(239, 68, 68, 0.95)',
-    warning: '#f59e0b',
-    warningDark: '#b45309',
-    gold: '#ffd700',
-    goldDarker: '#d4a843',
-    goldChip: '#f7f2dc',
-    goldChipAlpha80: 'rgba(247, 242, 220, 0.8)',
-    info: '#3b82f6',
-    infoCyan: '#06b6d4',
-    // Other legacy
-    playingCardBg: '#f8fafc',
-    playingCardBgLighter: '#ffffff',
-    goldenColorDarker: '#d4a843',
-    goldenColor: '#e2b84d',
-    dangerColorLighter: 'hsl(0, 100%, 56%)',
-    dangerColor: 'hsl(0, 100%, 46%)',
-    // Pill (chip) colors
-    pillDark: '#282215',
-    pillDarkText: '#fffefc',
-    pillBorder: '#5b96b5',
-    pillBackgroundLight: '#245069',
+    // Primary Brand Colors（felt = 确认/主操作，唯一实底色）
+    primaryCta: '#0b6b45',
+    primaryCtaDarker: '#095a3a',
+    secondaryCta: '#15507f',
+    secondaryCtaDarker: '#10416a',
+    secondaryCtaDarkest: '#0b3352',
+    // Brand Purple → felt 语义（渐变槽位 = 实底；账簿零渐变）
+    brandPurple: '#0b6b45',
+    brandPurpleHover: '#0d7a4f',
+    brandPurpleLight: '#a8c8b6',
+    brandPurpleRgb: '11, 107, 69',
+    brandPurpleAlpha04: 'rgba(11, 107, 69, 0.04)',
+    brandPurpleAlpha10: 'rgba(11, 107, 69, 0.10)',
+    brandPurpleAlpha15: 'rgba(11, 107, 69, 0.15)',
+    brandGradient: '#0b6b45',
+    brandGradientHover: '#0d7a4f',
+    // Brand Indigo → play 进行中语义
+    brandIndigo: '#15507f',
+    brandIndigoRgb: '21, 80, 127',
+    brandIndigoAlpha06: 'rgba(21, 80, 127, 0.06)',
+    brandIndigoAlpha10: 'rgba(21, 80, 127, 0.10)',
+    brandIndigoAlpha12: 'rgba(21, 80, 127, 0.12)',
+    brandIndigoAlpha15: 'rgba(21, 80, 127, 0.15)',
+    brandIndigoAlpha20: 'rgba(21, 80, 127, 0.20)',
+    brandIndigoAlpha25: 'rgba(21, 80, 127, 0.25)',
+    brandIndigoAlpha35: 'rgba(21, 80, 127, 0.35)',
+    // Brand Blue → play
+    brandBlue: '#15507f',
+    brandBlueAlpha08: 'rgba(21, 80, 127, 0.08)',
+    brandBlueAlpha20: 'rgba(21, 80, 127, 0.20)',
+    // Backgrounds（pg / cd / cd-2）
+    darkBg: '#eae5d9',
+    lightBg: '#f5f2ea',
+    lightestBg: '#fffdf7',
+    // Font Colors（ink / ink-2 / ink-3）
+    fontColorLight: '#f5f2ea',
+    fontColorDark: '#14130f',
+    fontColorDarkLighter: '#4b4840',
+    mutedText: '#4b4840',
+    softText: '#5f5b50',
+    softerText: '#8a8578',
+    // Surfaces（纸白，零玻璃）
+    surfaceGlass: '#fffdf7',
+    surfaceMuted: 'rgba(248, 245, 236, 0.9)',
+    surfaceSubtle: 'rgba(248, 245, 236, 0.95)',
+    surfaceMutedPlain: '#f8f5ec',
+    surfaceMutedPlainRgb: '248, 245, 236',
+    // Borders（rl / rl-2）
+    borderSubtle: '#ddd6c6',
+    borderSubtleRgb: '221, 214, 198',
+    borderMuted: '#c3bba7',
+    borderMutedRgb: '195, 187, 167',
+    // Status Colors（felt / bad / amb / play 语义）
+    success: '#0b6b45',
+    successStrong: '#095a3a',
+    successAlpha06: 'rgba(11, 107, 69, 0.06)',
+    successAlpha12: '#e6efe8',
+    successAlpha20: 'rgba(11, 107, 69, 0.20)',
+    danger: '#a83226',
+    dangerStrong: '#8f2a20',
+    dangerLighter: '#c4473a',
+    dangerBase: '#a83226',
+    dangerAlpha06: 'rgba(168, 50, 38, 0.06)',
+    dangerAlpha95: 'rgba(168, 50, 38, 0.95)',
+    warning: '#825510',
+    warningDark: '#6b450d',
+    gold: '#7d5308',
+    goldDarker: '#6a4607',
+    goldChip: '#f6ebd4',
+    goldChipAlpha80: 'rgba(246, 235, 212, 0.8)',
+    info: '#15507f',
+    infoCyan: '#15507f',
+    // Other legacy（牌面纸卡）
+    playingCardBg: '#fffdf7',
+    playingCardBgLighter: '#fffdf7',
+    goldenColorDarker: '#6a4607',
+    goldenColor: '#7d5308',
+    dangerColorLighter: '#c4473a',
+    dangerColor: '#a83226',
+    // Pill（chip）→ 墨底等宽
+    pillDark: '#14130f',
+    pillDarkText: '#f5f2ea',
+    pillBorder: '#c3bba7',
+    pillBackgroundLight: '#4b4840',
     // Disabled
-    disabled: 'rgba(0, 0, 0, 0.3)',
-    disabledText: '#94a3b8',
-    // Tooltip
-    tooltipBg: '#1e293b',
-    tooltipText: '#f8fafc',
+    disabled: 'rgba(20, 19, 15, 0.12)',
+    disabledText: '#8a8578',
+    // Tooltip（墨底白字反转）
+    tooltipBg: '#14130f',
+    tooltipText: '#f5f2ea',
   },
-  // Fonts
+  // Fonts（零 webfont：system-ui 栈；等宽走 fontMono）
   fonts: {
-    fontFamilySerif: "'Playfair Display', serif",
-    fontFamilySansSerif: "'Roboto', sans-serif",
+    fontFamilySerif: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', Roboto, Arial, sans-serif",
+    fontFamilySansSerif: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', Roboto, Arial, sans-serif",
     // Use clamp() so portrait phones don't blow up H1
-    fontLineHeight: '1.4',
+    fontLineHeight: '1.55',
     fontSizeRoot: '1em',
     fontSizeRootMobile: '0.9em',
     fontSizeH1: 'clamp(1.6rem, 4.5vmin + 1rem, 2.5rem)',
@@ -325,16 +338,16 @@ const theme: Theme = {
     fontSizeH6: 'clamp(1rem, 2vmin + 0.7rem, 1.2rem)',
     fontSizeParagraph: '1.2rem',
   },
-  // Radius scale (used by Modal, Cards, Buttons, Chips)
+  // Radius（账簿方角：3px / 6px；pill 保留给徽章胶囊）
   radius: {
-    pill: '999px',
-    xxl: '2rem',
-    xl: '20px',
-    lg: '16px',
-    md: '12px',
-    sm: '10px',
-    xs: '8px',
-    xxs: '6px',
+    pill: '2px',
+    xxl: '6px',
+    xl: '6px',
+    lg: '6px',
+    md: '3px',
+    sm: '3px',
+    xs: '2px',
+    xxs: '2px',
   },
   // Font size scale
   fontSize: {
@@ -394,11 +407,11 @@ const theme: Theme = {
       xl: down(1280),
     },
   },
-  // Other styles
+  // Other styles（零大圆角；阴影降到账簿级 1px 底线）
   other: {
-    stdBorderRadius: '2rem',
-    cardDropShadow: '0 8px 30px rgba(0, 0, 0, 0.06)',
-    navMenuDropShadow: '-10px 0px 30px rgba(0, 0, 0, 0.06)',
+    stdBorderRadius: '3px',
+    cardDropShadow: '0 1px 0 rgba(20, 19, 15, 0.04)',
+    navMenuDropShadow: '-6px 0 24px rgba(20, 19, 15, 0.06)',
     navHeight: '5.5rem',
     safeAreaTop: 'env(safe-area-inset-top, 0px)',
     safeAreaBottom: 'env(safe-area-inset-bottom, 0px)',
@@ -406,5 +419,9 @@ const theme: Theme = {
     safeAreaRight: 'env(safe-area-inset-right, 0px)',
   },
 };
+
+/** 账簿等宽字体（哈希/地址/金额专用；tokens.json font.mono 同源）。 */
+export const fontMono =
+  "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace";
 
 export default theme;

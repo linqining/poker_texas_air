@@ -147,7 +147,7 @@ interface SeatProps {
   sitDown: (tableId: string, seatId: number, amount: number) => Promise<void>;
 }
 
-interface BuyinFormProps {
+export interface BuyinFormProps {
   minBuyIn: number;
   maxBuyin: number;
   buyinStep: number;
@@ -157,7 +157,45 @@ interface BuyinFormProps {
   strkBalanceInStrk: number;
   confirmLabel: string;
   onConfirm: (amount: number) => void;
+  /** T5 单据上下文：目标座位与桌名/桌号 */
+  seatNumber?: number;
+  tableLabel?: string;
 }
+
+// T5 单据抬头（座位/桌上下文）
+const BuyinContext = styled.div`
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: ${({ theme }) => theme.colors.softerText};
+  margin-bottom: 0.6rem;
+`;
+
+// 琥珀「真实资产」警示条（原稿 bn-real 语言）
+const RealAssetNote = styled.div`
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  background: ${({ theme }) => theme.colors.goldChip};
+  border: 1px solid rgba(125, 83, 8, 0.35);
+  border-left: 3px solid ${({ theme }) => theme.colors.gold};
+  border-radius: ${({ theme }) => theme.radius.sm};
+  color: ${({ theme }) => theme.colors.gold};
+  font-size: 0.78rem;
+  line-height: 1.5;
+`;
+
+// 页脚溯源行
+const TraceFoot = styled.div`
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  color: ${({ theme }) => theme.colors.softerText};
+  text-align: center;
+  padding-top: 0.6rem;
+`;
 
 // 买入档位按钮：从 minBuyIn 起按步进取至多 4 档（设计稿 T5 的 1,000/2,000/3,000/4,000）
 const PresetRow = styled.div`
@@ -188,7 +226,7 @@ const PresetRow = styled.div`
  * 转换后余额」两行复核（设计稿 T5），替代原先的裸 number input。
  * 校验规则与原实现一致：min ≤ amount ≤ min(availableChips, maxBuyin) 且为步进整数倍。
  */
-const BuyinForm: React.FC<BuyinFormProps> = ({
+export const BuyinForm: React.FC<BuyinFormProps> = ({
   minBuyIn,
   maxBuyin,
   buyinStep,
@@ -198,10 +236,14 @@ const BuyinForm: React.FC<BuyinFormProps> = ({
   strkBalanceInStrk,
   confirmLabel,
   onConfirm,
+  seatNumber,
+  tableLabel,
 }) => {
   const { getLocalizedString } = useContext(contentContext)!;
   const [amount, setAmount] = useState<number>(minBuyIn);
   const effectiveMax = Math.min(availableChips, maxBuyin);
+  // 不可成交态：超出可用额度（余额 0 / 超上限）时给出可见错误而非静默拦截
+  const unaffordable = availableChips <= 0 || amount > effectiveMax;
   const presets: number[] = [];
   for (
     let v = minBuyIn;
@@ -211,11 +253,14 @@ const BuyinForm: React.FC<BuyinFormProps> = ({
     presets.push(v);
   }
 
+  const fmtAmt = (n: number) => n.toLocaleString();
+
   return (
     <Form
       onSubmit={(e) => {
         e.preventDefault();
         if (
+          !unaffordable &&
           amount &&
           amount >= minBuyIn &&
           amount % buyinStep === 0 &&
@@ -226,6 +271,11 @@ const BuyinForm: React.FC<BuyinFormProps> = ({
         }
       }}
     >
+      <BuyinContext>
+        {getLocalizedString('seat_buyin-ctx-label')}
+        {seatNumber ? ` · SEAT ${seatNumber}` : ''}
+        {tableLabel ? ` · ${tableLabel}` : ''}
+      </BuyinContext>
       <BuyinInfo>
         <BuyinInfoRow>
           <span>{getLocalizedString('seat_wallet-address-label')}</span>
@@ -250,7 +300,12 @@ const BuyinForm: React.FC<BuyinFormProps> = ({
         <ExchangeRate>{getLocalizedString('seat_exchange-rate-label').replace('{rate}', CHIPS_PER_STRK.toLocaleString())}</ExchangeRate>
       </BuyinInfo>
       <FormGroup>
-        <Label htmlFor="amount">{getLocalizedString('seat_buyin-amount-label')}</Label>
+        <Label htmlFor="amount">
+          {getLocalizedString('seat_buyin-amount-label')}
+          <span style={{ color: '#8a8578', fontWeight: 400, marginLeft: 6 }}>
+            {`${fmtAmt(minBuyIn)} – ${fmtAmt(effectiveMax || maxBuyin)} · ${getLocalizedString('seat_buyin-step-hint')} ${fmtAmt(buyinStep)}`}
+          </span>
+        </Label>
         <Input
           id="amount"
           type="number"
@@ -261,8 +316,26 @@ const BuyinForm: React.FC<BuyinFormProps> = ({
           step={buyinStep}
           value={amount}
           onChange={(e) => setAmount(+(e.target as HTMLInputElement).value)}
+          style={unaffordable ? { borderColor: '#a83226' } : undefined}
         />
+        {unaffordable && (
+          <div style={{ color: '#a83226', fontSize: '0.78rem', marginTop: 4 }}>
+            {getLocalizedString('seat_buyin-unaffordable')}
+          </div>
+        )}
       </FormGroup>
+      <RealAssetNote>
+        {getLocalizedString('seat_buyin-real-asset-note')}
+      </RealAssetNote>
+      <TraceFoot>
+        {[
+          seatNumber ? `SEAT ${seatNumber}` : '',
+          tableLabel ?? '',
+          `${getLocalizedString('seat_exchange-rate-label').replace('{rate}', CHIPS_PER_STRK.toLocaleString())}`,
+        ]
+          .filter(Boolean)
+          .join(' · ')}
+      </TraceFoot>
       {presets.length > 1 && (
         <PresetRow>
           {presets.map((v) => (
@@ -440,6 +513,8 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
               strkCostForChips={strkCostForChips}
               shortAddress={shortAddress}
               strkBalanceInStrk={strkBalanceInStrk}
+              seatNumber={seatNumber}
+              tableLabel={`${currentTable.name || currentTable.id}`}
               confirmLabel={getLocalizedString('game_rebuy-modal_confirm')}
               onConfirm={(amount) => {
                 rebuy(currentTable.id, seatNumber, parseInt(String(amount)));
@@ -514,6 +589,8 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
                         strkCostForChips={strkCostForChips}
                         shortAddress={shortAddress}
                         strkBalanceInStrk={strkBalanceInStrk}
+                        seatNumber={seatNumber}
+                        tableLabel={`${currentTable.name || currentTable.id}`}
                         confirmLabel={getLocalizedString('game_buyin-modal_confirm')}
                         onConfirm={(amount) => {
                           sitDown(

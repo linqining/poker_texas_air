@@ -264,25 +264,25 @@ export default function SecretPokerHomePage() {
                 icon: <Lock size={24} strokeWidth={1.5} />,
                 title: t('homepage_feature-encrypted-title'),
                 desc: t('homepage_feature-encrypted-desc'),
-                color: '#10b981',
+                color: 'felt' as const,
               },
               {
                 icon: <Shuffle size={24} strokeWidth={1.5} />,
                 title: t('homepage_feature-shuffle-title'),
                 desc: t('homepage_feature-shuffle-desc'),
-                color: '#3b82f6',
+                color: 'play' as const,
               },
               {
                 icon: <Eye size={24} strokeWidth={1.5} />,
                 title: t('homepage_feature-unlock-title'),
                 desc: t('homepage_feature-unlock-desc'),
-                color: '#8b5cf6',
+                color: 'real' as const,
               },
               {
                 icon: <Wallet size={24} strokeWidth={1.5} />,
                 title: t('homepage_feature-keys-title'),
                 desc: t('homepage_feature-keys-desc'),
-                color: '#f59e0b',
+                color: 'amb' as const,
               },
             ].map((f, i) => (
               <StaggerItem key={i}>
@@ -290,7 +290,7 @@ export default function SecretPokerHomePage() {
                   whileHover={{ y: -6 }}
                   transition={{ duration: 0.4 }}
                 >
-                  <S.FeatureIcon style={{ color: f.color }}>
+                  <S.FeatureIcon $tone={f.color}>
                     {f.icon}
                   </S.FeatureIcon>
                   <h3>{f.title}</h3>
@@ -322,7 +322,7 @@ export default function SecretPokerHomePage() {
                 desc: t('homepage_benefit-auditable-desc'),
                 stat: t('homepage_benefit-auditable-stat'),
                 statLabel: t('homepage_benefit-auditable-label'),
-                color: '#f59e0b',
+                color: 'amb' as const,
               },
               {
                 icon: <Globe size={28} strokeWidth={1.5} />,
@@ -330,7 +330,7 @@ export default function SecretPokerHomePage() {
                 desc: t('homepage_benefit-instant-desc'),
                 stat: t('homepage_benefit-instant-stat'),
                 statLabel: t('homepage_benefit-instant-label'),
-                color: '#3b82f6',
+                color: 'play' as const,
               },
               {
                 icon: <TrendingUp size={28} strokeWidth={1.5} />,
@@ -338,7 +338,7 @@ export default function SecretPokerHomePage() {
                 desc: t('homepage_benefit-fee-desc'),
                 stat: t('homepage_benefit-fee-stat'),
                 statLabel: t('homepage_benefit-fee-label'),
-                color: '#10b981',
+                color: 'felt' as const,
               },
               {
                 icon: <Clock size={28} strokeWidth={1.5} />,
@@ -346,7 +346,7 @@ export default function SecretPokerHomePage() {
                 desc: t('homepage_benefit-uptime-desc'),
                 stat: t('homepage_benefit-uptime-stat'),
                 statLabel: t('homepage_benefit-uptime-label'),
-                color: '#8b5cf6',
+                color: 'real' as const,
               },
             ].map((item, i) => (
               <StaggerItem key={i}>
@@ -355,7 +355,7 @@ export default function SecretPokerHomePage() {
                   transition={{ duration: 0.4 }}
                 >
                   <S.ValueHeader>
-                    <S.ValueIcon style={{ color: item.color }}>
+                    <S.ValueIcon $tone={item.color}>
                       {item.icon}
                     </S.ValueIcon>
                     <S.ValueStat>

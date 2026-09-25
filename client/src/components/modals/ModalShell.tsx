@@ -24,9 +24,7 @@ const Backdrop = styled.div`
   position: fixed;
   inset: 0;
   z-index: ${({ theme }) => theme.zIndex.modal};
-  background-color: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  background-color: rgba(20, 19, 15, 0.42);
   display: flex;
   align-items: center;
   justify-content: center;

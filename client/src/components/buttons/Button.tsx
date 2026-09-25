@@ -148,7 +148,7 @@ const Button = styled.button.withConfig({
       ? css`
           background: ${({ theme }) => theme.colors.brandGradient};
           color: ${({ theme }) => theme.colors.lightestBg};
-          box-shadow: 0 4px 20px rgba(102, 126, 234, 0.25);
+          box-shadow: none;
           &,
           &:visited {
             background: ${({ theme }) => theme.colors.brandGradient};
@@ -158,12 +158,12 @@ const Button = styled.button.withConfig({
           &:active:not(:disabled) {
             background: ${({ theme }) => theme.colors.brandGradientHover};
             transform: translateY(-2px);
-            box-shadow: 0 6px 24px rgba(102, 126, 234, 0.4);
+            box-shadow: none;
             color: ${({ theme }) => theme.colors.lightestBg};
           }
           &:focus-visible {
             color: ${({ theme }) => theme.colors.lightestBg};
-            box-shadow: 0 0 0 3px rgba(118, 75, 162, 0.5);
+            box-shadow: 0 0 0 3px rgba(11, 107, 69, 0.35);
           }
           &:disabled {
             background: ${({ theme }) => theme.colors.disabled};
@@ -225,7 +225,7 @@ const Button = styled.button.withConfig({
           }
           &:focus-visible {
             border-color: ${({ theme }) => theme.colors.secondaryCta};
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.3);
+            box-shadow: 0 0 0 3px rgba(11, 107, 69, 0.3);
             color: ${({ theme }) => theme.colors.fontColorDark};
           }
         `

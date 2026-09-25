@@ -21,7 +21,8 @@ interface WalletPillProps {
 }
 
 // theme 无 info 的 alpha token，余额段蓝色系在组件内用命名常量统一
-const INFO_RGB = '59, 130, 246';
+// 账簿：余额数字用墨色等宽（原蓝色 play 强调降级）
+const INFO_RGB = '20, 19, 15';
 
 const PillWrapper = styled.div`
   display: inline-flex;
@@ -39,7 +40,8 @@ const BalanceSegment = styled.div`
   gap: 0.4rem;
   padding: 0 0.75rem;
   color: rgb(${INFO_RGB});
-  font-family: 'JetBrains Mono', monospace;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
   font-size: ${({ theme }) => theme.fontSize.sm};
   white-space: nowrap;

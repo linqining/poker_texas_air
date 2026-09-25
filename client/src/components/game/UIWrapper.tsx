@@ -1,6 +1,9 @@
 import styled from 'styled-components';
 import { responsiveScale } from './responsiveScale';
 
+/**
+ * 行动区容器（GameUI 底部页脚）：账簿纸面（设计稿 .tb-ft 语义）。
+ */
 export const UIWrapper = styled.div`
   position: fixed;
   bottom: calc(1vh + env(safe-area-inset-bottom, 0px));
@@ -8,8 +11,9 @@ export const UIWrapper = styled.div`
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   grid-gap: 0.5rem;
-  background-color: ${({ theme }) => theme.colors.goldChipAlpha80};
-  box-shadow: 10px 10px 30px rgba(0, 0, 0, 0.1);
+  background-color: ${({ theme }) => theme.colors.lightestBg};
+  border: 1px solid ${({ theme }) => theme.colors.fontColorDark};
+  box-shadow: 0 6px 24px rgba(20, 19, 15, 0.14);
   border-radius: ${({ theme }) => theme.other.stdBorderRadius};
   padding: 1rem;
   transform-origin: bottom right;
@@ -17,6 +21,7 @@ export const UIWrapper = styled.div`
   backface-visibility: hidden;
   /* Avoid overscroll chaining from the floating HUD into the page */
   overscroll-behavior: contain;
+  max-width: min(92vw, 720px);
 
   ${responsiveScale(0.5)}
 

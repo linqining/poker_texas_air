@@ -1,4 +1,5 @@
 import styled, { keyframes, css } from 'styled-components';
+import type { ThemeColors } from '../styles/theme';
 import { motion } from 'framer-motion';
 
 /* ===== Keyframes ===== */
@@ -42,11 +43,11 @@ export const Particle = styled.div`
 /* ===== Buttons ===== */
 
 export const BtnPrimary = styled(motion.button)<{ $lg?: boolean }>`
-  background: linear-gradient(135deg, ${(props) => props.theme.colors.secondaryCta}, ${({ theme }) => theme.colors.brandPurple});
-  color: ${(props) => props.theme.colors.lightestBg};
+  background: ${({ theme }) => theme.colors.primaryCta};
+  color: #fffdf7;
   border: none;
   padding: 0.65rem 1.6rem;
-  border-radius: 10px;
+  border-radius: ${({ theme }) => theme.radius.sm};
   font-weight: 500;
   font-size: 0.9rem;
   display: inline-flex;
@@ -56,7 +57,7 @@ export const BtnPrimary = styled(motion.button)<{ $lg?: boolean }>`
   transition:
     box-shadow 0.35s cubic-bezier(0.22, 1, 0.36, 1),
     transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
-  box-shadow: 0 2px 12px rgba(102, 126, 234, 0.2);
+  box-shadow: ${({ theme }) => theme.other.cardDropShadow};
 
   &:hover:not(:disabled) {
     box-shadow: 0 6px 24px ${({ theme }) => theme.colors.brandIndigoAlpha35};
@@ -160,12 +161,11 @@ export const HeroBg = styled.div`
   inset: 0;
 `;
 
+// 账簿硬规则「零渐变」：hero 背景为平色纸白（原径向光晕废除）
 export const HeroGradient = styled.div`
   position: absolute;
   inset: 0;
-  background:
-    radial-gradient(circle at 20% 50%, ${({ theme }) => theme.colors.brandIndigoAlpha06} 0%, transparent 50%),
-    radial-gradient(circle at 80% 50%, ${({ theme }) => theme.colors.brandPurpleAlpha04} 0%, transparent 50%);
+  background: ${({ theme }) => theme.colors.lightBg};
 `;
 
 export const HeroOrb = styled.div<{ $variant: 1 | 2 }>`
@@ -189,7 +189,7 @@ export const HeroOrb = styled.div<{ $variant: 1 | 2 }>`
     css`
       width: 400px;
       height: 400px;
-      background: rgba(118, 75, 162, 0.1);
+      background: ${({ theme }) => theme.colors.brandPurpleAlpha10};
       bottom: 20%;
       right: 15%;
       animation-delay: -6s;
@@ -204,19 +204,22 @@ export const HeroContent = styled(motion.div)`
   padding-top: 2rem;
 `;
 
+// 账簿还原（design/client C1 .badge）：felt 方角章，非胶囊
 export const HeroBadge = styled(motion.div)`
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
-  background: ${({ theme }) => theme.colors.successAlpha06 ?? "rgba(16, 185, 129, 0.06)"};
-  border: 1px solid ${({ theme }) => theme.colors.successAlpha12};
-  color: ${({ theme }) => theme.colors.successStrong};
-  padding: 0.5rem 1rem;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  font-weight: 500;
+  gap: 8px;
+  background: ${({ theme }) => theme.colors.successAlpha12};
+  border: 1px solid ${({ theme }) => theme.colors.successAlpha20};
+  color: ${({ theme }) => theme.colors.success};
+  padding: 4px 10px;
+  border-radius: 2px;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   margin-bottom: 2rem;
-  letter-spacing: 0.02em;
 `;
 
 export const HeroTitle = styled(motion.h1)`
@@ -231,13 +234,9 @@ export const HeroTitle = styled(motion.h1)`
   }
 `;
 
+// 账簿硬规则「零渐变/零发光」：hero 强调行改翡翠实色（原蓝绿渐变文字废除）
 export const GradientText = styled.span`
-  background: linear-gradient(135deg, ${(props) => props.theme.colors.secondaryCta}, ${({ theme }) => theme.colors.brandPurple}, ${({ theme }) => theme.colors.infoCyan});
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  background-size: 200% 200%;
-  animation: ${gradientShift} 15s ease infinite;
+  color: ${({ theme }) => theme.colors.success};
 `;
 
 export const HeroDesc = styled(motion.p)`
@@ -282,7 +281,8 @@ export const StatValue = styled.span`
   font-size: 1.2rem;
   font-weight: 600;
   color: ${(props) => props.theme.colors.fontColorDark};
-  font-family: 'JetBrains Mono', monospace;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-variant-numeric: tabular-nums;
   margin-bottom: 0.3rem;
 `;
 
@@ -319,7 +319,7 @@ export const Section = styled.section<{ $variant?: 'default' | 'alt' | 'how' | '
   ${(props) =>
     props.$variant === 'alt' &&
     css`
-      background: ${props.theme.colors.darkBg};
+      background: ${props.theme.colors.lightestBg};
     `}
   ${(props) =>
     props.$variant === 'how' &&
@@ -347,7 +347,8 @@ export const Section = styled.section<{ $variant?: 'default' | 'alt' | 'how' | '
   ${(props) =>
     props.$variant === 'cta' &&
     css`
-      background: linear-gradient(180deg, ${({ theme }) => theme.colors.lightBg} 0%, ${({ theme }) => theme.colors.brandIndigoAlpha10} 100%);
+      /* 原稿 C1 尾段：墨底 band，纸白文字 */
+      background: ${({ theme }) => theme.colors.fontColorDark};
     `}
 
   @media (max-width: 1023px) {
@@ -367,16 +368,17 @@ export const SectionHeader = styled.div`
 
 export const SectionTag = styled.span`
   display: inline-block;
-  font-size: 0.8rem;
-  font-weight: 600;
-  text-transform: none;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: ${(props) => props.theme.colors.secondaryCta};
+  color: ${({ theme }) => theme.colors.success};
   margin-bottom: 1rem;
-  padding: 0.4rem 1.2rem;
-  border-radius: 999px;
-  background: ${({ theme }) => theme.colors.brandIndigoAlpha06};
-  border: 1px solid rgba(102, 126, 234, 0.1);
+  padding: 4px 10px;
+  border-radius: 2px;
+  background: ${({ theme }) => theme.colors.successAlpha12};
+  border: 1px solid ${({ theme }) => theme.colors.successAlpha20};
 `;
 
 export const SectionTitle = styled.h2`
@@ -404,7 +406,7 @@ export const SectionSubtitle = styled.p`
 
 export const StaggerGrid = styled(motion.div)`
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 1.75rem;
 
   @media (max-width: 1023px) {
@@ -414,17 +416,23 @@ export const StaggerGrid = styled(motion.div)`
 
 /* ===== Features ===== */
 
-export const FeatureIcon = styled.div`
+type IconTone = 'felt' | 'play' | 'real' | 'amb';
+// 原稿 grid4 四色左条语义：felt=公平/加密 play=洗牌/即时 real=金库 amb=密钥/时间
+const toneOf = (theme: { colors: ThemeColors }, tone: IconTone = 'felt'): string => {
+  const key = { felt: 'success', play: 'info', real: 'gold', amb: 'warning' }[tone] as keyof ThemeColors;
+  return theme.colors[key];
+};
+
+export const FeatureIcon = styled.div<{ $tone?: IconTone }>`
   margin-bottom: 1.25rem;
+  color: ${({ $tone, theme }) => toneOf(theme, $tone)};
   transition: transform 0.4s ease;
 `;
 
 export const FeatureCard = styled(motion.div)`
-  background: ${({ theme }) => theme.colors.surfaceGlass};
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: ${({ theme }) => theme.colors.lightestBg};
   border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
-  border-radius: 16px;
+  border-radius: ${({ theme }) => theme.radius.sm};
   padding: 2rem;
   transition:
     border-color 0.4s cubic-bezier(0.22, 1, 0.36, 1),
@@ -434,9 +442,9 @@ export const FeatureCard = styled(motion.div)`
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.03);
 
   &:hover {
-    border-color: rgba(102, 126, 234, 0.2);
-    background: #fff;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+    border-color: ${({ theme }) => theme.colors.borderMuted};
+    background: ${({ theme }) => theme.colors.lightestBg};
+    box-shadow: 0 2px 8px rgba(20, 19, 15, 0.06);
     transform: translateY(-4px);
   }
   &:hover ${FeatureIcon} {
@@ -465,16 +473,15 @@ export const ValueHeader = styled.div`
   margin-bottom: 1.25rem;
 `;
 
-export const ValueIcon = styled.div`
+export const ValueIcon = styled.div<{ $tone?: IconTone }>`
+  color: ${({ $tone, theme }) => toneOf(theme, $tone)};
   transition: transform 0.4s ease;
 `;
 
 export const ValueCard = styled(motion.div)`
-  background: ${({ theme }) => theme.colors.surfaceGlass};
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: ${({ theme }) => theme.colors.lightestBg};
   border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
-  border-radius: 16px;
+  border-radius: ${({ theme }) => theme.radius.sm};
   padding: 1.75rem;
   transition:
     border-color 0.4s cubic-bezier(0.22, 1, 0.36, 1),
@@ -484,9 +491,9 @@ export const ValueCard = styled(motion.div)`
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.03);
 
   &:hover {
-    border-color: rgba(102, 126, 234, 0.2);
-    background: #fff;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+    border-color: ${({ theme }) => theme.colors.borderMuted};
+    background: ${({ theme }) => theme.colors.lightestBg};
+    box-shadow: 0 2px 8px rgba(20, 19, 15, 0.06);
     transform: translateY(-4px);
   }
   &:hover ${ValueIcon} {
@@ -549,9 +556,9 @@ export const ProtocolStep = styled.div`
 export const StepNumber = styled.div`
   width: 48px;
   height: 48px;
-  border-radius: 14px;
-  background: linear-gradient(135deg, ${({ theme }) => theme.colors.brandIndigoAlpha10}, ${({ theme }) => theme.colors.brandPurpleAlpha10});
-  border: 1px solid ${({ theme }) => theme.colors.brandIndigoAlpha15};
+  border-radius: ${({ theme }) => theme.radius.sm};
+  background: ${({ theme }) => theme.colors.successAlpha12};
+  border: 1px solid ${({ theme }) => theme.colors.successAlpha20};
   display: flex;
   align-items: center;
   justify-content: center;
@@ -562,11 +569,13 @@ export const StepNumber = styled.div`
 
 export const StepNum = styled.span`
   position: absolute;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
   font-size: 0.6rem;
-  font-weight: 600;
-  color: ${(props) => props.theme.colors.secondaryCta};
+  font-weight: 700;
+  color: ${({ theme }) => theme.colors.success};
   top: 6px;
   left: 8px;
+  letter-spacing: 0.08em;
 `;
 
 export const StepIcon = styled.span`
@@ -598,7 +607,7 @@ export const StepLine = styled.div`
   top: 48px;
   bottom: 0;
   width: 1px;
-  background: linear-gradient(180deg, ${({ theme }) => theme.colors.brandIndigoAlpha20}, transparent);
+  background: ${({ theme }) => theme.colors.borderSubtle};
   z-index: 1;
 `;
 
@@ -614,12 +623,13 @@ export const CTAContent = styled.div`
     font-weight: 700;
     margin-bottom: 0.75rem;
     letter-spacing: -0.02em;
+    color: ${({ theme }) => theme.colors.fontColorLight};
   }
   p {
-    color: ${({ theme }) => theme.colors.mutedText};
     font-size: 1rem;
     margin: 0 auto 2rem;
     line-height: 1.7;
+    color: ${({ theme }) => theme.colors.fontColorDarkLighter};
   }
 `;
 
@@ -628,9 +638,7 @@ export const CTAContent = styled.div`
 export const Footer = styled.footer`
   border-top: 1px solid ${({ theme }) => theme.colors.borderMuted};
   padding: 3rem 2rem;
-  background: ${(props) => props.theme.colors.darkBg};
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: ${({ theme }) => theme.colors.surfaceMutedPlain};
   position: relative;
   z-index: 1;
   scroll-margin-top: 5rem;
@@ -800,8 +808,8 @@ export const ScrollDot = styled.button<{ $active?: boolean }>`
   ${(props) =>
     props.$active &&
     css`
-      background: linear-gradient(135deg, ${props.theme.colors.secondaryCta}, ${({ theme }) => theme.colors.brandPurple});
+      background: ${({ theme }) => theme.colors.success};
       transform: scale(1.3);
-      box-shadow: 0 0 0 4px ${({ theme }) => theme.colors.brandIndigoAlpha15};
+      box-shadow: 0 0 0 4px ${({ theme }) => theme.colors.successAlpha20};
     `}
 `;

@@ -23,8 +23,8 @@ const StyledLoadingScreen = styled.div`
     position: absolute;
     inset: 0;
     background:
-      radial-gradient(circle at 30% 40%, rgba(102, 126, 234, 0.12) 0%, transparent 50%),
-      radial-gradient(circle at 70% 60%, rgba(118, 75, 162, 0.12) 0%, transparent 50%),
+      radial-gradient(circle at 30% 40%, rgba(11, 107, 69, 0.08) 0%, transparent 50%),
+      radial-gradient(circle at 70% 60%, rgba(125, 83, 8, 0.06) 0%, transparent 50%),
       radial-gradient(circle at 50% 80%, rgba(6, 182, 212, 0.08) 0%, transparent 40%);
     pointer-events: none;
   }

@@ -9,13 +9,13 @@ const HamburgerIcon: React.FC = () => (
     fill="none"
     xmlns="http://www.w3.org/2000/svg"
   >
-    <circle cx="20" cy="20" r="20" fill={theme.colors.primaryCta} />
+    <rect x="1" y="1" width="38" height="38" rx="3" fill="none" stroke={theme.colors.fontColorDark} strokeWidth="2" />
     <line
       x1="8"
       y1="17.3334"
       x2="32"
       y2="17.3334"
-      stroke={theme.colors.playingCardBgLighter}
+      stroke={theme.colors.fontColorDark}
       strokeWidth="2"
     />
     <line
@@ -23,7 +23,7 @@ const HamburgerIcon: React.FC = () => (
       y1="12"
       x2="32"
       y2="12"
-      stroke={theme.colors.playingCardBgLighter}
+      stroke={theme.colors.fontColorDark}
       strokeWidth="2"
     />
     <line
@@ -31,7 +31,7 @@ const HamburgerIcon: React.FC = () => (
       y1="22.6666"
       x2="30"
       y2="22.6666"
-      stroke={theme.colors.playingCardBgLighter}
+      stroke={theme.colors.fontColorDark}
       strokeWidth="2"
     />
     <line
@@ -39,7 +39,7 @@ const HamburgerIcon: React.FC = () => (
       y1="28"
       x2="28"
       y2="28"
-      stroke={theme.colors.playingCardBgLighter}
+      stroke={theme.colors.fontColorDark}
       strokeWidth="2"
     />
   </svg>

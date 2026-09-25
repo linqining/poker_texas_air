@@ -13,6 +13,7 @@ import contentContext from '../../context/content/contentContext';
 import globalContext from '../../context/global/globalContext';
 import LanguageSwitcher from './LanguageSwitcher';
 import PlayerKeyPanel from './PlayerKeyPanel';
+import { fontMono } from '../../styles/theme';
 
 const NavMenuWrapper = styled.div`
   position: fixed;
@@ -24,9 +25,8 @@ const NavMenuWrapper = styled.div`
   width: 100%;
   height: 100%;
   z-index: ${({ theme }) => theme.zIndex.drawer};
-  background-color: rgba(0, 0, 0, 0.15);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  /* 账簿遮罩：纯色暗纱，零毛玻璃 */
+  background-color: rgba(20, 19, 15, 0.42);
   overscroll-behavior: contain;
 `;
 
@@ -38,9 +38,10 @@ const StyledNavMenu = styled.div`
   right: 0;
   width: 320px;
   height: 100%;
-  background: rgba(255, 255, 255, 0.95);
-  border-left: 1px solid rgba(226, 232, 240, 0.9);
-  box-shadow: -8px 0 40px rgba(0, 0, 0, 0.08);
+  /* 账簿：卡白实底 + 细线桌沿，零半透明零光晕 */
+  background: ${({ theme }) => theme.colors.lightestBg};
+  border-left: 1px solid ${({ theme }) => theme.colors.borderMuted};
+  box-shadow: -6px 0 24px rgba(20, 19, 15, 0.1);
   overflow: hidden;
 
   @media screen and (max-width: 400px) {
@@ -60,10 +61,11 @@ const MenuItem = styled(Link)`
   align-items: center;
   width: 100%;
   text-align: right;
-  font-family: 'Inter', -apple-system, sans-serif;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
   color: ${({ theme }) => theme.colors.fontColorDark} !important;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.6);
+  border-bottom: 1px solid ${({ theme }) => theme.colors.borderSubtle};
   background-color: transparent !important;
+  border-left: 3px solid transparent;
   font-size: 0.95rem;
   font-weight: 500;
   text-decoration: none;
@@ -78,8 +80,9 @@ const MenuItem = styled(Link)`
   }
 
   &:hover {
-    background-color: rgba(102, 126, 234, 0.08) !important;
-    color: ${({ theme }) => theme.colors.secondaryCta} !important;
+    background-color: ${({ theme }) => theme.colors.successAlpha12} !important;
+    border-left-color: ${({ theme }) => theme.colors.success};
+    color: ${({ theme }) => theme.colors.fontColorDark} !important;
 
     img {
       opacity: 1;
@@ -88,7 +91,7 @@ const MenuItem = styled(Link)`
 
   &:focus {
     outline: none;
-    border-left: 3px solid ${({ theme }) => theme.colors.secondaryCta};
+    border-left: 3px solid ${({ theme }) => theme.colors.success};
   }
 `;
 
@@ -106,15 +109,15 @@ const MenuBody = styled.div`
   }
 
   &::-webkit-scrollbar-thumb {
-    background: rgba(203, 213, 225, 0.6);
-    border-radius: 4px;
+    background: ${({ theme }) => theme.colors.borderMuted};
+    border-radius: 2px;
   }
 `;
 
 const MenuFooter = styled.div`
   padding: 1rem 1.25rem;
   margin: auto 0 0 0;
-  border-top: 1px solid rgba(226, 232, 240, 0.6);
+  border-top: 1px solid ${({ theme }) => theme.colors.borderSubtle};
 `;
 
 /* Single source of truth for nav menu icon dimensions. The audit (P1-47)
@@ -136,38 +139,38 @@ const HorizontalWrapper = styled.div`
 
   ${Button} {
     min-width: 6.5rem;
-    background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2) !important;
-    color: ${({ theme }) => theme.colors.lightestBg} !important;
+    background: ${({ theme }) => theme.colors.primaryCta} !important;
+    color: #fffdf7 !important;
     border: none !important;
-    border-radius: 10px !important;
-    box-shadow: 0 2px 12px rgba(102, 126, 234, 0.2) !important;
+    border-radius: ${({ theme }) => theme.radius.sm} !important;
+    box-shadow: none !important;
   }
 `;
 
 const SalutationText = styled(Text)`
-  font-family: 'Inter', -apple-system, sans-serif;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
   font-size: 1.25rem;
   font-weight: 700;
   color: ${({ theme }) => theme.colors.fontColorDark};
   letter-spacing: -0.02em;
 
+  /* 账簿：问候地址 = felt 实色（原蓝紫渐变文字废除） */
   ${ColoredText} {
-    background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    color: ${({ theme }) => theme.colors.success};
   }
 `;
 
 const OnlineText = styled(Text)`
-  font-family: 'Inter', -apple-system, sans-serif;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
   font-size: 0.85rem;
-  color: #64748b;
+  color: ${({ theme }) => theme.colors.softerText};
   margin-top: 0.25rem;
 
   ${ColoredText} {
-    color: #10b981;
+    color: ${({ theme }) => theme.colors.success};
     font-weight: 600;
+    font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+    font-variant-numeric: tabular-nums;
   }
 `;
 
@@ -177,12 +180,45 @@ const IconWrapper = styled.div`
   right: 0.75rem;
 
   button {
-    color: #64748b !important;
+    color: ${({ theme }) => theme.colors.softerText} !important;
 
     &:hover {
       color: ${({ theme }) => theme.colors.fontColorDark} !important;
     }
   }
+`;
+
+/* 退出登录：账簿描边钮（非主操作） */
+const LogoutButton = styled.button`
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid ${({ theme }) => theme.colors.borderMuted};
+  border-radius: ${({ theme }) => theme.radius.sm};
+  background: transparent;
+  color: ${({ theme }) => theme.colors.danger};
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+
+  &:hover {
+    background: ${({ theme }) => theme.colors.dangerAlpha06};
+    border-color: ${({ theme }) => theme.colors.danger};
+  }
+`;
+
+/* 账簿注记行（原稿 .wm 语言） */
+const MicroFoot = styled.div`
+  margin-top: 0.6rem;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: ${({ theme }) => theme.colors.softerText};
+  opacity: 0.7;
+  text-align: center;
 `;
 
 interface NavMenuProps {
@@ -198,6 +234,9 @@ interface NavMenuProps {
     btnCallBack?: () => void,
     onCloseCallBack?: () => void,
   ) => void;
+  /** 登出（MainLayout 传入：清 socket + 断钱包 + 清登录态） */
+  onLogout?: () => void;
+  loggedIn?: boolean;
 }
 
 const NavMenu: React.FC<NavMenuProps> = ({
@@ -205,6 +244,8 @@ const NavMenu: React.FC<NavMenuProps> = ({
   userName,
   chipsAmount,
   openModal,
+  onLogout,
+  loggedIn,
 }) => {
   const { players } = useContext(globalContext)!;
   const { getLocalizedString } = useContext(contentContext)!;
@@ -245,7 +286,7 @@ const NavMenu: React.FC<NavMenuProps> = ({
     if (e.shiftKey && document.activeElement === first) {
       e.preventDefault();
       last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
+    } else if (e.shiftKey && document.activeElement === last) {
       e.preventDefault();
       first.focus();
     }
@@ -332,6 +373,19 @@ const NavMenu: React.FC<NavMenuProps> = ({
         <PlayerKeyPanel />
         <MenuFooter>
           <LanguageSwitcher />
+          {loggedIn && onLogout && (
+            <LogoutButton
+              type="button"
+              style={{ marginTop: '0.75rem' }}
+              onClick={() => {
+                onClose();
+                onLogout();
+              }}
+            >
+              {getLocalizedString('navmenu-logout')}
+            </LogoutButton>
+          )}
+          <MicroFoot>zchain · appchain texas</MicroFoot>
         </MenuFooter>
       </StyledNavMenu>
     </NavMenuWrapper>

@@ -1,4 +1,4 @@
-import React, { useContext, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useTheme } from 'styled-components';
 import Container from '../components/layout/Container';
@@ -6,20 +6,13 @@ import Button from '../components/buttons/Button';
 import ModalShell from '../components/modals/ModalShell';
 import gameContext from '../context/game/gameContext';
 import socketContext from '../context/websocket/socketContext';
+import authContext from '../context/auth/authContext';
 
-import PokerTable from '../components/game/PokerTable';
 import { RotateDevicePrompt } from '../components/game/RotateDevicePrompt';
-import { PositionedUISlot } from '../components/game/PositionedUISlot';
-import { PokerTableWrapper } from '../components/game/PokerTableWrapper';
-import { Seat } from '../components/game/Seat';
 import Text from '../components/typography/Text';
 import { useModalContext } from '../context/modal/modalContext';
 import { useNavigate } from 'react-router-dom';
-import { TableInfoWrapper } from '../components/game/TableInfoWrapper';
-import { InfoPill } from '../components/game/InfoPill';
 import { GameUI } from '../components/game/GameUI';
-import { GameStateInfo } from '../components/game/GameStateInfo';
-import PokerCard from '../components/game/PokerCard';
 import { useContentContext } from '../context/content/contentContext';
 import { useGlobalContext } from '../context/global/globalContext';
 import { chipsToStrkText } from '../starknet/config';
@@ -30,42 +23,35 @@ import { useTableJoin } from '../hooks/useTableJoin';
 import { CryptoPanel } from '../components/game/CryptoPanel';
 import { KickNotification } from '../components/game/KickNotification';
 import HandHistoryPanel from '../components/game/HandHistoryPanel';
+import PlayLedger from '../components/game/ledger/PlayLedger';
+import HandReceipt from '../components/game/ledger/HandReceipt';
+import { BuyinForm } from '../components/game/Seat';
 import { api } from '../api/secretPokerClient';
+import { getStrkBalance } from '../starknet/starknetGameActions';
+import { CHIPS_PER_STRK, STRK_DECIMALS, WEI_PER_CHIP } from '../starknet/config';
+import { isZChainSession } from '../starknet/zchainWallet';
 import { ActionLoadingOverlay, LeavingOverlay, LeaveDeferredBanner } from './Play.styles';
 
-
-// 5 个座位的绝对定位布局，用于 .map() 渲染，避免重复的 PositionedUISlot + Seat 块
-interface SeatLayout {
-  seatNumber: number;
-  top?: string;
-  bottom?: string;
-  left?: string;
-  right?: string;
-  scale: string;
-  origin: string;
-}
-const SEAT_LAYOUTS: SeatLayout[] = [
-  { seatNumber: 1, top: '-5%', left: '0', scale: '0.55', origin: 'top left' },
-  { seatNumber: 2, top: '-5%', scale: '0.55', origin: 'top center' },
-  { seatNumber: 3, top: '-5%', right: '2%', scale: '0.55', origin: 'top right' },
-  { seatNumber: 4, bottom: '15%', right: '2%', scale: '0.55', origin: 'bottom right' },
-  { seatNumber: 5, bottom: '15%', left: '0', scale: '0.55', origin: 'bottom left' },
-];
+// ZChain 钱包会话（appchain→zchain 结算的 dev 部署）不入账链上筹码，
+// 入座额度按服务端结余 + 该 dev 常量放行（与 Seat.tsx 同源）。
+const ZCHAIN_DEV_BUYIN_CHIPS = 5000;
 
 const Play: React.FC = () => {
   const navigate = useNavigate();
   const theme = useTheme();
   const { socket, isConnected } = useContext(socketContext)!;
-  const { openModal } = useModalContext();
+  const { openModal, closeModal } = useModalContext();
   const {
     messages,
     currentTable,
     communityCards,
+    decryptedHandCards,
     isPlayerSeated,
     seatId,
     joinTable,
     leaveTable,
     sitDown,
+    rebuy,
     fold,
     check,
     call,
@@ -87,6 +73,8 @@ const Play: React.FC = () => {
   const { pkHex } = useContext(PlayerContext)!;
   // 离开确认时提醒金库里还有未领取筹码（1 chip = 0.001 STRK）
   const { chipsAmount } = useGlobalContext();
+  const { walletAddress } = useContext(authContext)!;
+  const hasWallet = !!walletAddress;
 
   const [bet, setBet] = useState(0);
   const [isLeaving, setIsLeaving] = useState(false);
@@ -97,6 +85,91 @@ const Play: React.FC = () => {
   // 空桌等待时的上一手结算摘要（来自 /history 末条记录）
   const [lastHandSummary, setLastHandSummary] = useState<string | null>(null);
   const lastHandFetchedRef = useRef<string>('');
+  // T6 本手凭证弹窗（打开时定位最新终局手）
+  const [receipt, setReceipt] = useState<{ open: boolean; seq: number }>({ open: false, seq: 1 });
+  // T5 买入单据弹窗的 STRK 余额（与 Seat.tsx 同源装配）
+  const [strkBalanceWei, setStrkBalanceWei] = useState<bigint>(0n);
+
+  const fetchBalance = useCallback(async () => {
+    if (!walletAddress || isZChainSession()) {
+      setStrkBalanceWei(0n);
+      return;
+    }
+    try {
+      const bal = await getStrkBalance(walletAddress);
+      setStrkBalanceWei(bal);
+    } catch (err) {
+      logger.error('[Play] fetch STRK balance failed:', err);
+    }
+  }, [walletAddress]);
+
+  useEffect(() => {
+    fetchBalance();
+  }, [fetchBalance]);
+
+  // T5 买入单据：空位「入座」按钮打开（字段与校验规则与 Seat.tsx 一致）
+  const openBuyinModal = useCallback(
+    (seatNumber: number) => {
+      if (!currentTable) return;
+      const maxBuyin =
+        currentTable.maxBuyIn && currentTable.maxBuyIn > 0
+          ? currentTable.maxBuyIn
+          : currentTable.limit > 0
+            ? currentTable.limit
+            : currentTable.bigBlind * 100 || 5000;
+      const minBuyIn =
+        currentTable.minBuyIn && currentTable.minBuyIn > 0
+          ? currentTable.minBuyIn
+          : Math.max(currentTable.minBet * 2 * 10, 1000);
+      const BUYIN_STEP = 1000;
+      const strkBalanceInStrk =
+        Number(strkBalanceWei / BigInt(10) ** BigInt(STRK_DECIMALS)) +
+        Number(strkBalanceWei % BigInt(10) ** BigInt(STRK_DECIMALS)) / 10 ** STRK_DECIMALS;
+      const availableChips = isZChainSession()
+        ? Math.max(chipsAmount ?? 0, ZCHAIN_DEV_BUYIN_CHIPS)
+        : Math.max(chipsAmount ?? 0, Number(strkBalanceWei / BigInt(WEI_PER_CHIP)));
+      const strkCostForChips = (chips: number): number => chips / CHIPS_PER_STRK;
+      const shortAddress = walletAddress
+        ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
+        : '';
+      openModal(
+        () => (
+          <BuyinForm
+            minBuyIn={minBuyIn}
+            maxBuyin={maxBuyin}
+            buyinStep={BUYIN_STEP}
+            availableChips={availableChips}
+            strkCostForChips={strkCostForChips}
+            shortAddress={shortAddress}
+            strkBalanceInStrk={strkBalanceInStrk}
+            seatNumber={seatNumber}
+            tableLabel={`${currentTable.name || currentTable.id}`}
+            confirmLabel={getLocalizedString('game_buyin-modal_confirm')}
+            onConfirm={(amount) => {
+              sitDown(currentTable.id, seatNumber, parseInt(String(amount)));
+              closeModal();
+            }}
+          />
+        ),
+        getLocalizedString('game_buyin-modal_header'),
+        getLocalizedString('game_buyin-modal_cancel'),
+      );
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [currentTable, strkBalanceWei, chipsAmount, walletAddress],
+  );
+
+  // T6 凭证：定位最新终局手并打开三段凭证
+  const openLatestReceipt = useCallback(async () => {
+    if (!currentTable) return;
+    try {
+      const records = await api.getHandHistory(Number(currentTable.id));
+      if (records.length === 0) return;
+      setReceipt({ open: true, seq: records[0].handSeq });
+    } catch (e) {
+      logger.error('[Play] open receipt failed:', e);
+    }
+  }, [currentTable]);
 
   /**
    * Portrait detection: supplements the CSS-only <RotateDevicePrompt /> with
@@ -243,6 +316,9 @@ const Play: React.FC = () => {
     );
   }
 
+  const lastMessage =
+    messages && messages.length > 0 ? messages[messages.length - 1].text : null;
+
   return (
     <>
       {isLeaving && (
@@ -294,10 +370,10 @@ const Play: React.FC = () => {
                 style={{
                   margin: 0,
                   padding: '0.5rem 0.75rem',
-                  background: '#fffbeb',
-                  border: '1px solid rgba(245, 158, 11, 0.35)',
+                  background: theme.colors.goldChip,
+                  border: '1px solid rgba(125, 83, 8, 0.35)',
                   borderRadius: theme.radius.sm,
-                  color: '#92400e',
+                  color: theme.colors.gold,
                   fontSize: '0.85rem',
                   lineHeight: 1.45,
                 }}
@@ -342,15 +418,35 @@ const Play: React.FC = () => {
       />
       {currentTable &&
         ReactDOM.createPortal(
-          <HandHistoryPanel
-            tableId={Number(currentTable.id)}
-            visible={showHistoryPanel}
-            onClose={() => setShowHistoryPanel(false)}
-          />,
+          <>
+            <HandHistoryPanel
+              tableId={Number(currentTable.id)}
+              visible={showHistoryPanel}
+              onClose={() => setShowHistoryPanel(false)}
+            />
+            <HandReceipt
+              tableId={Number(currentTable.id)}
+              handSeq={receipt.seq}
+              visible={receipt.open}
+              onClose={() => setReceipt({ open: false, seq: receipt.seq })}
+            />
+          </>,
           document.getElementById('modal') as HTMLElement,
         )}
       <RotateDevicePrompt />
-      <Container fullHeight>
+      <Container
+        fullHeight
+        style={{
+          padding: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'stretch',
+          justifyContent: 'flex-start',
+          width: '100%',
+          maxWidth: 'none',
+          margin: 0,
+        }}
+      >
         {leaveDeferred && (
           <LeaveDeferredBanner role="status" aria-live="polite">
             <span>{getLocalizedString('leave_deferred-banner')}</span>
@@ -369,195 +465,74 @@ const Play: React.FC = () => {
           </LeaveDeferredBanner>
         )}
         {currentTable && (
-          <>
-            {/* 票据抬头数据：桌名 / 手数 / 最小加注 / 盲注（对齐设计稿 T1–T3 抬头） */}
-            <PositionedUISlot
-              top="1vh"
-              left="1.5rem"
-              scale="0.65"
-              style={{ zIndex: '50', pointerEvents: 'none' }}
-            >
-              <TableInfoWrapper>
-                <Text>
-                  <strong>{currentTable.name || currentTable.id}</strong>
-                  {' | '}
-                  {getLocalizedString('game_header-hand-lbl')} #{currentTable.handId ?? '—'}
-                  {!!currentTable.minRaise && (
-                    <>
-                      {' | '}
-                      {getLocalizedString('game_info_min-raise-lbl')}{' '}
-                      {new Intl.NumberFormat(document.documentElement.lang).format(
-                        currentTable.minRaise,
-                      )}
-                    </>
-                  )}
-                  {' | '}
-                  {getLocalizedString('game_info_blinds-lbl')}{' '}
-                  {new Intl.NumberFormat(document.documentElement.lang).format(
-                    currentTable.smallBlind,
-                  )}{' '}
-                  /{' '}
-                  {new Intl.NumberFormat(document.documentElement.lang).format(
-                    currentTable.bigBlind,
-                  )}
-                </Text>
-              </TableInfoWrapper>
-            </PositionedUISlot>
-            <PositionedUISlot
-              bottom="2vh"
-              left="1.5rem"
-              scale="0.65"
-              style={{ zIndex: '50', display: 'flex', gap: '0.5rem' }}
-            >
-              <Button small secondary onClick={async () => {
-                if (isLeaving) return;
-                setIsLeaving(true);
-                try {
-                  await leaveTable(true, pkHex || undefined);
-                } catch (e) {
-                  logger.error('[Play] leaveTable failed:', e);
-                  setIsLeaving(false);
-                }
-              }} disabled={isLeaving}>
-                {isLeaving ? getLocalizedString('play_leaving') || '离开中...' : getLocalizedString('game_leave-table-btn')}
-              </Button>
-              <Button
-                small
-                secondary
-                onClick={() => setShowHistoryPanel(true)}
-                aria-label={getLocalizedString('game_history-open-btn')}
-              >
-                {getLocalizedString('game_history-open-btn')}
-              </Button>
-            </PositionedUISlot>
-            {!isPlayerSeated && (
-              <PositionedUISlot
-                bottom="1.5vh"
-                right="1.5rem"
-                scale="0.65"
-                style={{ pointerEvents: 'none', zIndex: '50' }}
-                origin="bottom right"
-              >
-                <TableInfoWrapper>
-                  <Text textAlign="right">
-                    <strong>{currentTable.id}</strong> |{' '}
-                    <strong>
-                      {getLocalizedString('game_info_limit-lbl')}:{' '}
-                    </strong>
-                    {new Intl.NumberFormat(
-                      document.documentElement.lang,
-                    ).format(currentTable.minBuyIn)}{' '}
-                    |{' '}
-                    <strong>
-                      {getLocalizedString('game_info_blinds-lbl')}:{' '}
-                    </strong>
-                    {new Intl.NumberFormat(
-                      document.documentElement.lang,
-                    ).format(currentTable.smallBlind)}{' '}
-                    /{' '}
-                    {new Intl.NumberFormat(
-                      document.documentElement.lang,
-                    ).format(currentTable.bigBlind)}
-                  </Text>
-                </TableInfoWrapper>
-              </PositionedUISlot>
-            )}
-          </>
-        )}
-        <PokerTableWrapper>
-          <PokerTable />
-          {currentTable && (
-            <>
-              {SEAT_LAYOUTS.map((layout) => (
-                <PositionedUISlot
-                  key={layout.seatNumber}
-                  top={layout.top}
-                  bottom={layout.bottom}
-                  left={layout.left}
-                  right={layout.right}
-                  scale={layout.scale}
-                  origin={layout.origin}
-                >
-                  <Seat
-                    seatNumber={layout.seatNumber}
+          <PlayLedger
+            table={currentTable}
+            communityCards={communityCards ?? []}
+            decryptedHandCards={decryptedHandCards}
+            lastMessage={lastMessage}
+            onSitDown={openBuyinModal}
+            canSit={!currentTable.closed}
+            onOpenReceipt={() => void openLatestReceipt()}
+            actionSlot={
+              isPlayerSeated && seatId != null && currentTable.seats[seatId]?.turn ? (
+                <div style={{ flex: 1, minWidth: 0, maxWidth: 780 }}>
+                  <GameUI
                     currentTable={currentTable}
-                    isPlayerSeated={isPlayerSeated}
-                    sitDown={sitDown}
+                    seatId={seatId}
+                    bet={bet}
+                    setBet={setBet}
+                    raise={wrappedRaise}
+                    fold={wrappedFold}
+                    check={wrappedCheck}
+                    call={wrappedCall}
+                    isActionLoading={isActionLoading}
                   />
-                </PositionedUISlot>
-              ))}
-              <PositionedUISlot
-                width="100%"
-                origin="center center"
-                scale="0.60"
-                style={{
-                  display: 'flex',
-                  textAlign: 'center',
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}
-              >
-                {communityCards && communityCards.length > 0 && (
-                  <>
-                    {communityCards.map((card, index) => (
-                      <PokerCard key={index} card={card} />
-                    ))}
-                  </>
-                )}
-              </PositionedUISlot>
-              <PositionedUISlot bottom="8%" scale="0.60" origin="bottom center">
-                {(messages.length > 0 || (waitingForNextHand && lastHandSummary)) && (
-                  <>
-                    {messages.length > 0 && <InfoPill>{messages[messages.length - 1].text}</InfoPill>}
-                    {!isPlayerSeated && (
-                      <InfoPill>{getLocalizedString('game_sitdown-prompt')}</InfoPill>
-                    )}
-                    {currentTable.winMessages && currentTable.winMessages.length > 0 && (
-                      <InfoPill>
-                        {currentTable.winMessages[currentTable.winMessages.length - 1]}
-                      </InfoPill>
-                    )}
-                    {!!currentTable.rakeCollected && (
-                      <InfoPill>
-                        {`${getLocalizedString('game_rake-collected_lbl')}: $${Number(currentTable.rakeCollected).toFixed(2)}`}
-                      </InfoPill>
-                    )}
-                    {waitingForNextHand && lastHandSummary && !isPlayerSeated && (
-                      <InfoPill>{lastHandSummary}</InfoPill>
-                    )}
-                  </>
-                )}
-              </PositionedUISlot>
-              <PositionedUISlot
-                bottom="25%"
-                scale="0.60"
-                origin="center center"
-              >
-                {(!currentTable.winMessages || currentTable.winMessages.length === 0) && (
-                  <GameStateInfo currentTable={currentTable} communityCards={communityCards} />
-                )}
-              </PositionedUISlot>
-            </>
-          )}
-        </PokerTableWrapper>
-
-        {currentTable &&
-          isPlayerSeated &&
-          seatId != null &&
-          currentTable.seats[seatId] &&
-          currentTable.seats[seatId].turn && (
-            <GameUI
-              currentTable={currentTable}
-              seatId={seatId}
-              bet={bet}
-              setBet={setBet}
-              raise={wrappedRaise}
-              fold={wrappedFold}
-              check={wrappedCheck}
-              call={wrappedCall}
-              isActionLoading={isActionLoading}
-            />
-          )}
+                </div>
+              ) : undefined
+            }
+            toolbar={
+              <>
+                {/* /play 隐藏全局导航：此处补回 首页/大厅 入口 */}
+                <Button small secondary onClick={() => navigate('/')}>
+                  {getLocalizedString('homepage_nav-home')}
+                </Button>
+                <Button small secondary onClick={() => navigate('/lobby')}>
+                  {getLocalizedString('navmenu-menu_item-lobby_txt')}
+                </Button>
+                <Button
+                  small
+                  secondary
+                  onClick={async () => {
+                    if (isLeaving) return;
+                    setIsLeaving(true);
+                    try {
+                      await leaveTable(true, pkHex || undefined);
+                    } catch (e) {
+                      logger.error('[Play] leaveTable failed:', e);
+                      setIsLeaving(false);
+                    }
+                  }}
+                  disabled={isLeaving}
+                >
+                  {isLeaving
+                    ? getLocalizedString('play_leaving') || '离开中...'
+                    : getLocalizedString('game_leave-table-btn')}
+                </Button>
+                <Button
+                  small
+                  secondary
+                  onClick={() => setShowHistoryPanel(true)}
+                  aria-label={getLocalizedString('game_history-open-btn')}
+                >
+                  {getLocalizedString('game_history-open-btn')}
+                </Button>
+                <Button small secondary onClick={() => void openLatestReceipt()}>
+                  {getLocalizedString('game_receipt-open-btn')}
+                </Button>
+              </>
+            }
+          />
+        )}
       </Container>
     </>
   );

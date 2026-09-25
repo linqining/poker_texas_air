@@ -25,19 +25,26 @@ const Panel = styled.div`
   gap: 0.5rem;
   padding: 0.75rem;
   border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
-  border-radius: 8px;
-  margin: 0.5rem 0;
+  border-radius: ${({ theme }) => theme.radius.sm};
+  margin: 0.5rem;
+  background: ${({ theme }) => theme.colors.lightestBg};
 `;
 
+// 账簿章（原稿 .ch 语言）：passphrase=felt / random=play / legacy=灰，方角 2px
 const ModeTag = styled.span<{ $mode: string }>`
-  font-size: 0.72rem;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-size: 9px;
   font-weight: 600;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  font-family: 'JetBrains Mono', monospace;
-  color: #fff;
-  background: ${({ $mode }) =>
-    $mode === 'passphrase' ? '#16a34a' : $mode === 'random' ? '#4da2ff' : '#94a3b8'};
+  padding: 1.5px 6px;
+  border-radius: 2px;
+  border: 1px solid;
+  ${({ $mode, theme }) => {
+    if ($mode === 'passphrase')
+      return `color: ${theme.colors.success}; border-color: rgba(11,107,69,.4); background: rgba(11,107,69,.06);`;
+    if ($mode === 'random')
+      return `color: ${theme.colors.info}; border-color: rgba(21,80,127,.4); background: rgba(21,80,127,.06);`;
+    return `color: ${theme.colors.softerText}; border-color: ${theme.colors.borderMuted}; background: ${theme.colors.surfaceMutedPlain};`;
+  }}
 `;
 
 const PlayerKeyPanel: React.FC = () => {
@@ -92,7 +99,7 @@ const PlayerKeyPanel: React.FC = () => {
         <Text style={{ fontWeight: 700, margin: 0 }}>{t('playerkey-title')}</Text>
         {keyMode && <ModeTag $mode={keyMode}>{modeLabel(keyMode)}</ModeTag>}
       </div>
-      <Text style={{ fontSize: '0.72rem', margin: 0, wordBreak: 'break-all' }}>
+      <Text style={{ fontSize: '0.72rem', margin: 0, wordBreak: 'break-all', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' }}>
         {t('playerkey-current-pk')}
         {pkHex ? `${pkHex.slice(0, 18)}…` : t('playerkey-no-key')}
       </Text>
@@ -134,7 +141,7 @@ const PlayerKeyPanel: React.FC = () => {
           style={{
             fontSize: '0.72rem',
             margin: 0,
-            color: msg.ok ? '#16a34a' : '#ef4444',
+            color: msg.ok ? '#0b6b45' : '#a83226',
             wordBreak: 'break-word',
           }}
         >

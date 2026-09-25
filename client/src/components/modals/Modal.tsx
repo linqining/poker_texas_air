@@ -42,7 +42,8 @@ const IconWrapper = styled.div`
  * ModalButton 保留为 Button variant="gradient" 的语义化别名
  * 用于模态底部主操作，与 ModalShell 配套使用。
  */
-export const ModalButton = styled(Button).attrs({ variant: 'gradient' })`
+// 账簿：弹窗底部按钮为描边（felt 实底仅留给表单内主操作）
+export const ModalButton = styled(Button).attrs({ variant: 'secondary' })`
   padding: 0.65rem 2rem;
 `;
 

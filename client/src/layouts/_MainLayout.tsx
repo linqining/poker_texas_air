@@ -2,7 +2,6 @@ import React, { useContext, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import Navbar from '../components/navigation/Navbar';
 import Footer from '../components/navigation/Footer';
-import WatermarkWrapper from '../components/decoration/WatermarkWrapper';
 import NavMenu from '../components/navigation/NavMenu';
 import CookieBanner from '../components/cookies/CookieBanner';
 import LoginModal from '../components/auth/LoginModal';
@@ -80,10 +79,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           lang={lang}
           setLang={setLang}
           openModal={openModal}
+          loggedIn={isLoggedIn}
+          onLogout={handleLogout}
         />
       )}
       <main className="blur-target">{children}</main>
-      <WatermarkWrapper className="blur-target" />
       {/* {!hideLayout && (
         <Footer
           className="blur-target"

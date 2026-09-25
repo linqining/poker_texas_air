@@ -52,14 +52,17 @@ const StyledHamburgerButton = styled(HamburgerButton)`
   }
 `;
 
+// 账簿还原（design/client C6）：主操作 = felt 实底方角，零渐变零浮起
 const LoginButton = styled(Button)`
-  background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2);
-  color: ${({ theme }) => theme.colors.lightestBg};
+  background: ${({ theme }) => theme.colors.primaryCta};
+  color: #fffdf7;
   border: none;
-  box-shadow: 0 4px 20px rgba(102, 126, 234, 0.25);
+  border-radius: ${({ theme }) => theme.radius.sm};
+  box-shadow: none;
   &:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 12px 35px rgba(102, 126, 234, 0.45);
+    transform: none;
+    background: ${({ theme }) => theme.colors.primaryCtaDarker};
+    box-shadow: none;
   }
 `;
 
