@@ -143,13 +143,14 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
         };
         logger.log(TABLE_UPDATED, table, message, from);
         if (table.roundState === 'waiting') {
-          setDecryptedHandCards([]);
+          // 注意：结算完成后服务端立即回 waiting（并非下一手开始才回），
+          // 这里只做 dedup 重置——自己的底牌保留到下一手 SHUFFLE_NOTICE
+          // 才清空，否则摊牌/结算画面上自己的牌会消失（2026-09-25 线上）。
           resetRevealDedup();
         }
-        // 手结束（结算/弃牌胜）即清理桌上已亮手牌
-        if (table.handOver) {
-          setDecryptedHandCards([]);
-        }
+        // 注意：本手结束（handOver）不清自己的底牌——摊牌比牌阶段正是
+        // 需要看牌的时刻（页脚英雄卡 + 牌型标注）；底牌在下一手开始时
+        // 由 waiting 快照 / SHUFFLE_NOTICE 清空。
         // 公共牌以服务器 board 为准同步（错过 reveal 事件的围观者由此补上）
         if (Array.isArray(table.board)) {
           setCommunityCards(table.board as Card[]);

@@ -4,6 +4,7 @@ import contentContext from '../../../context/content/contentContext';
 import gameContext from '../../../context/game/gameContext';
 import { Table } from '../../../types/game';
 import { fontMono } from '../../../styles/theme';
+import { PaperCard } from './PaperCard';
 
 /**
  * 座位条目卡（design/table .seat-cd）：账目条目而非圆形头像。
@@ -178,6 +179,14 @@ const BetLine = styled.div`
   }
 `;
 
+// 摊牌亮牌（design T4 .seat-hand）：服务端在 showdown 广播所有未弃牌
+// 座位的明牌（ClientSeat.hand），两张小牌交叠置于座卡下沿、牌型行之上。
+const SeatHand = styled.div`
+  margin-top: 5px;
+  display: flex;
+  align-items: flex-start;
+`;
+
 const VacantCard = styled(Card)`
   display: block;
   background: transparent;
@@ -215,7 +224,7 @@ const SitButton = styled.button`
 const fmt = (n: number) => new Intl.NumberFormat().format(n);
 
 /** 线性回合计时（T-XX 等宽读数 + 细条），绑定服务端截止时间。 */
-const SeatTimer: React.FC<{ deadline: number; totalMs: number }> = ({ deadline, totalMs }) => {
+export const SeatTimer: React.FC<{ deadline: number; totalMs: number }> = ({ deadline, totalMs }) => {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const iv = setInterval(() => setNow(Date.now()), 250);
@@ -224,9 +233,11 @@ const SeatTimer: React.FC<{ deadline: number; totalMs: number }> = ({ deadline, 
   const total = totalMs > 0 ? totalMs : 15000;
   const remaining = Math.max(deadline - now, 0);
   const frac = Math.min(remaining / total, 1);
+  /* 读数按 total 钳制：客户端时钟偏差不应显示出比配置更长的剩余时间 */
+  const secs = Math.ceil(Math.min(remaining, total) / 1000);
   return (
     <TimerRow>
-      <span className="num">T-{String(Math.ceil(remaining / 1000)).padStart(2, '0')}</span>
+      <span className="num">T-{String(secs).padStart(2, '0')}</span>
       <Meter>
         <i style={{ width: `${frac * 100}%` }} />
       </Meter>
@@ -245,6 +256,8 @@ export interface SeatEntryProps {
   canSit?: boolean;
   /** 摊牌胜者信息（本手结束 + WINNER 座位时回填账目行）；金额缺失显示 — */
   winnerInfo?: { rank: string; amount: number | null } | null;
+  /** 摊牌牌型（T4「三条 K」行：showdownHandRanks 广播的各家 rank，明牌不下发） */
+  showdownRank?: string | null;
 }
 
 export const SeatEntry: React.FC<SeatEntryProps> = ({
@@ -254,6 +267,7 @@ export const SeatEntry: React.FC<SeatEntryProps> = ({
   onSitDown,
   canSit,
   winnerInfo,
+  showdownRank,
 }) => {
   const { getLocalizedString } = useContext(contentContext)!;
   const { seatId } = useContext(gameContext)!;
@@ -279,7 +293,14 @@ export const SeatEntry: React.FC<SeatEntryProps> = ({
     );
   }
 
-  const folded = !!seat.folded || !!seat.sittingOut;
+  // 服务端 Seat::new 以 folded=true 作为「未参与本手」哨兵：刚买入/等待
+  // 入局的座位也带 folded=true，但从未行动过（lastAction 为空）。真正
+  // 弃牌必然经过 fold() → lastAction='fold'。据此区分：
+  // - 等待入局（isWaiting 或 folded 且无行动记录）→ 「等待下一手」章
+  // - 真弃牌 / 全下 / sitting out → 弃牌章（划销样式）
+  const waitingToEnter =
+    !!seat.isWaiting || (!!seat.folded && !seat.lastAction && !seat.sittingOut);
+  const folded = !waitingToEnter && (!!seat.folded || !!seat.sittingOut);
   const allIn = !folded && seat.stack === 0;
   const acting = !!seat.turn && !table.handOver;
   const isHero = seatId === seat.id;
@@ -295,16 +316,23 @@ export const SeatEntry: React.FC<SeatEntryProps> = ({
           : 'default';
   const statusText = folded
     ? getLocalizedString('game_seat-folded-lbl')
-    : acting
-      ? getLocalizedString('game_seat-acting-lbl')
-      : allIn
-        ? getLocalizedString('game_ui_all-in')
-        : seat.lastAction
-          ? getLocalizedString('game_seat-acted-lbl')
-          : getLocalizedString('game_seat-online-lbl');
+    : waitingToEnter
+      ? getLocalizedString('game_seat-waiting-lbl')
+      : acting
+        ? getLocalizedString('game_seat-acting-lbl')
+        : allIn
+          ? getLocalizedString('game_ui_all-in')
+          : seat.lastAction
+            ? getLocalizedString('game_seat-acted-lbl')
+            : getLocalizedString('game_seat-online-lbl');
 
   const name = seat.player.name || seat.player.pkHex.slice(0, 10);
   const initials = name.slice(0, 2).toUpperCase();
+
+  // T4 亮牌：摊牌后服务端对未弃牌座位下发明牌（ClientSeat.hand）。
+  // 弃牌座位底牌不公开（设计稿 sbar-note「弃牌 2 家底牌不公开」）。
+  const revealedCards =
+    table.handOver && !folded && Array.isArray(seat.hand) ? seat.hand.slice(0, 2) : [];
 
   const deadline =
     table.bettingStartedAt && table.bettingTimeoutMs
@@ -325,6 +353,15 @@ export const SeatEntry: React.FC<SeatEntryProps> = ({
         </NameCol>
         <StatusChip $tone={tone}>{statusText}</StatusChip>
       </Card>
+      {revealedCards.length >= 2 && (
+        <SeatHand>
+          {revealedCards.map((c, i) => (
+            <span key={i} style={{ marginLeft: i > 0 ? -11 : 0 }}>
+              <PaperCard card={c} small />
+            </span>
+          ))}
+        </SeatHand>
+      )}
       {acting && deadline && (
         <SeatTimer deadline={deadline} totalMs={table.bettingTimeoutMs ?? 15000} />
       )}
@@ -351,6 +388,13 @@ export const SeatEntry: React.FC<SeatEntryProps> = ({
           <span className="amt">
             {winnerInfo?.amount != null ? `+${fmt(winnerInfo.amount)}` : '—'}
           </span>
+        </BetLine>
+      )}
+      {table.handOver && seat.lastAction !== 'WINNER' && !folded && showdownRank && (
+        <BetLine>
+          <span style={{ fontFamily: fontMono }}>{showdownRank}</span>
+          <span className="lead" />
+          <span className="amt dim">—</span>
         </BetLine>
       )}
       <span data-seat={seatNo} style={{ display: 'none' }} />

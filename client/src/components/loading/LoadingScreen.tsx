@@ -7,6 +7,7 @@ const fadeIn = keyframes`
   to { opacity: 1; }
 `;
 
+// 账簿加载屏：纸面（pg）+ 极淡账格横纹，零光晕零网格面具。
 const StyledLoadingScreen = styled.div`
   width: 100%;
   min-height: 100dvh;
@@ -15,31 +16,19 @@ const StyledLoadingScreen = styled.div`
   justify-content: center;
   align-items: center;
   overflow: hidden;
-  background: ${({ theme }) => theme.colors.fontColorLight};
+  background: ${({ theme }) => theme.colors.lightBg};
   animation: ${fadeIn} 0.3s ease-out;
 
   &::before {
     content: '';
     position: absolute;
     inset: 0;
-    background:
-      radial-gradient(circle at 30% 40%, rgba(11, 107, 69, 0.08) 0%, transparent 50%),
-      radial-gradient(circle at 70% 60%, rgba(125, 83, 8, 0.06) 0%, transparent 50%),
-      radial-gradient(circle at 50% 80%, rgba(6, 182, 212, 0.08) 0%, transparent 40%);
+    background: repeating-linear-gradient(
+      180deg,
+      transparent 0 27px,
+      rgba(20, 19, 15, 0.035) 27px 28px
+    );
     pointer-events: none;
-  }
-
-  &::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background-image:
-      linear-gradient(rgba(0, 0, 0, 0.04) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(0, 0, 0, 0.04) 1px, transparent 1px);
-    background-size: 60px 60px;
-    pointer-events: none;
-    mask-image: radial-gradient(ellipse at center, black 0%, transparent 70%);
-    -webkit-mask-image: radial-gradient(ellipse at center, black 0%, transparent 70%);
   }
 `;
 

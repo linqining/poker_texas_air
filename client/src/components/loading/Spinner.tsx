@@ -1,5 +1,5 @@
 import React from 'react';
-import styled, { keyframes } from 'styled-components';
+import styled, { keyframes, useTheme } from 'styled-components';
 
 const spin = keyframes`
   to { transform: rotate(360deg); }
@@ -7,9 +7,9 @@ const spin = keyframes`
 
 interface SpinnerProps {
   size?: number;
-  /** 圆环颜色（默认 brandBlue） */
+  /** 圆环颜色（默认 primaryCta felt） */
   color?: string;
-  /** 圆环底色（默认 borderMuted） */
+  /** 圆环底色（默认 borderSubtle） */
   trackColor?: string;
   /** 圆环宽度（px） */
   thickness?: number;
@@ -27,7 +27,7 @@ const Ring = styled.div<{ $size: number; $thickness: number; $color: string; $tr
 `;
 
 /**
- * 统一 Spinner 组件
+ * 统一 Spinner 组件（账簿配色：felt 主色 + 淡纸轨道）
  * 替代 SecretPokerGameTable / ZkLoginCallback / Spinner styled 中的 4 套实现
  */
 const Spinner: React.FC<SpinnerProps> = ({
@@ -37,14 +37,15 @@ const Spinner: React.FC<SpinnerProps> = ({
   thickness = 3,
   ariaLabel = 'Loading',
 }) => {
+  const theme = useTheme();
   return (
     <Ring
       role="status"
       aria-label={ariaLabel}
       $size={size}
       $thickness={thickness}
-      $color={color ?? '#4DA2FF'}
-      $track={trackColor ?? 'rgba(203, 213, 225, 0.8)'}
+      $color={color ?? theme.colors.primaryCta}
+      $track={trackColor ?? theme.colors.borderSubtle}
     />
   );
 };

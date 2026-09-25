@@ -471,7 +471,8 @@ const Play: React.FC = () => {
             decryptedHandCards={decryptedHandCards}
             lastMessage={lastMessage}
             onSitDown={openBuyinModal}
-            canSit={!currentTable.closed}
+            /* 已入座用户不能再坐其他空位：隐藏全部入座钮 */
+            canSit={!currentTable.closed && seatId == null}
             onOpenReceipt={() => void openLatestReceipt()}
             actionSlot={
               isPlayerSeated && seatId != null && currentTable.seats[seatId]?.turn ? (

@@ -4,6 +4,7 @@ import { Shield, ChevronDown, ChevronUp, CheckCircle2, XCircle, Clock } from 'lu
 import CryptoEventStream from '../crypto/CryptoEventStream';
 import NarrationOverlay from '../crypto/NarrationOverlay';
 import { useContentContext } from '../../context/content/contentContext';
+import { fontMono } from '../../styles/theme';
 import type { CryptoEvent, Table, SettlementReceipt } from '../../types/game';
 
 interface CryptoPanelProps {
@@ -15,7 +16,8 @@ interface CryptoPanelProps {
   settlementReceipts?: Record<number, SettlementReceipt>;
 }
 
-// ZK 密码学事件浮动面板（可收起，位于右上角，不遮挡牌桌核心区域）
+// ZK 密码学事件浮动面板（可收起，位于右上角，不遮挡牌桌核心区域）。
+// 账簿语言：纸卡 + 细线桌沿 + 方角，零玻璃零渐变；标签走 .ch 小型章语言。
 const PanelContainer = styled.div`
   position: fixed;
   top: 7.6rem;
@@ -32,16 +34,24 @@ const ToggleButton = styled.button<{ $expanded: boolean }>`
   gap: 0.4rem;
   width: 100%;
   justify-content: space-between;
-  background: ${({ $expanded }) => ($expanded ? '#14130f' : '#15507f')};
-  color: #fff;
-  border: none;
-  border-radius: ${({ $expanded }) => ($expanded ? '8px 8px 0 0' : '8px')};
+  /* 折叠态也用卡白（cd）贴纸面（pg）：#f8f5ec 与页面底几乎同色会隐形 */
+  background: ${({ theme }) => theme.colors.lightestBg};
+  color: ${({ theme }) => theme.colors.fontColorDark};
+  border: 1px solid ${({ theme }) => theme.colors.borderMuted};
+  border-radius: ${({ $expanded }) => ($expanded ? '3px 3px 0 0' : '3px')};
   padding: 0.45rem 0.7rem;
-  font-size: 0.72rem;
-  font-weight: 700;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-  font-family: 'JetBrains Mono', monospace;
+  box-shadow: ${({ theme }) => theme.other.cardDropShadow};
+  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  transition: background-color 0.15s ease;
+
+  &:hover {
+    background: ${({ theme }) => theme.colors.surfaceMutedPlain};
+  }
 `;
 
 const ToggleLabel = styled.span`
@@ -51,17 +61,23 @@ const ToggleLabel = styled.span`
 `;
 
 const EventCountBadge = styled.span`
-  background: rgba(255, 255, 255, 0.25);
-  border-radius: 10px;
-  padding: 0 0.4rem;
+  font-family: ${fontMono};
+  font-variant-numeric: tabular-nums;
+  background: rgba(11, 107, 69, 0.06);
+  border: 1px solid rgba(11, 107, 69, 0.4);
+  color: ${({ theme }) => theme.colors.success};
+  border-radius: 2px;
+  padding: 0 0.35rem;
   font-size: 0.62rem;
 `;
 
 const PanelContent = styled.div`
-  background: rgba(255, 255, 255, 0.97);
-  border-radius: 0 0 8px 8px;
+  background: ${({ theme }) => theme.colors.lightestBg};
+  border: 1px solid ${({ theme }) => theme.colors.borderMuted};
+  border-top: none;
+  border-radius: 0 0 3px 3px;
   padding: 0.5rem;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: ${({ theme }) => theme.other.cardDropShadow};
   max-height: 40vh;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -75,20 +91,22 @@ const SettlementStamp = styled.div<{ $status: 'settled' | 'refused' | 'failed' }
   align-items: center;
   gap: 0.4rem;
   padding: 0.4rem 0.55rem;
-  border-radius: 6px;
+  border-radius: 3px;
   font-size: 0.7rem;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: ${fontMono};
+  font-variant-numeric: tabular-nums;
   border: 1px solid
     ${({ $status }) =>
-      $status === 'settled' ? 'rgba(16,185,129,0.45)' : 'rgba(239,68,68,0.45)'};
+      $status === 'settled' ? 'rgba(11, 107, 69, 0.4)' : 'rgba(168, 50, 38, 0.4)'};
   background: ${({ $status }) =>
-    $status === 'settled' ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)'};
-  color: ${({ $status }) => ($status === 'settled' ? '#047857' : '#b91c1c')};
+    $status === 'settled' ? 'rgba(11, 107, 69, 0.06)' : 'rgba(168, 50, 38, 0.06)'};
+  color: ${({ $status, theme }) =>
+    $status === 'settled' ? theme.colors.success : theme.colors.danger};
   flex-wrap: wrap;
 `;
 
 const StampMeta = styled.span`
-  color: #64748b;
+  color: ${({ theme }) => theme.colors.softerText};
   font-size: 0.66rem;
 `;
 
@@ -120,7 +138,7 @@ export const CryptoPanel: React.FC<CryptoPanelProps> = ({
         onClick={onToggle}
       >
         <ToggleLabel>
-          <Shield size={13} />
+          <Shield size={13} strokeWidth={1.8} />
           {getLocalizedString('play_zk-crypto-events')}
           {cryptoEvents.length > 0 && (
             <EventCountBadge>{cryptoEvents.length}</EventCountBadge>
@@ -184,3 +202,5 @@ export const CryptoPanel: React.FC<CryptoPanelProps> = ({
     </PanelContainer>
   );
 };
+
+export default CryptoPanel;

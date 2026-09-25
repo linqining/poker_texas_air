@@ -58,6 +58,8 @@ export interface Seat {
   lastAction: string | null;
   /** 玩家是否已 fold（与后端 ClientSeat.folded 对齐，camelCase 序列化） */
   folded?: boolean;
+  /** 等待下一手入局（后端 ClientSeat.isWaiting；中途买入未入局时为 true） */
+  isWaiting?: boolean;
   /** 本手累计投入（后端 ClientSeat.totalBet；旧服务端不下发时缺省） */
   totalBet?: number;
 }

@@ -42,16 +42,18 @@ export default function NarrationOverlay({
         display: 'flex',
         alignItems: 'flex-start',
         gap: '0.6rem',
-        background: 'rgba(59, 130, 246, 0.08)',
-        borderLeft: '3px solid #3b82f6',
-        borderRadius: '8px',
+        // 账簿语言：play 语义（进行中）淡章 + 左侧 3px 边线，方角
+        background: 'rgba(21, 80, 127, 0.06)',
+        border: '1px solid rgba(21, 80, 127, 0.25)',
+        borderLeft: '3px solid #15507f',
+        borderRadius: '3px',
         padding: '0.7rem 1rem',
         paddingBottom: hasCryptoCount ? '1.5rem' : '0.7rem',
       }}
     >
       <Info
         size={18}
-        color="#3b82f6"
+        color="#15507f"
         style={{ flexShrink: 0, marginTop: 2 }}
       />
       <p
@@ -59,7 +61,7 @@ export default function NarrationOverlay({
         style={{
           flex: 1,
           margin: 0,
-          color: '#0f172a',
+          color: '#14130f',
           fontWeight: 700,
           fontSize: '0.9rem',
           lineHeight: 1.5,
@@ -75,7 +77,7 @@ export default function NarrationOverlay({
             bottom: '0.3rem',
             right: '0.8rem',
             fontSize: '0.72rem',
-            color: '#10b981',
+            color: '#0b6b45',
             fontWeight: 600,
           }}
         >

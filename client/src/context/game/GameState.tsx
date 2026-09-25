@@ -188,22 +188,25 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   }, [location.pathname, pkHex, gameActions.leaveTable]);
 
   useEffect(() => {
-    if (turn && !turnTimeOutHandle) {
-      // 服务端下发回合计时（bettingStartedAt + bettingTimeoutMs）时以服务端
-      // 截止为准（clamp 到一个回合计时长度内，防时钟偏移）；缺省回退 15s。
-      let delay = 15000;
-      const t = currentTableRef.current;
-      if (t?.bettingStartedAt && t?.bettingTimeoutMs && t.bettingTimeoutMs > 0) {
-        const remaining = t.bettingStartedAt + t.bettingTimeoutMs - Date.now();
-        delay = Math.min(Math.max(remaining, 0), t.bettingTimeoutMs);
-      }
-      const handle = setTimeout(gameActions.fold, delay);
-      setHandle(handle);
-    } else {
+    if (!turn) {
       turnTimeOutHandle && clearTimeout(turnTimeOutHandle);
       turnTimeOutHandle && setHandle(null);
+      return;
     }
-  }, [turn]); // eslint-disable-line react-hooks/exhaustive-deps
+    // 自动弃牌定时器：始终以最新快照的回合计时锚点重排（deps 含
+    // bettingStartedAt）。此前只在 turn 翻转时布防一次，若该快照携带
+    // 的锚点已偏旧（回合推进广播乱序/延迟），会用过期剩余时间提前
+    // 弃牌（2026-09-26 线上：15s 配置下 ~5s 即被 fold）。
+    let delay = 15000;
+    const t = currentTableRef.current;
+    if (t?.bettingStartedAt && t?.bettingTimeoutMs && t.bettingTimeoutMs > 0) {
+      const remaining = t.bettingStartedAt + t.bettingTimeoutMs - Date.now();
+      delay = Math.min(Math.max(remaining, 0), t.bettingTimeoutMs);
+    }
+    turnTimeOutHandle && clearTimeout(turnTimeOutHandle);
+    const handle = setTimeout(gameActions.fold, delay);
+    setHandle(handle);
+  }, [turn, currentTable?.bettingStartedAt, currentTable?.bettingTimeoutMs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useGameSocket({
     socket,

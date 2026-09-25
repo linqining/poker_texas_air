@@ -52,10 +52,17 @@ fn user_to_response(user: &crate::models::User, vault_chips: i64) -> serde_json:
 
 /// 查询用户在 PokerVault 中的链上筹码余额（1 chip = WEI_PER_CHIP wei）。
 /// 未配置 vault / RPC 或查询失败时返回 0（与旧 SUI 余额失败路径一致）。
+/// dev 联调：TEXAS_DEV_VAULT_CHIPS 未配链时充当全钱包统一假余额，
+/// 让买入表单的前端额度校验可走通（verify_deposit 在 dev 同样放行）。
 async fn fetch_vault_chips(address: &str) -> i64 {
     match crate::starknet::chips::vault_chip_balance_wei(address).await {
         Some(wei) => (wei / crate::starknet::config::WEI_PER_CHIP) as i64,
         None => {
+            if let Ok(dev_chips) = std::env::var("TEXAS_DEV_VAULT_CHIPS") {
+                if let Ok(n) = dev_chips.parse::<i64>() {
+                    return n;
+                }
+            }
             tracing::warn!("[fetch_vault_chips] vault chip balance unavailable for {}", address);
             0
         }

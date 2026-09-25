@@ -680,6 +680,15 @@ pub(crate) fn bootstrap_vm_table(
             hand_id,
         )
         .map_err(|e| format!("begin_reveal: {e}"))?;
+    // 抽水规则与游戏层同源（rake_params → STARKNET_RAKE_BPS/CAP）。
+    // VmTable::new 只带 poker_l1 内建缺省（500bps），live 镜像若不同步，
+    // plan.rake 恒按缺省抽——对账 2 每手拒绝 "rake mismatch: plan N vs
+    // game 0"（2026-09-26 线上：plan 9 = 180×500bps vs game 0）。与
+    // begin_reveal_hand 同步点（本文件 rake 同源注释，2026-09-04 审核）
+    // 同一结论的第二处落点：改 env 只改一半的教训在此收口。
+    mirror.table.rules.rake_mode = poker_l1::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+    mirror.table.rules.rake_bps = crate::pokergame::rake::rake_params().rake_bps;
+    mirror.table.rules.rake_cap = crate::pokergame::rake::rake_params().rake_cap;
     Ok(mirror)
 }
 

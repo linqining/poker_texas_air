@@ -26,8 +26,9 @@ const ModalProvider: React.FC<ModalProviderProps> = ({ children }) => {
     if (showModal) {
       document.body.style.overflow = 'hidden';
 
+      // 账簿语言：零玻璃拟态——ModalShell 自带纯色暗纱遮罩，
+      // 这里只锁滚动与指针，不再对 layout 内容做 filter: blur。
       if (layoutWrapper) {
-        layoutWrapper.style.filter = 'blur(4px)';
         layoutWrapper.style.pointerEvents = 'none';
         layoutWrapper.tabIndex = -1;
       }
@@ -35,7 +36,6 @@ const ModalProvider: React.FC<ModalProviderProps> = ({ children }) => {
       document.body.style.overflow = 'initial';
 
       if (layoutWrapper) {
-        layoutWrapper.style.filter = 'none';
         layoutWrapper.style.pointerEvents = 'all';
       }
     }

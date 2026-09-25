@@ -15,7 +15,7 @@ const CloseIcon: React.FC = () => (
       r="19"
       fill={theme.colors.playingCardBgLighter}
       fillOpacity="0.8"
-      stroke={theme.colors.secondaryCta}
+      stroke={theme.colors.fontColorDark}
       strokeWidth="2"
     />
     <line
@@ -23,7 +23,7 @@ const CloseIcon: React.FC = () => (
       y1="8.29289"
       x2="31.3345"
       y2="30.9203"
-      stroke={theme.colors.secondaryCta}
+      stroke={theme.colors.fontColorDark}
       strokeWidth="2"
     />
     <line
@@ -31,7 +31,7 @@ const CloseIcon: React.FC = () => (
       y1="30.9203"
       x2="30.9203"
       y2="8.29292"
-      stroke={theme.colors.secondaryCta}
+      stroke={theme.colors.fontColorDark}
       strokeWidth="2"
     />
   </svg>

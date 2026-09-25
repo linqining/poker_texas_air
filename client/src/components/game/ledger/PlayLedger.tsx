@@ -9,7 +9,7 @@ import { Table } from '../../../types/game';
 import TicketHeader from './TicketHeader';
 import StreetRail, { currentStreetIndex } from './StreetRail';
 import PotBlock from './PotBlock';
-import SeatEntry from './SeatEntry';
+import SeatEntry, { SeatTimer } from './SeatEntry';
 import PaperCard from './PaperCard';
 import { blindRoles, toCallAmount, potOdds } from '../../../helpers/tableDerived';
 import { evaluateBestHand, rankLabel } from '../../../helpers/handEval';
@@ -86,20 +86,21 @@ const Felt = styled.div`
   top: 8px;
   bottom: 8px;
   background: ${({ theme }) => theme.colors.surfaceMutedPlain};
-  border-radius: 60px;
+  /* 账簿牌桌：椭圆毡面（design/table .felt 大圆角胶囊语言） */
+  border-radius: 50%;
   &::before {
     content: '';
     position: absolute;
     inset: 0;
     border: 1px solid ${({ theme }) => theme.colors.borderMuted};
-    border-radius: 60px;
+    border-radius: 50%;
   }
   &::after {
     content: '';
     position: absolute;
     inset: 6px;
     border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
-    border-radius: 55px;
+    border-radius: 50%;
     background: repeating-linear-gradient(
       180deg,
       transparent 0 25px,
@@ -456,6 +457,7 @@ export const PlayLedger: React.FC<PlayLedgerProps> = ({
               table={table}
               seatNumber={n}
               winnerInfo={isWinnerSeat && rank ? { rank, amount: winAmount } : null}
+              showdownRank={table.handOver ? (rank ?? null) : null}
               blindLabel={roles[n] === 'sb' ? getLocalizedString('game_seat-sb-lbl') : roles[n] === 'bb' ? getLocalizedString('game_seat-bb-lbl') : null}
               onSitDown={onSitDown}
               canSit={canSit}
@@ -529,6 +531,13 @@ export const PlayLedger: React.FC<PlayLedgerProps> = ({
                 </HeroSeal>
               )}
             </HeroTop>
+            {/* 轮到自己行动：与对手座位同款 T-XX 倒计时（绑定服务端截止） */}
+            {heroSeat?.turn && !table.handOver && table.bettingStartedAt && table.bettingTimeoutMs ? (
+              <SeatTimer
+                deadline={table.bettingStartedAt + table.bettingTimeoutMs}
+                totalMs={table.bettingTimeoutMs}
+              />
+            ) : null}
             <HeroHand>
               {heroHand.map((c, i) => (
                 <span key={i} style={{ marginLeft: i > 0 ? -11 : 0 }}>

@@ -2,6 +2,7 @@ import type { CryptoEvent, CryptoEventType } from '../../types/game'
 import { Shuffle, RefreshCw, Eye, LogOut, RefreshCcw } from 'lucide-react'
 import { useContentContext } from '../../context/content/contentContext'
 import { OnchainVerificationBadge } from './OnchainVerificationBadge'
+import { fontMono } from '../../styles/theme'
 
 interface CryptoEventStreamProps {
   events: CryptoEvent[]
@@ -58,13 +59,13 @@ export default function CryptoEventStream({
       style={{
         maxHeight: '100%',
         overflowY: 'auto',
-        background: 'rgba(248,250,252,0.6)',
-        borderRadius: 8,
+        background: 'rgba(248, 245, 236, 0.6)',
+        borderRadius: 3,
         padding: '0.5rem',
         display: 'flex',
         flexDirection: 'column',
         gap: '0.4rem',
-        fontFamily: "'JetBrains Mono', monospace",
+        fontFamily: fontMono,
       }}
     >
       {sorted.length === 0 ? (
@@ -93,15 +94,15 @@ export default function CryptoEventStream({
                 display: 'flex',
                 alignItems: 'flex-start',
                 gap: '0.6rem',
-                background: '#ffffff',
-                borderRadius: 8,
+                background: '#fffdf7',
+                borderRadius: 3,
                 padding: '0.55rem 0.7rem',
                 cursor: onSelect ? 'pointer' : 'default',
-                // 选中项加蓝色左边框高亮
+                // 选中项加 play 语义左边框高亮
                 borderLeft: isSelected
                   ? '3px solid #15507f'
                   : '3px solid transparent',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+                boxShadow: '0 1px 0 rgba(20, 19, 15, 0.04)',
                 transition: 'background 0.15s ease',
               }}
             >
@@ -111,8 +112,8 @@ export default function CryptoEventStream({
                   flexShrink: 0,
                   width: 28,
                   height: 28,
-                  borderRadius: 6,
-                  background: 'rgba(59,130,246,0.1)',
+                  borderRadius: 3,
+                  background: 'rgba(21, 80, 127, 0.08)',
                   color: '#15507f',
                   display: 'flex',
                   alignItems: 'center',

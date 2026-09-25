@@ -86,7 +86,8 @@ const Button = styled.button.withConfig({
 
   &:disabled {
     background-color: ${({ theme }) => theme.colors.disabled};
-    color: ${({ theme }) => theme.colors.fontColorLight};
+    /* 账簿亮色主题：禁用态文字用弱墨（纸白在浅底上不可读） */
+    color: ${({ theme }) => theme.colors.softText};
     cursor: not-allowed;
     opacity: 0.6;
   }
@@ -167,7 +168,7 @@ const Button = styled.button.withConfig({
           }
           &:disabled {
             background: ${({ theme }) => theme.colors.disabled};
-            color: ${({ theme }) => theme.colors.fontColorLight};
+            color: ${({ theme }) => theme.colors.softText};
             box-shadow: none;
             transform: none;
           }
