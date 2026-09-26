@@ -24,6 +24,7 @@ import { CryptoPanel } from '../components/game/CryptoPanel';
 import { KickNotification } from '../components/game/KickNotification';
 import HandHistoryPanel from '../components/game/HandHistoryPanel';
 import PlayLedger from '../components/game/ledger/PlayLedger';
+import TableStage from '../components/game/ledger/TableStage';
 import HandReceipt from '../components/game/ledger/HandReceipt';
 import { BuyinForm } from '../components/game/Seat';
 import { api } from '../api/secretPokerClient';
@@ -409,13 +410,6 @@ const Play: React.FC = () => {
           </ModalShell>,
           document.getElementById('modal') as HTMLElement,
         )}
-      <CryptoPanel
-        cryptoEvents={cryptoEvents}
-        currentTable={currentTable}
-        showCryptoPanel={showCryptoPanel}
-        onToggle={() => setShowCryptoPanel((v) => !v)}
-        settlementReceipts={settlementReceipts}
-      />
       {currentTable &&
         ReactDOM.createPortal(
           <>
@@ -434,6 +428,16 @@ const Play: React.FC = () => {
           document.getElementById('modal') as HTMLElement,
         )}
       <RotateDevicePrompt />
+      {/* 牌桌舞台：固定设计分辨率 + 等比缩放（窗口缩放不重排，只改缩放系数）。
+          CryptoPanel 的 position:fixed 以舞台为包含块，随牌桌一起缩放。 */}
+      <TableStage>
+      <CryptoPanel
+        cryptoEvents={cryptoEvents}
+        currentTable={currentTable}
+        showCryptoPanel={showCryptoPanel}
+        onToggle={() => setShowCryptoPanel((v) => !v)}
+        settlementReceipts={settlementReceipts}
+      />
       <Container
         fullHeight
         style={{
@@ -445,6 +449,7 @@ const Play: React.FC = () => {
           width: '100%',
           maxWidth: 'none',
           margin: 0,
+          height: '100%',
         }}
       >
         {leaveDeferred && (
@@ -535,6 +540,7 @@ const Play: React.FC = () => {
           />
         )}
       </Container>
+      </TableStage>
     </>
   );
 };

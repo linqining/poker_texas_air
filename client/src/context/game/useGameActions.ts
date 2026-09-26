@@ -356,13 +356,30 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     // ----- Starknet 买入（一次性）：私密路径优先（Plan B），公开路径回退 -----
     addMessage('Submitting the STRK20 buy-in...');
     const depositResult = await submitBuyIn(readyAccount, amount);
+    let depositTxHashUsed: string | undefined;
     if (!depositResult.success) {
       const failMsg = depositResult.error || 'Buy-in deposit failed';
       logger.error('[SitDown] vault.deposit failed:', failMsg);
-      addMessage(`Sit down failed: ${failMsg}`);
-      return;
+      // dev 构建降级：钱包层签名/审查失败（如 Argent 云审查不可达
+      // SIMULATE_AND_REVIEW_FAILED——扩展需访问 cloud.argent-api.com）时，
+      // 允许无链上凭证入座：服务端 SIT_DOWN_V2 仅在携带 deposit_tx_hash
+      // 时核验（handlers.rs），dev 模式缺省即放行。生产构建不提供此退路。
+      const devFallback =
+        import.meta.env.DEV &&
+        window.confirm(
+          `链上买入失败：${failMsg}\n\n` +
+            '开发模式：跳过链上买入直接入座？（不产生真实链上交易，筹码按 dev 余额入账）',
+        );
+      if (!devFallback) {
+        addMessage(`Sit down failed: ${failMsg}`);
+        return;
+      }
+      addMessage('Dev fallback: 跳过链上买入入座（无 deposit 凭证）');
+      depositTxHashUsed = undefined;
+    } else {
+      logger.log('[SitDown] PokerVault deposit tx:', depositResult.hash);
+      depositTxHashUsed = depositResult.hash;
     }
-    logger.log('[SitDown] PokerVault deposit tx:', depositResult.hash);
 
     // P1-2 会话委托：与买入同笔登记的会话交易公钥在此声明（服务端经
     // vault active_session_tx_pk view 逐字节对拍，通过后成为座位 VM
@@ -376,7 +393,6 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     // 新玩家取牌组→生成证明→提交的间隙可能撞上变更（Invalid remask proof）。
     // 服务器把 join 失败经 error 事件回传，客户端据此自动重取牌组重试。
     const MAX_ATTEMPTS = 3;
-    let depositTxHashUsed = depositResult.hash;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       // 每次尝试重新拉取最新 table/deck 状态
       let table = currentTableRef.current;

@@ -24,8 +24,8 @@ import { fontMono } from '../../../styles/theme';
 const Root = styled.div`
   display: flex;
   flex-direction: column;
-  flex: 1;
-  min-height: 100dvh;
+  /* 牌桌舞台（TableStage 1600×900）内排版：填满舞台而非视口 */
+  height: 100%;
   background: ${({ theme }) => theme.colors.lightBg};
   color: ${({ theme }) => theme.colors.fontColorDark};
   text-align: left;

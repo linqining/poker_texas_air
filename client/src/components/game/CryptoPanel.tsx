@@ -78,7 +78,8 @@ const PanelContent = styled.div`
   border-radius: 0 0 3px 3px;
   padding: 0.5rem;
   box-shadow: ${({ theme }) => theme.other.cardDropShadow};
-  max-height: 40vh;
+  /* 舞台设计像素（900 高）：40vh 的视口等量改为固定值，保持等比缩放一致 */
+  max-height: 360px;
   overflow-y: auto;
   overscroll-behavior: contain;
   display: flex;

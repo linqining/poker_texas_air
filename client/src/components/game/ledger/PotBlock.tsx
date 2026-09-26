@@ -15,7 +15,7 @@ const Wrap = styled.div`
   overflow: hidden;
   box-shadow: ${({ theme }) => theme.other.cardDropShadow};
   width: 320px;
-  max-width: 90vw;
+  max-width: 90%;
   &::before {
     content: '';
     position: absolute;

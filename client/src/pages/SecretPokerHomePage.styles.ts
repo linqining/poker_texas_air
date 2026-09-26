@@ -434,6 +434,10 @@ export const FeatureCard = styled(motion.div)`
   border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
   border-radius: ${({ theme }) => theme.radius.sm};
   padding: 2rem;
+  /* 等高卡片：填满网格 item（StaggerItem 拉伸），标题行齐、正文自然对齐 */
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   transition:
     border-color 0.4s cubic-bezier(0.22, 1, 0.36, 1),
     background-color 0.4s cubic-bezier(0.22, 1, 0.36, 1),
@@ -483,6 +487,10 @@ export const ValueCard = styled(motion.div)`
   border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
   border-radius: ${({ theme }) => theme.radius.sm};
   padding: 1.75rem;
+  /* 等高卡片：与 FeatureCard 同款填满逻辑 */
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   transition:
     border-color 0.4s cubic-bezier(0.22, 1, 0.36, 1),
     background-color 0.4s cubic-bezier(0.22, 1, 0.36, 1),

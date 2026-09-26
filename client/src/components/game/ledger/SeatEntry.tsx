@@ -14,7 +14,8 @@ import { PaperCard } from './PaperCard';
 
 const SeatWrap = styled.div<{ $turn: boolean; $folded: boolean }>`
   position: relative;
-  width: clamp(150px, 18vw, 200px);
+  /* 舞台设计像素：1600 宽 × 5 席 + 间距，固定宽度随舞台等比缩放 */
+  width: 190px;
   max-width: 100%;
   opacity: ${({ $folded }) => ($folded ? 0.55 : 1)};
 `;
