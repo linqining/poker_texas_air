@@ -519,8 +519,8 @@ def build_page(rel: Path, tpl_base: str, tpl_docs: str) -> None:
 
     desc = meta.get(
         "description",
-        "ZChain Poker（工作名）：面向扑克场景的专用 Appchain。当前为 devnet 托管网络；"
-        "PLAY 用于测试与娱乐，REAL 为托管映射。",
+        "ProofPlay Poker：让游戏自己证明公平。牌面保持私密，洗牌、动作与结算留下可复验证据；"
+        "底层网络与协议标识暂时沿用 ZChain。",
     )
 
     # 首页 page-head 由 hero 自带 h1 承担，避免标题重复渲染

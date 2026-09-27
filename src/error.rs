@@ -64,6 +64,10 @@ pub enum TexasAirError {
     /// 绑定未通过。
     #[error("consensus anchor: {0}")]
     ConsensusAnchor(String),
+
+    /// 宿主（EVM 族）事件解码失败（host_evm_settlement）。
+    #[error("evm event decode: {0}")]
+    EvmEventDecode(String),
 }
 
 /// Stable high-level category for telemetry and RPC error mapping.
@@ -84,6 +88,7 @@ impl TexasAirError {
     #[must_use]
     pub const fn category(&self) -> ErrorCategory {
         match self {
+            TexasAirError::EvmEventDecode(_) => ErrorCategory::Internal,
             Self::SpecViolation(_)
             | Self::UnsupportedBettingTransition(_)
             | Self::SerializationError(_)

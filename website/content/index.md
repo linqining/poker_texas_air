@@ -1,16 +1,16 @@
 ---
-title: 让每一手牌，都有可验证的结算记录
+title: ProofPlay Poker —— 每一局，都有证
 lang: zh-CN
 section: home
-lead: ZChain Poker（工作名）——面向扑克场景的专用 Appchain。当前网络：devnet（zchain-poker-devnet）。
+lead: ProofPlay Poker —— 让游戏自己证明公平。底层网络沿用 ZChain 技术标识；当前环境信息以状态页为准。
 ---
 
 <div class="hero">
   <div class="hero-grid">
     <div class="hero-copy">
-      <p class="tagline-en">Every hand. A verifiable settlement.</p>
-      <h1>让每一手牌，都有可验证的结算记录。</h1>
-      <p>ZChain Poker 是面向扑克场景的专用 Appchain：快速确认牌局操作，用可验证证明约束结算与 rake，并把最终资金释放交给明确的 Vault 与退出协议。</p>
+      <p class="tagline-en">Every game, proven.</p>
+      <h1>不信发牌，验证每一手。</h1>
+      <p>ProofPlay Poker 让牌面保持私密，让洗牌、动作与结算留下可复验的证据。用户品牌使用 ProofPlay；底层网络、协议域标签和部署标识暂时沿用 ZChain。</p>
       <div class="cta-row">
         <a class="btn btn-play" href="/product/">立即试玩 PLAY</a>
         <a class="btn btn-ghost" href="/docs/">阅读技术文档</a>

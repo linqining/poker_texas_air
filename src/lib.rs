@@ -74,6 +74,9 @@ pub mod settlement_binding;
 /// Strict Cairo ABI calldata builder for the verified outer aggregate
 /// settlement path on Starknet Sepolia.
 pub mod starknet_settlement;
+/// 宿主（EVM 族）结算绑定：Monad 优先，EVM 等价链通用。与 starknet_settlement
+/// 同层——per-chain calldata/事件编码唯一落点，AIR/证明器保持链无关。
+pub mod host_evm_settlement;
 pub mod state_root;
 /// Flock-proven state-root binding replacing host hash recomputation.
 pub mod state_root_binding;

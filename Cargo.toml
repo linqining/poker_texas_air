@@ -102,6 +102,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 blake2 = { workspace = true }
+# ===== 宿主（EVM 族）结算绑定（host_evm_settlement：selector/事件面）=====
+sha3 = { workspace = true }
+hex = { workspace = true }
 num-bigint = "0.4.8"
 num-traits = "0.2"
 # ===== 二元域哈希证明后端（vendored flock，BLAKE3 merkle fork）=====
