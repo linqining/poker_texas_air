@@ -41,7 +41,7 @@ DIST = ROOT / "dist"
 # ---------------------------------------------------------------------------
 
 SITE = {
-    "NAME": "ZChain Poker",
+    "NAME": "ProofPlay Poker",
     "NETWORK": "devnet",
     "NETWORK_FULL": "zchain-poker-devnet",
     "DOCS_VERSION": "v1.3.0-alpha",
