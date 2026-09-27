@@ -14,6 +14,8 @@
 #                                   # texas/.env.dev.local 里的地址快照；
 #                                   # devnet 重启后地址会变，勿混用）
 #   scripts/dev.sh --keep-devnet    # 脚本退出时不关 devnet
+#   scripts/dev.sh --skip-wasm      # 跳过 client-wasm 构建（默认仅缺失/源码过期时重建）
+#   scripts/dev.sh --site           # 一并构建并预览官网静态站（website/，:8080）
 #   scripts/dev.sh fund <地址> [n]   # 给任意地址充值 n 个 STRK（钱包联调用，
 #                                   # 需 devnet 已在运行；默认 100 STRK）。
 #                                   # 等价的独立脚本: scripts/fund_devnet.sh
@@ -50,6 +52,8 @@ SKIP_BUILD=0
 SKIP_DEPLOY=0
 KEEP_DEVNET=0
 NO_CLIENT=0
+SKIP_WASM=0
+SITE=0
 
 # ---------- fund 子命令：给任意地址充值 STRK（真实钱包部署前必做）----------
 # 钱包插件的智能账户（Argent/Ready）部署费从反事实账户地址自身余额扣，
@@ -70,6 +74,8 @@ for arg in "$@"; do
     --skip-deploy) SKIP_DEPLOY=1 ;;
     --keep-devnet) KEEP_DEVNET=1 ;;
     --no-client) NO_CLIENT=1 ;;
+    --skip-wasm) SKIP_WASM=1 ;;
+    --site) SITE=1 ;;
     --debug) PROFILE=debug ;;
     *) echo "未知参数: $arg"; exit 1 ;;
   esac
@@ -114,6 +120,7 @@ fi
 cleanup() {
   [[ -n "${CLIENT_PID:-}" ]] && kill "$CLIENT_PID" 2>/dev/null
   [[ -n "${SERVER_PID:-}" ]] && kill "$SERVER_PID" 2>/dev/null
+  [[ -n "${SITE_PID:-}" ]] && kill "$SITE_PID" 2>/dev/null
   if [[ -n "$DEVNET_PID" ]] && [[ "$KEEP_DEVNET" != 1 ]]; then
     kill "$DEVNET_PID" 2>/dev/null || true
     log "devnet 已停止（--keep-devnet 可保留）"
@@ -146,6 +153,34 @@ fi
 SNOPS="$ROOT/target/debug/snops"
 [[ -x "$SNOPS" ]] || SNOPS="$ROOT/target/release/snops"
 [[ -x "$SNOPS" ]] || { echo "找不到 snops 产物（target/{debug,release}/snops），请先构建"; exit 1; }
+
+# ---------- 3b) client-wasm（前端 link:../client-wasm/pkg 的构建产物）----------
+# pkg/ 已 gitignore：克隆后首次必建；此后仅当 src / Cargo.toml / Cargo.lock 比
+# 产物新时才重建（wasm-pack 全量编译不便宜，日常重启不重复付）。
+# --skip-wasm 显式跳过；--no-client 时前端不启动，用不到 wasm。
+build_wasm() {
+  command -v wasm-pack >/dev/null 2>&1 || { echo "缺少 wasm-pack（cargo install wasm-pack）"; exit 1; }
+  log "构建 client-wasm（wasm-pack build --target web）…"
+  wasm-pack build "$ROOT/client-wasm" --target web >>/tmp/texas-wasm.log 2>&1 || {
+    echo "client-wasm 构建失败，日志见 /tmp/texas-wasm.log"
+    tail -20 /tmp/texas-wasm.log
+    exit 1
+  }
+}
+WASM_STAMP="$ROOT/client-wasm/pkg/client_wasm_bg.wasm"
+if [[ "$NO_CLIENT" == 1 ]]; then
+  log "--no-client：跳过 client-wasm"
+elif [[ "$SKIP_WASM" == 1 ]]; then
+  log "跳过 client-wasm 构建（--skip-wasm）"
+elif [[ ! -f "$WASM_STAMP" ]]; then
+  build_wasm
+  log "client-wasm 已构建: $ROOT/client-wasm/pkg"
+elif [[ -n "$(find "$ROOT/client-wasm/src" "$ROOT/client-wasm/Cargo.toml" "$ROOT/client-wasm/Cargo.lock" -newer "$WASM_STAMP" -print -quit 2>/dev/null)" ]]; then
+  build_wasm
+  log "client-wasm 已重建: $ROOT/client-wasm/pkg"
+else
+  log "client-wasm 产物已是最新，跳过"
+fi
 
 # ---------- 4) 账户上链准备 + 部署合约到 devnet ----------
 if [[ "$SKIP_DEPLOY" != 1 ]]; then
@@ -369,6 +404,19 @@ curl -sf "http://127.0.0.1:${PORT}/" >/dev/null 2>&1 || {
 log "游戏服务器就绪: http://127.0.0.1:${PORT}（日志 /tmp/texas-server.log）"
 if [[ -n "${CLIENT_PID:-}" ]]; then
   log "前端就绪: http://localhost:5173（端口占用时 vite 自动顺延，日志 /tmp/texas-client.log）"
+fi
+
+# ---------- 6b) 官网静态站（--site）：构建 + 静态预览，失败不影响游戏联调 ----------
+if [[ "$SITE" == 1 ]]; then
+  SITE_PORT="${SITE_PORT:-8080}"
+  log "构建官网（python3 website/build.py）…"
+  if python3 "$ROOT/website/build.py" >>/tmp/texas-site.log 2>&1; then
+    ( cd "$ROOT/website/dist" && exec python3 -m http.server "$SITE_PORT" ) >>/tmp/texas-site.log 2>&1 &
+    SITE_PID=$!
+    log "官网预览: http://127.0.0.1:${SITE_PORT}（日志 /tmp/texas-site.log）"
+  else
+    log "警告: 官网构建失败（不影响游戏联调），日志 /tmp/texas-site.log"
+  fi
 fi
 log "全部已启动；Ctrl-C 一次性停止（前端 + 服务器 + devnet）"
 log "提示: 真实钱包（Ready/Argent）首连报余额不足时，先充值反事实地址: scripts/dev.sh fund <钱包地址> 100"

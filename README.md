@@ -428,6 +428,15 @@ Prerequisites: Rust `nightly-2026-04-15` (pinned via rust-toolchain.toml),
 [Scarb](https://docs.swmansion.com/scarb/) + snforge (Cairo/Starknet 2.11),
 Node.js + pnpm, wasm-pack.
 
+Shortest path (one command: devnet + contract deploy + game server + client;
+client-wasm is rebuilt automatically when missing or stale):
+
+```bash
+scripts/dev.sh            # flags such as --skip-build / --skip-deploy / --no-client / --site (also serves the static site on :8080) — see the script header
+```
+
+Step-by-step manual flow:
+
 ```bash
 # 1. Rust workspace (AIR stack + protocol crates + game server)
 cargo test --workspace

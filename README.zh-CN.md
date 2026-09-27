@@ -393,6 +393,14 @@ git 依赖方式引用：
 [Scarb](https://docs.swmansion.com/scarb/) + snforge（Cairo/Starknet 2.11）、
 Node.js + pnpm、wasm-pack。
 
+最短路径（一键：devnet + 合约部署 + 服务器 + 前端，client-wasm 缺失/过期时自动重建）：
+
+```bash
+scripts/dev.sh            # --skip-build / --skip-deploy / --no-client / --site（附带官网预览 :8080）等开关见脚本头注释
+```
+
+分步手动流程：
+
 ```bash
 # 1. Rust 工作区（AIR 栈 + 协议 crate + 游戏服务）
 cargo test --workspace
