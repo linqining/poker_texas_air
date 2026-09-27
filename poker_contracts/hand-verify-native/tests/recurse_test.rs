@@ -83,6 +83,111 @@ fn recursion_rejects_forged_prev_acc() {
         .expect("forged prev_acc must be caught");
 }
 
+/// Production shape (snip36 settlement, texas `recursion_prover::prove_batch_blocking`):
+/// the recursive batch is action-sig-only — one statement per participant.
+/// Times the full `prove_payload_layer` path (host verify → prove-hand →
+/// parity gate → check-only) for a 2-seat and a full 9-seat table. Loose
+/// upper bound only guards against order-of-magnitude regressions; the 3 s
+/// goal line was validated on M3 Pro (2026-09-27, with exec compile cache).
+#[test]
+#[ignore]
+fn recursion_prod_shape_action_sig_batch() {
+    use hand_verify_native::curve::Point;
+    use hand_verify_native::handbatch::{action_sig_challenge_raw, ascii_felt_pub};
+    use hand_verify_native::recurse::{
+        build_action_batch_payload, prove_payload_layer, ActionSigStatement, GENESIS_ACC,
+    };
+    use poker_protocol_core::curve::CurveScalar;
+    use poker_protocol_core::stark_curve::StarkScalar;
+    use starknet_crypto::Felt;
+    use std::time::{Duration, Instant};
+
+    let to_scalar =
+        |f: Felt| <StarkScalar as CurveScalar>::from_bytes_mod_order(&f.to_bytes_be());
+    let hex_fe = |f: Felt| -> String {
+        let mut s = String::from("0x");
+        for b in f.to_bytes_be() {
+            s += &format!("{b:02x}");
+        }
+        s
+    };
+
+    // One honest action-sig statement (same algebra as mint.rs `mint_action`,
+    // expressed against the public API): pk = sk·G, R = w·G,
+    // c = challenge(pk, R, ...), s = (w + c·sk) mod n.
+    let statement = |i: u64| -> ActionSigStatement {
+        let g = Point::generator();
+        let sk = Felt::from(101 + i);
+        let pk = g.mul(sk);
+        let w = Felt::from(1009 + 7 * i);
+        let r = g.mul(w);
+        let table_id = 7u32;
+        let hand_id = 9u32;
+        let seq = 100u64 + i;
+        let action = "bet";
+        let amount = 50u64;
+        let c = action_sig_challenge_raw(
+            table_id as u64,
+            hand_id as u64,
+            seq,
+            ascii_felt_pub(action),
+            amount,
+            r,
+        );
+        let s = to_scalar(w) + to_scalar(c) * to_scalar(sk);
+        let s_felt = Felt::from_bytes_be(&s.to_bytes_be());
+        let (pkx, pky) = pk.to_affine().expect("pk affine");
+        let (rx, ry) = r.to_affine().expect("R affine");
+        ActionSigStatement {
+            pk_x_hex: hex_fe(pkx),
+            pk_y_hex: hex_fe(pky),
+            r_x_hex: hex_fe(rx),
+            r_y_hex: hex_fe(ry),
+            s_hex: hex_fe(s_felt),
+            table_id,
+            hand_id,
+            seq,
+            action: action.into(),
+            amount,
+        }
+    };
+
+    let params = write_prod_params(&out_dir("params")).expect("params");
+    for seats in [2usize, 9] {
+        let statements: Vec<_> = (0..seats as u64).map(statement).collect();
+        let hb = Felt::from(0x9_5EED_u64);
+        let payload =
+            build_action_batch_payload(hb, 7, 9, &statements).expect("payload build");
+        let t = Instant::now();
+        let (acc, outcome) = prove_payload_layer(
+            hb,
+            payload,
+            GENESIS_ACC,
+            &out_dir(&format!("prod-shape-{seats}")),
+            Some(&params),
+        )
+        .expect("envelope layer");
+        let elapsed = t.elapsed();
+        assert_eq!(acc, outcome.expected_acc, "parity gate");
+        assert!(outcome.ec_ops > 0, "EC must be in the cairo trace");
+        println!(
+            "| action-sig batch | {seats} statements | steps {} | EC_OP {} | total {} ms \
+             (compile {} / run {} / prove {}) | reverify {} ms |",
+            outcome.steps,
+            outcome.ec_ops,
+            outcome.total_ms,
+            outcome.cairo_compile_ms,
+            outcome.cairo_run_ms,
+            outcome.cairo_prove_ms,
+            outcome.check_verify_ms,
+        );
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "order-of-magnitude regression: {elapsed:?}"
+        );
+    }
+}
+
 /// The accumulator fold is order- and content-sensitive (sanity on the host
 /// mirror itself, cheap — no proving involved).
 #[test]

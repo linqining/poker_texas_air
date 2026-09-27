@@ -76,6 +76,109 @@ struct Args {
     /// Proof file to verify with --check-only.
     #[arg(long, requires = "check_only")]
     proof: Option<PathBuf>,
+    /// Disable the content-addressed executable compile cache (compile every run).
+    #[arg(long)]
+    no_exec_cache: bool,
+}
+
+/// Content-addressed executable compile cache outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecCacheOutcome {
+    Hit,
+    Miss,
+    Disabled,
+}
+
+/// Cache dir: `PROVE_HAND_CACHE_DIR` overrides, else `<repo>/proving-tool/.cache/exec-cache`.
+fn exec_cache_dir(root: &Path) -> PathBuf {
+    match std::env::var_os("PROVE_HAND_CACHE_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => root.join("proving-tool/.cache/exec-cache"),
+    }
+}
+
+/// Stable 128-bit key (two independent FNV-1a lanes, no external crate) for the
+/// executable compile cache. Inputs: cache schema tag, program source bytes,
+/// corelib path + `lib.cairo` stat, and the prove-hand binary's own stat — a
+/// rebuild (vendored compiler/corelib bump) invalidates every cached entry.
+fn exec_cache_key(program: &Path, corelib: &Path) -> String {
+    const FNV_OFFSET_A: u64 = 0xcbf29ce484222325;
+    const FNV_OFFSET_B: u64 = 0x6c62272e07bb0142;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    struct Lanes {
+        a: u64,
+        b: u64,
+    }
+    impl Lanes {
+        fn new() -> Self {
+            Self { a: FNV_OFFSET_A, b: FNV_OFFSET_B }
+        }
+        fn update(&mut self, bytes: &[u8]) {
+            for &byte in bytes {
+                self.a = (self.a ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+                self.b = (self.b ^ u64::from(byte).rotate_left(17))
+                    .wrapping_mul(FNV_PRIME)
+                    .rotate_left(29);
+            }
+        }
+        fn update_u64(&mut self, v: u64) {
+            self.update(&v.to_le_bytes());
+        }
+    }
+    fn stat_fingerprint(h: &mut Lanes, path: &Path) {
+        let Ok(meta) = fs::metadata(path) else { return };
+        h.update_u64(meta.len());
+        if let Some(mtime) = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        {
+            h.update_u64(mtime.as_millis() as u64);
+        }
+    }
+    let mut h = Lanes::new();
+    h.update(b"prove-hand exec cache v1");
+    h.update(&fs::read(program).unwrap_or_default());
+    h.update(corelib.to_string_lossy().as_bytes());
+    stat_fingerprint(&mut h, &corelib.join("lib.cairo"));
+    if let Ok(exe) = std::env::current_exe() {
+        stat_fingerprint(&mut h, &exe);
+    }
+    format!("{:016x}{:016x}", h.a, h.b)
+}
+
+fn compile_to_file_uncached(program: &Path, corelib: &Path, out: &Path) -> Result<()> {
+    let executable = compile_cairo1_executable(program, Some(corelib))
+        .with_context(|| format!("compile {}", program.display()))?;
+    write_json(out, &serde_json::to_value(&executable)?)
+        .with_context(|| format!("write {}", out.display()))
+}
+
+/// Materialize `<out-dir>/executable.json` via the content-addressed compile
+/// cache: compile once per (program source, corelib, toolchain), then copy the
+/// cached artifact on every later run (~ms vs ~1.5 s). Cache publishes are
+/// atomic renames, so concurrent prove processes only ever race to a no-op.
+fn materialize_executable(
+    program: &Path,
+    corelib: &Path,
+    executable_path: &Path,
+    cache_dir: &Path,
+) -> Result<ExecCacheOutcome> {
+    fs::create_dir_all(cache_dir)
+        .with_context(|| format!("mkdir {}", cache_dir.display()))?;
+    let cached_path = cache_dir.join(format!("exec-{}.json", exec_cache_key(program, corelib)));
+    if cached_path.exists() {
+        fs::copy(&cached_path, executable_path)
+            .with_context(|| format!("copy cached executable from {}", cached_path.display()))?;
+        return Ok(ExecCacheOutcome::Hit);
+    }
+    let tmp_path = cached_path.with_extension(format!("tmp-{}", std::process::id()));
+    compile_to_file_uncached(program, corelib, &tmp_path)?;
+    fs::rename(&tmp_path, &cached_path)
+        .with_context(|| format!("publish {}", cached_path.display()))?;
+    fs::copy(&cached_path, executable_path)
+        .with_context(|| format!("copy compiled executable"))?;
+    Ok(ExecCacheOutcome::Miss)
 }
 
 fn main() -> Result<()> {
@@ -124,12 +227,26 @@ fn main() -> Result<()> {
     let total = Instant::now();
 
     // 1. Compile Cairo1 -> Executable (gas-disabled; see third_party/proving fixes).
+    //    Content-addressed cache: the recursion/settlement programs are fixed per
+    //    release, so recompiling per prove (~1.5 s wall) is pure waste per hand.
     let t = Instant::now();
-    let executable = compile_cairo1_executable(&program, Some(&corelib))
-        .with_context(|| format!("compile {}", program.display()))?;
-    let compile_dur = t.elapsed();
     let executable_path = out_dir.join("executable.json");
-    write_json(&executable_path, &serde_json::to_value(&executable)?)?;
+    let cache_dir = (!args.no_exec_cache).then(|| exec_cache_dir(&root));
+    let cache_outcome = match cache_dir {
+        Some(dir) => match materialize_executable(&program, &corelib, &executable_path, &dir) {
+            Ok(outcome) => outcome,
+            Err(cache_err) => {
+                tracing::warn!("exec cache: {cache_err:#}; compiling without cache");
+                compile_to_file_uncached(&program, &corelib, &executable_path)?;
+                ExecCacheOutcome::Disabled
+            }
+        },
+        None => {
+            compile_to_file_uncached(&program, &corelib, &executable_path)?;
+            ExecCacheOutcome::Disabled
+        }
+    };
+    let compile_dur = t.elapsed();
 
     // 2. Run the witness + adapt to the Stwo prover input.
     let t = Instant::now();
@@ -243,7 +360,15 @@ fn main() -> Result<()> {
     // 6. Report + summary.json.
     println!();
     println!("phase        wall");
-    println!("compile      {}", fmt_dur(compile_dur));
+    println!(
+        "compile      {}  ({})",
+        fmt_dur(compile_dur),
+        match cache_outcome {
+            ExecCacheOutcome::Hit => "cache hit",
+            ExecCacheOutcome::Miss => "cache miss",
+            ExecCacheOutcome::Disabled => "cache disabled",
+        }
+    );
     println!(
         "run/witness  {}  ({} steps)",
         fmt_dur(run_dur), steps
@@ -277,6 +402,11 @@ fn main() -> Result<()> {
         "scale": scale.label(),
         "inputs": args.inputs,
         "verified": true,
+        "compile_cache": match cache_outcome {
+            ExecCacheOutcome::Hit => "hit",
+            ExecCacheOutcome::Miss => "miss",
+            ExecCacheOutcome::Disabled => "disabled",
+        },
         "artifacts": {
             "executable": "executable.json",
             "proof": proof_path.file_name().and_then(|n| n.to_str()).unwrap_or("proof.json"),
