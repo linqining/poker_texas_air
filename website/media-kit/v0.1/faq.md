@@ -1,6 +1,6 @@
 # FAQ 必答 8 问 v0.1
 
-> 按 §6.6 原文收录。回答如需更新，必须与 docs/plan-appchain-v1.md 与路线图页同步。
+> 按 §6.6 原文收录。回答如需更新，必须与 zchain 仓库的 docs/plan-appchain-v1.md 与路线图页同步。
 
 **这是公链还是中心化服务器？**
 v1 是单 Sequencer 的托管式 Appchain，逐步增加 BFT。

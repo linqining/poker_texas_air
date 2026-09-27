@@ -1,6 +1,6 @@
 # 可引用项目事实表（fact-sheet）v0.1
 
-> 数据截至 2026-09-12，来源为本仓库（workspace 构建 + 测试）与 `docs/plan-appchain-v1.md`。
+> 数据截至 2026-09-12，来源为本仓库（workspace 构建 + 测试）与 zchain 仓库（github.com/linqining/zchain）的 `docs/plan-appchain-v1.md`。
 > 引用规则：数字必须与本表一致；引用性能数字必须连同口径（硬件、并发、样本、分位数）一起引用。
 
 ## 项目身份

@@ -3,7 +3,7 @@
 静态站，零构建依赖：`python3 build.py`（仅 Python 3 标准库）把 `content/`（markdown）+
 `templates/`（HTML 模板）+ `assets/` 构建到 `dist/`。无 npm、无框架、可复现。
 
-对应计划：`docs/plan-appchain-v1.md` §6（产品化蓝图）。
+对应计划：zchain 仓库（github.com/linqining/zchain）的 `docs/plan-appchain-v1.md` §6（产品化蓝图）。
 
 ## 构建与部署
 

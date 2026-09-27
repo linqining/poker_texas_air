@@ -1,6 +1,6 @@
 # 文档站最低要求对照（plan §6.4）— docs-status.md
 
-对照对象：`docs/plan-appchain-v1.md` §6.4「文档发布最低要求」+ 15 分钟 quickstart 要求。
+对照对象：zchain 仓库（github.com/linqining/zchain）`docs/plan-appchain-v1.md` §6.4「文档发布最低要求」+ 15 分钟 quickstart 要求。
 状态图例：✅ 完成 · 🟡 部分 · ⬜ 待后端/待发布（不虚标完成）。
 
 | # | 要求 | 状态 | 说明 / 落点 |

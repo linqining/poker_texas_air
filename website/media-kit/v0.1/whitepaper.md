@@ -1,7 +1,7 @@
 # ZChain Poker 技术白皮书（工作稿 v0.1）
 
-> 工作名项目 · devnet 阶段 · 2026-09-12。本文是技术方案（`docs/plan-appchain-v1.md`）
-> 与 ABI 规范（`poker-appchain/docs/ABI.md`）的对外压缩版；两份源文件优先级高于本文。
+> 工作名项目 · devnet 阶段 · 2026-09-12。本文是技术方案（zchain 仓库 `docs/plan-appchain-v1.md`）
+> 与 ABI 规范（zchain 仓库 `poker-appchain/docs/ABI.md`）的对外压缩版；两份源文件优先级高于本文。
 
 ## 1. 系统模型
 
