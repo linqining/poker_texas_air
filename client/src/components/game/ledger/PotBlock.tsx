@@ -11,10 +11,10 @@ const Wrap = styled.div`
   background: ${({ theme }) => theme.colors.lightestBg};
   border: 1px solid ${({ theme }) => theme.colors.borderMuted};
   border-radius: 3px;
-  padding: 10px 13px;
+  padding: 8px 13px 9px;
   overflow: hidden;
-  box-shadow: ${({ theme }) => theme.other.cardDropShadow};
-  width: 320px;
+  box-shadow: 0 8px 20px rgba(4, 30, 20, 0.4);
+  width: 316px;
   max-width: 90%;
   &::before {
     content: '';
@@ -31,8 +31,8 @@ const Wrap = styled.div`
 
 const Label = styled.div`
   position: relative;
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
-  font-size: 9.5px;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
+  font-size: 9px;
   letter-spacing: 0.15em;
   text-transform: uppercase;
   color: ${({ theme }) => theme.colors.softerText};
@@ -43,18 +43,18 @@ const Label = styled.div`
 
 const Amount = styled.div`
   position: relative;
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
   font-variant-numeric: tabular-nums;
-  font-size: 28px;
-  font-weight: 600;
-  letter-spacing: -0.6px;
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
   line-height: 1.15;
-  margin: 2px 0 0;
+  margin: 1px 0 0;
   display: flex;
   align-items: baseline;
   gap: 5px;
   .u {
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 500;
     letter-spacing: 0.08em;
     color: ${({ theme }) => theme.colors.softerText};
@@ -63,7 +63,7 @@ const Amount = styled.div`
 
 const Break = styled.div`
   position: relative;
-  margin-top: 5px;
+  margin-top: 4px;
   border-top: 1px solid ${({ theme }) => theme.colors.borderSubtle};
   padding-top: 1px;
   display: grid;
@@ -75,16 +75,16 @@ const Row = styled.div`
   display: flex;
   align-items: baseline;
   gap: 10px;
-  padding: 4px 0;
-  font-size: 11.5px;
+  padding: 3px 0;
+  font-size: 11px;
   .k {
     color: ${({ theme }) => theme.colors.mutedText};
-    font-size: 11px;
+    font-size: 10.5px;
     min-width: 0;
   }
   .v {
     margin-left: auto;
-    font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+    font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
     font-variant-numeric: tabular-nums;
     text-align: right;
     color: ${({ theme }) => theme.colors.fontColorDark};

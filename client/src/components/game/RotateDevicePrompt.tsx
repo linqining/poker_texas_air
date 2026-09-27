@@ -8,12 +8,12 @@ const Wrapper = styled.div`
   display: none;
   position: fixed;
   z-index: ${({ theme }) => theme.zIndex.critical};
-  background-color: hsl(202, 49%, 18%);
+  /* 账簿墨底（tokens ink），与牌桌页脚同源 */
+  background-color: ${({ theme }) => theme.colors.fontColorDark};
   padding: 2rem;
   width: 100%;
   height: 100%;
   inset: 0;
-  backdrop-filter: blur(6px);
 
   & ${Text} {
     color: ${(props) => props.theme.colors.fontColorLight};

@@ -26,6 +26,7 @@ import HandHistoryPanel from '../components/game/HandHistoryPanel';
 import PlayLedger from '../components/game/ledger/PlayLedger';
 import TableStage from '../components/game/ledger/TableStage';
 import HandReceipt from '../components/game/ledger/HandReceipt';
+import { ToolButton } from '../components/game/ledger/TicketHeader';
 import { BuyinForm } from '../components/game/Seat';
 import { api } from '../api/secretPokerClient';
 import { getStrkBalance } from '../starknet/starknetGameActions';
@@ -498,16 +499,14 @@ const Play: React.FC = () => {
             }
             toolbar={
               <>
-                {/* /play 隐藏全局导航：此处补回 首页/大厅 入口 */}
-                <Button small secondary onClick={() => navigate('/')}>
+                {/* /play 隐藏全局导航：此处补回 首页/大厅 入口（抬头墨线工具钮） */}
+                <ToolButton onClick={() => navigate('/')}>
                   {getLocalizedString('homepage_nav-home')}
-                </Button>
-                <Button small secondary onClick={() => navigate('/lobby')}>
+                </ToolButton>
+                <ToolButton onClick={() => navigate('/lobby')}>
                   {getLocalizedString('navmenu-menu_item-lobby_txt')}
-                </Button>
-                <Button
-                  small
-                  secondary
+                </ToolButton>
+                <ToolButton
                   onClick={async () => {
                     if (isLeaving) return;
                     setIsLeaving(true);
@@ -523,18 +522,16 @@ const Play: React.FC = () => {
                   {isLeaving
                     ? getLocalizedString('play_leaving') || '离开中...'
                     : getLocalizedString('game_leave-table-btn')}
-                </Button>
-                <Button
-                  small
-                  secondary
+                </ToolButton>
+                <ToolButton
                   onClick={() => setShowHistoryPanel(true)}
                   aria-label={getLocalizedString('game_history-open-btn')}
                 >
                   {getLocalizedString('game_history-open-btn')}
-                </Button>
-                <Button small secondary onClick={() => void openLatestReceipt()}>
+                </ToolButton>
+                <ToolButton onClick={() => void openLatestReceipt()}>
                   {getLocalizedString('game_receipt-open-btn')}
-                </Button>
+                </ToolButton>
               </>
             }
           />

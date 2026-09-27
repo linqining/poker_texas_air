@@ -1,4 +1,5 @@
 import React, { useContext } from 'react';
+import styled from 'styled-components';
 import contentContext from '../../context/content/contentContext';
 import Button from '../buttons/Button';
 import { BetSlider } from './BetSlider';
@@ -10,6 +11,35 @@ import {
   raisePresets,
   toCallAmount,
 } from '../../helpers/tableDerived';
+
+/** 跟注钮：secondaryCta 蓝实底（play 语义），与翡翠加注钮区分。 */
+const CallButton = styled.button`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: ${({ theme }) => theme.radius.md};
+  background-color: ${({ theme }) => theme.colors.secondaryCta};
+  color: #fff;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
+  font-weight: 600;
+  font-size: ${({ theme }) => theme.fontSize.sm};
+  min-height: 44px;
+  cursor: pointer;
+  &:hover:not(:disabled) {
+    background-color: ${({ theme }) => theme.colors.secondaryCtaDarker};
+  }
+  &:disabled {
+    background-color: ${({ theme }) => theme.colors.disabled};
+    color: ${({ theme }) => theme.colors.softText};
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(21, 80, 127, 0.4);
+  }
+`;
 
 interface GameUIProps {
   currentTable: Table;
@@ -121,15 +151,15 @@ export const GameUI: React.FC<GameUIProps> = ({
         </div>
       )}
 
-      <Button small disabled={isActionLoading} onClick={() => raise(bet + currentTable.seats[seatId].bet)}>
+      <Button small variant="primary" disabled={isActionLoading} onClick={() => raise(bet + currentTable.seats[seatId].bet)}>
         {getLocalizedString('game_ui_bet')} {bet}
       </Button>
-      <Button small secondary disabled={isActionLoading} onClick={fold}>
+      <Button small variant="secondary" disabled={isActionLoading} onClick={fold}>
         {getLocalizedString('game_ui_fold')}
       </Button>
       <Button
         small
-        secondary
+        variant="secondary"
         disabled={
           isActionLoading ||
           (currentTable.callAmount !== currentTable.seats[seatId].bet &&
@@ -139,8 +169,7 @@ export const GameUI: React.FC<GameUIProps> = ({
       >
         {getLocalizedString('game_ui_check')}
       </Button>
-      <Button
-        small
+      <CallButton
         disabled={
           isActionLoading ||
           currentTable.callAmount === 0 ||
@@ -154,9 +183,10 @@ export const GameUI: React.FC<GameUIProps> = ({
         currentTable.callAmount <= currentTable.seats[seatId].stack
           ? currentTable.callAmount - currentTable.seats[seatId].bet
           : ''}
-      </Button>
+      </CallButton>
       <Button
         small
+        variant="secondary"
         disabled={isActionLoading}
         onClick={() => {
           const totalPossible =

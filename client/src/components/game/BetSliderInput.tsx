@@ -1,7 +1,7 @@
 import styled from 'styled-components';
 
-const TRACK_COLOR = '#245069';
-const THUMB_COLOR = '#6297b5';
+const TRACK_COLOR = 'rgba(245, 242, 234, 0.28)';
+const THUMB_COLOR = '#f5f2ea';
 
 export const BetSliderInput = styled.input`
   width: 100%;

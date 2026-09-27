@@ -17,8 +17,12 @@ import { fontMono } from '../../../styles/theme';
 
 /**
  * 牌桌账簿主布局（design/table T1–T4）：
- * 票据抬头 → 街段栏 → 毡面（账格纸面：对手座位压上沿 + 公共牌 + 彩池合计 + 消息条）
- * → 页脚（玩家本人英雄卡 + 行动区）。
+ * 票据抬头 → 街段栏 → 毡面舞台（墨皮包边椭圆毡桌 + 环桌座位 + 下注纸签 +
+ * 公共牌 + 彩池合计 + 消息条）→ 页脚（玩家本人英雄卡 + 行动区）。
+ *
+ * 设计立意：账簿纸面（审计桌）上摆一张真实的深毡绿椭圆牌桌——
+ * 桌面是全场唯一的深色实底，纸卡、筹码签、座位账卡都落在毡面上，
+ * 「赌桌 × 账本」的碰撞即产品身份（可审计的牌局）。
  */
 
 const Root = styled.div`
@@ -36,7 +40,7 @@ const StreetBar = styled.div`
   display: flex;
   align-items: center;
   gap: 18px;
-  padding: 10px 22px;
+  padding: 8px 22px;
   border-top: 1px solid ${({ theme }) => theme.colors.borderSubtle};
   border-bottom: 1px solid ${({ theme }) => theme.colors.borderSubtle};
   background: ${({ theme }) => theme.colors.lightBg};
@@ -73,96 +77,231 @@ const BarNote = styled.span`
   justify-content: flex-end;
 `;
 
+/* ============================================================================
+ * 毡面舞台
+ * ========================================================================= */
+
 const FeltBody = styled.div`
   position: relative;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 `;
 
+/* 墨皮包边：皮革深底 + 内侧高光 + 缝线，包住深毡绿桌面 */
+const Rail = styled.div`
+  position: absolute;
+  inset: 10px 14px;
+  border-radius: 50%;
+  background: #241d14;
+  box-shadow:
+    0 24px 48px rgba(20, 19, 15, 0.22),
+    0 2px 0 rgba(20, 19, 15, 0.08),
+    inset 0 1px 0 rgba(245, 242, 234, 0.12),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.5);
+`;
+
+const Stitch = styled.div`
+  position: absolute;
+  inset: 6px;
+  border: 1px dashed rgba(245, 242, 234, 0.22);
+  border-radius: 50%;
+  pointer-events: none;
+`;
+
+/* 毡面：深毡绿 + 细纹 + 内圈刻线；唯一允许的大面积深色 */
 const Felt = styled.div`
   position: absolute;
-  left: 12px;
-  right: 12px;
-  top: 8px;
-  bottom: 8px;
-  background: ${({ theme }) => theme.colors.surfaceMutedPlain};
-  /* 账簿牌桌：椭圆毡面（design/table .felt 大圆角胶囊语言） */
+  inset: 22px 26px;
   border-radius: 50%;
+  background:
+    repeating-linear-gradient(
+      115deg,
+      rgba(255, 255, 255, 0.028) 0 2px,
+      transparent 2px 5px
+    ),
+    #0d5c3c;
+  box-shadow:
+    inset 0 2px 14px rgba(4, 30, 20, 0.6),
+    inset 0 0 90px rgba(7, 44, 29, 0.55);
+
   &::before {
     content: '';
     position: absolute;
-    inset: 0;
-    border: 1px solid ${({ theme }) => theme.colors.borderMuted};
+    inset: 20px;
+    border: 1.5px solid rgba(245, 242, 234, 0.22);
     border-radius: 50%;
   }
   &::after {
     content: '';
     position: absolute;
-    inset: 6px;
-    border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
+    inset: 27px;
+    border: 1px solid rgba(245, 242, 234, 0.1);
     border-radius: 50%;
-    background: repeating-linear-gradient(
-      180deg,
-      transparent 0 25px,
-      rgba(20, 19, 15, 0.045) 25px 26px
-    );
   }
 `;
 
+/* 桌面中央钢印水印（压在公共牌之下，位于彩池与下沿座位之间的空档） */
+const FeltMark = styled.div`
+  position: absolute;
+  left: 50%;
+  top: 69%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  color: rgba(245, 242, 234, 0.14);
+  pointer-events: none;
+  z-index: 0;
+  white-space: nowrap;
+  b {
+    display: block;
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: 0.34em;
+    text-indent: 0.34em;
+    font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
+  }
+  span {
+    display: block;
+    margin-top: 5px;
+    font-size: 9px;
+    letter-spacing: 0.3em;
+    text-indent: 0.3em;
+    text-transform: uppercase;
+  }
+`;
+
+/* 桌沿小字：公共区归属说明 */
 const FeltTag = styled.span`
   position: absolute;
   left: 50%;
-  top: 10px;
+  top: 4.2%;
   transform: translateX(-50%);
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
   font-size: 8.5px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: ${({ theme }) => theme.colors.softerText};
-  opacity: 0.7;
+  color: rgba(245, 242, 234, 0.45);
   white-space: nowrap;
   z-index: 1;
 `;
 
-const SeatsRail = styled.div`
+/* 盲注指示盘：毡面左下（真实牌桌的 blind disk） */
+const BlindDisks = styled.div`
   position: absolute;
-  left: 50%;
-  top: 36px;
-  transform: translateX(-50%);
+  left: 14%;
+  top: 74%;
   display: flex;
-  gap: 10px;
-  z-index: 3;
-  flex-wrap: wrap;
-  justify-content: center;
-  /* 显式宽度：绝对定位 + left:50% 时 shrink-to-fit 只剩右半幅，会错误折行 */
-  width: min(96%, 1180px);
+  gap: 7px;
+  z-index: 1;
 `;
 
+const BlindDisk = styled.span`
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: ${({ theme }) => theme.colors.lightestBg};
+  border: 1px solid ${({ theme }) => theme.colors.borderMuted};
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
+  i {
+    font-style: normal;
+    font-size: 7.5px;
+    letter-spacing: 0.14em;
+    color: ${({ theme }) => theme.colors.softerText};
+    text-transform: uppercase;
+  }
+  b {
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    font-weight: 700;
+    color: ${({ theme }) => theme.colors.fontColorDark};
+    line-height: 1.1;
+  }
+`;
+
+/* 座位锚点层：座位按钟位环绕毡面（顺时针 1→5，本人居中下沿） */
+const SeatsLayer = styled.div`
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+`;
+
+const SeatAnchor = styled.div<{ $x: number; $y: number }>`
+  position: absolute;
+  left: ${({ $x }) => $x}%;
+  top: ${({ $y }) => $y}%;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+`;
+
+/* 下注纸签：从座位投向桌心的中途（真实牌桌的前注位） */
+const BetAnchor = styled.div<{ $x: number; $y: number }>`
+  position: absolute;
+  left: ${({ $x }) => $x}%;
+  top: ${({ $y }) => $y}%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  pointer-events: none;
+`;
+
+const BetChipPill = styled.div<{ $allin: boolean }>`
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: ${({ theme }) => theme.colors.lightestBg};
+  border: 1px solid
+    ${({ $allin, theme }) => ($allin ? theme.colors.danger : theme.colors.fontColorDark)};
+  border-radius: 2px;
+  padding: 2.5px 9px;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 600;
+  color: ${({ $allin, theme }) => ($allin ? theme.colors.danger : theme.colors.fontColorDark)};
+  white-space: nowrap;
+  i {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: ${({ $allin, theme }) => ($allin ? theme.colors.danger : theme.colors.success)};
+    border: 1.5px solid currentColor;
+    color: ${({ $allin, theme }) => ($allin ? theme.colors.danger : theme.colors.goldDarker)};
+    flex: none;
+  }
+`;
+
+/* 桌心：公共牌 + 彩池合计 */
 const CenterStack = styled.div`
   position: absolute;
   left: 50%;
-  top: 46%;
+  top: 43%;
   transform: translate(-50%, -50%);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   z-index: 2;
 `;
 
 const BoardRow = styled.div`
   display: flex;
-  gap: 7px;
+  gap: 8px;
   align-items: flex-start;
   justify-content: center;
 `;
 
 const BoardLabel = styled.div`
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
   font-size: 8.5px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: ${({ theme }) => theme.colors.softerText};
+  color: rgba(245, 242, 234, 0.5);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -170,17 +309,17 @@ const BoardLabel = styled.div`
   justify-content: center;
 `;
 
+/* 消息条：毡面左下角内侧（避开下沿本人座位） */
 const MsgStrip = styled.div`
   position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  bottom: 12px;
+  left: 42px;
+  bottom: 28px;
   display: flex;
   gap: 8px;
   flex-direction: column;
-  align-items: center;
-  z-index: 3;
-  max-width: 94%;
+  align-items: flex-start;
+  z-index: 4;
+  max-width: 44%;
 `;
 
 const Msg = styled.div<{ $ok?: boolean }>`
@@ -191,32 +330,23 @@ const Msg = styled.div<{ $ok?: boolean }>`
   padding: 6px 13px;
   font-size: 12px;
   color: ${({ theme, $ok }) => ($ok ? theme.colors.fontColorDark : theme.colors.mutedText)};
-  box-shadow: ${({ theme }) => theme.other.cardDropShadow};
+  box-shadow: 0 4px 12px rgba(20, 19, 15, 0.28);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 100%;
   b,
   .num {
-    font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+    font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
     font-variant-numeric: tabular-nums;
     font-weight: 600;
     color: ${({ theme }) => theme.colors.fontColorDark};
   }
 `;
 
-const Watermark = styled.span`
-  position: absolute;
-  left: 22px;
-  bottom: 10px;
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
-  font-size: 8px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: ${({ theme }) => theme.colors.softerText};
-  opacity: 0.55;
-  pointer-events: none;
-`;
+/* ============================================================================
+ * 页脚（玩家英雄卡 + 行动区）
+ * ========================================================================= */
 
 const Footer = styled.footer`
   flex: none;
@@ -231,7 +361,7 @@ const Footer = styled.footer`
 `;
 
 const HeroCard = styled.div<{ $accent?: 'felt' | 'ink' }>`
-  width: 280px;
+  width: 300px;
   flex: none;
   border: 1px solid ${({ $accent, theme }) => ($accent === 'felt' ? theme.colors.success : theme.colors.borderSubtle)};
   background: ${({ $accent, theme }) => ($accent === 'felt' ? 'rgba(11,107,69,.08)' : theme.colors.lightestBg)};
@@ -246,14 +376,14 @@ const HeroTop = styled.div`
   b {
     font-size: 12.5px;
     font-weight: 600;
-    font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+    font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
     font-variant-numeric: tabular-nums;
   }
 `;
 
 const HeroAv = styled.div`
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border-radius: 2px;
   background: ${({ theme }) => theme.colors.fontColorDark};
   color: ${({ theme }) => theme.colors.fontColorLight};
@@ -271,7 +401,7 @@ const HeroHand = styled.div`
   gap: 0;
   margin-top: 7px;
   .note {
-    font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+    font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
     font-variant-numeric: tabular-nums;
     font-size: 10px;
     color: ${({ theme }) => theme.colors.success};
@@ -285,7 +415,7 @@ const HeroSeal = styled.span`
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
   font-size: 9px;
   letter-spacing: 0.13em;
   text-transform: uppercase;
@@ -309,7 +439,7 @@ const FootNote = styled.div`
   padding: 10px 12px;
   line-height: 1.55;
   b {
-    font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+    font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
     font-variant-numeric: tabular-nums;
     color: ${({ theme }) => theme.colors.fontColorDark};
   }
@@ -337,6 +467,24 @@ const streetNote = (rs: string): string => {
   return map[rs] ?? rs;
 };
 
+/* 座位钟位（FeltBody 百分比坐标，顺时针 1→5；5=本人，居中下沿）。
+ * 角度：198° / 126° / 54° / 342° / 270°（数学角，y 轴向下取反）。 */
+const SEAT_POS: Record<number, { x: number; y: number }> = {
+  1: { x: 9.6, y: 60.5 },
+  2: { x: 25.2, y: 16.5 },
+  3: { x: 74.8, y: 16.5 },
+  4: { x: 90.4, y: 60.5 },
+  5: { x: 50, y: 86.5 },
+};
+
+/* 下注纸签位：座位→桌心连线 45% 处 */
+const BET_POS: Record<number, { x: number; y: number }> = Object.fromEntries(
+  Object.entries(SEAT_POS).map(([n, p]) => [
+    n,
+    { x: p.x + 0.45 * (50 - p.x), y: p.y + 0.45 * (46 - p.y) },
+  ]),
+);
+
 export interface PlayLedgerProps {
   table: Table;
   communityCards: { suit: string; rank: string }[];
@@ -346,7 +494,7 @@ export interface PlayLedgerProps {
   canSit: boolean;
   /** 页脚右侧动作区（GameUI 或等待提示），由 Play 装配 */
   actionSlot?: React.ReactNode;
-  /** 街段栏右侧工具钮（离桌 / 牌局记录 / 凭证），由 Play 装配 */
+  /** 抬头右侧工具钮（离桌 / 牌局记录 / 凭证），由 Play 装配 */
   toolbar?: React.ReactNode;
   onOpenReceipt: () => void;
 }
@@ -378,15 +526,6 @@ export const PlayLedger: React.FC<PlayLedgerProps> = ({
     [decryptedHandCards],
   );
 
-  // 对手席位：除英雄座外按座位号取前 4；未入座时取前 4（SEAT 5 由英雄位呈现）
-  const railSeats = useMemo(() => {
-    // 服务端 seats 只序列化在座座位——空位固定渲染为虚线待填行。
-    // 未入座：5 席全上栏；已入座：4 个对手上栏，本人座位于页脚英雄卡。
-    const all = [1, 2, 3, 4, 5];
-    const withoutHero = heroSeat ? all.filter((n) => n !== seatId) : all;
-    return withoutHero.slice(0, heroSeat ? 4 : 5);
-  }, [heroSeat, seatId]);
-
   // 自己手牌牌型标注（公共牌齐才可评）
   const heroEval = useMemo(() => {
     if (!heroSeat) return null;
@@ -395,7 +534,6 @@ export const PlayLedger: React.FC<PlayLedgerProps> = ({
   }, [heroSeat, communityCards]);
 
   const boardCount = communityCards.length || table.board.length || 0;
-  const streetIdx = currentStreetIndex(table);
   const activeCount = Object.values(table.seats).filter(
     (s) => s?.player && !s.folded && !s.sittingOut,
   ).length;
@@ -411,12 +549,11 @@ export const PlayLedger: React.FC<PlayLedgerProps> = ({
 
   return (
     <Root>
-      <TicketHeader table={table} statusNote={statusNote} />
+      <TicketHeader table={table} statusNote={statusNote} toolbar={toolbar} />
 
       <StreetBar>
         <StreetRail table={table} />
         <BarNote>
-          {toolbar}
           <Chip $tone={table.handOver ? 'default' : 'play'}>
             roundState · {table.roundState}
           </Chip>
@@ -435,11 +572,31 @@ export const PlayLedger: React.FC<PlayLedgerProps> = ({
       </StreetBar>
 
       <FeltBody>
-        <Felt />
+        <Rail>
+          <Stitch />
+          <Felt />
+        </Rail>
         <FeltTag>公共区 · COMMON — 不归属任何玩家</FeltTag>
+        <FeltMark>
+          <b>SECRET POKER</b>
+          <span>PROVABLY FAIR · EVERY MOVE ON-CHAIN</span>
+        </FeltMark>
+        <BlindDisks>
+          <BlindDisk>
+            <i>SB</i>
+            <b>{fmt(table.smallBlind)}</b>
+          </BlindDisk>
+          <BlindDisk>
+            <i>BB</i>
+            <b>{fmt(table.bigBlind)}</b>
+          </BlindDisk>
+        </BlindDisks>
 
-        <SeatsRail>
-          {railSeats.map((n) => {
+        {/* 环桌座位（含本人座；空位渲染虚线待填卡） */}
+        <SeatsLayer>
+          {[1, 2, 3, 4, 5].map((n) => {
+            const pos = SEAT_POS[n];
+            const seat = table.seats[n];
             // 胜者账目行回填（T4）：牌型来自 showdownHandRanks，金额从
             // winMessages 首条解析（"X wins $200 with Two Pair"）
             const rank = table.showdownHandRanks?.find((h) => h.seat === n)?.rank;
@@ -451,27 +608,45 @@ export const PlayLedger: React.FC<PlayLedgerProps> = ({
               const m = msg.match(/\$([\d,]+)/);
               return m ? Number(m[1].replace(/,/g, '')) : null;
             })();
+            const betPill = (() => {
+              if (table.handOver) return null;
+              if (!seat?.player || seat.folded || seat.sittingOut) return null;
+              if (!(seat.bet > 0)) return null;
+              return (
+                <BetAnchor key={`bet-${n}`} $x={BET_POS[n].x} $y={BET_POS[n].y}>
+                  <BetChipPill $allin={seat.stack === 0}>
+                    <i />
+                    {fmt(seat.bet)}
+                  </BetChipPill>
+                </BetAnchor>
+              );
+            })();
             return (
-            <SeatEntry
-              key={n}
-              table={table}
-              seatNumber={n}
-              winnerInfo={isWinnerSeat && rank ? { rank, amount: winAmount } : null}
-              showdownRank={table.handOver ? (rank ?? null) : null}
-              blindLabel={roles[n] === 'sb' ? getLocalizedString('game_seat-sb-lbl') : roles[n] === 'bb' ? getLocalizedString('game_seat-bb-lbl') : null}
-              onSitDown={onSitDown}
-              canSit={canSit}
-            />
+              <React.Fragment key={n}>
+                <SeatAnchor $x={pos.x} $y={pos.y}>
+                  <SeatEntry
+                    table={table}
+                    seatNumber={n}
+                    isDealer={table.button === n || table.dealerSeatId === n}
+                    winnerInfo={isWinnerSeat && rank ? { rank, amount: winAmount } : null}
+                    showdownRank={table.handOver ? (rank ?? null) : null}
+                    blindLabel={roles[n] === 'sb' ? getLocalizedString('game_seat-sb-lbl') : roles[n] === 'bb' ? getLocalizedString('game_seat-bb-lbl') : null}
+                    onSitDown={onSitDown}
+                    canSit={canSit}
+                  />
+                </SeatAnchor>
+                {betPill}
+              </React.Fragment>
             );
           })}
-        </SeatsRail>
+        </SeatsLayer>
 
         <CenterStack>
           <div>
             <BoardLabel>
               公共牌 {boardCount} / 5 · {boardCount === 0 ? '未发' : '已上链开牌'}
             </BoardLabel>
-            <div style={{ height: 5 }} />
+            <div style={{ height: 6 }} />
             <BoardRow>
               {[0, 1, 2, 3, 4].map((i) =>
                 i < boardCount ? (
@@ -512,10 +687,6 @@ export const PlayLedger: React.FC<PlayLedgerProps> = ({
             </Msg>
           )}
         </MsgStrip>
-
-        <Watermark>
-          zchain · appchain texas · hand #{table.handId ?? '—'}
-        </Watermark>
       </FeltBody>
 
       <Footer>

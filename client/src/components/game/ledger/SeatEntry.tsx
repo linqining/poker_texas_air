@@ -7,30 +7,32 @@ import { fontMono } from '../../../styles/theme';
 import { PaperCard } from './PaperCard';
 
 /**
- * 座位条目卡（design/table .seat-cd）：账目条目而非圆形头像。
- * 在座 = 方形纸卡（头像块 + 名 + 等宽余量右对齐 + 状态章 + 线性计时 + 注单引线）；
+ * 座位账卡（design/table .seat-cd）：环绕毡面桌沿的账目条目。
+ * 在座 = 纸卡（头像块 + 名 + 等宽余量 + 状态章 + 线性计时 + 摊牌亮牌）；
  * 空置 = 虚线待填行 + 行内「入座」。已弃牌保留在账页上（划销 + 虚线框）。
+ * 下注金额不进卡片——由 PlayLedger 的下注纸签投向桌心呈现。
  */
 
 const SeatWrap = styled.div<{ $turn: boolean; $folded: boolean }>`
   position: relative;
-  /* 舞台设计像素：1600 宽 × 5 席 + 间距，固定宽度随舞台等比缩放 */
-  width: 190px;
-  max-width: 100%;
-  opacity: ${({ $folded }) => ($folded ? 0.55 : 1)};
+  /* 舞台设计像素：环桌 5 席固定宽度，随舞台等比缩放 */
+  width: 176px;
+  opacity: ${({ $folded }) => ($folded ? 0.68 : 1)};
 `;
 
 const Card = styled.div<{ $turn: boolean; $folded: boolean }>`
-  background: ${({ $folded, theme }) => ($folded ? 'transparent' : theme.colors.lightestBg)};
+  background: ${({ $folded, theme }) =>
+    $folded ? 'rgba(245, 242, 234, 0.6)' : theme.colors.lightestBg};
   border: 1px
     ${({ $folded, $turn, theme }) =>
       $folded ? `dashed 1px ${theme.colors.borderMuted}` : `solid 1px ${$turn ? theme.colors.fontColorDark : theme.colors.borderSubtle}`};
   border-radius: 3px;
-  box-shadow: ${({ $folded, theme }) => ($folded ? 'none' : theme.other.cardDropShadow)};
-  padding: 8px 10px;
+  box-shadow: ${({ $folded, theme }) =>
+    $folded ? 'none' : '0 4px 10px rgba(4, 30, 20, 0.35)'};
+  padding: 7px 9px;
   display: grid;
-  grid-template-columns: 30px 1fr auto;
-  gap: 9px;
+  grid-template-columns: 28px 1fr auto;
+  gap: 8px;
   align-items: center;
   position: relative;
   ${({ $turn, theme }) =>
@@ -45,13 +47,22 @@ const Card = styled.div<{ $turn: boolean; $folded: boolean }>`
           background: ${theme.colors.warning};
         }`
       : ''}
+  ${({ $turn, theme }) =>
+    $turn
+      ? `animation: seat-act-pulse 1.6s ${theme.easing.easeStandard} infinite;
+         @media (prefers-reduced-motion: reduce) { animation: none; }`
+      : ''}
+  @keyframes seat-act-pulse {
+    0%, 100% { box-shadow: 0 4px 10px rgba(4, 30, 20, 0.35); }
+    50% { box-shadow: 0 4px 10px rgba(4, 30, 20, 0.35), 0 0 0 4px rgba(130, 85, 16, 0.18); }
+  }
 `;
 
 const Tag = styled.span`
   position: absolute;
   top: -9px;
-  left: 9px;
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  left: 8px;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
   font-size: 8.5px;
   letter-spacing: 0.1em;
   color: ${({ theme }) => theme.colors.softerText};
@@ -61,16 +72,16 @@ const Tag = styled.span`
 `;
 
 const Avatar = styled.div`
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border-radius: 2px;
   flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
   font-weight: 700;
-  font-size: 12px;
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-size: 11px;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
   background: ${({ theme }) => theme.colors.fontColorDark};
   color: ${({ theme }) => theme.colors.fontColorLight};
 `;
@@ -79,7 +90,7 @@ const NameCol = styled.div<{ $folded: boolean }>`
   min-width: 0;
   b {
     display: block;
-    font-size: 12.5px;
+    font-size: 12px;
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
@@ -92,7 +103,7 @@ const Stack = styled.span`
   display: flex;
   align-items: baseline;
   gap: 4px;
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
   font-variant-numeric: tabular-nums;
   font-size: 13px;
   font-weight: 600;
@@ -102,7 +113,7 @@ const Stack = styled.span`
 `;
 
 const StatusChip = styled.span<{ $tone: 'default' | 'felt' | 'amb' | 'bad' }>`
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
   font-size: 9px;
   letter-spacing: 0.06em;
   padding: 1.5px 6px;
@@ -127,10 +138,15 @@ const TimerRow = styled.div`
   display: flex;
   align-items: center;
   gap: 7px;
+  background: ${({ theme }) => theme.colors.lightestBg};
+  border: 1px solid ${({ theme }) => theme.colors.borderMuted};
+  border-radius: 3px;
+  padding: 4px 7px;
+  box-shadow: 0 3px 8px rgba(4, 30, 20, 0.35);
   .num {
-    font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+    font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
     font-variant-numeric: tabular-nums;
-    font-size: 10px;
+    font-size: 10.5px;
     color: ${({ theme }) => theme.colors.warning};
     font-weight: 600;
     letter-spacing: 0.04em;
@@ -151,13 +167,19 @@ const Meter = styled.div`
   }
 `;
 
-const BetLine = styled.div`
+/* 摊牌后的账目行（胜者金额 / 牌型注记）：座位卡下沿的虚线引线行 */
+const LedgerLine = styled.div`
+  margin-top: 5px;
   display: flex;
   align-items: baseline;
   gap: 6px;
-  padding: 5px 6px 0;
+  padding: 4px 7px;
+  background: ${({ theme }) => theme.colors.lightestBg};
+  border: 1px solid ${({ theme }) => theme.colors.borderSubtle};
+  border-radius: 3px;
   font-size: 10.5px;
   color: ${({ theme }) => theme.colors.mutedText};
+  box-shadow: 0 3px 8px rgba(4, 30, 20, 0.35);
   .lead {
     flex: 1;
     border-bottom: 1px dotted ${({ theme }) => theme.colors.borderMuted};
@@ -165,14 +187,14 @@ const BetLine = styled.div`
     min-width: 14px;
   }
   .amt {
-    font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+    font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
     font-variant-numeric: tabular-nums;
     font-weight: 600;
     color: ${({ theme }) => theme.colors.fontColorDark};
     font-size: 12px;
   }
-  .amt.allin {
-    color: ${({ theme }) => theme.colors.danger};
+  .amt.win {
+    color: ${({ theme }) => theme.colors.success};
   }
   .amt.dim {
     font-weight: 400;
@@ -186,30 +208,31 @@ const SeatHand = styled.div`
   margin-top: 5px;
   display: flex;
   align-items: flex-start;
+  filter: drop-shadow(0 3px 6px rgba(4, 30, 20, 0.4));
 `;
 
 const VacantCard = styled(Card)`
   display: block;
-  background: transparent;
+  background: rgba(255, 253, 247, 0.92);
   border: 1px dashed ${({ theme }) => theme.colors.borderMuted};
-  box-shadow: none;
-  padding: 11px 10px;
+  box-shadow: 0 4px 10px rgba(4, 30, 20, 0.3);
+  padding: 10px 9px;
   text-align: center;
 `;
 
 const VacLabel = styled.div`
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
   font-size: 8.5px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: ${({ theme }) => theme.colors.softerText};
+  color: ${({ theme }) => theme.colors.softText};
 `;
 
 const SitButton = styled.button`
   margin-top: 7px;
-  height: 28px;
+  height: 26px;
   padding: 0 14px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   border: 1px solid ${({ theme }) => theme.colors.fontColorDark};
   border-radius: 3px;
@@ -220,6 +243,31 @@ const SitButton = styled.button`
     background: ${({ theme }) => theme.colors.fontColorDark};
     color: ${({ theme }) => theme.colors.fontColorLight};
   }
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(21, 80, 127, 0.35);
+  }
+`;
+
+/* 庄家钮：座卡右上角的 D 盘（真实牌桌 dealer button） */
+const DealerDisk = styled.span`
+  position: absolute;
+  top: -8px;
+  right: -7px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: ${({ theme }) => theme.colors.lightestBg};
+  border: 1.5px solid ${({ theme }) => theme.colors.fontColorDark};
+  box-shadow: 0 2px 5px rgba(4, 30, 20, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
+  font-size: 10px;
+  font-weight: 700;
+  color: ${({ theme }) => theme.colors.fontColorDark};
+  z-index: 1;
 `;
 
 const fmt = (n: number) => new Intl.NumberFormat().format(n);
@@ -259,6 +307,8 @@ export interface SeatEntryProps {
   winnerInfo?: { rank: string; amount: number | null } | null;
   /** 摊牌牌型（T4「三条 K」行：showdownHandRanks 广播的各家 rank，明牌不下发） */
   showdownRank?: string | null;
+  /** 本手庄家位（table.button / dealerSeatId）：座卡右上角 D 盘 */
+  isDealer?: boolean;
 }
 
 export const SeatEntry: React.FC<SeatEntryProps> = ({
@@ -269,6 +319,7 @@ export const SeatEntry: React.FC<SeatEntryProps> = ({
   canSit,
   winnerInfo,
   showdownRank,
+  isDealer,
 }) => {
   const { getLocalizedString } = useContext(contentContext)!;
   const { seatId } = useContext(gameContext)!;
@@ -353,6 +404,7 @@ export const SeatEntry: React.FC<SeatEntryProps> = ({
           <Stack>{fmt(seat.stack)}</Stack>
         </NameCol>
         <StatusChip $tone={tone}>{statusText}</StatusChip>
+        {isDealer && <DealerDisk>D</DealerDisk>}
       </Card>
       {revealedCards.length >= 2 && (
         <SeatHand>
@@ -366,37 +418,23 @@ export const SeatEntry: React.FC<SeatEntryProps> = ({
       {acting && deadline && (
         <SeatTimer deadline={deadline} totalMs={table.bettingTimeoutMs ?? 15000} />
       )}
-      {!folded && seat.lastAction !== 'WINNER' && (seat.bet > 0 || seat.lastAction) && (
-        <BetLine>
-          <span style={{ fontFamily: fontMono }}>{seat.lastAction ?? '下注'}</span>
-          <span className="lead" />
-          <span className={`amt ${allIn ? 'allin' : ''}`}>{seat.bet > 0 ? fmt(seat.bet) : '—'}</span>
-        </BetLine>
-      )}
-      {folded && seat.bet > 0 && (
-        <BetLine>
-          <span style={{ fontFamily: fontMono }}>弃牌</span>
-          <span className="lead" />
-          <span className="amt dim">—</span>
-        </BetLine>
-      )}
       {seat.lastAction === 'WINNER' && table.handOver && (
-        <BetLine>
+        <LedgerLine>
           <span style={{ fontFamily: fontMono }}>
             {winnerInfo ? `${winnerInfo.rank}` : 'WINNER'}
           </span>
           <span className="lead" />
-          <span className="amt">
+          <span className="amt win">
             {winnerInfo?.amount != null ? `+${fmt(winnerInfo.amount)}` : '—'}
           </span>
-        </BetLine>
+        </LedgerLine>
       )}
       {table.handOver && seat.lastAction !== 'WINNER' && !folded && showdownRank && (
-        <BetLine>
+        <LedgerLine>
           <span style={{ fontFamily: fontMono }}>{showdownRank}</span>
           <span className="lead" />
           <span className="amt dim">—</span>
-        </BetLine>
+        </LedgerLine>
       )}
       <span data-seat={seatNo} style={{ display: 'none' }} />
     </SeatWrap>

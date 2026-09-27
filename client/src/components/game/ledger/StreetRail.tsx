@@ -4,27 +4,31 @@ import { Table } from '../../../types/game';
 
 /**
  * 五节点街段状态轨（design/table .rail）：翻前/翻牌/转牌/河牌/摊牌。
- * done=翡翠实心 / cur=琥珀实心 / 待=空心。由 roundState + 公共牌数推导。
+ * done=翡翠实心 / cur=琥珀实心（外圈光环）/ 待=空心。由 roundState + 公共牌数推导。
  */
 const Rail = styled.div`
   display: flex;
   align-items: flex-start;
+  padding-top: 3px;
 `;
 
 const Node = styled.div<{ $state: 'done' | 'cur' | 'todo' }>`
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   flex: none;
-  width: 60px;
+  width: 64px;
   i {
-    width: 9px;
-    height: 9px;
+    width: 11px;
+    height: 11px;
     border: 1.5px solid ${({ theme }) => theme.colors.borderMuted};
     background: ${({ theme }) => theme.colors.lightestBg};
     display: block;
     flex: none;
+    border-radius: 2px;
+    box-shadow: ${({ $state, theme }) =>
+      $state === 'cur' ? `0 0 0 3px rgba(130, 85, 16, 0.18)` : 'none'};
     ${({ $state, theme }) =>
       $state === 'done'
         ? `background: ${theme.colors.success}; border-color: ${theme.colors.success};`
@@ -33,9 +37,9 @@ const Node = styled.div<{ $state: 'done' | 'cur' | 'todo' }>`
           : ''}
   }
   span {
-    font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
-    font-size: 8.5px;
-    letter-spacing: 0.05em;
+    font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
+    font-size: 9.5px;
+    letter-spacing: 0.08em;
     color: ${({ theme }) => theme.colors.softerText};
     text-transform: uppercase;
     text-align: center;
@@ -52,7 +56,7 @@ const Line = styled.div<{ $done: boolean }>`
   flex: 1;
   height: 1.5px;
   background: ${({ $done, theme }) => ($done ? theme.colors.success : theme.colors.borderMuted)};
-  margin-top: 4px;
+  margin-top: 9px;
   min-width: 8px;
 `;
 

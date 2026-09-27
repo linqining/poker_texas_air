@@ -100,13 +100,13 @@ interface PaperCardProps {
 }
 
 export const PaperCard: React.FC<PaperCardProps> = ({ card, sealedIndex, small }) => {
-  const w = small ? 36 : 52;
-  const h = small ? 52 : 74;
+  const w = small ? 38 : 60;
+  const h = small ? 54 : 84;
   if (!card) {
     return (
       <PC $red={false} $w={w} $h={h} aria-label={`sealed card #${sealedIndex ?? ''}`}>
         <BackArt>
-          <Lock size={small ? 11 : 14} strokeWidth={1.6} />
+          <Lock size={small ? 11 : 15} strokeWidth={1.6} />
           <span>SEALED</span>
         </BackArt>
         {sealedIndex != null && <BackNo>#{sealedIndex}</BackNo>}
@@ -115,7 +115,7 @@ export const PaperCard: React.FC<PaperCardProps> = ({ card, sealedIndex, small }
   }
   const suit = SUIT_GLYPH[card.suit] ?? card.suit;
   const red = card.suit?.toLowerCase() === 'h' || card.suit?.toLowerCase() === 'd';
-  const glyphSize = small ? 17 : 26;
+  const glyphSize = small ? 18 : 30;
   return (
     <PC $red={red} $w={w} $h={h} aria-label={`${card.rank}${suit}`}>
       <Ix>

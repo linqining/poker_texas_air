@@ -56,10 +56,17 @@ const Hand = styled.span`
 const Right = styled.div`
   margin-left: auto;
   display: flex;
-  align-items: center;
-  gap: 7px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
   flex: none;
-  padding-top: 4px;
+  padding-top: 2px;
+`;
+
+const NetsRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
 `;
@@ -68,7 +75,7 @@ const Net = styled.span`
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-family: ${({ theme }) => theme.fonts.fontFamilySansSerif};
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
   font-variant-numeric: tabular-nums;
   font-size: 10.5px;
   color: ${({ theme }) => theme.colors.mutedText};
@@ -79,15 +86,62 @@ const Net = styled.span`
   white-space: nowrap;
 `;
 
+/* 抬头工具行：安静的墨线小钮（离桌 / 记录 / 凭证），不与主操作抢色 */
+const ToolRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+`;
+
+export const ToolButton = styled.button`
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  font-family: ${({ theme }) => theme.fonts.fontFamilySerif};
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: ${({ theme }) => theme.colors.mutedText};
+  background: ${({ theme }) => theme.colors.lightestBg};
+  border: 1px solid ${({ theme }) => theme.colors.borderMuted};
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    color ${({ theme }) => theme.timing.fast} ${({ theme }) => theme.easing.easeStandard},
+    border-color ${({ theme }) => theme.timing.fast} ${({ theme }) => theme.easing.easeStandard},
+    background-color ${({ theme }) => theme.timing.fast} ${({ theme }) => theme.easing.easeStandard};
+
+  &:hover:not(:disabled) {
+    color: ${({ theme }) => theme.colors.fontColorDark};
+    border-color: ${({ theme }) => theme.colors.fontColorDark};
+  }
+  &:disabled {
+    color: ${({ theme }) => theme.colors.disabledText};
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(21, 80, 127, 0.35);
+  }
+`;
+
 const fmt = (n: number) => new Intl.NumberFormat().format(n);
 
 interface TicketHeaderProps {
   table: Table;
   /** 状态注（如「等待开盘」「轮到我行动」） */
   statusNote?: string;
+  /** 右侧工具钮行（首页/大厅/离桌/记录/凭证），由 Play 装配 */
+  toolbar?: React.ReactNode;
 }
 
-export const TicketHeader: React.FC<TicketHeaderProps> = ({ table, statusNote }) => {
+export const TicketHeader: React.FC<TicketHeaderProps> = ({ table, statusNote, toolbar }) => {
   const name = table.name || table.id;
   return (
     <Wrap>
@@ -102,12 +156,15 @@ export const TicketHeader: React.FC<TicketHeaderProps> = ({ table, statusNote })
         </Title>
       </div>
       <Right>
-        <Net>
-          盲注 {fmt(table.smallBlind)} / {fmt(table.bigBlind)}
-        </Net>
-        {!!table.minRaise && <Net>最小加注 {fmt(table.minRaise)}</Net>}
-        <Net>最小买入 {fmt(table.minBuyIn)}</Net>
-        <Net>上限 {fmt(table.maxBuyIn)}</Net>
+        <ToolRow>{toolbar}</ToolRow>
+        <NetsRow>
+          <Net>
+            盲注 {fmt(table.smallBlind)} / {fmt(table.bigBlind)}
+          </Net>
+          {!!table.minRaise && <Net>最小加注 {fmt(table.minRaise)}</Net>}
+          <Net>最小买入 {fmt(table.minBuyIn)}</Net>
+          <Net>上限 {fmt(table.maxBuyIn)}</Net>
+        </NetsRow>
       </Right>
     </Wrap>
   );

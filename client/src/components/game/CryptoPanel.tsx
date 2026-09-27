@@ -20,7 +20,7 @@ interface CryptoPanelProps {
 // 账簿语言：纸卡 + 细线桌沿 + 方角，零玻璃零渐变；标签走 .ch 小型章语言。
 const PanelContainer = styled.div`
   position: fixed;
-  top: 7.6rem;
+  top: 10.4rem;
   right: 0.8rem;
   z-index: 900;
   max-width: 320px;
