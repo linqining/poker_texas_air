@@ -105,7 +105,7 @@ const Loader: React.FC = () => {
           <Pip>♠</Pip>
         </CardFace>
       </CardContainer>
-      <LogoText>Secret Poker</LogoText>
+      <LogoText>ProofPlay Poker</LogoText>
       <Tagline>{getLocalizedString('common_loading')}</Tagline>
     </Wrapper>
   );

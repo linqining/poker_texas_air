@@ -216,7 +216,7 @@ const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
         <ModalHeading>{t('login_sign-in')}</ModalHeading>
 
         <LoginSection>
-          {/* ZChain Wallet：浏览器装了 zchain 扩展时的原生登录入口 */}
+          {/* ProofPlay Wallet：浏览器装了 zchain 扩展时的原生登录入口 */}
           {typeof window !== 'undefined'
             && (window as { zchain?: { isZChain?: boolean } }).zchain?.isZChain === true && (
             <WalletButton
@@ -233,7 +233,7 @@ const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
               }}
             >
               <span>⛓</span>
-              <span>ZChain Wallet</span>
+              <span>ProofPlay Wallet</span>
             </WalletButton>
           )}
           {availableConnectors.map((connector) => (

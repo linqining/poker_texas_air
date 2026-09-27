@@ -1,6 +1,10 @@
 # 技术型宣传语 v0.1
 
-按 §6.6 定稿，使用时不得改写为效果承诺。
+母品牌标语（Masterbrand slogan，出自《ProofPlay 统一设计风格建议》§2）：
+
+- **"Every game, proven."** —— 每一局，都有证。
+
+技术型宣传语按 §6.6 定稿，使用时不得改写为效果承诺。
 
 - "Fast at the table. Verifiable at settlement."
 - "The appchain for provable poker settlement."

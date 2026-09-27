@@ -1,6 +1,6 @@
 # ProofPlay Poker 媒体包 v0.1
 
-ProofPlay 为用户品牌，ZChain 仅保留在历史工作名和内部技术标识中。
+ProofPlay（中文辅助名：明局）为用户品牌，标语 "Every game, proven."；ZChain 保留为网络、协议与链上标识及历史工作名，不承担母品牌角色。
 
 版本：v0.1（工作名阶段）· 日期：2026-09-12 · 水印要求：所有对外素材带版本与环境水印（如 `PLAY / devnet / v1.3`）。
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ZChain Poker 官网/文档站静态构建器。
+"""ProofPlay Poker 官网/文档站静态构建器。
 
 只用 Python 3 标准库，无任何第三方依赖：
 
@@ -417,14 +417,15 @@ def footer_html(docs_mode: bool) -> str:
     return (
         '<footer class="site-footer"><div class="wrap footer-grid">'
         '<div><p class="footer-brand"><img src="/assets/img/logo.svg" alt="" width="28" height="28"> '
-        + SITE["NAME"] + '</p><p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络，'
+        + SITE["NAME"] + ' · 明局</p><p>Every game, proven. 面向扑克场景的专用 Appchain。'
+        '当前为 devnet 托管网络，'
         'PLAY 用于测试与娱乐；REAL 提现受托管与 finality 门槛约束。</p></div>'
         '<div class="footer-links"><h2 class="footer-h">站点</h2>' + links + "</div>"
         '<div class="footer-meta"><h2 class="footer-h">版本与仓库</h2>'
         '<p>' + ver + '</p>'
         '<p><a href="' + SITE["REPO_URL"] + '" rel="noopener">代码仓库（占位地址）</a></p>'
         '<p>上线前域名 ' + SITE["URL_BASE"] + ' 为占位（plan &#167;6.1）。</p>'
-        '<p>&#169; ' + SITE["YEAR"] + " " + SITE["NAME"] + " 项目（工作名）</p>"
+        '<p>&#169; ' + SITE["YEAR"] + " " + SITE["NAME"] + " 项目（历史工作名 ZChain）</p>"
         "</div></div></footer>"
     )
 

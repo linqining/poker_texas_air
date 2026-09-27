@@ -1,4 +1,4 @@
-# Secret Poker Client - 部署文档
+# ProofPlay Poker Client - 部署文档
 
 ## 项目概述
 

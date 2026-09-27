@@ -11,7 +11,7 @@
 ## 短版（280 字内）
 
 ```text
-ZChain Poker devnet：桌级软确认毫秒级反馈，结算由 STARK proof 约束，
+ProofPlay Poker devnet：桌级软确认毫秒级反馈，结算由 STARK proof 约束，
 rake 可独立重算。PLAY 测试环境已开放；REAL 与无信任提现按路线图启用。
 devnet / custodial v1 / provable settlement
 ```

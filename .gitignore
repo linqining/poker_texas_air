@@ -33,3 +33,4 @@ deploy/
 fact-verify/target*
 stwo_lean/charon-demo/*
 uiwalk-recheck/*
+docs/brand/*

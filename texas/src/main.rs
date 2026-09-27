@@ -191,7 +191,7 @@ async fn main() -> std::io::Result<()> {
 
     let app = Router::new()
         .nest("/api", api_routes)
-        .route("/", routing::get(|| async { "Welcome to Secret Poker (Rust)!" }))
+        .route("/", routing::get(|| async { "Welcome to ProofPlay Poker (Rust)!" }))
         .layer(
             ServiceBuilder::new()
                 .map_request(move |mut req: axum::http::Request<axum::body::Body>| {
@@ -212,7 +212,7 @@ async fn main() -> std::io::Result<()> {
 
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    tracing::info!("Secret Poker Server (Rust) starting on port {}", port);
+    tracing::info!("ProofPlay Poker Server (Rust) starting on port {}", port);
     tracing::info!("Using in-memory user storage (MongoDB removed). 筹码余额由 Starknet STRK20 链上结算决定。");
 
     axum::serve(

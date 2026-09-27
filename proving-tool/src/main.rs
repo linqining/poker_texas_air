@@ -4,8 +4,12 @@
 //! Cairo1 source -> gas-disabled `Executable` compile -> Cairo VM witness run -> Stwo proof
 //! -> verification, with per-phase timings and all artifacts written to an output directory.
 //!
-//! The game server never runs this; it is a standalone tool for whoever settles a hand in
-//! `STARKNET_SETTLE_MODE=proved`. See README.md for the mode story.
+//! This IS the production prover for all app-level statements: the texas server spawns it
+//! directly for the snip36 settlement mode (`recursion_prover.rs`, hand_verify recursion
+//! envelope) and the v2 fact-registry entry (`settlement_prover.rs`, settlement_private
+//! circuit). It is NOT a replacement for the official `transaction-prover` container — that
+//! one proves SNOS (Starknet OS) execution of the settlement transaction for the DAPV
+//! `entry=snip36` leg, a different program/format/verifier entirely.
 
 use std::fs;
 use std::io::{Read, Write};

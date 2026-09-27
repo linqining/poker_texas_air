@@ -259,7 +259,7 @@ const useAuth = (): UseAuthReturn => {
   };
 
   /**
-   * ZChain 钱包登录：连接扩展（弹窗确认）→ 结构化操作签名（弹窗确认）→
+   * ProofPlay 钱包登录：连接扩展（弹窗确认）→ 结构化操作签名（弹窗确认）→
    * 以摘要作为凭证走 /auth/wallet（服务端 dev 模式跳过链上验签；
    * STARKNET_AUTH_STRICT=true 时需链上可验，ZChain 路径仅用于 dev 部署）。
    */
@@ -287,7 +287,7 @@ const useAuth = (): UseAuthReturn => {
     } catch (error) {
       logger.error('[Auth] ZChain wallet login failed:', error);
       const e = error as { code?: string; message?: string };
-      window.alert(`ZChain 钱包登录失败：${e?.code ? `${e.code}: ` : ''}${e?.message ?? error}`);
+      window.alert(`ProofPlay 钱包登录失败：${e?.code ? `${e.code}: ` : ''}${e?.message ?? error}`);
     }
     setIsLoading(false);
   };

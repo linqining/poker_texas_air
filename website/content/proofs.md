@@ -17,9 +17,9 @@ v1 无 portal 后端。以下表单为接口就绪的静态层：生产环境将
   <p class="kv">当前状态：v1 静态层 &#183; SAMPLE DATA / devnet &#183; 查询接口待 portal 服务</p>
 </form>
 
-## 浏览器扩展侧接线（ZChain Wallet Extension 0.2，已交付）
+## 浏览器扩展侧接线（ProofPlay Wallet Extension 0.2，已交付）
 
-网页静态表单之上的可用路径：**ZChain 钱包浏览器扩展（0.2.0-alpha）内置 proof
+网页静态表单之上的可用路径：**ProofPlay 钱包浏览器扩展（0.2.0-alpha）内置 proof
 portal**（扩展页 <code>portal/portal.html</code>，popup 一键打开）。验证一手
 牌的完整流程在本机完成：
 

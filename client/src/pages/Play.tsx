@@ -34,7 +34,7 @@ import { CHIPS_PER_STRK, STRK_DECIMALS, WEI_PER_CHIP } from '../starknet/config'
 import { isZChainSession } from '../starknet/zchainWallet';
 import { ActionLoadingOverlay, LeavingOverlay, LeaveDeferredBanner } from './Play.styles';
 
-// ZChain 钱包会话（appchain→zchain 结算的 dev 部署）不入账链上筹码，
+// ProofPlay 钱包会话（appchain→zchain 结算的 dev 部署）不入账链上筹码，
 // 入座额度按服务端结余 + 该 dev 常量放行（与 Seat.tsx 同源）。
 const ZCHAIN_DEV_BUYIN_CHIPS = 5000;
 

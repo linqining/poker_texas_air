@@ -14,9 +14,10 @@
 🎬 **[3 分钟演示视频](https://www.youtube.com/watch?v=uqtrvw_bR4w)** ·
 📜 [strk20.json](strk20.json)——机器可读的部署清单
 
-一个构建在 Starknet 上的全栈可证明公平在线德州扑克——运营方在密码学上无法
+**ProofPlay Poker**（明局）——构建在 Starknet 上的全栈可证明公平在线德州扑克——运营方在密码学上无法
 对自己运营的牌局作弊、也无法冻结牌局的资金。**2026-09-07 起部署并实际运行于
 Starknet 主网**：5 个合约，完整筹码回路（存入 → 结算 → 私密领取）已有真实交易。
+消费品牌为 ProofPlay（每一局，都有证）；网络与协议层沿用历史名 ZChain。
 
 没有 Ready 钱包？[视频](https://www.youtube.com/watch?v=uqtrvw_bR4w) 3 分钟走完整条主网回路。
 
@@ -24,7 +25,7 @@ Starknet 主网**：5 个合约，完整筹码回路（存入 → 结算 → 私
   <img src="docs/game_live.gif" width="820" alt="实牌对局——加密发牌、联合洗牌，每个证明到达即在浏览器内校验">
 </p>
 <p align="center">
-  <img src="docs/secret_poker_game.png" width="400" alt="牌桌与 ZK Crypto Events 面板——每个洗牌/开牌 sigma 证明到达即绿色通过">
+  <img src="docs/proofplay_poker_game.png" width="400" alt="牌桌与 ZK Crypto Events 面板——每个洗牌/开牌 sigma 证明到达即绿色通过">
   <img src="docs/claim_private.png" width="400" alt="领取奖励弹窗——经 STRK20 池私密领取，或公开提款">
 </p>
 

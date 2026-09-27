@@ -15,11 +15,12 @@
 🎬 **[Watch the 3-minute video](https://www.youtube.com/watch?v=uqtrvw_bR4w)** ·
 📜 [strk20.json](strk20.json) — machine-readable deployment manifest
 
-A full-stack, provably fair online Texas Hold'em on Starknet — a poker platform
-where the operator is cryptographically incapable of cheating at, or freezing
-the money of, the game it hosts. **Live on Starknet mainnet since 2026-09-07**:
-5 contracts, the full chips loop (deposit → settle → private claim) already
-transacting.
+**ProofPlay Poker** is a full-stack, provably fair online Texas Hold'em on
+Starknet — a poker platform where the operator is cryptographically incapable
+of cheating at, or freezing the money of, the game it hosts. **Live on Starknet
+mainnet since 2026-09-07**: 5 contracts, the full chips loop (deposit → settle →
+private claim) already transacting. ProofPlay is the consumer brand — *every
+game, proven*; ZChain remains the network and protocol name.
 
 No Ready wallet? The [video](https://www.youtube.com/watch?v=uqtrvw_bR4w) walks
 the full mainnet loop in 3 minutes.
@@ -28,7 +29,7 @@ the full mainnet loop in 3 minutes.
   <img src="docs/game_live.gif" width="820" alt="A live hand — encrypted dealing, joint shuffle, every proof verified in-browser as it arrives">
 </p>
 <p align="center">
-  <img src="docs/secret_poker_game.png" width="400" alt="Game table with the ZK Crypto Events panel — each shuffle/reveal sigma proof arrives and verifies in green">
+  <img src="docs/proofplay_poker_game.png" width="400" alt="Game table with the ZK Crypto Events panel — each shuffle/reveal sigma proof arrives and verifies in green">
   <img src="docs/claim_private.png" width="400" alt="Claim rewards modal — private claim into a STRK20 pool note, or plain public withdrawal">
 </p>
 

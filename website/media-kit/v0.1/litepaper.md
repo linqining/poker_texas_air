@@ -1,11 +1,11 @@
-# ZChain Poker Litepaper（工作稿 v0.1）
+# ProofPlay Poker Litepaper（工作稿 v0.1）
 
 > 面向产品与运营读者。完整技术细节见 whitepaper.md 与公开文档。
 > 本文件按发布纪律保留了 custodial 与 PLAY/REAL 限制——不得删减后传播。
 
 ## 这是什么
 
-ZChain Poker 是一条专为扑克设计的应用链：牌桌操作在链内以毫秒级软确认返回；每一手牌的结算关系（pot、rake、赔付结构）由可独立验证的证明约束；外部资产由明确的 Vault 与提现流程管理。
+ProofPlay Poker 是一条专为扑克设计的应用链：牌桌操作在链内以毫秒级软确认返回；每一手牌的结算关系（pot、rake、赔付结构）由可独立验证的证明约束；外部资产由明确的 Vault 与提现流程管理。
 
 **当前形态（务必引用）**：devnet；单 Sequencer；**托管式（custodial）v1**。PLAY 是测试/娱乐筹码；REAL 是运营方托管的真实资产映射，当前不对公众开放充值。
 

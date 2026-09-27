@@ -212,7 +212,7 @@ fi
 if [[ -n "${CLIENT_PID:-}" ]]; then
   log "前端就绪: http://localhost:5173（端口占用时 vite 自动顺延，日志 /tmp/texas-client.log）"
   if [[ "$CHAIN" == "zchain" ]]; then
-    log "提示: zchain 模式需浏览器装有 ZChain Wallet 扩展（window.zchain）；登录/买入经扩展弹窗签名"
+    log "提示: zchain 模式需浏览器装有 ProofPlay Wallet 扩展（window.zchain）；登录/买入经扩展弹窗签名"
   fi
 fi
 log "全部已启动；Ctrl-C 一次性停止（前端 + 服务器）"

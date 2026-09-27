@@ -1,5 +1,5 @@
 // =============================================================================
-// zchainWallet.ts — ZChain Wallet（window.zchain）连接器
+// zchainWallet.ts — ProofPlay Wallet（window.zchain）连接器
 //
 // 通过 ZChain 浏览器钱包扩展注入的 window.zchain provider（独立命名空间，
 // 非 EIP-1193 / Starknet injected）完成：
@@ -70,7 +70,7 @@ export function clearZChainSession(): void {
 function provider(): ZChainProvider {
   const p = (window as { zchain?: ZChainProvider }).zchain;
   if (!p || p.isZChain !== true) {
-    throw new Error('ZChain Wallet not installed');
+    throw new Error('ProofPlay Wallet not installed');
   }
   return p;
 }
@@ -84,7 +84,7 @@ export async function zchainConnect(): Promise<string> {
   const res = await p.requestAccounts() as { accounts?: string[]; address?: string };
   const addr = res?.accounts?.[0] ?? res?.address ?? null;
   if (!addr || typeof addr !== 'string') {
-    throw new Error('ZChain Wallet: no account (locked or rejected)');
+    throw new Error('ProofPlay Wallet: no account (locked or rejected)');
   }
   localStorage.setItem(ZCHAIN_ADDR_KEY, addr);
   logger.log('[ZChain] connected:', addr);
@@ -130,7 +130,7 @@ export async function zchainSignLogin(addr: string): Promise<string> {
   const { inputs, total } = await collectInputs(p);
   if (inputs.length === 0 || total === 0n) {
     throw Object.assign(
-      new Error('no spendable PLAY note — 请先在 ZChain Wallet 弹窗的 devnet 水龙头铸造'),
+      new Error('no spendable PLAY note — 请先在 ProofPlay Wallet 弹窗的 devnet 水龙头铸造'),
       { code: 'NoPlayableNote' },
     );
   }
@@ -159,7 +159,7 @@ export async function zchainSignBuyIn(addr: string, tableId: number): Promise<st
   const { inputs } = await collectInputs(p);
   if (inputs.length === 0) {
     throw Object.assign(
-      new Error('no spendable PLAY note — 请先在 ZChain Wallet 弹窗的 devnet 水龙头铸造'),
+      new Error('no spendable PLAY note — 请先在 ProofPlay Wallet 弹窗的 devnet 水龙头铸造'),
       { code: 'NoPlayableNote' },
     );
   }

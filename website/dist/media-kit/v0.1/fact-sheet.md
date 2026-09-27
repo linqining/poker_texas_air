@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 项目名（工作名） | ZChain Poker / ZChain Poker L1 |
+| 项目名 | ProofPlay Poker（历史工作名：ZChain Poker / ZChain Poker L1） |
 | 当前网络 | devnet（`zchain-poker-devnet`） |
 | 原生费用 | 游戏操作免 gas；收入 = rake；无原生代币 |
 | 资产 | PLAY（测试/娱乐筹码）、REAL（托管真实资产映射），AIR 层物理隔离 |

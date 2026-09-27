@@ -6,7 +6,7 @@ description: 启动 devnet、试玩 PLAY、验证证明的入口页。
 lead: 从克隆仓库到验证一手牌：三条路径，最短 15 分钟。
 ---
 
-本板块是开发者与玩家进入 ZChain Poker devnet 的入口。
+本板块是开发者与玩家进入 ProofPlay Poker devnet（网络与协议标识沿用 ZChain）的入口。
 
 | 页面 | 适合谁 | 内容 |
 |---|---|---|

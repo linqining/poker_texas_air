@@ -8,7 +8,7 @@ lead: Appchain、Note 账本、Texas AIR 证明、Sequencer 与 BFT 路线。v1 
 ## 总体架构
 
 ```
-┌─ ZChain Poker Appchain ─────────────────────────────────┐
+┌─ ProofPlay Poker Appchain ───────────────────────────┐
 │  Sequencer：软确认链 / 查重 / 桌准入 / 限流 / WAL         │
 │      ↓                                                   │
 │  Note 账本：承诺树(Poseidon, 深32) + nullifier 集          │

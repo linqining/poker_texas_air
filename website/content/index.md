@@ -126,8 +126,8 @@ lead: ProofPlay Poker —— 让游戏自己证明公平。底层网络沿用 ZC
 
 ## 英文简介（English short copy）
 
-> Every hand. A verifiable settlement.
+> Every game, proven.
 >
-> ZChain Poker is a purpose-built appchain for poker: fast table-level confirmations, provable settlement and rake accounting, with final asset release handled by an explicit Vault and exit protocol.
+> ProofPlay Poker (powered by ZChain) is a purpose-built appchain for poker: fast table-level confirmations, provable settlement and rake accounting, with final asset release handled by an explicit Vault and exit protocol.
 >
-> ZChain Poker v1 is a custodial network. PLAY is for testing and entertainment; REAL assets remain subject to operator custody and the withdrawal process. Trustless withdrawal, censorship-resistant finality and multi-operator consensus are later roadmap milestones and will only be enabled after the corresponding verifier, BFT and exit protocol pass acceptance.
+> ProofPlay Poker v1 is a custodial network. PLAY is for testing and entertainment; REAL assets remain subject to operator custody and the withdrawal process. Trustless withdrawal, censorship-resistant finality and multi-operator consensus are later roadmap milestones and will only be enabled after the corresponding verifier, BFT and exit protocol pass acceptance.

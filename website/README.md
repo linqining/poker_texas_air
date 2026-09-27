@@ -1,4 +1,4 @@
-# ZChain Poker 官网 / 文档站（website/）
+# ProofPlay Poker 官网 / 文档站（website/）
 
 静态站，零构建依赖：`python3 build.py`（仅 Python 3 标准库）把 `content/`（markdown）+
 `templates/`（HTML 模板）+ `assets/` 构建到 `dist/`。无 npm、无框架、可复现。

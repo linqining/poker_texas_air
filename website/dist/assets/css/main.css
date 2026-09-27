@@ -1,5 +1,5 @@
 /* ==========================================================================
-   ZChain Poker 官网 · 账簿 Ledger 设计体系 v1.0
+   ProofPlay Poker 官网 · 账簿 Ledger 设计体系 v1.0
    唯一样式源。纸白为默认底面，夜场通过 html[data-ground="night"] 切换
    （切换控件见 templates/*.html 与 assets/js/ground.js）。
    夜场 14 个 token 逐字沿用 media-kit/v0.1/brand.css，即改版前站点的颜色。
@@ -7,7 +7,7 @@
    出图与走查：website/tools/site_shoot.py · design/site/README.md
    ========================================================================== */
 /* ============================================================================
-   ZChain 站点 · 账簿 Ledger 体系 v0.1
+   ProofPlay 站点 · 账簿 Ledger 体系 v0.1
    ----------------------------------------------------------------------------
    形态:website/assets/css/main.css 的**替换件**。类名与现站点 1:1 沿用,
    build.py / templates/base.html / 13 个 content/*.md 一行都不用改。

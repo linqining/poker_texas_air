@@ -5,9 +5,9 @@
 ---
 
 ```text
-ZChain Poker 发布 [网络版本/测试网版本]：面向扑克场景的专用 Appchain
+ProofPlay Poker 发布 [网络版本/测试网版本]：面向扑克场景的专用 Appchain
 
-[城市]，[日期] —— ZChain Poker 今日开放 [devnet/testnet/MVP]。该网络将桌级操作、结算证明和外部
+[城市]，[日期] —— ProofPlay Poker 今日开放 [devnet/testnet/MVP]。该网络将桌级操作、结算证明和外部
 资产边界分层设计：玩家可在 PLAY 环境体验低延迟牌局，开发者可以通过公开 ABI、
 RPC 和 proof portal 复验结算记录。当前 REAL 资产仍处于 [托管/白名单/限额] 阶段；
 BFT checkpoint、强制包含和 permissionless withdrawal 按公开路线图逐步启用。
@@ -24,7 +24,7 @@ BFT checkpoint、强制包含和 permissionless withdrawal 按公开路线图逐
 引用（发言人占位）：
 "[关于分层设计与证明边界的引述]" —— [姓名]，[职务]
 
-关于 ZChain Poker：
+关于 ProofPlay Poker：
 [一句话定位 + 仓库/文档/浏览器/状态页链接。项目为工作名，域名上线前为占位。]
 
 媒体联系：[邮箱占位]

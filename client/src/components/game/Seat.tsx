@@ -35,7 +35,7 @@ import { logger } from '../../helpers/logger';
 import { blindRoles } from '../../helpers/tableDerived';
 import { evaluateBestHand, rankLabel } from '../../helpers/handEval';
 
-// ZChain 钱包会话（appchain→zchain 结算的 dev 部署）不入账链上筹码，
+// ProofPlay 钱包会话（appchain→zchain 结算的 dev 部署）不入账链上筹码，
 // 入座额度按服务端结余 + 该 dev 常量放行。
 const ZCHAIN_DEV_BUYIN_CHIPS = 5000;
 

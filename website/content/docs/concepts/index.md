@@ -3,7 +3,7 @@ title: 核心概念
 lang: zh-CN
 section: concepts
 description: Note、nullifier、桌、手、rake 与四阶段最终性。
-lead: ZChain Poker 的状态模型与最终性词汇表。
+lead: ProofPlay Poker 的状态模型与最终性词汇表。
 ---
 
 ## Note 与 nullifier

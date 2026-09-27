@@ -3,7 +3,7 @@
 > 版本 v0.1 · 水印：PLAY / devnet / v1.3
 
 ```text
-ZChain Poker 把扑克牌局执行、可验证结算和资金边界拆成清晰的三层：
+ProofPlay Poker 把扑克牌局执行、可验证结算和资金边界拆成清晰的三层：
 桌级快速执行负责体验，证明管道负责结算正确性，Vault/退出协议负责外部资产。
 项目从托管式 v1 起步，逐步增加多 validator BFT checkpoint、强制包含和
 permissionless withdrawal。每个阶段都以公开规范、测试向量和可复验指标为出口。

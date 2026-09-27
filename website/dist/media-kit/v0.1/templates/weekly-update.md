@@ -1,7 +1,7 @@
 # 开发周报模板
 
 ```markdown
-# ZChain Poker 开发周报 #<编号>（<起始日> – <结束日>）
+# ProofPlay Poker 开发周报 #<编号>（<起始日> – <结束日>）
 
 环境：devnet · 文档版本：docs v1.3.0-alpha (ABI v1.2.2)
 

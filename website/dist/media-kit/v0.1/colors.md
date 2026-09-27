@@ -3,6 +3,20 @@
 变量与官网样式表 `website/assets/css/main.css` 的 `:root` / `html[data-ground="night"]` 完全同源；
 任何一侧修改必须同步（本目录另附机器可读的 `brand.css`，由 `main.css` 生成）。
 
+## 母品牌色（Masterbrand）
+
+出自《ProofPlay 统一设计风格建议》（`docs/brand/PROOFPLAY_DESIGN_UNIFICATION.md` §2），
+是品牌识别层的五个锚点色：用于 logo、品牌物料与对外视觉。站点场景配色（下文两套底面）
+按对比度实测选取，语义角色与母品牌色一一对应；改场景色不改语义。
+
+| 名称 | 值 | 语义 | 站点场景色对应 |
+|---|---|---|---|
+| Proof Ink | `#101512` | 默认暗底（墨） | 夜场底色系（`--bg` / `--surface` 族） |
+| Paper | `#F3F0E7` | 纸面底 | 纸白底色系（`--bg` / `--surface` 族） |
+| Verify Green | `#18A66A` | 已验证 / 已完成 | `--felt`（纸白下加深至 `#0b6b45` 保对比度） |
+| Signal Blue | `#4967F2` | 信息与流程 | `--play` |
+| Evidence Gold | `#D49A2A` | 证据 / 托管 / 需注意 | `--real`（托管资产）· `--amb`（警示） |
+
 ## 两套底面
 
 | | 默认 | 可切 |

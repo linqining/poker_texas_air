@@ -288,12 +288,12 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
       }
       let buyinDigest = '';
       try {
-        addMessage('Confirming buy-in in ZChain Wallet...');
+        addMessage('Confirming buy-in in ProofPlay Wallet...');
         buyinDigest = await zchainSignBuyIn(walletAddress, Number(tableId));
       } catch (e) {
         const err = e as { code?: string; message?: string };
         logger.error('[SitDown] ZChain buy_in signing failed:', err);
-        addMessage(`Sit down failed: ZChain Wallet ${err?.code ?? ''} ${err?.message ?? e}`);
+        addMessage(`Sit down failed: ProofPlay Wallet ${err?.code ?? ''} ${err?.message ?? e}`);
         return;
       }
       let pkProof: unknown;
@@ -335,7 +335,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
         }, 6000);
       });
       if (outcome === null) {
-        addMessage('Joined table (ZChain Wallet buy-in confirmed)');
+        addMessage('Joined table (ProofPlay Wallet buy-in confirmed)');
         logger.log('[SitDown] zchain join accepted');
         return;
       }
