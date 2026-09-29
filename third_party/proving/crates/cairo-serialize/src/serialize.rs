@@ -7,6 +7,9 @@ use stwo::core::pcs::quotients::CommitmentSchemeProof;
 use stwo::core::poly::line::LinePoly;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs::blake2_hash::Blake2sHash;
+// LOCAL PATCH (poker_texas_air 2026-09-29): keccak256 hash serialization for
+// the keccak256-backed channel (ChannelHash::Keccak256).
+use stwo::core::vcs::keccak256_hash::Keccak256Hash;
 use stwo::core::vcs_lifted::MerkleHasherLifted;
 use stwo::core::vcs_lifted::verifier::MerkleDecommitmentLifted;
 // Make derive macro available.
@@ -199,6 +202,18 @@ impl<T0: CairoSerialize, T1: CairoSerialize, T2: CairoSerialize> CairoSerialize 
 }
 
 impl CairoSerialize for Blake2sHash {
+    fn serialize(&self, output: &mut Vec<FieldElement>) {
+        for byte_chunk in self.0.chunks_exact(4) {
+            let bytes: [u8; 4] = byte_chunk.try_into().unwrap();
+            let v = u32::from_le_bytes(bytes);
+            CairoSerialize::serialize(&v, output);
+        }
+    }
+}
+
+// LOCAL PATCH (poker_texas_air 2026-09-29): same 8x u32 little-endian word
+// layout as Blake2sHash — both hashes are 32 bytes.
+impl CairoSerialize for Keccak256Hash {
     fn serialize(&self, output: &mut Vec<FieldElement>) {
         for byte_chunk in self.0.chunks_exact(4) {
             let bytes: [u8; 4] = byte_chunk.try_into().unwrap();

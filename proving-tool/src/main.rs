@@ -38,6 +38,19 @@ const BENCH_DIR_REL: &str = "third_party/proving/test_data/test_hand_verify_benc
 /// Corelib crate root (the dir containing `lib.cairo`), not the repo root.
 const CORELIB_REL: &str = "third_party/corelib-2.19.4/corelib/src";
 
+/// L1 批量终证腿钉扎（settlement_batch_private，含 acc_prev/批根入参 +
+/// 电路内 poseidon 链接尾；2026-09-29 E2E 钉扎）。
+///
+/// 程序哈希 = prove-hand K=1/4/8/32/64 出证实测（prover 参数无关）。
+/// 改 cairo 源码必换哈希 → 同步更新 stark-recursion `stark_final.rs` 与
+/// fact-verify `PINNED_BATCH_PROGRAM_HASH`。批入口包装：`prove-batch.sh`
+/// （参数钉扎 params/canonical_small.json —— ≤6G 内存硬约束的成立前提，
+/// canonical 预处理迹同程序实测 9.6-12.9 GiB）。
+pub const SETTLEMENT_BATCH_PROGRAM_HASH: &str =
+    "0x05c400b46a261c6672cd7581436754e05da2287ba8ecdc69778d06e4ef831803";
+/// L1 批腿批程序源（相对 repo root）。
+pub const SETTLEMENT_BATCH_PROGRAM: &str = "proving-tool/src/settlement_batch_private.cairo";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "prove-hand",

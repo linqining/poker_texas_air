@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom';
 import styled from 'styled-components';
 import { useAccount, useConnect, useDisconnect } from '@starknet-react/core';
 import { activeAddress } from '../../starknet/devAccount';
+import { isMonadProvider } from '../../starknet/monadWallet';
 import authContext from '../../context/auth/authContext';
 import contentContext from '../../context/content/contentContext';
 import CloseButton from '../buttons/CloseButton';
@@ -134,8 +135,9 @@ const READY_CHROME_STORE_URL =
 const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
   const isLoggedIn = useContext(authContext)!.isLoggedIn;
   const { getLocalizedString: t } = useContext(contentContext)!;
-  const { loginWithZChain } = useContext(authContext)!;
+  const { loginWithZChain, loginWithMonad } = useContext(authContext)!;
   const [zchainPending, setZchainPending] = useState(false);
+  const [monadPending, setMonadPending] = useState(false);
   const connected = useAccount();
   // 连接的钱包（Ready/Cartridge）优先，dev 直签账户仅作无钱包时兜底
   const address = activeAddress(connected.address);
@@ -234,6 +236,26 @@ const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
             >
               <span>⛓</span>
               <span>ProofPlay Wallet</span>
+            </WalletButton>
+          )}
+          {/* Monad 钱包：浏览器带 EIP-1193 注入 provider（MetaMask/Rabby 等）
+              时的登录入口——切/加 Monad 测试网（10143）后 personal_sign 登录 */}
+          {typeof window !== 'undefined' && isMonadProvider() && (
+            <WalletButton
+              type="button"
+              data-testid="login-monad"
+              disabled={monadPending}
+              onClick={async () => {
+                setMonadPending(true);
+                try {
+                  await loginWithMonad();
+                } finally {
+                  setMonadPending(false);
+                }
+              }}
+            >
+              <span>⬡</span>
+              <span>Monad 钱包</span>
             </WalletButton>
           )}
           {availableConnectors.map((connector) => (

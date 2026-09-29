@@ -10,6 +10,7 @@ export interface AuthContextType {
   disconnectWallet: () => void;
   authMethod: AuthMethod;
   loginWithZChain: () => Promise<void>;
+  loginWithMonad: () => Promise<void>;
 }
 
 const authContext = createContext<AuthContextType | undefined>(undefined);

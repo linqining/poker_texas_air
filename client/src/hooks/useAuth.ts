@@ -14,6 +14,14 @@ import {
   clearZChainSession,
   isZChainSession,
 } from '../starknet/zchainWallet';
+import {
+  monadAddress,
+  monadConnect,
+  monadPersonalSign,
+  monadLoginMessageHash,
+  clearMonadSession,
+  isMonadSession,
+} from '../starknet/monadWallet';
 import type { AuthMethod } from '../context/auth/authContext';
 import { logger } from '../helpers/logger';
 
@@ -25,6 +33,7 @@ interface UseAuthReturn {
   disconnectWallet: () => void;
   authMethod: AuthMethod;
   loginWithZChain: () => Promise<void>;
+  loginWithMonad: () => Promise<void>;
 }
 
 /** Typed-data domain for the login message (SNIP-12 revision 1). */
@@ -64,8 +73,16 @@ const useAuth = (): UseAuthReturn => {
   // 无 Starknet 连接地址时才接管，避免与注入钱包互抢。
   const [zchainAddr, setZchainAddr] = useState<string | null>(zchainAddress());
   const zchainActive = !connectedAddress && zchainAddr !== null;
-  // 连接的钱包（Ready/Cartridge）优先，ZChain 扩展会话次之，dev 直签兜底。
-  const address = zchainActive ? zchainAddr : activeAddress(connectedAddress);
+  // Monad 钱包会话：身份来自 EIP-1193 window.ethereum（EVM 地址，
+  // 同样无 Starknet account）。优先级与 ZChain 并列：注入钱包 > ZChain/Monad 会话。
+  const [monadAddr, setMonadAddr] = useState<string | null>(monadAddress());
+  const monadActive = !connectedAddress && monadAddr !== null;
+  // 连接的钱包（Ready/Cartridge）优先，ZChain/Monad 扩展会话次之，dev 直签兜底。
+  const address = zchainActive
+    ? zchainAddr
+    : monadActive
+      ? monadAddr
+      : activeAddress(connectedAddress);
   const account = activeAccount(connectedAccount);
   const { connectAsync, connectors } = useConnect();
   // 登出过渡守卫：disconnect 是异步的，期间 address 尚未清空，自动重登
@@ -123,7 +140,7 @@ const useAuth = (): UseAuthReturn => {
       setStrkBalance(null);
       return;
     }
-    if (isZChainSession()) {
+    if (isZChainSession() || isMonadSession()) {
       setStrkBalance(null);
       return;
     }
@@ -259,6 +276,44 @@ const useAuth = (): UseAuthReturn => {
   };
 
   /**
+   * Monad 钱包登录（EIP-1193）：切/加 Monad 测试网 → eth_requestAccounts →
+   * personal_sign（EIP-191，钱包弹窗确认）→ 以本地复算摘要作 messageHash
+   * 走 /auth/wallet。服务端口径与 ZChain 路径相同：默认
+   * STARKNET_AUTH_STRICT=false 的 dev 模式跳过链上验签
+   * （texas/src/starknet/auth.rs:31-33）；strict 模式只能验 Starknet
+   * isValidSignature，EVM 登录在该模式下不可用——部署 ZChain dev 栈时成立。
+   */
+  const loginWithMonad = async (): Promise<void> => {
+    clearLoggedOutFlag();
+    setIsLoading(true);
+    try {
+      const addr = await monadConnect();
+      const message = `zgame-login:${addr}:${Date.now()}`;
+      const signature = await monadPersonalSign(addr, message);
+      const messageHash = monadLoginMessageHash(message);
+      setMonadAddr(addr);
+      const res = await httpClient.post('/auth/wallet', {
+        address: addr,
+        messageHash,
+        signature: [signature],
+        message,
+      });
+      const backendToken = res.data.token;
+      if (backendToken) {
+        localStorage.setItem('token', backendToken);
+        setAuthToken(backendToken);
+        await loadUser(backendToken);
+        setAuthMethod('wallet');
+        localStorage.setItem('authMethod', 'wallet');
+      }
+    } catch (error) {
+      logger.error('[Auth] Monad wallet login failed:', error);
+      window.alert(`Monad 钱包登录失败：${(error as Error)?.message ?? error}`);
+    }
+    setIsLoading(false);
+  };
+
+  /**
    * ProofPlay 钱包登录：连接扩展（弹窗确认）→ 结构化操作签名（弹窗确认）→
    * 以摘要作为凭证走 /auth/wallet（服务端 dev 模式跳过链上验签；
    * STARKNET_AUTH_STRICT=true 时需链上可验，ZChain 路径仅用于 dev 部署）。
@@ -320,6 +375,8 @@ const useAuth = (): UseAuthReturn => {
       localStorage.removeItem('authMethod');
       clearZChainSession();
       setZchainAddr(null);
+      clearMonadSession();
+      setMonadAddr(null);
       setAuthToken(null);
       setIsLoggedIn(false);
       setWalletAddress(null);
@@ -353,6 +410,9 @@ const useAuth = (): UseAuthReturn => {
     // ZChain 钱包会话：清理本地会话状态（扩展侧授权由用户在扩展里管理）。
     clearZChainSession();
     setZchainAddr(null);
+    // Monad 钱包会话：同款清理（EIP-1193 授权由用户在钱包里管理）。
+    clearMonadSession();
+    setMonadAddr(null);
     // 登出三步，顺序关键：
     // 1) 先立"登出中"标记 + 清本地登录态——自动重登 effect 立即失效；
     // 2) 再异步断开钱包连接（disconnectConnector 是 Promise，不 await 会
@@ -411,6 +471,7 @@ const useAuth = (): UseAuthReturn => {
     disconnectWallet,
     authMethod,
     loginWithZChain,
+    loginWithMonad,
   };
 };
 

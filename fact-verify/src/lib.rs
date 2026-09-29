@@ -125,6 +125,137 @@ pub fn verify_cairo_proof_file_pinned(
     Ok(out)
 }
 
+// ============================================================
+// L1 批量终证腿（settlement_batch_private）钉扎与累加链尾对拍
+//
+// 与 poker_texas_air stark-recursion/src/stark_final.rs 同一公式，
+// 但用 starknet-crypto 0.8 的 poseidon_hash_many —— 第二套独立实现
+// 交叉验证电路内 batch_fact 公式（groth16-wrap 复刻 ↔ starknet-crypto）。
+// ============================================================
+
+/// 批程序（settlement_batch_private，含 acc_prev/批根入参与电路内 poseidon
+/// 链接尾版）钉扎哈希。实测出处：prove-hand E2E（2026-09-29，K=1/4/8/32/64
+/// 出证 program_hash 一致；prover 参数无关）。
+pub const PINNED_BATCH_PROGRAM_HASH: &str =
+    "0x05c400b46a261c6672cd7581436754e05da2287ba8ecdc69778d06e4ef831803";
+
+/// 每手公开段长度 / 链尾长度（与 stark-recursion stark_final 同值）。
+pub const BATCH_SEGMENT_LEN: usize = 16;
+pub const BATCH_TAIL_LEN: usize = 4;
+
+/// 批证明公开输出的累加链尾（输出末 4 felt）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchChainTail {
+    /// 手数（= (elements − 4) / 16）。
+    pub k: usize,
+    /// 批 n-1 的 batch_fact（首批 = 0）。
+    pub acc_prev: starknet_crypto::Felt,
+    /// keccak 批根 32B 的 hi 16B（大端入域）。
+    pub root_hi: starknet_crypto::Felt,
+    /// keccak 批根 32B 的 lo 16B。
+    pub root_lo: starknet_crypto::Felt,
+    /// 电路内 poseidon 链接值（= 累加链新链头）。
+    pub batch_fact: starknet_crypto::Felt,
+}
+
+/// 电路内 batch_fact 公式的宿主镜像（starknet-crypto 实现）：
+/// `poseidon_hash_many([acc_prev, root_hi, root_lo, k] ++ segments)`。
+///
+/// corelib HashState（配对吸收/耗尽补 1/末置换取 s0）与 poseidon_hash_many
+/// 构造等价——stark-recursion 真双批 E2E（批 2 绑定批 1 的 batch_fact）实证。
+#[must_use]
+pub fn batch_fact_mirror(
+    acc_prev: starknet_crypto::Felt,
+    root_hi: starknet_crypto::Felt,
+    root_lo: starknet_crypto::Felt,
+    k: usize,
+    segments: &[starknet_crypto::Felt],
+) -> starknet_crypto::Felt {
+    let mut msg = Vec::with_capacity(BATCH_TAIL_LEN + segments.len());
+    msg.push(acc_prev);
+    msg.push(root_hi);
+    msg.push(root_lo);
+    msg.push(starknet_crypto::Felt::from(k as u64));
+    msg.extend_from_slice(segments);
+    poseidon_hash_many(&msg)
+}
+
+/// 从批证明公开输出解析累加链尾（fail-closed：len 前缀 / 16k+4 形状）。
+///
+/// 输出形状（K=1 E2E 实测）：`[len] ++ 16k 手段 ++ [acc_prev, root_hi, root_lo,
+/// batch_fact]`，len = 16k+4。
+///
+/// # Errors
+/// 输出过短 / len 前缀与元素数不符 / 非 16k+4 形状。
+pub fn parse_batch_chain_tail(output: &[starknet_crypto::Felt]) -> anyhow::Result<BatchChainTail> {
+    anyhow::ensure!(
+        output.len() >= 1 + BATCH_SEGMENT_LEN + BATCH_TAIL_LEN,
+        "batch output too short: {}",
+        output.len()
+    );
+    anyhow::ensure!(
+        output[0] == starknet_crypto::Felt::from((output.len() - 1) as u64),
+        "batch output len prefix mismatch（形状漂移，fail-closed）"
+    );
+    let elements = output.len() - 1;
+    anyhow::ensure!(
+        (elements - BATCH_TAIL_LEN) % BATCH_SEGMENT_LEN == 0,
+        "batch output not 16k+4 shape"
+    );
+    let k = (elements - BATCH_TAIL_LEN) / BATCH_SEGMENT_LEN;
+    let t = elements - BATCH_TAIL_LEN;
+    Ok(BatchChainTail {
+        k,
+        acc_prev: output[1 + t],
+        root_hi: output[2 + t],
+        root_lo: output[3 + t],
+        batch_fact: output[4 + t],
+    })
+}
+
+/// L1 批量终证腿全链验证：验证证明 + 钉扎批程序哈希 + 解析链尾 +
+/// 电路内 batch_fact 宿主镜像对拍 + acc/根回显断言（16k+4 形状）。
+///
+/// # Errors
+/// 验证失败 / 哈希不符 / 形状不符 / 链尾对拍失败 / acc·根回显不符。
+pub fn verify_batch_proof_file_pinned(
+    proof_path: &Path,
+    expected_acc_prev: starknet_crypto::Felt,
+    expected_root: [u8; 32],
+) -> anyhow::Result<BatchChainTail> {
+    let out = verify_cairo_proof_file(proof_path)?;
+    let pinned = starknet_crypto::Felt::from_hex(PINNED_BATCH_PROGRAM_HASH)?;
+    anyhow::ensure!(
+        out.program_hash == pinned,
+        "batch program hash mismatch: {:#x} != pinned {:#x}",
+        out.program_hash,
+        pinned
+    );
+    let tail = parse_batch_chain_tail(&out.output)?;
+    // 16B 大端左对齐入 32B felt（groth16-wrap batch.rs:46-55 同式）
+    let mut hb = [0u8; 32];
+    hb[16..].copy_from_slice(&expected_root[..16]);
+    let mut lb = [0u8; 32];
+    lb[16..].copy_from_slice(&expected_root[16..]);
+    let exp_hi = starknet_crypto::Felt::from_bytes_be(&hb);
+    let exp_lo = starknet_crypto::Felt::from_bytes_be(&lb);
+    anyhow::ensure!(
+        tail.acc_prev == expected_acc_prev,
+        "acc chain mismatch: {:#x} != expected {:#x}",
+        tail.acc_prev,
+        expected_acc_prev
+    );
+    anyhow::ensure!(tail.root_hi == exp_hi && tail.root_lo == exp_lo, "root hi/lo mismatch");
+    let k = tail.k;
+    let segments = &out.output[1..1 + k * BATCH_SEGMENT_LEN];
+    let recomputed = batch_fact_mirror(expected_acc_prev, exp_hi, exp_lo, k, segments);
+    anyhow::ensure!(
+        tail.batch_fact == recomputed,
+        "in-circuit batch_fact != host mirror（starknet-crypto 第二实现）"
+    );
+    Ok(tail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +288,60 @@ mod tests {
         felts[1] += starknet_crypto::Felt::from(1_u64);
         let tampered_fact = poseidon_hash_many(&felts);
         assert_ne!(out.fact, tampered_fact, "fact 必须绑定全部公开输出");
+    }
+
+    use starknet_crypto::Felt as _FeltAlias;
+    use starknet_crypto::Felt;
+    // ── L1 批量终证腿：真实批证明（settlement_batch_private，K=1）──────
+
+    /// 真实批证明工件（prove-batch.sh 阶段 B 产物，2026-09-29 E2E）。
+    const BATCH_PROOF: &str = "../proving-tool/output/settlement-batch/proof.json";
+    /// 批根（manifest.json 的 keccak_batch_root；K=1 语句集 keccak 折叠）。
+    const BATCH_ROOT_HEX: &str =
+        "0xab4821e599993a8544f148522dfcea1ad50a11727b7b3a4759a4b9e82fb86165";
+    /// 批 1 累加链头（genesis acc=0 出证；尾字 batch_fact）。
+    const BATCH_FACT_HEX: &str =
+        "0x041fb9bae6ddbd26b7425354f855571179323cab3c8a57b7590562c4feef6ced";
+
+    /// 真实批证明：验证 + 钉扎 + 链尾对拍（starknet-crypto 第二实现对拍
+    /// stark_final 宿主镜像与电路内 HashState）。
+    /// hex -> 32B（keccak 根是全 256bit 值，可 >= felt prime——正是 hi/lo 拆分
+    /// 的原因；不能过 Felt::from_hex）。
+    fn root_bytes(hex_str: &str) -> [u8; 32] {
+        let h = hex_str.trim_start_matches("0x");
+        let mut out = [0u8; 32];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap();
+        }
+        out
+    }
+
+    /// 真实批证明：验证 + 钉扎 + 链尾对拍（starknet-crypto 第二实现对拍
+    /// stark_final 宿主镜像与电路内 HashState）。
+    #[test]
+    fn real_batch_proof_verifies_with_pinned_hash_and_tail() {
+        let root = root_bytes(BATCH_ROOT_HEX);
+        let tail = verify_batch_proof_file_pinned(Path::new(BATCH_PROOF), Felt::ZERO, root)
+            .expect("batch proof full-chain verify");
+        assert_eq!(tail.k, 1);
+        assert_eq!(tail.acc_prev, Felt::ZERO, "批 1 genesis");
+        assert_eq!(
+            tail.batch_fact,
+            Felt::from_hex(BATCH_FACT_HEX).unwrap(),
+            "电路内 batch_fact = E2E 实测值"
+        );
+        // 钉扎常量与公开输出 program_hash 一致
+        let out = verify_cairo_proof_file(Path::new(BATCH_PROOF)).unwrap();
+        assert_eq!(out.program_hash, Felt::from_hex(PINNED_BATCH_PROGRAM_HASH).unwrap());
+    }
+
+    /// parse_batch_chain_tail 形状负例：len 前缀漂移拒绝。
+    #[test]
+    fn batch_tail_parser_rejects_shape_drift() {
+        let mut bad = vec![Felt::from(99u64)];
+        bad.extend(std::iter::repeat_n(Felt::from(0u64), 21));
+        assert!(parse_batch_chain_tail(&bad).is_err());
+        assert!(parse_batch_chain_tail(&bad[..3]).is_err());
     }
 }
 

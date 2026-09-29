@@ -435,6 +435,19 @@ pub fn create_and_serialize_proof(
                 proof_params,
             )?;
         }
+        // LOCAL PATCH (poker_texas_air 2026-09-29): keccak256-backed channel for
+        // EVM-verifiable proofs (Keccak256Channel + Keccak256MerkleChannel ship
+        // with stwo core; see crates/common ChannelHash::Keccak256).
+        ChannelHash::Keccak256 => {
+            use stwo::core::vcs_lifted::keccak256_merkle::Keccak256MerkleChannel;
+            prove_verify_serialize::<Keccak256MerkleChannel>(
+                input,
+                verify,
+                &proof_path,
+                proof_format,
+                proof_params,
+            )?;
+        }
     };
 
     Ok(())

@@ -15,9 +15,11 @@ resolver = "2"
 exclude = ["third_party", "third_party/flock", "third_party/flock/crates/flock-core", "third_party/flock/crates/flock-prover", "third_party/flock/crates/flock-cuda-ffi", "fuzz"]
 members = [
     ".",
+    "groth16-wrap",
     "hand-bench",
     "poker_contracts/hand-verify-native",
     "poker_l1",
+    "stark-recursion",
     "vm-common",
     "texas",
 ]
@@ -151,6 +153,83 @@ debug = "line-tables-only"
 # opt-level 0 makes the poseidon252 prove tests tens of times slower.
 # Optimize every dependency (including workspace members) while keeping
 # this crate itself at fast-compile opt-level 0 for quick iteration.
+#
+# 注意（实测勘误）：package."*" 通配不覆盖 workspace 成员——`cargo build
+# -p stark-recursion -v` 里 groth16-wrap 的 rustc 命令行没有任何 opt-level
+# （opt0 下 emulated-poseidon 合成/证明比 opt3 慢 ~10×，K=2 终证门禁 862s
+# 撞穿 10 分钟预算）。这里对 K=2 门禁热路径逐个点名：opt3 + 关 dev 断言
+# （debug-assertions/overflow-checks 在 ark 大整数热循环里的开销占比极高，
+# 实测 setup 336s→目标 <60s）。只影响这几个包的 dev 构建，其它成员不变。
 [profile.dev.package."*"]
 opt-level = 3
 debug = false
+
+[profile.dev.package.groth16-wrap]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+
+[profile.dev.package.ark-ff]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+
+[profile.dev.package.ark-bn254]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+
+[profile.dev.package.ark-ec]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+
+[profile.dev.package.ark-poly]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+
+[profile.dev.package.ark-groth16]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+
+[profile.dev.package.ark-r1cs-std]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+
+[profile.dev.package.ark-relations]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+
+[profile.dev.package.ark-serialize]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+
+[profile.dev.package.ark-std]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1

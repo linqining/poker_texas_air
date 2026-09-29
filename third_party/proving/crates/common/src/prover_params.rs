@@ -50,6 +50,17 @@ pub enum ChannelHash {
     /// Note that using `Poseidon252` results in a significant decrease in proving speed compared
     /// to `Blake2s` (because of the large field emulation)
     Poseidon252,
+    /// A variant backed by `keccak256` (channel + Merkle commitments), intended
+    /// for proofs verified on EVM chains where keccak256 has a precompile.
+    ///
+    /// LOCAL PATCH (poker_texas_air 2026-09-29, vendored starkware-libs/proving
+    /// 2.4.0): exposes the already-existing `stwo::core::channel::Keccak256Channel`
+    /// / `stwo::core::vcs_lifted::keccak256_merkle::Keccak256MerkleChannel`
+    /// through the cairo prover parameter surface. The channel's byte order
+    /// matches Solidity `abi.encodePacked` conventions by design (see
+    /// core/channel/keccak256.rs) so an on-chain verifier can reproduce the
+    /// transcript. Proving speed sits between Blake2s and Poseidon252.
+    Keccak256,
 }
 
 /// Policy for choosing the heights the committed trees are lifted to.
