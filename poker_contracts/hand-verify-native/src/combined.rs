@@ -1,16 +1,16 @@
 //! 合并信封驱动（host 侧）——P 层任务 + 结算隐私语句，一次 prove-hand 出
-//! 一份 Stwo 证明，公开输出 16 词 `[new_acc] ++ settlement 公开段`。
+//! 一份 Stwo 证明，公开输出 17 词 `[new_acc] ++ settlement 公开段(16)`。
 //!
 //! 与 `recurse.rs`（纯 P 层信封）的分工：combined 面向 snip36 生产形状
 //! （每手一批 action-sig + 该手的结算语句），绑定断言在 Cairo 侧强制
 //! （任务 hand_binding == settle hand_binding）。host 侧双 parity 门：
 //! 1. acc parity：cairo 公开输出首词 == host `host_fold_tasks` 重算值；
-//! 2. segment parity：输出后续 15 词 == host 独立重算的期望公开段
+//! 2. segment parity：输出后续 16 词 == host 独立重算的期望公开段
 //!    （digest 按实际参与者折叠、cms/total 与合约公式逐字段一致）。
 //!
-//! 结算 wire 布局（98 词）与 `cairo/src/settlement_stmt.cairo` 同源：
-//! `[hand_id, registered_digest, n_expected, hand_binding, p×8, s×8, m×8,
-//!  c×8, action_log_digest, action_count, w×60]`。
+//! 结算 wire 布局（102 词，9 人桌）与 `cairo/src/settlement_stmt.cairo`
+//! 同源：`[hand_id, registered_digest, n_expected, hand_binding, p×9, s×9,
+//!  m×9, c×9, action_log_digest, action_count, w×60]`。
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -21,7 +21,7 @@ use crate::handbatch::{action_sig_challenge_raw, ascii_felt_pub, verify_hand};
 use crate::recurse::{fold_accumulator, host_fold_tasks, RecurseTask, GENESIS_ACC};
 
 /// settle 段词数（与 settlement_stmt.cairo SETTLE_WORDS 一致）。
-pub const SETTLE_WORDS: usize = 98;
+pub const SETTLE_WORDS: usize = 102;
 
 /// 公开段成功标记（'SP2M_OK'）。
 pub fn segment_magic() -> Felt {
@@ -39,7 +39,7 @@ pub fn action_log_domain() -> Felt {
 
 /// 结算隐私语句（host 侧镜像 + wire 构造）。
 ///
-/// `players/signs/magnitudes/commitments` 固定 8 槽（尾部补零）；digest
+/// `players/signs/magnitudes/commitments` 固定 9 槽（尾部补零）；digest
 /// 只按 `players` 前缀（非零槽）折叠——与合约 `compute_settlement_digest`
 /// （calldata 实际人数）与 `settlement_stmt.cairo` 的前缀吸收一致。
 #[derive(Debug, Clone)]
@@ -49,10 +49,10 @@ pub struct SettleStatement {
     pub n_expected: u64,
     pub hand_binding: Felt,
     /// 非零槽为实际参与者（felt 地址），尾部零槽 = 补位。
-    pub players: [Felt; 8],
-    pub signs: [u64; 8],
-    pub magnitudes: [u64; 8],
-    pub commitments: [Felt; 8],
+    pub players: [Felt; 9],
+    pub signs: [u64; 9],
+    pub magnitudes: [u64; 9],
+    pub commitments: [Felt; 9],
     pub action_log_digest: Felt,
     /// 每条 2 词（[日志打包词, 合法性词]），≤ 30 条。
     pub action_entries: Vec<[Felt; 2]>,
@@ -77,7 +77,7 @@ impl SettleStatement {
         poseidon_hash_many(&fields)
     }
 
-    /// 期望公开段（15 词）：`[MAGIC, hand_id, digest, n, binding, cm×8,
+    /// 期望公开段（16 词）：`[MAGIC, hand_id, digest, n, binding, cm×9,
     /// total, ald]`——与 v2 合约消费口径逐字段一致。
     pub fn expected_segment(&self) -> Result<Vec<Felt>, String> {
         // 与 Cairo 语句同一批良构断言（fail-closed：不合法语句不出证）。
@@ -91,8 +91,8 @@ impl SettleStatement {
         let mut sum: i128 = 0;
         let mut count = 0u64;
         let mut total: u64 = 0;
-        let mut cms = [Felt::ZERO; 8];
-        for i in 0..8 {
+        let mut cms = [Felt::ZERO; 9];
+        for i in 0..9 {
             if self.signs[i] > 1 {
                 return Err(format!("host: sign at seat {i} not bool"));
             }
@@ -143,7 +143,7 @@ impl SettleStatement {
         Ok(segment)
     }
 
-    /// wire 摊平（98 词），与 settlement_stmt.cairo 布局一致。
+    /// wire 摊平（102 词），与 settlement_stmt.cairo 布局一致。
     pub fn wire_words(&self) -> Vec<Felt> {
         let mut w = Vec::with_capacity(SETTLE_WORDS);
         w.push(Felt::from(self.hand_id));
@@ -229,7 +229,7 @@ fn prove_hand_bin() -> PathBuf {
 #[derive(Debug, Clone)]
 pub struct CombinedOutcome {
     pub cairo_acc: Felt,
-    /// 16 词公开输出（[acc] ++ segment）。
+    /// 17 词公开输出（[acc] ++ segment 16）。
     pub public_output: Vec<Felt>,
     pub total_ms: u128,
     pub cairo_prove_ms: u64,
@@ -246,7 +246,7 @@ pub struct CombinedOutcome {
 /// 合并出证 + 双 parity 门 + 独立复验：
 /// 1. host 先验 P 任务（fail-closed）与 settle 语句（良构断言）；
 /// 2. spawn prove-hand（combined.cairo）一次；
-/// 3. 输出首词 == host acc 重算、后续 15 词 == host 期望公开段；
+/// 3. 输出首词 == host acc 重算、后续 16 词 == host 期望公开段；
 /// 4. `--check-only` 独立复验。
 pub fn prove_combined_layer(
     tasks: &[RecurseTask],
@@ -344,7 +344,7 @@ pub fn prove_combined_layer(
         return Err("public output has no room for acc before MAGIC".into());
     }
     let cairo_acc = public[magic_pos - 1];
-    let cairo_segment = &public[magic_pos..magic_pos + 15];
+    let cairo_segment = &public[magic_pos..magic_pos + 16];
     if cairo_acc != expected_acc {
         return Err(format!(
             "acc parity failure: cairo {} != host {}",
@@ -406,8 +406,8 @@ pub fn build_settle_statement(
     action_log_digest: Felt,
     action_entries: &[[Felt; 2]],
 ) -> Result<SettleStatement, String> {
-    if players.len() > 8 || deltas_wei.len() > 8 || commitments.len() > 8 {
-        return Err("participants exceed 8".into());
+    if players.len() > 9 || deltas_wei.len() > 9 || commitments.len() > 9 {
+        return Err("participants exceed 9".into());
     }
     if action_entries.len() > 30 {
         return Err("action entries exceed 30".into());
@@ -417,10 +417,10 @@ pub fn build_settle_statement(
         registered_digest: Felt::ZERO,
         n_expected: 0,
         hand_binding,
-        players: [Felt::ZERO; 8],
-        signs: [0; 8],
-        magnitudes: [0; 8],
-        commitments: [Felt::ZERO; 8],
+        players: [Felt::ZERO; 9],
+        signs: [0; 9],
+        magnitudes: [0; 9],
+        commitments: [Felt::ZERO; 9],
         action_log_digest,
         action_entries: action_entries.to_vec(),
     };
@@ -450,7 +450,7 @@ pub fn build_settle_statement(
     }
     st.registered_digest = st.expected_digest();
     // 尾部补位槽必须全零玩家（与 Cairo 前缀折叠的规范一致）。
-    for i in players.len()..8 {
+    for i in players.len()..9 {
         st.players[i] = Felt::ZERO;
     }
     Ok(st)

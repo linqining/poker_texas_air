@@ -1,7 +1,7 @@
 //! P2-M1 结算隐私电路（`docs/design/SETTLEMENT_PRIVACY_PLAN.md` §开发排期 / P2-M1 电路规格，已定稿）。
 //!
 //! 语句（公开输入）：`hand_binding, hand_id, registered_digest, n_participants`
-//! 见证（私密）：`players[8], deltas[8]`（i128 → (sign, |delta| u64) 对）
+//! 见证（私密）：`players[9], deltas[9]`（i128 → (sign, |delta| u64) 对）
 //! 约束（规格四条）：
 //! 1. `poseidon_hash_many([hand_id] ++ Σ(player, sign, |delta|) ++ [action_log_digest])
 //!    == registered_digest`——与合约 `compute_settlement_digest` 及
@@ -22,7 +22,7 @@
 //!   模式）。
 //! - **AIR 骨架（Stwo component，本模块）**：trace 布局按规格「每参与者一行
 //!   ×(player, sign, |delta|, winner, cm)」。约束框架逐行求值，故公开语句展开为
-//!   **8 行 scope**（常量列每行重复 + 每行 participant 字段与 prefix 计数），AIR
+//!   **9 行 scope**（常量列每行重复 + 每行 participant 字段与 prefix 计数），AIR
 //!   将 trace 的全部语义列逐 limb 绑定到 scope，并约束 M31 原生可表达的全部关系：
 //!   sign/winner booleanity、winner⇒sign、非赢家 cm 归零、cm/player/|delta| 与
 //!   scope 相等、trace 计数与 scope 计数相等。§8.2 预留的三个动作域槽位中，
@@ -61,8 +61,8 @@ use stwo_constraint_framework::{
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::trace_gen::MethodTrace;
 
-/// 参与者上限（规格：witness players[8]）。
-pub const MAX_PARTICIPANTS: usize = 8;
+/// 参与者上限（规格：witness players[9]，9 人桌常规桌型）。
+pub const MAX_PARTICIPANTS: usize = 9;
 /// felt252 的 16-bit limb 数（256 bit 覆盖）。
 pub const FELT_LIMBS: usize = 16;
 /// u64 金额的 16-bit limb 数。
@@ -176,7 +176,7 @@ pub struct SettlementPrivateStatement {
     pub hand_id: u64,
     pub hand_binding: FeltBytes,
     pub registered_digest: FeltBytes,
-    /// 固定 8 槽，未用槽位填零 felt（与 settle calldata `players` 一一对应）。
+    /// 固定 9 槽，未用槽位填零 felt（与 settle calldata `players` 一一对应）。
     pub players: [FeltBytes; MAX_PARTICIPANTS],
     /// wei 单位有符号变动（与 settle calldata `deltas` 一致），|delta| ≤ u64::MAX。
     pub signed_deltas: [i128; MAX_PARTICIPANTS],
@@ -687,8 +687,8 @@ mod tests {
             hand_binding: sample_felt(0xAA),
             registered_digest: ZERO_FELT, // 由 digest 对齐测试填充
             players,
-            // +300 / -200 / -100，零变动 5 槽：零和成立
-            signed_deltas: [300, -200, -100, 0, 0, 0, 0, 0],
+            // +300 / -200 / -100，零变动 6 槽：零和成立
+            signed_deltas: [300, -200, -100, 0, 0, 0, 0, 0, 0],
             n_participants: 3,
             action_log_digest: sample_felt(0x77),
             action_flags: 0,
@@ -700,6 +700,7 @@ mod tests {
         SettlementPrivateWitness {
             payout_commitments: [
                 sample_felt(0x21),
+                ZERO_FELT,
                 ZERO_FELT,
                 ZERO_FELT,
                 ZERO_FELT,
@@ -895,7 +896,7 @@ mod tests {
     };
 
     /// 真实量级的样例手牌：wei 记账（+3000/-2000/-1000 chips × 1e14），
-    /// 零变动 5 槽（sign=1, |delta|=0，与 submit.rs 的 d≥0→1 口径一致）。
+    /// 零变动 6 槽（sign=1, |delta|=0，与 submit.rs 的 d≥0→1 口径一致）。
     fn prove_sample_statement(action_log_digest: FeltBytes) -> SettlementPrivateStatement {
         let wei_chip: i128 = 100_000_000_000_000;
         let mut players = [ZERO_FELT; MAX_PARTICIPANTS];
@@ -909,7 +910,17 @@ mod tests {
             hand_binding: sample_felt(0xAA),
             registered_digest: ZERO_FELT,
             players,
-            signed_deltas: [3000 * wei_chip, -2000 * wei_chip, -1000 * wei_chip, 0, 0, 0, 0, 0],
+            signed_deltas: [
+                3000 * wei_chip,
+                -2000 * wei_chip,
+                -1000 * wei_chip,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
             n_participants: 3,
             // game 层动作日志 Poseidon 链根（#18 Phase C 切片 1）。
             action_log_digest,
@@ -1012,40 +1023,50 @@ mod tests {
         let digest = compute_settlement_digest(&statement).expect("digest");
         let cms = derive_claim_cms(&statement, &witness).expect("cms");
 
-        let mut inputs: Vec<String> = vec![
+        // settle wire（102 词，9 人桌）：[hand_id, digest, n, binding,
+        // p×9, s×9, m×9, c×9, ald, count, w0..w59]——settlement_stmt.cairo
+        // 同一布局。
+        let mut wire: Vec<String> = vec![
             hex(Felt::from(statement.hand_id)),
             hex(felt_from_bytes(digest).expect("canonical")),
             hex(Felt::from(statement.n_participants)),
             hex(felt_from_bytes(statement.hand_binding).expect("canonical")),
         ];
         for player in &statement.players {
-            inputs.push(hex(felt_from_bytes(*player).expect("canonical")));
+            wire.push(hex(felt_from_bytes(*player).expect("canonical")));
         }
         for delta in statement.signed_deltas.iter().copied() {
-            inputs.push(hex(Felt::from(u64::from(delta >= 0))));
+            wire.push(hex(Felt::from(u64::from(delta >= 0))));
         }
         for delta in statement.signed_deltas.iter().copied() {
-            inputs.push(hex(Felt::from(delta.unsigned_abs() as u64)));
+            wire.push(hex(Felt::from(delta.unsigned_abs() as u64)));
         }
         for commitment in &witness.payout_commitments {
-            inputs.push(hex(felt_from_bytes(*commitment).expect("canonical")));
+            wire.push(hex(felt_from_bytes(*commitment).expect("canonical")));
         }
-        // #18 Phase B：第 37 入参 = 动作日志哈希（吸收链尾词）。
-        inputs.push(hex(felt_from_bytes(statement.action_log_digest).expect("canonical")));
-        // #18 Phase C 切片 1：词条区 = [count] ++ 60×1 打包词（不足补零）——
-        // 电路重放整链并约束补零槽 canonical。
-        inputs.push(hex(Felt::from(entries.len() as u64)));
+        // #18 Phase B：wire[40] = 动作日志哈希（digest 吸收链尾词）。
+        wire.push(hex(felt_from_bytes(statement.action_log_digest).expect("canonical")));
+        // #18 Phase C 切片 1：词条区 = [count] ++ 30×[日志词, 合法性词]
+        // （不足补零）——电路重放整链并约束补零槽 canonical。
+        wire.push(hex(Felt::from(entries.len() as u64)));
         for slot in 0..30usize {
             let pair: [Felt; 2] =
                 entries.get(slot).copied().unwrap_or([Felt::ZERO; 2]);
             for word in pair {
-                inputs.push(hex(word));
+                wire.push(hex(word));
             }
         }
-        assert_eq!(inputs.len(), 38 + 60);
+        assert_eq!(wire.len(), 41 + 1 + 60);
+        // Span ABI（2026-09-30 重构）：prove-hand flat 输入 = [len, elements…]
+        // 摊平（与 combined / fold_batch / settlement_batch 同约定）——
+        // `[102] ++ wire`。
+        let mut inputs: Vec<String> = Vec::with_capacity(1 + wire.len());
+        inputs.push(hex(Felt::from(wire.len() as u64)));
+        inputs.extend(wire);
+        assert_eq!(inputs.len(), 1 + 41 + 1 + 60);
 
-        // 公开段期望：[MAGIC, hand_id, digest, n, binding, cm_0..cm_7,
-        // total_winnings, action_log_digest]（15 felt）
+        // 公开段期望：[MAGIC, hand_id, digest, n, binding, cm_0..cm_8,
+        // total_winnings, action_log_digest]（16 felt，9 人桌）
         let mut expected: Vec<String> = vec![
             hex(Felt::from_bytes_be(&PROVE_MAGIC)),
             hex(Felt::from(statement.hand_id)),

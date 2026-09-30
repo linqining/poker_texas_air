@@ -4,7 +4,10 @@
 协议（与 texas/src/starknet/settlement_prover.rs::HttpSettlementProver 对齐）：
   GET  /          -> {"ok": true, "service": ..., "program": ...}
   POST /          -> body {"circuit": "settlement_private", "hand_id": N,
-                           "inputs": ["0x..", ...]}（98 个 felt = 37 标量 + 1 计数 + 60 动作词条打包词，序同 Cairo main；#18 Phase B/C）
+                           "inputs": ["0x..", ...]}（Span ABI，2026-09-30 重构 +
+                           9 人桌：103 个 felt = [102 长度前缀] ++ settle wire
+                           102 词 = 41 标量 + 1 计数 + 60 动作词条打包词，
+                           [len, elements…] 摊平，序同 settlement_stmt 布局；#18 Phase B/C）
                    -> {"ok": true, "output": [hex...], "program_hash": "0x.."}
                     （电路断言失败/证明失败 → 非 200 + {"ok": false, "error": ..}）
 

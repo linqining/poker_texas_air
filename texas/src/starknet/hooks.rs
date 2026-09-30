@@ -515,7 +515,7 @@ async fn snip36_settle_flow(
                     "[snip36] dual settlement address not configured — proof archived, settlement falls back to legacy"
                 );
             } else {
-                // v3 入口提交：calldata = [hand_binding, hand_id, segment(15)]
+                // v3 入口提交：calldata = [hand_binding, hand_id, segment(16)]
                 // —— segment 由 settlement_private 公开段给出；外部 settle
                 // prover 未配置时落盘工件并回退 legacy（P2/P4 激活项）。
                 tracing::info!(
@@ -531,7 +531,7 @@ async fn snip36_settle_flow(
     }
 
     // 3. 保底：对账已通过的 settlement 经 dual 入口上链——entry=combined 时
-    //    submit_dual_settlement 会先试合并信封证明腿（16 词段 + 单 fact），
+    //    submit_dual_settlement 会先试合并信封证明腿（17 词段 + 单 fact），
     //    失败照旧回退线性（register_hand + verify_and_settle_dapv_stark）。
     submit_dual_fallback(table_id, &mirror, &settlement, combined_tasks).await;
 }

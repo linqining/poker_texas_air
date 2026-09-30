@@ -5,11 +5,11 @@
 //!   段 16 词（长度前缀 15 + 'SP2M_OK' + 14），fact 由
 //!   `WrapWitness::expected_fact` 吞含前缀整段；
 //! - **combined（本层新形态）**：[`CombinedHandEntry`] 输出 = combined.cairo
-//!   合并信封公开输出 16 词（`[chain_acc] ++ v2 公开段 15`，无长度前缀），
-//!   fact = [`combined_expected_fact`]（program_hash 后跟整段 16 词——
+//!   合并信封公开输出 17 词（`[chain_acc] ++ v2 公开段 16`，无长度前缀），
+//!   fact = [`combined_expected_fact`]（program_hash 后跟整段 17 词——
 //!   合约 `fact_for_segment` 同式）；
 //! - **fold（fold 链，规格 out/fold-spec.md §1/D1）**：[`FoldHandEntry`] 输出 =
-//!   combined 16 词信封原样 + roster_digest 尾插 index 16（17 词），fact =
+//!   combined 17 词信封原样 + roster_digest 尾插 index 17（18 词），fact =
 //!   [`fold_expected_fact`]（与 combined 同式——`fact_for_segment` 对段长
 //!   通用，两链 fact 不等源由 program_hash 分槽保证，规格 D3c 第 2 层）。
 //!
@@ -19,9 +19,9 @@
 //!   （fact-verify/src/lib.rs:78-83 `fact_for_output` 同式；见证侧复用
 //!   `groth16_wrap::wrap_circuit::WrapWitness::expected_fact`，两者在
 //!   groth16-wrap 内已被对拍）。
-//! - **fact（combined）**：`poseidon_hash_many([program_hash ‖ 16 词公开
-//!   输出])`（poker_dual_settlement.cairo:302 `fact_for_segment` 同式——
-//!   对 combined 合约入口，与 v2 的 15 词段式不同源）。
+//! - **fact（combined）**：`poseidon_hash_many([program_hash ‖ 17 词公开
+//!   输出])`（poker_dual_settlement.cairo `fact_for_segment` 同式——
+//!   对 combined 合约入口，与 v2 的 16 词段式不同源）。
 //! - **keccak 批根**：leaf_i = keccak256(index_be32 ‖ program_hash ‖ binding ‖
 //!   fact)，两两折叠，条数 2 的幂（`groth16_wrap::batch::keccak_batch_root`，
 //!   与 zchain SettleBatch.sol:99-119 链上重算逐式一致——该一致性已由 zchain
@@ -34,7 +34,7 @@
 //!   `LeafInput::output_values` 的精确宿主镜像；编码用同一库函数
 //!   starknet-types-core 0.2.4 `Blake2Felt252::encode_felts_to_u32s`，精确性同源）。
 //!   preimage = `[program_hash] ++ concat(K×段)`（wrap 段 16 词含前缀 /
-//!   combined 输出 16 词无前缀）—— 与
+//!   combined 输出 17 词无前缀）—— 与
 //!   leaf_proof_format/src/lib.rs:75-77 `Plain.output_preimage`（"the task's
 //!   program hash followed by the task's raw output"）同形状。
 //! - **累加链接（本 crate 的协议定义，新增）**：
@@ -177,35 +177,36 @@ fn check_hand_count(k: usize) -> Result<()> {
     Ok(())
 }
 
-/// combined 信封公开输出词数：`[chain_acc] ++ v2 公开段(15)`，无长度前缀
+/// combined 信封公开输出词数：`[chain_acc] ++ v2 公开段(16)`，无长度前缀
 /// （combined.cairo main 返回数组原样）。与 wrap 路径的
-/// `groth16_wrap::wrap_circuit::OUTPUT_LEN`（16 = 长度前缀 1 + 返回 15）
-/// 数值相同、语义不同——首词一个是折叠累计承诺、一个是长度前缀，
-/// 勿混用（两常量并存即为此锚定）。
-pub const COMBINED_OUTPUT_LEN: usize = 16;
+/// `groth16_wrap::wrap_circuit::OUTPUT_LEN`（16 = 长度前缀 1 + 返回 15，
+/// Groth16 出局后的 baseline，**保留勿动**）数值不同、语义亦不同——首词
+/// 一个是折叠累计承诺、一个是长度前缀，勿混用（wrap 段形状随 Groth16
+/// baseline 停在 16 词，combined 侧随 9 人桌迁移到 17 词）。
+pub const COMBINED_OUTPUT_LEN: usize = 17;
 
 /// combined 输出槽位（combined.cairo / 合约 verify_and_settle_dapv_
 /// combined_private 的段布局，合约索引同值）。
 pub const COMBINED_MAGIC_INDEX: usize = 1;
 pub const COMBINED_BINDING_INDEX: usize = 5;
 
-/// 一条 combined 手语句 + 其 16 词公开输出见证。
+/// 一条 combined 手语句 + 其 17 词公开输出见证。
 ///
 /// output = `[chain_acc, MAGIC('SP2M_OK'), hand_id, registered_digest,
-/// n_expected, hand_binding, cm_0..cm_7, total_winnings, action_log_digest]`
+/// n_expected, hand_binding, cm_0..cm_8, total_winnings, action_log_digest]`
 /// ——combined.cairo（P 层递归 + settlement 语句一次出证）的公开输出，
 /// 亦即链上 combined 入口的 segment 参数原样。statement 三元组与 wrap
 /// 形态同构（keccak 批根/链上公开输入直接复用）。
 #[derive(Debug, Clone)]
 pub struct CombinedHandEntry {
     pub statement: BatchStatement,
-    /// 16 词 combined 公开输出（无长度前缀，首词 chain_acc）。
+    /// 17 词 combined 公开输出（无长度前缀，首词 chain_acc）。
     pub output: Vec<Felt252>,
 }
 
-/// combined fact：`poseidon_hash_many([program_hash ‖ 整段 16 词输出])`——
-/// 与合约 `fact_for_segment`（poker_dual_settlement.cairo:302）同式；区别于
-/// v2 合约入口的 15 词段式（texas settlement_prover::settlement_fact）。
+/// combined fact：`poseidon_hash_many([program_hash ‖ 整段 17 词输出])`——
+/// 与合约 `fact_for_segment`（poker_dual_settlement.cairo）同式；区别于
+/// v2 合约入口的 16 词段式（texas settlement_prover::settlement_fact）。
 #[must_use]
 pub fn combined_expected_fact(program_hash: &Felt252, output: &[Felt252]) -> Felt252 {
     let mut felts = Vec::with_capacity(1 + output.len());
@@ -229,10 +230,10 @@ pub struct CombinedBatchPlan {
 
 impl CombinedBatchPlan {
     /// 构造并逐条校验（fail-closed，逐手标注序号）：
-    /// 1..=MAX_HANDS_PER_LEAF、条数 2 的幂、输出形状（恰 16 词、
+    /// 1..=MAX_HANDS_PER_LEAF、条数 2 的幂、输出形状（恰 17 词、
     /// `output[1] == MAGIC`、`output[5] == statement.hand_binding`）、
     /// fact 宿主重算一致（[`combined_expected_fact`] 新公式：program_hash
-    /// 后跟整段 16 词）、binding 无重复。
+    /// 后跟整段 17 词）、binding 无重复。
     ///
     /// # acc 链信任边界（如实声明，不伪造校验）
     ///
@@ -255,7 +256,7 @@ impl CombinedBatchPlan {
         for (i, hand) in hands.iter().enumerate() {
             if hand.output.len() != COMBINED_OUTPUT_LEN {
                 return Err(anyhow!(
-                    "hand {i}: combined output len = {}, expected {COMBINED_OUTPUT_LEN}（[chain_acc] ++ v2 段 15，无长度前缀）",
+                    "hand {i}: combined output len = {}, expected {COMBINED_OUTPUT_LEN}（[chain_acc] ++ v2 段 16，无长度前缀）",
                     hand.output.len()
                 ));
             }
@@ -267,7 +268,7 @@ impl CombinedBatchPlan {
             let fact = combined_expected_fact(&program_hash, &hand.output);
             if fact != hand.statement.fact {
                 return Err(anyhow!(
-                    "hand {i}: fact != poseidon(program_hash ‖ combined output_16)（宿主重算不一致）"
+                    "hand {i}: fact != poseidon(program_hash ‖ combined output_17)（宿主重算不一致）"
                 ));
             }
             let binding_felt = hand.output[COMBINED_BINDING_INDEX];
@@ -299,11 +300,11 @@ impl CombinedBatchPlan {
         keccak_batch_root(&self.statements()).context("keccak batch root")
     }
 
-    /// 叶任务预映像：`[program_hash] ++ concat(K × output_16)`。
+    /// 叶任务预映像：`[program_hash] ++ concat(K × output_17)`。
     ///
     /// 与 leaf_proof_format `Plain.output_preimage` 同形状（"the task's
     /// program hash followed by the task's raw output"——combined 任务的原
-    /// 始输出即 16 词公开输出）。
+    /// 始输出即 17 词公开输出）。
     #[must_use]
     pub fn leaf_preimage(&self) -> Vec<Felt252> {
         let mut preimage =
@@ -325,49 +326,49 @@ impl CombinedBatchPlan {
     }
 }
 
-/// fold 链（生产 fold 批程序）每手公开输出词数：combined 16 词信封**原样**
-/// + roster_digest 尾插 index 16（规格 out/fold-spec.md §1/D1）。
+/// fold 链（生产 fold 批程序）每手公开输出词数：combined 17 词信封**原样**
+/// + roster_digest 尾插 index 17（规格 out/fold-spec.md §1/D1）。
 ///
-/// word 0–15 与 combined 信封逐词同位（chain_acc@0、MAGIC@1、hand_id@2、
-/// digest@3、n@4、binding@5、cm@6..=13、total@14、ald@15），消费面唯一新增
-/// 语义收口在 index 16。**与 [`COMBINED_OUTPUT_LEN`] 并存不共享**（规格
+/// word 0–16 与 combined 信封逐词同位（chain_acc@0、MAGIC@1、hand_id@2、
+/// digest@3、n@4、binding@5、cm@6..=14、total@15、ald@16），消费面唯一新增
+/// 语义收口在 index 17。**与 [`COMBINED_OUTPUT_LEN`] 并存不共享**（规格
 /// D3/K-1：改共享常量即报废 combined fallback 在役路径——在库负例测试
-/// `combined_batch_plan_rejects_bad_shapes` 拒绝 17 词）。
-pub const FOLD_OUTPUT_LEN: usize = 17;
+/// `combined_batch_plan_rejects_bad_shapes` 拒绝 18 词）。
+pub const FOLD_OUTPUT_LEN: usize = 18;
 
-/// fold 输出槽位（生产 fold 程序 17 词段布局；MAGIC/binding 与 combined
+/// fold 输出槽位（生产 fold 程序 18 词段布局；MAGIC/binding 与 combined
 /// 同位零位移复用，规格 D1）。索引值与 `COMBINED_MAGIC_INDEX`/
 /// `COMBINED_BINDING_INDEX` 相同是**布局巧合的显式锚定**——fold 段 word
-/// 0–15 就是 combined 信封同位词，不是同一个常量的两个名字。
+/// 0–16 就是 combined 信封同位词，不是同一个常量的两个名字。
 pub const FOLD_MAGIC_INDEX: usize = 1;
 pub const FOLD_BINDING_INDEX: usize = 5;
 /// roster_digest 尾插槽（**桌内常量**，规格 D1a 的多桌超集 out/
 /// fold-multitable-spec.md §4/M4：roster 每桌进电路一次，桌内段各自重复
 /// 携带，使每手段独立成 fact/binding 语句；跨桌可异、不同桌允许同值
 /// ——同批玩家群开两桌合法。T=1 特例下退化为原批常量，D1a 原文仍真）。
-pub const FOLD_ROSTER_INDEX: usize = 16;
+pub const FOLD_ROSTER_INDEX: usize = 17;
 
-/// fold 批桌数上限 T_MAX（多桌规格 M1-c/M4-c：slot 16 同值 run 数 = 桌数
+/// fold 批桌数上限 T_MAX（多桌规格 M1-c/M4-c：slot 17 同值 run 数 = 桌数
 /// T，构造时断言 T ≤ 8）。**评审面政策而非 steps 硬门**——ΣK ≤ 64 政策下
-/// steps 最坏情形（T=64 全 8 人）≈ 2^20 桶的 47.7%；首版 T=8 拼批笼内
-/// 实测落库后可复核放宽（开放点 Q-M3）。
+/// steps 最坏情形（T=8 全 9 人）按线性模型 ≈ 2^20 桶的 39%；首版 T=8 拼批
+/// 笼内实测落库后可复核放宽（开放点 Q-M3）。
 pub const MAX_TABLES_PER_FOLD_BATCH: usize = 8;
 
-/// 一条 fold 手语句 + 其 17 词公开输出见证。
+/// 一条 fold 手语句 + 其 18 词公开输出见证。
 ///
 /// output = `[chain_acc(批终), MAGIC, hand_id, registered_digest, n_expected,
-/// hand_binding, cm_0..cm_7, total_winnings, action_log_digest, roster_digest]`
+/// hand_binding, cm_0..cm_8, total_winnings, action_log_digest, roster_digest]`
 /// ——生产 fold 批程序的公开段（规格 D1）；与 [`CombinedHandEntry`] 独立
-/// 类型（`chain.rs:213-219` 先例：fold/combined 条目互插是编译期错误）。
+/// 类型（`chain.rs` 先例：fold/combined 条目互插是编译期错误）。
 #[derive(Debug, Clone)]
 pub struct FoldHandEntry {
     pub statement: BatchStatement,
-    /// 17 词 fold 公开输出（word 0–15 = combined 信封同位 + slot 16 roster）。
+    /// 18 词 fold 公开输出（word 0–16 = combined 信封同位 + slot 17 roster）。
     pub output: Vec<Felt252>,
 }
 
-/// fold fact：`poseidon_hash_many([program_hash ‖ 整段 17 词输出])`——与
-/// [`combined_expected_fact`] 同式（合约 `fact_for_segment` 对 16/17 词段长
+/// fold fact：`poseidon_hash_many([program_hash ‖ 整段 18 词输出])`——与
+/// [`combined_expected_fact`] 同式（合约 `fact_for_segment` 对 17/18 词段长
 /// 均通用，规格 D4b）。两链 fact 不等源**不在公式**而在 program_hash 分槽
 /// （fold 新程序 ⇒ 新哈希，合约侧 `fold_program_hash` 与
 /// `combined_program_hash` 两个存储槽，规格 D3c 第 2 层）。
@@ -380,7 +381,7 @@ pub fn fold_expected_fact(program_hash: &Felt252, output: &[Felt252]) -> Felt252
 ///
 /// 与 [`BatchPlan`]（wrap）/ [`CombinedBatchPlan`]（combined）并列的第三个
 /// 独立类型（规格 D3a/K-1）：不用 enum 泛化的理由同 combined——段语义
-/// （slot 16 roster 桌内常量，多桌规格 M4）与禁混批闸不同，独立类型让
+/// （slot 17 roster 桌内常量，多桌规格 M4）与禁混批闸不同，独立类型让
 /// 旧路径零改动、编译期即禁止混装；K 政策/keccak 根/叶 H1 经共享函数复用
 /// （`check_hand_count` / `keccak_batch_root` / [`leaf_output_words`]）。
 #[derive(Debug, Clone)]
@@ -391,14 +392,14 @@ pub struct FoldBatchPlan {
 
 impl FoldBatchPlan {
     /// 构造并逐条校验（fail-closed，逐手标注序号）。镜像
-    /// `CombinedBatchPlan::new`（chain.rs:247-281）的五连检：
-    /// 1..=MAX_HANDS_PER_LEAF、条数 2 的幂、输出形状（恰 17 词、
+    /// `CombinedBatchPlan::new` 的五连检：
+    /// 1..=MAX_HANDS_PER_LEAF、条数 2 的幂、输出形状（恰 18 词、
     /// `output[1] == MAGIC`、`output[5] == statement.hand_binding`）、
     /// fact 宿主重算一致（[`fold_expected_fact`]）、binding 无重复——
     /// 外加 D1a/Q-1 钉死、多桌规格 M4-c 放宽后的三检：
-    /// slot 0（批终 acc）全手同值、slot 16（roster_digest）逐手非零
+    /// slot 0（批终 acc）全手同值、slot 17（roster_digest）逐手非零
     /// （合约 fold 入口消费面同款断言，规格 §4.4 检查 #10 的 host 镜像）、
-    /// slot 16 **桌内常量**——按段序切极大同值 run，run 数 = 桌数 T ≤
+    /// slot 17 **桌内常量**——按段序切极大同值 run，run 数 = 桌数 T ≤
     /// [`MAX_TABLES_PER_FOLD_BATCH`]；同 run 内同值由 run 定义自持（真正
     /// 的桌内常量是电路结构事实，host 层不重复断言），**不同 run 允许
     /// 同值**（同批玩家群开两桌合法）。
@@ -428,7 +429,7 @@ impl FoldBatchPlan {
         for (i, hand) in hands.iter().enumerate() {
             if hand.output.len() != FOLD_OUTPUT_LEN {
                 return Err(anyhow!(
-                    "hand {i}: fold output len = {}, expected {FOLD_OUTPUT_LEN}（combined 16 词信封 + roster_digest 尾插，规格 D1）",
+                    "hand {i}: fold output len = {}, expected {FOLD_OUTPUT_LEN}（combined 17 词信封 + roster_digest 尾插，规格 D1）",
                     hand.output.len()
                 ));
             }
@@ -454,8 +455,8 @@ impl FoldBatchPlan {
                     "hand {i}: output[{FOLD_ROSTER_INDEX}] roster_digest must be non-zero（合约消费面同款断言）"
                 ));
             }
-            // D1a→M4-c：slot 16 从批常量放宽为桌内常量。按段序切极大同值
-            // run——与前一段 slot 16 不同即新 run；run 数 = 桌数 T（批尾断
+            // D1a→M4-c：slot 17 从批常量放宽为桌内常量。按段序切极大同值
+            // run——与前一段 slot 17 不同即新 run；run 数 = 桌数 T（批尾断
             // T ≤ T_MAX）。旧「跨批同值」match 分支按规格删除：手间不一致
             // 不再批拒（那是合法的换桌边界）；桌内漂移在 host 平面层的可
             // 见形态 = run 数膨胀，超 T_MAX 即拒——真正的桌内常量由电路
@@ -484,7 +485,7 @@ impl FoldBatchPlan {
         // M4-c/M9-4(d)：run 数 = 桌数 T，评审面政策上限 T_MAX。
         if table_runs > MAX_TABLES_PER_FOLD_BATCH {
             return Err(anyhow!(
-                "fold batch table count T={table_runs} > T_MAX={MAX_TABLES_PER_FOLD_BATCH}（slot 16 同值 run 数 = 桌数，多桌规格 M4-c）"
+                "fold batch table count T={table_runs} > T_MAX={MAX_TABLES_PER_FOLD_BATCH}（slot 17 同值 run 数 = 桌数，多桌规格 M4-c）"
             ));
         }
         Ok(Self { program_hash, hands })
@@ -747,18 +748,22 @@ mod tests {
         assert_eq!(felt_to_hex(&fact), golden::GOLDEN_FACT, "host fact 公式必须与金向量一致");
     }
 
-    /// combined 金向量手：16 词输出 = [acc_i] ++ golden v2 段（去长度前缀
-    /// 的 15 词），acc 链确定性生成（acc_{i+1} = poseidon([acc_i, i])——
+    /// combined 金向量手：17 词输出 = [acc_i] ++ golden v2 段（去长度前缀
+    /// 的 15 词 + 补位 1 词 = 16 词），acc 链确定性生成（acc_{i+1} = poseidon([acc_i, i])——
     /// 生产者不变量的 host 镜像形态）、手序号进 hand_id 槽位、binding
     /// 逐手递增；fact 用 [`combined_expected_fact`] 新公式。
     fn combined_golden_hands(k: u64) -> (Felt252, Vec<CombinedHandEntry>) {
         let program_hash = felt_from_hex(golden::GOLDEN_PROGRAM_HASH).unwrap();
-        let base_v2: Vec<Felt252> = golden::GOLDEN_OUTPUT
+        let mut base_v2: Vec<Felt252> = golden::GOLDEN_OUTPUT
             .iter()
             .skip(1) // wrap 段 [0] = 长度前缀 15，combined 输出无前缀
             .map(|h| felt_from_hex(h).unwrap())
             .collect();
-        assert_eq!(base_v2.len(), 15, "v2 公开段 15 词");
+        assert_eq!(base_v2.len(), 15, "groth16 金向量 v2 段 15 词");
+        // 9 人桌：语句段 15 → 16 词——金向量没有第 9 个 cm 槽，确定性补一
+        // 词（形状测试语料，不进任何公式锚）。
+        base_v2.push(Felt252::from(0x5E47u64));
+        assert_eq!(base_v2.len(), 16, "v2 公开段 16 词（cm×9）");
         let mut acc = acc_genesis();
         let hands = (0..k)
             .map(|i| {
@@ -781,7 +786,7 @@ mod tests {
         (program_hash, hands)
     }
 
-    /// combined fact 新公式钉死：`poseidon([program_hash ‖ 整段 16 词])`
+    /// combined fact 新公式钉死：`poseidon([program_hash ‖ 整段 17 词])`
     /// （合约 fact_for_segment 同式）——改 chain_acc 首词、换 ph、改任一
     /// 段词都必改 fact；并证与 wrap 段（含长度前缀）的 fact 不同源。
     #[test]
@@ -823,7 +828,7 @@ mod tests {
     }
 
     /// K=2 combined 批：构造校验全过；keccak 根与直接复用一致（statements
-    /// 形状未变 → 批根不受重定基影响）；叶预映像形状 [ph] ++ K×16。
+    /// 形状未变 → 批根不受重定基影响）；叶预映像形状 [ph] ++ K×17。
     #[test]
     fn combined_batch_plan_k2_builds_and_roots() {
         let (ph, hands) = combined_golden_hands(2);
@@ -837,8 +842,8 @@ mod tests {
         let preimage = plan.leaf_preimage();
         assert_eq!(preimage.len(), 1 + 2 * COMBINED_OUTPUT_LEN);
         assert_eq!(preimage[0], ph);
-        assert_eq!(&preimage[1..17], hands[0].output.as_slice());
-        assert_eq!(&preimage[17..33], hands[1].output.as_slice());
+        assert_eq!(&preimage[1..18], hands[0].output.as_slice());
+        assert_eq!(&preimage[18..35], hands[1].output.as_slice());
         let mut swapped = hands.clone();
         swapped.reverse();
         let swapped_root =
@@ -849,7 +854,7 @@ mod tests {
         assert_ne!(w, [0u32; ROOT_OUTPUT_WORDS]);
     }
 
-    /// combined 批负例：词数 15/17、MAGIC 篡改、binding 不一致、fact 篡改、
+    /// combined 批负例：词数 16/18、MAGIC 篡改、binding 不一致、fact 篡改、
     /// binding 重复、K=3 非 2 的幂——全部 fail-closed。
     #[test]
     fn combined_batch_plan_rejects_bad_shapes() {
@@ -861,7 +866,7 @@ mod tests {
             h
         };
         let err = CombinedBatchPlan::new(ph, vec![short, hands[1].clone()])
-            .expect_err("15 词必须拒绝");
+            .expect_err("16 词必须拒绝");
         assert!(format!("{err}").contains("hand 0"), "逐手标注序号：{err}");
         let long = {
             let mut h = hands[0].clone();
@@ -920,19 +925,21 @@ mod tests {
         );
     }
 
-    /// fold 金向量手：17 词输出 = [批终 acc] ++ golden v2 段 15 词 ++
+    /// fold 金向量手：18 词输出 = [批终 acc] ++ golden v2 段 16 词 ++
     /// [roster_digest]（规格 D1 布局）。批终 acc 与 roster 全手同值
     /// （Q-1/D1a 批常量），hand_id/binding 逐手递增；fact 用
     /// [`fold_expected_fact`]。roster_digest 用确定性 poseidon 值（本测试
     /// 只钉链格式形状，不涉曲线点）。
     fn fold_golden_hands(k: u64) -> (Felt252, Felt252, Vec<FoldHandEntry>) {
         let program_hash = felt_from_hex(golden::GOLDEN_PROGRAM_HASH).unwrap();
-        let base_v2: Vec<Felt252> = golden::GOLDEN_OUTPUT
+        let mut base_v2: Vec<Felt252> = golden::GOLDEN_OUTPUT
             .iter()
             .skip(1) // wrap 段 [0] = 长度前缀 15，combined/fold 段无前缀
             .map(|h| felt_from_hex(h).unwrap())
             .collect();
-        assert_eq!(base_v2.len(), 15, "v2 公开段 15 词");
+        assert_eq!(base_v2.len(), 15, "groth16 金向量 v2 段 15 词");
+        base_v2.push(Felt252::from(0x5E47u64)); // 9 人桌 cm×9 补位（同 combined 侧）
+        assert_eq!(base_v2.len(), 16, "v2 公开段 16 词（cm×9）");
         let roster_d = poseidon_hash_many(&[Felt252::from(0x1057u64), Felt252::from(k)]);
         // 确定性批终 acc（批级折叠形态；只求金向量可复现）。
         let claims: Vec<Felt252> = (0..k)
@@ -963,7 +970,7 @@ mod tests {
     }
 
     /// K=2 fold 批：构造校验全过；keccak 根与直接复用一致；叶预映像形状
-    /// [ph] ++ K×17；批终 acc/roster 批常量全手同值（Q-1/D1a）；根对语句
+    /// [ph] ++ K×18；批终 acc/roster 批常量全手同值（Q-1/D1a）；根对语句
     /// 顺序敏感；H1 可算且确定。
     #[test]
     fn fold_batch_plan_k2_builds_and_roots() {
@@ -976,16 +983,16 @@ mod tests {
         assert_eq!(hands[0].output[0], hands[1].output[0], "批终 acc 一批同值（Q-1）");
         assert_eq!(hands[0].output[FOLD_ROSTER_INDEX], hands[1].output[FOLD_ROSTER_INDEX]);
         assert_eq!(hands[0].output[FOLD_ROSTER_INDEX], roster_d);
-        // 布局同位（D1）：word 0–15 与 combined 信封逐词同位——fold 输出
-        // 去掉 slot 16 尾词的前 16 词即 combined 信封形状（word 0 各链 acc）。
+        // 布局同位（D1）：word 0–16 与 combined 信封逐词同位——fold 输出
+        // 去掉 slot 17 尾词的前 17 词即 combined 信封形状（word 0 各链 acc）。
         assert_eq!(hands[0].output.len(), FOLD_OUTPUT_LEN);
         assert_eq!(hands[0].output[FOLD_MAGIC_INDEX], Felt252::from(groth16_wrap::wrap_circuit::SEGMENT_MAGIC));
         // 叶预映像形状与顺序敏感。
         let preimage = plan.leaf_preimage();
         assert_eq!(preimage.len(), 1 + 2 * FOLD_OUTPUT_LEN);
         assert_eq!(preimage[0], ph);
-        assert_eq!(&preimage[1..18], hands[0].output.as_slice());
-        assert_eq!(&preimage[18..35], hands[1].output.as_slice());
+        assert_eq!(&preimage[1..19], hands[0].output.as_slice());
+        assert_eq!(&preimage[19..37], hands[1].output.as_slice());
         let mut swapped = hands.clone();
         swapped.reverse();
         let swapped_root = FoldBatchPlan::new(ph, swapped).unwrap().keccak_batch_root().unwrap();
@@ -996,7 +1003,7 @@ mod tests {
         assert_eq!(plan.leaf_output_words().unwrap(), w);
     }
 
-    /// fold fact 公式钉死：`poseidon([program_hash ‖ 整段 17 词])`（与
+    /// fold fact 公式钉死：`poseidon([program_hash ‖ 整段 18 词])`（与
     /// combined_expected_fact 同式）；roster 尾词参与预映像；换 ph 必改
     /// fact（D3c 第 2 层：两链 fact 不等源由 program_hash 分槽保证）。
     #[test]
@@ -1014,19 +1021,19 @@ mod tests {
         );
         assert_eq!(fold_expected_fact(&ph, &hand.output), combined_expected_fact(&ph, &hand.output),
             "同式（fact_for_segment 对段长通用）——不等源在 ph 分槽");
-        // roster 尾词参与：去 slot 16 的 16 词 fact ≠ 17 词 fact。
-        let truncated = hand.output[..16].to_vec();
+        // roster 尾词参与：去 slot 17 的 17 词 fact ≠ 18 词 fact。
+        let truncated = hand.output[..17].to_vec();
         assert_ne!(
             fold_expected_fact(&ph, &truncated),
             hand.statement.fact,
             "roster_digest 是预映像尾词（改 roster 必改 fact）"
         );
-        // 换 ph：同一 17 词内容、不同链程序哈希 → fact 必不同（禁混批锚）。
+        // 换 ph：同一 18 词内容、不同链程序哈希 → fact 必不同（禁混批锚）。
         let other_ph = ph + Felt252::from(1u64);
         assert_ne!(fold_expected_fact(&other_ph, &hand.output), hand.statement.fact);
     }
 
-    /// fold 批负例：词数 16/18、MAGIC 篡改、批终 acc 不一致（Q-1 门）、
+    /// fold 批负例：词数 17/19、MAGIC 篡改、批终 acc 不一致（Q-1 门）、
     /// roster 槽为零（D1a 门；手间不一致不再批拒——多桌规格 M4-c 放宽为
     /// run 分组，正例/超 T_MAX 负例见 multitable 测试）、binding 不一致、
     /// fact 篡改、binding 重复、K=3 非 2 的幂——全部 fail-closed。
@@ -1034,15 +1041,15 @@ mod tests {
     fn fold_batch_plan_rejects_bad_shapes() {
         let (ph, _roster_d, mut hands) = fold_golden_hands(2);
         assert!(FoldBatchPlan::new(ph, vec![]).is_err(), "空批拒绝");
-        // 16 词（combined 形状混入 fold 链——D3c 运行期防线）
+        // 17 词（combined 形状混入 fold 链——D3c 运行期防线）
         let short = {
             let mut h = hands[0].clone();
             h.output.pop();
             h
         };
-        let err = FoldBatchPlan::new(ph, vec![short, hands[1].clone()]).expect_err("16 词必须拒绝");
+        let err = FoldBatchPlan::new(ph, vec![short, hands[1].clone()]).expect_err("17 词必须拒绝");
         assert!(format!("{err}").contains("hand 0"), "逐手标注序号：{err}");
-        // 18 词
+        // 19 词
         let long = {
             let mut h = hands[0].clone();
             h.output.push(Felt252::from(1u64));
@@ -1107,12 +1114,14 @@ mod tests {
     /// binding 逐手全局唯一。fact 用 [`fold_expected_fact`] 逐手重算。
     fn fold_multitable_hands(table_sizes: &[u64]) -> (Felt252, Vec<FoldHandEntry>) {
         let program_hash = felt_from_hex(golden::GOLDEN_PROGRAM_HASH).unwrap();
-        let base_v2: Vec<Felt252> = golden::GOLDEN_OUTPUT
+        let mut base_v2: Vec<Felt252> = golden::GOLDEN_OUTPUT
             .iter()
             .skip(1) // wrap 段 [0] = 长度前缀 15，combined/fold 段无前缀
             .map(|h| felt_from_hex(h).unwrap())
             .collect();
-        assert_eq!(base_v2.len(), 15, "v2 公开段 15 词");
+        assert_eq!(base_v2.len(), 15, "groth16 金向量 v2 段 15 词");
+        base_v2.push(Felt252::from(0x5E47u64)); // 9 人桌 cm×9 补位（同上）
+        assert_eq!(base_v2.len(), 16, "v2 公开段 16 词（cm×9）");
         let k_total: u64 = table_sizes.iter().sum();
         // 确定性批终 acc（跨桌 claims 桌序串接后仍单次折叠，规格 M6）。
         let claims: Vec<Felt252> = (0..k_total)

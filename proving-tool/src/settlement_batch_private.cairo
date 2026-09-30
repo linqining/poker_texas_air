@@ -3,16 +3,15 @@
 //! 与单手 `settlement_private.cairo`（P2-M2）逐字段同逻辑：digest sponge、
 //! 零和、人数、赢家 cm、动作日志整链重放与合法性词规则——差别只在入参
 //! 形态、公开段分段与累加链尾：
-//! - 入参 `main(k, acc_prev, root_hi, root_lo, data)`：`data` 为 K × 98 felt
-//!   的单手入参顺次拼接（每手内部布局与单手程序 98 参数逐位一致；
+//! - 入参 `main(k, acc_prev, root_hi, root_lo, data)`：`data` 为 K × 102 felt
+//!   的单手入参顺次拼接（每手内部布局与 settlement_stmt.cairo wire 同序；
 //!   `Array<felt252>` 走 corelib ArraySerde = [len, elems…] 前缀，prove-hand
-//!   flat 输入 = [k, acc_prev, root_hi, root_lo, 98·k, …]，ABI 由 spike_abi
-//!   实证）。单手 98 参数顶满 Cairo1 standalone 入参上限 100，批量必须走
-//!   数组形态。
-//! - 公开段：每手 16 felt `[15, MAGIC, hand_id, digest, n, binding,
-//!   cm_0..cm_7, total, action_digest]`（与单手证明 public_output.json
-//!   的 Serde 形态逐位一致，含字面 15 前缀），K 手顺次拼接。
-//!   K=8 即 8×16=128 felt 公开段，桥接器逐 felt 对拍。
+//!   flat 输入 = [k, acc_prev, root_hi, root_lo, 102·k, …]，ABI 由 spike_abi
+//!   实证）。单手独立电路的 98 参数形态在 9 人桌下需 102 参数，顶破
+//!   Cairo1 standalone 入参上限 100——批量数组形态是唯一可行 ABI。
+//! - 公开段：每手 17 felt `[16, MAGIC, hand_id, digest, n, binding,
+//!   cm_0..cm_8, total, action_digest]`（字面 16 前缀 = Serde 形态复刻），
+//!   K 手顺次拼接。
 //! - **累加链尾（递归聚合陈述层，stark-recursion/src/stark_final.rs 镜像）**：
 //!   程序把 `acc_prev`（批 n-1 的 fact；首批 = 0）与 keccak 批根拆分
 //!   `root_hi/root_lo`（batch.rs:46-55 同式，与 zchain SettleBatch.sol 逐式
@@ -21,6 +20,12 @@
 //!   `batch_fact = poseidon([acc_prev, root_hi, root_lo, k] ++ 全部手段)`。
 //!   终局 fact = poseidon([program_hash ‖ 全部公开输出])（fact-verify
 //!   fact_for_output 同式）——由归纳法把全部历史批 fact 链进本批证明。
+//!
+//! **9 人桌迁移（2026-09-30）**：席位 8 → 9——四组席位索引数组各 +1 词，
+//! 尾部字段右移 4 词（ald 36→40、count 37→41、词条区 38→42）、公开段
+//! 16 → 17 felt（字面前缀 15→16、cm×8→cm×9）。约束链语义一行不动。
+//! 重编必然换 program_hash → 同步重钉 stark_final.rs / proving-tool
+//! main.rs / fact-verify 三处钉扎。
 //!
 //! 语句钉死：任一手任一断言失败 → 整批无证明（fail-closed）。
 //! 手数上限 64（canonical_small trace 地板 2^20 内的政策上限；
@@ -33,10 +38,10 @@ use core::hash::HashStateTrait;
 use core::traits::TryInto;
 
 const MAGIC: felt252 = 0x5350324d5f4f4b;
-const N_PLAYERS: usize = 8;
+const N_PLAYERS: usize = 9;
 const N_WORDS: usize = 30; // 每手 30 词条 ×2 词
 const HAND_WORDS: usize = 60; // 词条区 60 felt
-const HAND_INPUT_LEN: usize = 37 + 1 + HAND_WORDS; // 98
+const HAND_INPUT_LEN: usize = 41 + 1 + HAND_WORDS; // 102
 
 const DOMAIN: felt252 = 0x11b4269299cbd19c8d701730e13001ca46cbdd2d7a74ba25d7b30be4258fa6e;
 const W_FOLD: felt252 = 0x464F4C44;
@@ -53,21 +58,21 @@ const LEG_MAX_HIGH: u128 = 0x40000000000000000;
 
 const MAX_HANDS: usize = 64;
 
-/// 读第 hand_idx 手的第 i 个入参 felt（data 内按 98 布局顺次排布）。
+/// 读第 hand_idx 手的第 i 个入参 felt（data 内按 102 布局顺次排布）。
 fn read(data: Span<felt252>, hand_idx: usize, i: usize) -> felt252 {
     *data.at(hand_idx * HAND_INPUT_LEN + i)
 }
 
-/// 处理一手：与单手程序逐字段同逻辑，返回该手 16 felt 公开段
-/// `[15, MAGIC, hand_id, digest, n, binding, cm×8, total, action_digest]`。
+/// 处理一手：与单手程序逐字段同逻辑，返回该手 17 felt 公开段
+/// `[16, MAGIC, hand_id, digest, n, binding, cm×9, total, action_digest]`。
 fn process_hand(data: Span<felt252>, hand_idx: usize) -> (felt252, Array<felt252>) {
     let hand_id = read(data, hand_idx, 0);
     let registered_digest = read(data, hand_idx, 1);
     let n_expected = read(data, hand_idx, 2);
     let hand_binding = read(data, hand_idx, 3);
-    // players 4..12, signs 12..20, mags 20..28, commitments 28..36,
-    // action_log_digest 36, action_count 37, words 38..98。
-    let words_base = 38;
+    // players 4..13, signs 13..22, mags 22..31, commitments 31..40,
+    // action_log_digest 40, action_count 41, words 42..102。
+    let words_base = 42;
 
     // --- 约束 1：digest 匹配（Starknet Poseidon sponge，与链上同式） ---
     let mut h = PoseidonTrait::new();
@@ -75,16 +80,16 @@ fn process_hand(data: Span<felt252>, hand_idx: usize) -> (felt252, Array<felt252
     let mut i: usize = 0;
     while i < N_PLAYERS {
         h = h.update(read(data, hand_idx, 4 + i));
-        h = h.update(read(data, hand_idx, 12 + i));
-        h = h.update(read(data, hand_idx, 20 + i));
+        h = h.update(read(data, hand_idx, 13 + i));
+        h = h.update(read(data, hand_idx, 22 + i));
         i += 1;
     }
-    h = h.update(read(data, hand_idx, 36));
+    h = h.update(read(data, hand_idx, 40));
     let digest = h.finalize();
     assert!(digest == registered_digest, "DIGEST_MISMATCH");
 
     // --- 动作日志整链重放（与单手同式；30 槽上限钉死） ---
-    let count_f = read(data, hand_idx, 37);
+    let count_f = read(data, hand_idx, 41);
     let count_us: usize = count_f.try_into().expect('COUNT_NOT_USIZE');
     assert!(count_us <= N_WORDS, "COUNT_OVER_30");
 
@@ -136,13 +141,13 @@ fn process_hand(data: Span<felt252>, hand_idx: usize) -> (felt252, Array<felt252
         i += 1;
     }
     let chain_root = ah.finalize();
-    assert!(chain_root == read(data, hand_idx, 36), "ACTION_CHAIN_MISMATCH");
+    assert!(chain_root == read(data, hand_idx, 40), "ACTION_CHAIN_MISMATCH");
 
     // --- 见证良构：sign∈{0,1}，|delta|≤u64 ---
     let mut i: usize = 0;
     while i < N_PLAYERS {
-        let s = read(data, hand_idx, 12 + i);
-        let m = read(data, hand_idx, 20 + i);
+        let s = read(data, hand_idx, 13 + i);
+        let m = read(data, hand_idx, 22 + i);
         assert!(s * (s - 1) == 0, "SIGN_NOT_BOOL");
         let _m_u64: u64 = m.try_into().expect('MAGNITUDE_OVER_U64');
         i += 1;
@@ -153,8 +158,8 @@ fn process_hand(data: Span<felt252>, hand_idx: usize) -> (felt252, Array<felt252
     let mut count: felt252 = 0;
     let mut i: usize = 0;
     while i < N_PLAYERS {
-        let s = read(data, hand_idx, 12 + i);
-        let m = read(data, hand_idx, 20 + i);
+        let s = read(data, hand_idx, 13 + i);
+        let m = read(data, hand_idx, 22 + i);
         if s == 1 {
             sum += m;
         } else {
@@ -168,9 +173,9 @@ fn process_hand(data: Span<felt252>, hand_idx: usize) -> (felt252, Array<felt252
     assert!(sum == 0, "NOT_ZERO_SUM");
     assert!(count == n_expected, "COUNT_MISMATCH");
 
-    // --- 约束 4：赢家 cm + 该手 16 felt 公开段 ---
+    // --- 约束 4：赢家 cm + 该手 17 felt 公开段 ---
     let mut seg = ArrayTrait::new();
-    seg.append(15); // 单手 Serde 前缀的字面复刻（与单手 public_output[0] 一致）
+    seg.append(16); // 单手 Serde 前缀的字面复刻（9 人桌段长 16）
     seg.append(MAGIC);
     seg.append(hand_id);
     seg.append(registered_digest);
@@ -179,13 +184,13 @@ fn process_hand(data: Span<felt252>, hand_idx: usize) -> (felt252, Array<felt252
     let mut total_winnings: felt252 = 0;
     let mut i: usize = 0;
     while i < N_PLAYERS {
-        let s = read(data, hand_idx, 12 + i);
-        let m = read(data, hand_idx, 20 + i);
+        let s = read(data, hand_idx, 13 + i);
+        let m = read(data, hand_idx, 22 + i);
         if s == 1 {
             if m != 0 {
                 total_winnings += m;
                 let mut ch = PoseidonTrait::new();
-                ch = ch.update(read(data, hand_idx, 28 + i));
+                ch = ch.update(read(data, hand_idx, 31 + i));
                 ch = ch.update(hand_binding);
                 ch = ch.update(m);
                 ch = ch.update(0);
@@ -199,7 +204,7 @@ fn process_hand(data: Span<felt252>, hand_idx: usize) -> (felt252, Array<felt252
         i += 1;
     }
     seg.append(total_winnings);
-    seg.append(read(data, hand_idx, 36));
+    seg.append(read(data, hand_idx, 40));
     (hand_id, seg)
 }
 
@@ -221,7 +226,7 @@ fn main(
     while i < k_us {
         let (_hand_id, seg) = process_hand(data.span(), i);
         let mut j: usize = 0;
-        while j < 16 {
+        while j < 17 {
             out.append(*seg.at(j));
             j += 1;
         }
@@ -229,7 +234,7 @@ fn main(
     }
 
     // --- 累加链尾（电路内 poseidon 链接）：batch_fact =
-    //     poseidon([acc_prev, root_hi, root_lo, k] ++ 全部 16·k 手段)。
+    //     poseidon([acc_prev, root_hi, root_lo, k] ++ 全部 17·k 手段)。
     //     sponge = corelib HashState（rate-2、耗尽补 1、末置换取 s0）——与
     //     groth16-wrap poseidon_hash_many 同一构造（stark-recursion 镜像 +
     //     E2E 对拍钉死）。批根 hi/lo 与 acc_prev 先复制进公开段再参与哈希，

@@ -107,8 +107,8 @@ pub trait IPokerDualSettlement<TContractState> {
     /// P2-M3（docs/design/SETTLEMENT_PRIVACY_PLAN.md §4 Phase 2）：零明文结算入口。
     /// calldata 只含 (hand_binding, hand_id, segment)，**不含 players/deltas**；
     /// segment 是 settlement_private 电路（program_hash 钉死）的公开段：
-    /// `[MAGIC, hand_id, digest, n, binding, cm_0..cm_7, total_winnings,
-    /// action_log_digest]`（15 felt，#18 Phase B）。
+    /// `[MAGIC, hand_id, digest, n, binding, cm_0..cm_8, total_winnings,
+    /// action_log_digest]`（16 felt，#18 Phase B + 9 人桌迁移）。
     /// 信任锚为 fact-registry：`fact = poseidon([program_hash ++ segment])`
     /// 须已由授权 prover/owner 登记（Stwo Cairo verifier 上链前的过渡形态，
     /// 与 G 层 host-verified 同一 residual-trust 口径）；托管金额取自公开段
@@ -119,7 +119,7 @@ pub trait IPokerDualSettlement<TContractState> {
     /// P2-M3（docs/design/SETTLEMENT_PRIVACY_PLAN.md §4 Phase 2）：零明文结算入口。
     /// calldata 只含 (hand_binding, hand_id, segment)，**不含 players/deltas**；
     /// segment 是 settlement_private 电路（program_hash 钉死）的公开段：
-    /// `[MAGIC, hand_id, digest, n, binding, cm_0..cm_7, total_winnings]`。
+    /// `[MAGIC, hand_id, digest, n, binding, cm_0..cm_8, total_winnings]`。
     /// 信任锚为 fact-registry：`fact = poseidon([program_hash ++ segment])`
     /// 须已由授权 prover/owner 登记（Stwo Cairo verifier 上链前的过渡形态，
     /// 与 G 层 host-verified 同一 residual-trust 口径）；托管金额取自公开段
@@ -215,8 +215,8 @@ pub trait IPokerDualSettlement<TContractState> {
     );
     /// 合并信封（2026-09-29）：**一份** Stwo 证明同时覆盖 P 层（hand_verify
     /// σ 批量校验，EC_OP 进 trace）与 settlement_private 语句，公开段
-    /// 16 词 = `[chain_acc, MAGIC, hand_id, digest, n, binding, cm_0..cm_7,
-    /// total_winnings, action_log_digest]`（v2 15 词段前置 chain_acc）。
+    /// 17 词 = `[chain_acc, MAGIC, hand_id, digest, n, binding, cm_0..cm_8,
+    /// total_winnings, action_log_digest]`（v2 16 词段前置 chain_acc）。
     /// 单 fact 门：`fact = poseidon([combined_program_hash ++ segment])`——
     /// 电路内已断言每条 P 任务的 hand_binding == settle 段 binding，故单
     /// fact 即同时锚定「这手的签名验证」与「这手的结算语句」。派奖/幂等/
@@ -235,8 +235,8 @@ pub trait IPokerDualSettlement<TContractState> {
     /// 一张桌的 roster。链上重算
     /// `roster_digest = poseidon(['poker/fold-batch/roster.v1', n] ++ pks)`
     /// ——标签与 fold 电路 `fold_batch.cairo` 的 ROSTER_LABEL 常量逐字节
-    /// 一致，使注册值与电路公式同源（消费面对照 = segment[16] 直读）。
-    /// `n` 限 2..=8、`pks.len() == 2·n`；不验 on-curve（合约无 EC 能力，
+    /// 一致，使注册值与电路公式同源（消费面对照 = segment[17] 直读）。
+    /// `n` 限 2..=9、`pks.len() == 2·n`（≤ 18 词）；不验 on-curve（合约无 EC 能力，
     /// 垃圾 pks 只会登记一个电路必然 panic 的 digest，不出证即不出金）。
     /// digest 已注册时拒绝（注册值不可改写）；pks 全文随事件可取，供
     /// 玩家自核注册面。
@@ -248,9 +248,9 @@ pub trait IPokerDualSettlement<TContractState> {
     fn set_fold_program_hash(ref self: TContractState, program_hash: felt252);
     /// View：钉死的 fold 批程序 program hash。
     fn fold_program_hash(self: @TContractState) -> felt252;
-    /// fold 链批结算入口（规格 §4.4）：17 词公开段 = combined 16 词信封
-    /// 原样 + 尾插 roster_digest（index 16）。校验序列与 combined 入口
-    /// 逐项同构，仅两处增量：段长 17 与 segment[16] 对照 roster 注册面。
+    /// fold 链批结算入口（规格 §4.4）：18 词公开段 = combined 17 词信封
+    /// 原样 + 尾插 roster_digest（index 17）。校验序列与 combined 入口
+    /// 逐项同构，仅两处增量：段长 18 与 segment[17] 对照 roster 注册面。
     /// fact 门复用 settlement_facts（owner/prover 登记），绑 fold 哈希。
     fn verify_and_settle_dapv_fold_private(
         ref self: TContractState,
@@ -299,13 +299,14 @@ pub mod PokerDualSettlement {
     // 及 texas/src/starknet/settlement_prover.rs 三方一致）。
     // #18 Phase B：段长 14 → 15（尾词 = 动作日志哈希，对注册承诺比对）。
     const SETTLEMENT_SEGMENT_MAGIC: felt252 = 0x5350324d5f4f4b;
-    const SETTLEMENT_SEGMENT_LEN: usize = 15;
-    /// 合并信封公开段：v2 15 词前置 chain_acc（fact 消费整段 16 词）。
-    const COMBINED_SEGMENT_LEN: usize = 16;
-    /// fold 批公开段：combined 16 词信封原样 + 尾插 roster_digest
-    /// （index 16；word 0–15 与 combined 逐词同位，规格 out/fold-spec.md D1）。
+    const SETTLEMENT_SEGMENT_LEN: usize = 16;
+    /// 合并信封公开段：v2 16 词前置 chain_acc（fact 消费整段 17 词）。
+    const COMBINED_SEGMENT_LEN: usize = 17;
+    /// fold 批公开段：combined 17 词信封原样 + 尾插 roster_digest
+    /// （index 17；word 0–16 与 combined 逐词同位，规格 out/fold-spec.md D1）。
     /// 三态共存：各入口自断言各段长，禁混批（D3c 第 3 层）。
-    const FOLD_SEGMENT_LEN: usize = 17;
+    /// 9 人桌迁移：语句段 cm×8→cm×9，三段长各 +1。
+    const FOLD_SEGMENT_LEN: usize = 18;
     /// roster 域标签（与 fold_batch.cairo 电路 ROSTER_LABEL 常量逐字节一致）。
     const ROSTER_LABEL: felt252 = 'poker/fold-batch/roster.v1';
 
@@ -444,11 +445,11 @@ fn validate_settlement_segment(
     assert!(*segment.at(1) == hand_id.into(), "Segment hand_id mismatch");
     assert!(*segment.at(4) == hand_binding, "Segment binding mismatch");
     let n: u32 = (*segment.at(3)).try_into().expect('n fits u32');
-    assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
+    assert!(n >= 2_u32 && n <= 9_u32, "Participant count out of range");
     let registered_digest = read_registered_digest(self, hand_binding);
     assert!(*segment.at(2) == registered_digest, "Segment digest mismatch");
     assert!(
-        *segment.at(14) == self.action_logs.read(hand_binding),
+        *segment.at(15) == self.action_logs.read(hand_binding),
         "Segment action log mismatch"
     );
     registered_digest
@@ -589,7 +590,7 @@ fn dapv_prelude(
         /// （v2 公开段尾词必须逐 felt 等于该值）。
         action_logs: Map<felt252, felt252>,
         /// fold 链注册面：roster_digest → 已注册（键 = fold 公开段
-        /// segment[16] 的值本身——电路输出词即注册成员证明）。
+        /// segment[17] 的值本身——电路输出词即注册成员证明）。
         roster_registry: Map<felt252, bool>,
         /// fold 链程序哈希（fold 入口 fact 绑定根，与 combined_program_hash
         /// 分槽——两链禁混批 D3c 第 2 层的承重件）。
@@ -1144,11 +1145,11 @@ fn dapv_prelude(
             assert!(*segment.at(1) == hand_id.into(), "Segment hand_id mismatch");
             assert!(*segment.at(4) == hand_binding, "Segment binding mismatch");
             let n: u32 = (*segment.at(3)).try_into().expect('n fits u32');
-            assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
+            assert!(n >= 2_u32 && n <= 9_u32, "Participant count out of range");
             let registered_digest = read_registered_digest(@self, hand_binding);
             assert!(*segment.at(2) == registered_digest, "Segment digest mismatch");
             assert!(
-                *segment.at(14) == self.action_logs.read(hand_binding),
+                *segment.at(15) == self.action_logs.read(hand_binding),
                 "Segment action log mismatch"
             );
 
@@ -1181,7 +1182,7 @@ fn dapv_prelude(
             );
 
             // —— 私密派奖（与 v2 private 相同）——
-            let total_u128: u128 = (*segment.at(13)).try_into().expect('total fits u128');
+            let total_u128: u128 = (*segment.at(14)).try_into().expect('total fits u128');
             let total_winnings: u256 = total_u128.into();
             assert!(total_winnings > 0_u256, "No winnings to escrow");
             let vault_addr = self.vault_address.read();
@@ -1190,7 +1191,7 @@ fn dapv_prelude(
             let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
             vault.settlement_fund_escrow(helper, hand_binding, total_winnings);
             let mut i: u32 = 0;
-            while i < 8_u32 {
+            while i < 9_u32 {
                 self.claim_cms.write((hand_binding, i), *segment.at(5 + i));
                 i += 1;
             }
@@ -1257,7 +1258,7 @@ fn dapv_prelude(
 
             // ===== 派奖（与 v2 完全一致）=====
             let n: u32 = (*segment.at(3)).try_into().expect('n fits u32');
-            let total_u128: u128 = (*segment.at(13)).try_into().expect('total fits u128');
+            let total_u128: u128 = (*segment.at(14)).try_into().expect('total fits u128');
             let total_winnings: u256 = total_u128.into();
             assert!(total_winnings > 0_u256, "No winnings to escrow");
             let vault_addr = self.vault_address.read();
@@ -1266,7 +1267,7 @@ fn dapv_prelude(
             let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
             vault.settlement_fund_escrow(helper, hand_binding, total_winnings);
             let mut i: u32 = 0;
-            while i < 8_u32 {
+            while i < 9_u32 {
                 self.claim_cms.write((hand_binding, i), *segment.at(5 + i));
                 i += 1;
             }
@@ -1304,14 +1305,14 @@ fn dapv_prelude(
             assert!(*segment.at(1) == hand_id.into(), "Segment hand_id mismatch");
             assert!(*segment.at(4) == hand_binding, "Segment binding mismatch");
             let n: u32 = (*segment.at(3)).try_into().expect('n fits u32');
-            assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
+            assert!(n >= 2_u32 && n <= 9_u32, "Participant count out of range");
             // digest 取 register_aggregate 时的注册值（无明文参与比对）
             let registered_digest = read_registered_digest(@self, hand_binding);
             assert!(*segment.at(2) == registered_digest, "Segment digest mismatch");
             // #18 Phase B：公开段尾词（动作日志哈希）必须等于注册承诺——
             // 把零明文结算锚定到注册时刻钉住的动作日志（审计/auto 标记）。
             assert!(
-                *segment.at(14) == self.action_logs.read(hand_binding),
+                *segment.at(15) == self.action_logs.read(hand_binding),
                 "Segment action log mismatch"
             );
             // fact-registry 锚：fact = poseidon([program_hash ++ segment])，
@@ -1324,7 +1325,7 @@ fn dapv_prelude(
                 "Settlement fact not registered"
             );
 
-            let total_u128: u128 = (*segment.at(13)).try_into().expect('total fits u128');
+            let total_u128: u128 = (*segment.at(14)).try_into().expect('total fits u128');
             let total_winnings: u256 = total_u128.into();
             assert!(total_winnings > 0_u256, "No winnings to escrow");
             let vault_addr = self.vault_address.read();
@@ -1333,7 +1334,7 @@ fn dapv_prelude(
             let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
             vault.settlement_fund_escrow(helper, hand_binding, total_winnings);
             let mut i: u32 = 0;
-            while i < 8_u32 {
+            while i < 9_u32 {
                 self.claim_cms.write((hand_binding, i), *segment.at(5 + i));
                 i += 1;
             }
@@ -1369,7 +1370,7 @@ fn dapv_prelude(
         ) {
             self.ownable.assert_only_owner();
             let n_u32: u32 = n.try_into().expect('n fits u32');
-            assert!(n_u32 >= 2_u32 && n_u32 <= 8_u32, "Participant count out of range");
+            assert!(n_u32 >= 2_u32 && n_u32 <= 9_u32, "Participant count out of range");
             assert!(pks.len() == 2 * n_u32, "Roster pks length mismatch");
             // 与 fold_batch.cairo 电路 ROSTER_LABEL 常量同式：poseidon([LABEL, n] ++ pks)。
             let mut roster_in: Array<felt252> = array![ROSTER_LABEL, n];
@@ -1404,7 +1405,7 @@ fn dapv_prelude(
             self.fold_program_hash.read()
         }
 
-        /// 合并信封私密结算：16 词公开段（v2 段前置 chain_acc）+ 单 fact 门。
+        /// 合并信封私密结算：17 词公开段（v2 段前置 chain_acc）+ 单 fact 门。
         /// 字段校验与 v2 逐项对齐（索引 +1）；chain_acc 随事件 emit。
         fn verify_and_settle_dapv_combined_private(
             ref self: ContractState,
@@ -1428,14 +1429,14 @@ fn dapv_prelude(
             assert!(*segment.at(2) == hand_id.into(), "Segment hand_id mismatch");
             assert!(*segment.at(5) == hand_binding, "Segment binding mismatch");
             let n: u32 = (*segment.at(4)).try_into().expect('n fits u32');
-            assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
+            assert!(n >= 2_u32 && n <= 9_u32, "Participant count out of range");
             let registered_digest = read_registered_digest(@self, hand_binding);
             assert!(*segment.at(3) == registered_digest, "Segment digest mismatch");
             assert!(
-                *segment.at(15) == self.action_logs.read(hand_binding),
+                *segment.at(16) == self.action_logs.read(hand_binding),
                 "Segment action log mismatch"
             );
-            // 单 fact 门：合并证明（P 层 + settlement）锚定整段 16 词。
+            // 单 fact 门：合并证明（P 层 + settlement）锚定整段 17 词。
             let program_hash = self.combined_program_hash.read();
             assert!(program_hash != 0, "Combined program hash not set");
             let fact = fact_for_segment(program_hash, segment);
@@ -1445,7 +1446,7 @@ fn dapv_prelude(
             );
             let chain_acc = *segment.at(0);
 
-            let total_u128: u128 = (*segment.at(14)).try_into().expect('total fits u128');
+            let total_u128: u128 = (*segment.at(15)).try_into().expect('total fits u128');
             let total_winnings: u256 = total_u128.into();
             assert!(total_winnings > 0_u256, "No winnings to escrow");
             let vault_addr = self.vault_address.read();
@@ -1454,7 +1455,7 @@ fn dapv_prelude(
             let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
             vault.settlement_fund_escrow(helper, hand_binding, total_winnings);
             let mut i: u32 = 0;
-            while i < 8_u32 {
+            while i < 9_u32 {
                 self.claim_cms.write((hand_binding, i), *segment.at(6 + i));
                 i += 1;
             }
@@ -1471,9 +1472,9 @@ fn dapv_prelude(
             );
         }
 
-        /// fold 批私密结算：17 词公开段（combined 16 词信封 + 尾插
+        /// fold 批私密结算：18 词公开段（combined 17 词信封 + 尾插
         /// roster_digest）。校验序列与 combined 入口逐项同构，仅两处增量：
-        /// 段长 17（FOLD_SEGMENT_LEN）与 segment[16] 对照 roster 注册面
+        /// 段长 18（FOLD_SEGMENT_LEN）与 segment[17] 对照 roster 注册面
         /// （规格 out/fold-spec.md §4.4 #10——C1 的闭合点）。fact 门复用
         /// settlement_facts（不新增 ACL），绑 fold_program_hash 分槽哈希。
         fn verify_and_settle_dapv_fold_private(
@@ -1498,15 +1499,15 @@ fn dapv_prelude(
             assert!(*segment.at(2) == hand_id.into(), "Segment hand_id mismatch");
             assert!(*segment.at(5) == hand_binding, "Segment binding mismatch");
             let n: u32 = (*segment.at(4)).try_into().expect('n fits u32');
-            assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
+            assert!(n >= 2_u32 && n <= 9_u32, "Participant count out of range");
             let registered_digest = read_registered_digest(@self, hand_binding);
             assert!(*segment.at(3) == registered_digest, "Segment digest mismatch");
             assert!(
-                *segment.at(15) == self.action_logs.read(hand_binding),
+                *segment.at(16) == self.action_logs.read(hand_binding),
                 "Segment action log mismatch"
             );
             // —— fold 增量 1：roster 对照（段尾词必须已注册且非零）——
-            let roster_digest = *segment.at(16);
+            let roster_digest = *segment.at(17);
             assert!(
                 roster_digest != 0 && self.roster_registry.read(roster_digest),
                 "Roster not registered"
@@ -1522,7 +1523,7 @@ fn dapv_prelude(
             let chain_acc = *segment.at(0);
 
             // —— 派奖：与 combined 入口同构 ——
-            let total_u128: u128 = (*segment.at(14)).try_into().expect('total fits u128');
+            let total_u128: u128 = (*segment.at(15)).try_into().expect('total fits u128');
             let total_winnings: u256 = total_u128.into();
             assert!(total_winnings > 0_u256, "No winnings to escrow");
             let vault_addr = self.vault_address.read();
@@ -1531,7 +1532,7 @@ fn dapv_prelude(
             let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
             vault.settlement_fund_escrow(helper, hand_binding, total_winnings);
             let mut i: u32 = 0;
-            while i < 8_u32 {
+            while i < 9_u32 {
                 self.claim_cms.write((hand_binding, i), *segment.at(6 + i));
                 i += 1;
             }
@@ -1640,7 +1641,7 @@ mod settlement_private_v2_tests {
         let commitment = 0x21;
         let binding = hand_binding;
         let mut i: u32 = 0;
-        while i < 8_u32 {
+        while i < 9_u32 {
             let (s, m): (felt252, felt252) = if i == 0 {
                 (1, 3000)
             } else if i == 1 {
@@ -1672,12 +1673,12 @@ mod settlement_private_v2_tests {
         let digest_in_segment: felt252 = if tamper_digest { 0xDEAD } else { digest };
         let mut segment = array![MAGIC, hand_id.into(), digest_in_segment, 3, binding];
         let mut w: u32 = 0;
-        while w < 8_u32 {
+        while w < 9_u32 {
             segment.append(*cms.at(w));
             w += 1;
         };
         segment.append(total);
-        // #18 Phase B：公开段尾词 = 动作日志哈希（15 felt 段）。
+        // #18 Phase B：公开段尾词 = 动作日志哈希（16 felt 段，cm×9）。
         segment.append(action_log);
 
         if with_fact {
@@ -1708,7 +1709,7 @@ mod settlement_private_v2_tests {
         let s = setup(false, true);
         // 注册承诺可见（view），公开段尾词与其一致
         assert!(s.dual.hand_action_log(s.hand_binding) == s.action_log, "action log view");
-        assert!(*s.segment.at(14) == s.action_log, "segment tail is the action log");
+        assert!(*s.segment.at(15) == s.action_log, "segment tail is the action log");
         // v2 calldata：只有 (hand_binding, hand_id, segment)——无 players/deltas
         s.dual
             .verify_and_settle_dapv_stark_private_v2(s.hand_binding, 42, s.segment.span());
@@ -1746,7 +1747,7 @@ mod settlement_private_v2_tests {
         let mut tampered_segment = array![];
         let mut w: u32 = 0;
         while w < s.segment.len() {
-            let v = if w == 14_u32 { 0xFEED } else { *s.segment.at(w) };
+            let v = if w == 15_u32 { 0xFEED } else { *s.segment.at(w) };
             tampered_segment.append(v);
             w += 1;
         }
@@ -1783,7 +1784,7 @@ mod settlement_private_v2_tests {
 }
 
 // ============================================================
-// Tests (snforge): 合并信封结算——单 fact 门消费 16 词公开段
+// Tests (snforge): 合并信封结算——单 fact 门消费 17 词公开段
 // （v2 段前置 chain_acc），派奖/幂等与 v2 一致。
 // ============================================================
 
@@ -1837,7 +1838,7 @@ mod settlement_combined_private_tests {
         let action_log: felt252 = 0xA11CE;
         dual.register_hand(hand_binding, digest, 0, action_log, 0, 0, 0);
 
-        // 16 词合并段 = [chain_acc] ++ 15 词 v2 段（赢家 seat0 +3000）。
+        // 17 词合并段 = [chain_acc] ++ 16 词 v2 段（赢家 seat0 +3000）。
         let chain_acc: felt252 = 0xACCE55;
         let mut segment = array![chain_acc, MAGIC, hand_id.into(), digest, 3, hand_binding];
         // cm0 = poseidon([0x21, binding, 3000, 0])，其余 0。
@@ -1849,7 +1850,7 @@ mod settlement_combined_private_tests {
         let cm0 = ch.finalize();
         segment.append(cm0);
         let mut w: u32 = 0;
-        while w < 7_u32 {
+        while w < 8_u32 {
             segment.append(0);
             w += 1;
         }
@@ -1903,7 +1904,7 @@ mod settlement_combined_private_tests {
     #[should_panic(expected: "Segment length mismatch")]
     fn combined_wrong_length_reverts() {
         let s = setup(true);
-        // 15 词段（v2 形态）必须被拒绝——合并入口只吃 16 词。
+        // 16 词段（v2 形态）必须被拒绝——合并入口只吃 17 词。
         let mut short = array![];
         let mut w: u32 = 1;
         while w < s.segment.len() {
@@ -1926,10 +1927,10 @@ mod settlement_combined_private_tests {
 
     #[test]
     #[should_panic(expected: "Segment length mismatch")]
-    fn combined_rejects_17_word_fold_segment() {
+    fn combined_rejects_18_word_fold_segment() {
         // 消费面禁混批（规格 out/fold-spec.md D3c 第 3 层镜像）：fold 的
-        // 17 词段（combined 16 词信封 + 尾插 roster 词）过不了 combined
-        // 入口——combined fallback 只吃 16 词，行为不得被 fold 增量破坏。
+        // 18 词段（combined 17 词信封 + 尾插 roster 词）过不了 combined
+        // 入口——combined fallback 只吃 17 词，行为不得被 fold 增量破坏。
         let s = setup(true);
         let mut longer = array![];
         let mut w: u32 = 0;
@@ -2016,7 +2017,7 @@ mod settlement_proved_private_tests {
         let mut cms = array![];
         let mut total: felt252 = 0;
         let mut i: u32 = 0;
-        while i < 8_u32 {
+        while i < 9_u32 {
             let (s, m): (felt252, felt252) = if i == 0 {
                 (1, 3000)
             } else if i == 1 {
@@ -2046,7 +2047,7 @@ mod settlement_proved_private_tests {
 
         let mut segment = array![MAGIC, hand_id.into(), digest, 3, hand_binding];
         let mut w: u32 = 0;
-        while w < 8_u32 {
+        while w < 9_u32 {
             segment.append(*cms.at(w));
             w += 1;
         };
@@ -2131,7 +2132,7 @@ mod settlement_proved_private_tests {
     }
 }
 // ============================================================
-// Tests (snforge): fold 批结算——17 词公开段（combined 16 词信封 +
+// Tests (snforge): fold 批结算——18 词公开段（combined 17 词信封 +
 // 尾插 roster_digest），roster 注册面（owner-gated + 链上重算 digest）
 // 与 fold 哈希分槽 fact 门。规格 out/fold-spec.md §4/D3c/D5。
 // ============================================================
@@ -2235,7 +2236,7 @@ mod settlement_fold_private_tests {
 
     /// 完整前置：部署 + claim helper + 三 program hash 就位 + register_hand
     /// （digest=0x9900、action_log=0xA11CE）+ register_roster（n=2、pks 4 词）
-    /// + 构造 17 词 fold 段（赢家 seat0 +3000，cm0 = poseidon([0x21,
+    /// + 构造 18 词 fold 段（赢家 seat0 +3000，cm0 = poseidon([0x21,
     /// binding, 3000, 0])，尾词 = roster_digest）+ `with_fold_fact` 控制
     /// fold 哈希 fact 登记。`tamper_roster` 把段尾换成未注册 digest。
     fn setup(tamper_roster: bool, with_fold_fact: bool) -> FoldSetup {
@@ -2264,7 +2265,7 @@ mod settlement_fold_private_tests {
         let roster_digest = roster_digest_of(n, pks.span());
         dual.register_roster(7, n, pks.span());
 
-        // 17 词 fold 段 = 16 词 combined 信封原样 + 尾插 roster_digest。
+        // 18 词 fold 段 = 17 词 combined 信封原样 + 尾插 roster_digest。
         let chain_acc: felt252 = 0xACCE55;
         let mut segment = array![chain_acc, MAGIC, hand_id.into(), digest, 3, hand_binding];
         let mut ch = PoseidonTrait::new();
@@ -2274,7 +2275,7 @@ mod settlement_fold_private_tests {
         ch = ch.update(0);
         segment.append(ch.finalize());
         let mut w: u32 = 0;
-        while w < 7_u32 {
+        while w < 8_u32 {
             segment.append(0);
             w += 1;
         }
@@ -2411,7 +2412,12 @@ mod settlement_fold_private_tests {
     #[should_panic(expected: "Participant count out of range")]
     fn fold_register_roster_rejects_n_out_of_window() {
         let dual = deploy_dual();
-        dual.register_roster(1, 9, array![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18].span());
+        // 9 人桌窗口为 2..=9；n=10（20 词 pks）必须仍被拒。
+        dual.register_roster(
+            1, 10, array![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+            ].span(),
+        );
     }
 
     // ===== fold 结算负例（规格 D5 第 6 条：4 条 should_panic）=====
@@ -2427,12 +2433,12 @@ mod settlement_fold_private_tests {
 
     #[test]
     #[should_panic(expected: "Segment length mismatch")]
-    fn fold_rejects_16_word_combined_segment() {
-        // 消费面禁混批（D3c 第 3 层）：combined 16 词段过不了 fold 入口。
+    fn fold_rejects_17_word_combined_segment() {
+        // 消费面禁混批（D3c 第 3 层）：combined 17 词段过不了 fold 入口。
         let s = setup(false, true);
         let mut short = array![];
         let mut w: u32 = 0;
-        while w < 16_u32 {
+        while w < 17_u32 {
             short.append(*s.segment.at(w));
             w += 1;
         }
@@ -2465,7 +2471,7 @@ mod settlement_fold_private_tests {
     }
 
     // ===== 多桌段测试（规格 out/fold-multitable-spec.md §7/§9 M9-5b）=====
-    // 判定前提：fold 入口一次调用只吃一段 17 词且 segment[16] 逐手对照
+    // 判定前提：fold 入口一次调用只吃一段 18 词且 segment[17] 逐手对照
     // roster_registry——多桌批 = 每手一次调用各携各桌 digest，入口对
     // 「批里还有别的桌」无感知（零合约改动的消费面证据）。
 
@@ -2507,7 +2513,7 @@ mod settlement_fold_private_tests {
         }
     }
 
-    /// 造一张桌的 17 词 fold 段：slot0 = 批终 chain_acc（多桌批内全段
+    /// 造一张桌的 18 词 fold 段：slot0 = 批终 chain_acc（多桌批内全段
     /// 同值——Q-1 语义），尾词 = 本桌 roster_digest；赢家 seat0 +total，
     /// cm0 = poseidon([0x21, binding, total, 0])。
     fn fold_segment_for(
@@ -2527,7 +2533,7 @@ mod settlement_fold_private_tests {
         ch = ch.update(0);
         segment.append(ch.finalize());
         let mut w: u32 = 0;
-        while w < 7_u32 {
+        while w < 8_u32 {
             segment.append(0);
             w += 1;
         }
@@ -2675,7 +2681,7 @@ mod settlement_fold_private_tests {
 
         let mut swapped = array![];
         let mut w: u32 = 0;
-        while w < 16_u32 {
+        while w < 17_u32 {
             swapped.append(*seg_a.at(w));
             w += 1;
         }
@@ -2686,8 +2692,8 @@ mod settlement_fold_private_tests {
     #[test]
     fn fold_multitable_coexists_with_combined_fallback() {
         let mt = setup_multitable();
-        // combined 回归保持：combined 手（16 词段 + combined 哈希 fact）
-        // 与桌 A 的 fold 手（17 词段 + fold 哈希 fact）在同一合约实例上
+        // combined 回归保持：combined 手（17 词段 + combined 哈希 fact）
+        // 与桌 A 的 fold 手（18 词段 + fold 哈希 fact）在同一合约实例上
         // 先后结算——combined fallback 行为不受多桌 fold 影响。
         let binding_c: felt252 = 0xDD01;
         let binding_f: felt252 = 0xAA01;
@@ -2705,7 +2711,7 @@ mod settlement_fold_private_tests {
         ch = ch.update(0);
         seg_c.append(ch.finalize());
         let mut w: u32 = 0;
-        while w < 7_u32 {
+        while w < 8_u32 {
             seg_c.append(0);
             w += 1;
         }
@@ -2885,7 +2891,7 @@ mod settlement_snip36_v3_tests {
         let mut cms = array![];
         let mut total: felt252 = 0;
         let mut i: u32 = 0;
-        while i < 8_u32 {
+        while i < 9_u32 {
             let (sgn, m): (felt252, felt252) = if i == 0 {
                 (1, 3000)
             } else if i == 1 {
@@ -2914,7 +2920,7 @@ mod settlement_snip36_v3_tests {
         }
         let mut segment = array![MAGIC, hand_id.into(), digest, 3, hand_binding];
         let mut w: u32 = 0;
-        while w < 8_u32 {
+        while w < 9_u32 {
             segment.append(*cms.at(w));
             w += 1;
         }

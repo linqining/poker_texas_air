@@ -5,6 +5,8 @@
 #      见证 → Stwo 证明 → 独立 verify；
 #   3. 跨语言对齐：证明的公开段与 Rust 期望逐 felt 比对；
 #   4. 负例：registered_digest 篡改 → 电路中止 → 不得产出证明。
+# Span ABI（2026-09-30 重构 + 9 人桌）：inputs = [102] ++ settle wire 102 词
+# （flat [len, elements…] 摊平，与 combined / batch 同约定）。
 # 用法：proving-tool/scripts/prove-settlement.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -38,7 +40,7 @@ python3 - "$OUT_FIXTURES/settlement_inputs.json" "$OUT_FIXTURES/settlement_expec
 import json, sys
 inputs = json.load(open(sys.argv[1]))
 expected = json.load(open(sys.argv[2]))
-inputs[1] = expected[0]  # 把 registered_digest 换成 MAGIC → digest 必不匹配
+inputs[2] = expected[0]  # 把 registered_digest（flat[2] = [len]++wire[1]）换成 MAGIC → digest 必不匹配
 json.dump(inputs, open(sys.argv[1] + ".tampered", "w"))
 EOF
 if "$ROOT/proving-tool/prove-hand.sh" \
@@ -54,9 +56,10 @@ echo "[4b/4] 负例：非法默认动作（auto FOLD 篡改为 Check）必须中
 python3 - "$OUT_FIXTURES/settlement_inputs.json" <<'PYEOF'
 import json, sys
 inputs = json.load(open(sys.argv[1]))
-# 词条区起点 = 38；槽 1 = auto FOLD 的合法性词（kind=2 | owed=500·4 | …）。
-# 把 kind 位（低 2 位）从 2 改成 0（声称 Check）→ 电路规则必须拒绝。
-idx = 38 + 3  # 槽 1 的合法性词（38=log0, 39=leg0, 40=log1, 41=leg1）
+# settle wire 词条区起点 = 42（flat 再 +1 长度前缀）；槽 1 = auto FOLD 的
+# 合法性词（kind=2 | owed=500·4 | …）。把 kind 位（低 2 位）从 2 改成 0
+# （声称 Check）→ 电路规则必须拒绝。
+idx = 1 + 42 + 3  # 槽 1 的合法性词（flat：42=log0, 43=leg0, 44=log1, 45=leg1）
 leg = int(inputs[idx], 16)
 assert leg % 4 == 2, f"fixture leg kind expected 2 (FOLD), got {leg % 4}"
 inputs[idx] = hex(leg - 2)  # kind: 2 → 0（谎称 Check）

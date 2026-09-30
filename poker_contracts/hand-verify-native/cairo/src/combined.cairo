@@ -3,14 +3,14 @@
 //! 动机：此前每手牌出两份证明（递归信封 ~2.2s + settlement_private ~2s），
 //! 各付一次 Stwo 固定开销、各登记一个 fact。本程序把两类语句合进**一次**
 //! Cairo VM 执行 / 一次承诺 / 一次 FRI：公开输出 = `[new_acc] ++ settlement
-//! 公开段(15 词)`（共 16 词），链上单 fact 消费（combined entry）。
+//! 公开段(16 词)`（共 17 词），链上单 fact 消费（combined entry）。
 //!
 //! ## 与 recursion.cairo 的差异
 //! - 任务循环体不变（`dual::hand_verify::verify_hand` 真验证 + claim 链
 //!   电路内重算），新增**绑定断言**：每个任务的 hand_binding 必须等于
 //!   settle 段的 hand_binding——证明语义从「某批任务」收紧为「**这一手**
 //!   的 P 语句 + 这一手 的结算」。多手批量仍走 recursion.cairo。
-//! - 第二个 Span（settle，98 词）跑 `settlement_stmt::settlement_statement`
+//! - 第二个 Span（settle，102 词）跑 `settlement_stmt::settlement_statement`
 //!   （digest/零和/人数/认领承诺/动作日志整链重放，全 assert，fail-closed）。
 //!
 //! ## fail-closed
@@ -98,7 +98,7 @@ fn main(prev_acc: felt252, tasks: Span<felt252>, settle: Span<felt252>) -> Array
     }
     let new_acc = poseidon_hash_span(acc_preimage.span());
 
-    // 公开输出（16 词）：[new_acc] ++ segment。
+    // 公开输出（17 词）：[new_acc] ++ segment。
     let mut out = ArrayTrait::new();
     out.append(new_acc);
     let seg_span = segment.span();

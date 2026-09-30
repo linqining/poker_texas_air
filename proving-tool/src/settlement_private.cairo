@@ -6,28 +6,53 @@
 //!    ++ [action_log_digest]` 后 finalize，必须等于公开入参 `registered_digest`
 //!    （与合约 `compute_settlement_digest` 的 `poseidon_hash_span` 同一 sponge：
 //!    配对吸收、余项补 1，逐字段一致）。`action_log_digest` 为 #18 Phase B
-//!    接线的第 37 入参——本手动作日志哈希（game 层 starknet_keccak 链，含
+//!    接线的第 37 词——本手动作日志哈希（game 层 starknet_keccak 链，含
 //!    auto 代打标记），把结算锚定到完整动作日志；
-//! 2. 零和：`Σ sign·|delta| == 0`（|delta| ≤ u64 在下方强制；8 项之和
-//!    < 2^67 << felt 素数，模零 ⟺ 整数零）；
+//! 2. 零和：`Σ sign·|delta| == 0`（|delta| ≤ u64 在下方强制；9 项之和
+//!    < 9·2^64 < 2^68 << felt 素数，模零 ⟺ 整数零）；
 //! 3. 人数：非零 |delta| 参与者数 == `n_expected`；
 //! 4. 每赢家输出 `cm_i = Poseidon(commitment_i, hand_binding, amount_lo, amount_hi)`
 //!    （amount = u256(delta)，low = |delta|，high = 0），非赢家 cm = 0
 //!    ——与合约写入 `claim_cms` 的公式逐字段一致。
 //!
+//! ## Span ABI（2026-09-30 重构 + 9 人桌迁移）
+//!
+//! 旧 ABI 是 98 个独立命名入参（8 席 + 60 词条词，顶满 standalone 100 参
+//! 上限的实测）；9 人桌需 102 词、超限——重构为单一 Span 摊平 wire（与
+//! combined.cairo / fold_batch.cairo 的 `[len, elements…]` 摊平约定一致，
+//! prove-hand flat 输入 = `[102, w0..w101]` 共 103 词）。**wire 布局与
+//! settlement_stmt.cairo（根 crate 语句模块）逐槽对齐**：
+//!
+//! ```text
+//! [0]hand_id [1]registered_digest [2]n_expected [3]hand_binding
+//! [4..13] p0..p8   [13..22] s0..s8   [22..31] m0..m8   [31..40] c0..c8
+//! [40] action_log_digest   [41] action_count   [42..102] w0..w59（30 词条 ×2）
+//! ```
+//!
+//! 电路体约束**逐条保留**（digest sponge、动作日志整链重放、sign/值域、
+//! 零和、人数、认领承诺公式），只把命名参数引用改为槽位索引；席位容量
+//! 8 → 9（四组席位循环界右移，公开段 cm×8 → cm×9）。**digest 语义保持
+//! 「固定 9 槽全吸收」**（既有语义，仅循环界右移）——与共享模块
+//! settlement_stmt.cairo 的「按实际参与者前缀折叠」是两处已知的分叉：
+//! 链上注册 digest 按实际人数折叠，故本电路只在满桌（9 席全非零）语料
+//! 下与注册值一致（与 settlement_batch_private 同口径）；n<9 的手走
+//! combined 路径（settlement_stmt 前缀折叠）。
+//!
 //! 隐私模型：`(players, signs, mags, commitments)` 是 prove-hand 的程序入参
 //!（witness，不进公开段）；公开段（public_outputs.json / Stwo public memory）
 //! 只有返回数组 `[MAGIC, hand_id, registered_digest, n_expected, hand_binding,
-//! cm_0..cm_7, total_winnings, action_log_digest]`（15 felt）—— P2-M3 的
+//! cm_0..cm_8, total_winnings, action_log_digest]`（16 felt，9 人桌口径——
+//! v2 合约入口 `SETTLEMENT_SEGMENT_LEN=16` 的段长）—— P2-M3 的
 //! `verify_and_settle_dapv_stark_private_v2` 合约以 `registered_digest ==
-//! 已登记 digest ∧ 公开段 cms == 待写 claim_cms ∧ segment[14] == 注册的
+//! 已登记 digest ∧ 公开段 cms == 待写 claim_cms ∧ segment[15] == 注册的
 //! action_log 承诺` 消费该段。
 //!
-//! §8.2 状态（#18 Phase B）：动作日志哈希已进吸收链与公开段（列位零重排）；
-//! 电路内"合法默认"校验（零下注才可 auto-check 等）与 seq 单调仍待落地
-//! ——主网上线门槛（`docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §8.2）。
+//! §8.2 状态（#18 Phase B/C）：动作日志哈希已进吸收链与公开段；电路内
+//! "合法默认"校验（零下注才可 auto-check 等）已落地（Phase C 切片 1/2）；
+//! seq 单调仍待落地——主网上线门槛
+//! （`docs/design/ACTION_SIGNING_CENSORSHIP_RESISTANCE.md` §8.2）。
 
-use core::array::ArrayTrait;
+use core::array::{ArrayTrait, SpanTrait};
 use core::num::traits::DivRem;
 use core::poseidon::PoseidonTrait;
 use core::hash::HashStateTrait;
@@ -36,8 +61,12 @@ use core::traits::TryInto;
 /// 公开段成功标记（'SP2M_OK' 短字符串）。
 const MAGIC: felt252 = 0x5350324d5f4f4b;
 
-/// 参与者上限（与根 crate MAX_PARTICIPANTS 一致）。
-const N_PLAYERS: usize = 8;
+/// 参与者上限（9 人桌常规桌型，与根 crate MAX_PARTICIPANTS 一致）。
+const N_PLAYERS: usize = 9;
+
+/// settle wire 词数（固定 102：4 头 + 9×4 槽 + ald + count + 60 词条词，
+/// settlement_stmt.cairo SETTLE_WORDS 同值）。
+const SETTLE_WORDS: usize = 102;
 
 /// 动作日志 Poseidon 吸收链域标签（starknet_keccak(b"zgame.action_log.v1")
 /// 的数值，与 texas `action_log_domain()` 同一冻结字面量）——
@@ -60,131 +89,55 @@ const LOG_MAX_HIGH: u128 = 0x400000000000000000000;
 /// 合法性词值域上限 2^194（u256 高 128 位段 < 2^66）。
 const LEG_MAX_HIGH: u128 = 0x40000000000000000;
 
+/// 词条区槽位数（30 槽 ×2 词）。
+const N_ENTRIES: usize = 30;
+
 #[executable]
-fn main(
-    hand_id: felt252,
-    registered_digest: felt252,
-    n_expected: felt252,
-    hand_binding: felt252,
-    p0: felt252, p1: felt252, p2: felt252, p3: felt252,
-    p4: felt252, p5: felt252, p6: felt252, p7: felt252,
-    s0: felt252, s1: felt252, s2: felt252, s3: felt252,
-    s4: felt252, s5: felt252, s6: felt252, s7: felt252,
-    m0: felt252, m1: felt252, m2: felt252, m3: felt252,
-    m4: felt252, m5: felt252, m6: felt252, m7: felt252,
-    c0: felt252, c1: felt252, c2: felt252, c3: felt252,
-    c4: felt252, c5: felt252, c6: felt252, c7: felt252,
-    action_log_digest: felt252,
-    action_count: felt252,
-    w0: felt252,
-    w1: felt252,
-    w2: felt252,
-    w3: felt252,
-    w4: felt252,
-    w5: felt252,
-    w6: felt252,
-    w7: felt252,
-    w8: felt252,
-    w9: felt252,
-    w10: felt252,
-    w11: felt252,
-    w12: felt252,
-    w13: felt252,
-    w14: felt252,
-    w15: felt252,
-    w16: felt252,
-    w17: felt252,
-    w18: felt252,
-    w19: felt252,
-    w20: felt252,
-    w21: felt252,
-    w22: felt252,
-    w23: felt252,
-    w24: felt252,
-    w25: felt252,
-    w26: felt252,
-    w27: felt252,
-    w28: felt252,
-    w29: felt252,
-    w30: felt252,
-    w31: felt252,
-    w32: felt252,
-    w33: felt252,
-    w34: felt252,
-    w35: felt252,
-    w36: felt252,
-    w37: felt252,
-    w38: felt252,
-    w39: felt252,
-    w40: felt252,
-    w41: felt252,
-    w42: felt252,
-    w43: felt252,
-    w44: felt252,
-    w45: felt252,
-    w46: felt252,
-    w47: felt252,
-    w48: felt252,
-    w49: felt252,
-    w50: felt252,
-    w51: felt252,
-    w52: felt252,
-    w53: felt252,
-    w54: felt252,
-    w55: felt252,
-    w56: felt252,
-    w57: felt252,
-    w58: felt252,
-    w59: felt252,
-) -> Array<felt252> {
-    let players = array![p0, p1, p2, p3, p4, p5, p6, p7].span();
-    let signs = array![s0, s1, s2, s3, s4, s5, s6, s7].span();
-    let mags = array![m0, m1, m2, m3, m4, m5, m6, m7].span();
-    let commitments = array![c0, c1, c2, c3, c4, c5, c6, c7].span();
+fn main(words: Span<felt252>) -> Array<felt252> {
+    assert!(words.len() == SETTLE_WORDS, "BAD_SETTLE_LEN");
+    let hand_id = *words.at(0);
+    let registered_digest = *words.at(1);
+    let n_expected = *words.at(2);
+    let hand_binding = *words.at(3);
+    // players 4..13, signs 13..22, mags 22..31, commitments 31..40,
+    // action_log_digest 40, action_count 41, 词条区 42..102。
 
     // --- 约束 1：digest 匹配（Starknet Poseidon sponge，与链上逐字段一致） ---
     let mut h = PoseidonTrait::new();
     h = h.update(hand_id);
     let mut i: usize = 0;
     while i < N_PLAYERS {
-        h = h.update(*players.at(i));
-        h = h.update(*signs.at(i));
-        h = h.update(*mags.at(i));
+        h = h.update(*words.at(4 + i));
+        h = h.update(*words.at(13 + i));
+        h = h.update(*words.at(22 + i));
         i += 1;
     }
     // 吸收链尾词：本手动作日志哈希（与 register/register 侧 digest 同公式）。
-    h = h.update(action_log_digest);
+    h = h.update(*words.at(40));
     let digest = h.finalize();
     assert!(digest == registered_digest, "DIGEST_MISMATCH");
 
     // --- #18 Phase C 切片 1：动作日志整链重放（poseidon_builtin） ---
-    // 语句钉死 30 槽上限（§9.5；main 参数上限 100 实测 → 37 标量 + count
-    // + 30×2 = 98）；每词条 2 词：[日志打包词, 合法性词]。日志词为单 felt
+    // 语句钉死 30 槽上限（§9.5；wire 102 词 = 41 标量 + count + 30×2）；
+    // 每词条 2 词：[日志打包词, 合法性词]。日志词为单 felt
     // 打包（低 → 高）：
     // `action(40) | flags(2)@40 | amount(64)@42 | seq(64)@106 | seat(32)@170`
     // 总宽 202 位；词序与游戏层 action_log_digest_felt 逐字段一致：
     // [DOMAIN] ++ Σ packed_word。合法性词
     // `kind(2) | owed(64)@2 | my_bet(64)@66 | big_blind(64)@130`（194 位）
     // 只作规则见证、不进吸收链；非 auto 词条 canonical 为 0。
+    let action_count = *words.at(41);
     let count_us: usize = action_count.try_into().expect('COUNT_NOT_USIZE');
-    assert!(count_us <= 30, "COUNT_OVER_30");
-
-    let words: Array<felt252> = array![
-        w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15,
-        w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26, w27, w28, w29,
-        w30, w31, w32, w33, w34, w35, w36, w37, w38, w39, w40, w41, w42, w43,
-        w44, w45, w46, w47, w48, w49, w50, w51, w52, w53, w54, w55, w56, w57,
-        w58, w59,
-    ];
+    assert!(count_us <= N_ENTRIES, "COUNT_OVER_30");
 
     let mut ah = PoseidonTrait::new();
     ah = ah.update(DOMAIN);
 
     // 打包词值域上限 2^202（= u256 高 128 位段 < 2^74）。
     let mut i: usize = 0;
-    while i < 30 {
-        let log_w = *words.at(i * 2);
-        let leg_w = *words.at(i * 2 + 1);
+    while i < N_ENTRIES {
+        let log_w = *words.at(42 + i * 2);
+        let leg_w = *words.at(42 + i * 2 + 1);
         let log_u: u256 = log_w.try_into().expect('LOG_NOT_U256');
         assert!(log_u.high < LOG_MAX_HIGH, "LOG_OVER_202BIT");
         if i < count_us {
@@ -241,12 +194,12 @@ fn main(
     let chain_root = ah.finalize();
     // 链根必须等于吸收进 settlement digest 的动作日志哈希——电路内重算的
     // 整链与游戏层 digest 锚定一致。
-    assert!(chain_root == action_log_digest, "ACTION_CHAIN_MISMATCH");
+    assert!(chain_root == *words.at(40), "ACTION_CHAIN_MISMATCH");
     // --- 见证良构：sign ∈ {0,1}，|delta| ≤ u64（规格分解的值域） ---
     let mut i: usize = 0;
     while i < N_PLAYERS {
-        let s = *signs.at(i);
-        let m = *mags.at(i);
+        let s = *words.at(13 + i);
+        let m = *words.at(22 + i);
         assert!(s * (s - 1) == 0, "SIGN_NOT_BOOL");
         // felt→u64 try_into 失败即 |delta| 超出 u64 值域（合约同款守卫）
         let _m_u64: u64 = m.try_into().expect('MAGNITUDE_OVER_U64');
@@ -258,8 +211,8 @@ fn main(
     let mut count: felt252 = 0;
     let mut i: usize = 0;
     while i < N_PLAYERS {
-        let s = *signs.at(i);
-        let m = *mags.at(i);
+        let s = *words.at(13 + i);
+        let m = *words.at(22 + i);
         if s == 1 {
             sum += m;
         } else {
@@ -280,18 +233,18 @@ fn main(
     out.append(registered_digest);
     out.append(n_expected);
     out.append(hand_binding);
-    // total_winnings = Σ 赢家 |delta|（有界 < 2^67，无模回绕）——v2 合约据此
-    // 把 pot 划入认领托管（公开段取代明文 deltas 成为托管金额来源）。
+    // total_winnings = Σ 赢家 |delta|（有界 < 9·2^64 < 2^68，无模回绕）——
+    // v2 合约据此把 pot 划入认领托管（公开段取代明文 deltas 成为托管金额来源）。
     let mut total_winnings: felt252 = 0;
     let mut i: usize = 0;
     while i < N_PLAYERS {
-        let s = *signs.at(i);
-        let m = *mags.at(i);
+        let s = *words.at(13 + i);
+        let m = *words.at(22 + i);
         if s == 1 {
             if m != 0 {
                 total_winnings += m;
                 let mut ch = PoseidonTrait::new();
-                ch = ch.update(*commitments.at(i));
+                ch = ch.update(*words.at(31 + i));
                 ch = ch.update(hand_binding);
                 ch = ch.update(m);
                 ch = ch.update(0);
@@ -305,7 +258,7 @@ fn main(
         i += 1;
     }
     out.append(total_winnings);
-    // 公开段尾词（第 15 felt）：动作日志哈希——v2 合约与注册承诺逐 felt 比对。
-    out.append(action_log_digest);
+    // 公开段尾词（第 16 felt）：动作日志哈希——v2 合约与注册承诺逐 felt 比对。
+    out.append(*words.at(40));
     out
 }

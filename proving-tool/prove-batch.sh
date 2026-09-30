@@ -8,10 +8,12 @@
 #           → 电路内 batch_fact 与宿主镜像逐字对拍（fail-closed）
 #
 # 参数钉扎：
-#   - 程序：proving-tool/src/settlement_batch_private.cairo
-#     program_hash = 0x05c400b46a261c6672cd7581436754e05da2287ba8ecdc69778d06e4ef831803
-#     （改程序源码必换哈希 → 同步更新 stark-recursion stark_final.rs 与
-#      fact-verify 的钉扎常量）
+#   - 程序：proving-tool/src/settlement_batch_private.cairo（9 人桌迁移
+#     2026-09-30：HAND_INPUT_LEN 98→102、批段 16→17 词；基础手输入须为
+#     102 词、全席非零参与者语料）
+#     program_hash = 0x03977925c8f46d896d04f4b76c18874e0f9a05a4c860f0de56236518e9faf74d
+#     （K=1 真出证重钉；改程序源码必换哈希 → 同步更新 stark-recursion
+#      stark_final.rs 与 fact-verify 的钉扎常量）
 #   - 证明参数：params/canonical_small.json（≤6G 内存硬约束的成立前提；
 #     K=1 实测 1.87 GiB，K=64 实测 3.69 GiB，/usr/bin/time -l 2026-09-29）
 #
@@ -46,7 +48,7 @@ cargo run -q -p stark-recursion --bin batch-inputs --manifest-path "$STARK_RECUR
 
 PH=$(python3 -c "import json;print('0x%064x' % int(json.load(open('$OUT/run_a/public_outputs.json'))['program_hash'],16))")
 echo "    program_hash = $PH"
-EXPECTED_PH="0x05c400b46a261c6672cd7581436754e05da2287ba8ecdc69778d06e4ef831803"
+EXPECTED_PH="0x03977925c8f46d896d04f4b76c18874e0f9a05a4c860f0de56236518e9faf74d"
 if [[ "$PH" != "$EXPECTED_PH" ]]; then
   echo "error: program_hash ${PH} != pinned ${EXPECTED_PH} (program source drift - update stark_final.rs / fact-verify pinning first)" >&2
   exit 1

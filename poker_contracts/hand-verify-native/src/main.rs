@@ -483,10 +483,10 @@ fn recurse_perf_cmd() {
 ///     "registered_digest": "0x…",
 ///     "n_expected": 3,              // u64（非零 delta 计数）
 ///     "hand_binding": "0x…",
-///     "players":     ["0x…" × 8],   // 尾部补位槽零
-///     "signs":       [0|1 × 8],     // u64
-///     "magnitudes":  [u64 × 8],
-///     "commitments": ["0x…" × 8],
+///     "players":     ["0x…" × 9],   // 尾部补位槽零
+///     "signs":       [0|1 × 9],     // u64
+///     "magnitudes":  [u64 × 9],
+///     "commitments": ["0x…" × 9],
 ///     "action_log_digest": "0x…",
 ///     "action_entries": [["0x…","0x…"], …]   // 每条 2 词，≤ 30 条
 ///   },
@@ -571,26 +571,26 @@ fn combined_felt_vec(v: &serde_json::Value, ctx: &str) -> Result<Vec<Felt>, Stri
         .collect()
 }
 
-/// JSON 对象字段 → 固定 8 槽 felt 数组。
-fn combined_felt8(obj: &serde_json::Value, key: &str) -> Result<[Felt; 8], String> {
+/// JSON 对象字段 → 固定 9 槽 felt 数组。
+fn combined_felt9(obj: &serde_json::Value, key: &str) -> Result<[Felt; 9], String> {
     let v = obj
         .get(key)
-        .ok_or_else(|| format!("settle.{key}: missing (8 slots required)"))?;
+        .ok_or_else(|| format!("settle.{key}: missing (9 slots required)"))?;
     let vec = combined_felt_vec(v, &format!("settle.{key}"))?;
     vec.try_into()
-        .map_err(|_| format!("settle.{key}: expected exactly 8 slots"))
+        .map_err(|_| format!("settle.{key}: expected exactly 9 slots"))
 }
 
-/// JSON 对象字段 → 固定 8 槽 u64 数组。
-fn combined_u64_8(obj: &serde_json::Value, key: &str) -> Result<[u64; 8], String> {
+/// JSON 对象字段 → 固定 9 槽 u64 数组。
+fn combined_u64_9(obj: &serde_json::Value, key: &str) -> Result<[u64; 9], String> {
     let arr = obj
         .get(key)
         .and_then(|v| v.as_array())
-        .ok_or_else(|| format!("settle.{key}: expected an array of 8 u64"))?;
-    if arr.len() != 8 {
-        return Err(format!("settle.{key}: expected exactly 8 slots, got {}", arr.len()));
+        .ok_or_else(|| format!("settle.{key}: expected an array of 9 u64"))?;
+    if arr.len() != 9 {
+        return Err(format!("settle.{key}: expected exactly 9 slots, got {}", arr.len()));
     }
-    let mut out = [0u64; 8];
+    let mut out = [0u64; 9];
     for (i, v) in arr.iter().enumerate() {
         out[i] = v
             .as_u64()
@@ -651,10 +651,10 @@ fn combined_parse(raw: &str) -> Result<CombinedInput, String> {
             settle_v.get("hand_binding").ok_or("settle.hand_binding is required")?,
             "settle.hand_binding",
         )?,
-        players: combined_felt8(settle_v, "players")?,
-        signs: combined_u64_8(settle_v, "signs")?,
-        magnitudes: combined_u64_8(settle_v, "magnitudes")?,
-        commitments: combined_felt8(settle_v, "commitments")?,
+        players: combined_felt9(settle_v, "players")?,
+        signs: combined_u64_9(settle_v, "signs")?,
+        magnitudes: combined_u64_9(settle_v, "magnitudes")?,
+        commitments: combined_felt9(settle_v, "commitments")?,
         action_log_digest: combined_felt(
             settle_v
                 .get("action_log_digest")
@@ -712,7 +712,7 @@ fn combined_run(raw: &str) -> Result<String, String> {
         input.params_path.as_deref(),
     )?;
 
-    // 16 词锚定：[acc] ++ [MAGIC …]（与 prove_combined_layer 内部锚定同式；
+    // 17 词锚定：[acc] ++ [MAGIC …]（与 prove_combined_layer 内部锚定同式；
     // 公开段前若有 runner 回显词，这里剥掉）。
     let magic = segment_magic();
     let pos = outcome
@@ -720,19 +720,19 @@ fn combined_run(raw: &str) -> Result<String, String> {
         .iter()
         .position(|w| *w == magic)
         .ok_or("SEGMENT_MAGIC not found in public output")?;
-    // 切片 [pos-1, pos+15) 恰 16 词；pos+15 == len 是合法贴边情况，须放行。
-    if pos == 0 || pos + 15 > outcome.public_output.len() {
-        return Err("public output has no anchored 16-word segment".into());
+    // 切片 [pos-1, pos+16) 恰 17 词；pos+16 == len 是合法贴边情况，须放行。
+    if pos == 0 || pos + 16 > outcome.public_output.len() {
+        return Err("public output has no anchored 17-word segment".into());
     }
-    let combined16 = outcome.public_output[pos - 1..pos + 15].to_vec();
-    if combined16[0] != outcome.cairo_acc {
+    let combined17 = outcome.public_output[pos - 1..pos + 16].to_vec();
+    if combined17[0] != outcome.cairo_acc {
         return Err("anchored chain_acc != CombinedOutcome.cairo_acc".into());
     }
 
     Ok(serde_json::json!({
         "ok": true,
         "cairo_acc": format!("0x{:x}", outcome.cairo_acc),
-        "public_output": combined16.iter().map(|f| format!("0x{f:x}")).collect::<Vec<_>>(),
+        "public_output": combined17.iter().map(|f| format!("0x{f:x}")).collect::<Vec<_>>(),
         "program_hash": format!("0x{:x}", outcome.program_hash),
         "steps": outcome.steps,
         "total_ms": outcome.total_ms,
@@ -832,10 +832,10 @@ mod tests {
                 "registered_digest": "0xabc",
                 "n_expected": 3,
                 "hand_binding": "0xB16D",
-                "players": ["0x1","0x2","0x3","0x0","0x0","0x0","0x0","0x0"],
-                "signs": [1,0,0,0,0,0,0,0],
-                "magnitudes": [3000,2000,1000,0,0,0,0,0],
-                "commitments": ["0x21","0x0","0x0","0x0","0x0","0x0","0x0","0x0"],
+                "players": ["0x1","0x2","0x3","0x0","0x0","0x0","0x0","0x0","0x0"],
+                "signs": [1,0,0,0,0,0,0,0,0],
+                "magnitudes": [3000,2000,1000,0,0,0,0,0,0],
+                "commitments": ["0x21","0x0","0x0","0x0","0x0","0x0","0x0","0x0","0x0"],
                 "action_log_digest": "0xA7",
                 "action_entries": [["0xB1","0x0"],["0xB2","0xB3"]]
             },
@@ -850,7 +850,7 @@ mod tests {
         assert_eq!(input.settle.hand_id, 9);
         assert_eq!(input.settle.n_expected, 3);
         assert_eq!(input.settle.players[2], Felt::from(3u64));
-        assert_eq!(input.settle.signs, [1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(input.settle.signs, [1, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(input.settle.magnitudes[0], 3000);
         assert_eq!(input.settle.action_entries.len(), 2);
         assert_eq!(input.settle.action_entries[1], [Felt::from(0xB2u64), Felt::from(0xB3u64)]);
@@ -865,7 +865,7 @@ mod tests {
         let err = combined_parse(&bad_hex).expect_err("bad felt hex must fail");
         assert!(err.contains("prev_acc"), "unexpected error: {err}");
         let bad_slots = raw.replace(
-            "\"players\": [\"0x1\",\"0x2\",\"0x3\",\"0x0\",\"0x0\",\"0x0\",\"0x0\",\"0x0\"]",
+            "\"players\": [\"0x1\",\"0x2\",\"0x3\",\"0x0\",\"0x0\",\"0x0\",\"0x0\",\"0x0\",\"0x0\"]",
             "\"players\": [\"0x1\"]",
         );
         let err = combined_parse(&bad_slots).expect_err("slot count must be enforced");

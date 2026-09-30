@@ -1106,8 +1106,12 @@ async fn winners_registered(players_remapped: &[Felt], deltas: &[i128]) -> bool 
 /// DAPV proved 路径的 settle 入口选择（`STARKNET_DAPV_SETTLE_ENTRY`）：
 ///
 /// - `v2`（默认）：`verify_and_settle_dapv_stark_private_v2`——零明文结算，
-///   calldata `[hand_binding, hand_id, segment(15)]`，fact-registry 单证明锚
-///   （settlement_private 电路），**可随时回退的稳定入口**；
+///   calldata `[hand_binding, hand_id, segment(16)]`（9 人桌公开段：MAGIC +
+///   4 头词 + cm×9 + total + ald），fact-registry 单证明锚
+///   （settlement_private 电路，2026-09-30 Span ABI 迁移后支持 9 席——
+///   digest 固定 9 槽全吸收，非满桌语料与链上按实际人数折叠的注册值
+///   不一致，会 DIGEST_MISMATCH fail-closed；n<9 的手走 combined），**可随时
+///   回退的稳定入口**；
 /// - `proved_private`：`verify_and_settle_dapv_proved_private`——hand_verify +
 ///   stark verify 双 fact 认证，calldata 尾部追加 `[p_batch_commitment,
 ///   p_batch_len]`（P2-M4，dual v4）；
@@ -1117,9 +1121,9 @@ async fn winners_registered(players_remapped: &[Felt], deltas: &[i128]) -> bool 
 ///   docs/design/SNIP36_INTEGRATION.md §4；选中未上链的入口会 revert）；
 /// - `combined`：`verify_and_settle_dapv_combined_private`——P 层 + settlement
 ///   合并信封（combined.cairo 一次出证），calldata `[hand_binding, hand_id,
-///   segment(16)]`（v2 段前置 chain_acc，**必须来自 prove_combined 的公开
+///   segment(17)]`（v2 16 词段前置 chain_acc，**必须来自 prove_combined 的公开
 ///   输出**，不可本地拼装——chain_acc 是证明内折叠值），单 fact 门
-///   `fact = poseidon([combined_program_hash ‖ 段16])`（合约
+///   `fact = poseidon([combined_program_hash ‖ 段17])`（合约
 ///   `fact_for_segment` 同式）。
 ///
 /// 各入口共用 register_hand_proved 注册（bindings/action_logs 同写）；差异在
@@ -1145,8 +1149,8 @@ pub fn settle_entry_calldata(
             ("verify_and_settle_dapv_proved_private", calldata)
         }
         "snip36" => ("verify_and_settle_dapv_stark_private_v3", calldata),
-        // combined：segment 为 16 词公开输出（[chain_acc] ++ v2 段），由
-        // prove_combined 结果传入（长度由合约 COMBINED_SEGMENT_LEN 再门）。
+        // combined：segment 为 17 词公开输出（[chain_acc] ++ v2 段 16 词），
+        // 由 prove_combined 结果传入（长度由合约 COMBINED_SEGMENT_LEN 再门）。
         "combined" => ("verify_and_settle_dapv_combined_private", calldata),
         // "v2" 与任何未知值：默认稳定入口（回退保证）
         _ => ("verify_and_settle_dapv_stark_private_v2", calldata),
@@ -1440,7 +1444,7 @@ pub async fn submit_dual_settlement(
     // 只要隐私公开段就绪（全体赢家 payout commitment 齐备）即具备提交条件。
     // entry=combined：证明源 = operator spawn 的 hand-verify-native 合并
     // 信封（combined.cairo，一次 Cairo 执行覆盖 P 层 + settlement）——
-    // 16 词公开段只能来自证明输出，证明失败/无 P 任务即回退 linear。
+    // 17 词公开段只能来自证明输出，证明失败/无 P 任务即回退 linear。
     let snip36_engaged = chain.config.dapv_settle_entry() == "snip36";
     let combined_engaged = chain.config.dapv_settle_entry() == "combined";
     let mode = if chain.config.settle_mode == SettleMode::Proved
@@ -1455,7 +1459,7 @@ pub async fn submit_dual_settlement(
             super::vm_session::prover_mode() == super::vm_session::ProverMode::Local;
         // P2-M2：settlement-private 电路 inputs 导出 + prover attestation。
         // best-effort：任何失败只告警，绝不阻塞结算（与 batch prover 同语义）。
-        // P2-M4/M3：请求成功时构建公开段（15 felt），按
+        // P2-M4/M3：请求成功时构建公开段（16 felt，9 人桌），按
         // STARKNET_DAPV_SETTLE_ENTRY 选择 settle 入口（v2 默认 / proved_private）。
         // entry=combined：v2 段不直接上链——只作为 prove_combined 的 settle
         // 语句真源，上链段 = 证明公开输出（[chain_acc] ++ v2 段）。
@@ -1485,7 +1489,7 @@ pub async fn submit_dual_settlement(
                             std::path::Path::new(&chain.config.prover_work_dir),
                         );
                         if combined_engaged {
-                            // combined 腿：证明先行——16 词段只能来自证明公开
+                            // combined 腿：证明先行——17 词段只能来自证明公开
                             // 输出（chain_acc 是证明内折叠值，本地拼不出）。
                             match prove_combined_segment(chain, &req, dual, combined_tasks).await {
                                 Ok(out) => {
@@ -3316,14 +3320,14 @@ mod settle_mode_tests {
 
     #[test]
     fn settle_entry_defaults_to_v2() {
-        // v2：calldata = [hand_binding, hand_id, segment(15)]，无承诺尾部。
+        // v2：calldata = [hand_binding, hand_id, segment(16)]，无承诺尾部。
         let hb = Felt::from(0xBBBBu64);
-        let segment: Vec<Felt> = (0..15).map(|i| Felt::from(i as u64)).collect();
+        let segment: Vec<Felt> = (0..16).map(|i| Felt::from(i as u64)).collect();
         for entry in ["", "v2", "garbage"] {
             let (selector, calldata) =
                 settle_entry_calldata(entry, hb, 42, &segment, Felt::from(0xC0BAu64), 37);
             assert_eq!(selector, "verify_and_settle_dapv_stark_private_v2", "entry={entry}");
-            assert_eq!(calldata.len(), 2 + 15);
+            assert_eq!(calldata.len(), 2 + 16);
             assert_eq!(calldata[0], hb);
             assert_eq!(calldata[1], Felt::from(42u64));
             assert_eq!(calldata[2], Felt::ZERO, "segment[0]");
@@ -3334,17 +3338,17 @@ mod settle_mode_tests {
     fn settle_entry_proved_private_appends_commitment() {
         // proved_private：v2 形态 + [p_batch_commitment, p_batch_len] 尾部。
         let hb = Felt::from(0xCCCCu64);
-        let segment: Vec<Felt> = (0..15).map(|i| Felt::from(100 + i as u64)).collect();
+        let segment: Vec<Felt> = (0..16).map(|i| Felt::from(100 + i as u64)).collect();
         let (selector, calldata) =
             settle_entry_calldata("proved_private", hb, 43, &segment, Felt::from(0xC0BAu64), 37);
         assert_eq!(selector, "verify_and_settle_dapv_proved_private");
-        assert_eq!(calldata.len(), 2 + 15 + 2);
+        assert_eq!(calldata.len(), 2 + 16 + 2);
         assert_eq!(calldata[2], Felt::from(100u64), "segment[0]");
-        assert_eq!(calldata[17], Felt::from(0xC0BAu64), "commitment");
-        assert_eq!(calldata[18], Felt::from(37u64), "batch len");
+        assert_eq!(calldata[18], Felt::from(0xC0BAu64), "commitment");
+        assert_eq!(calldata[19], Felt::from(37u64), "batch len");
         // 公开段前缀与 v2 完全一致（同一 segment 语义）
         let (_, v2) = settle_entry_calldata("v2", hb, 43, &segment, Felt::ZERO, 0);
-        assert_eq!(calldata[..17], v2[..], "shared segment prefix");
+        assert_eq!(calldata[..18], v2[..], "shared segment prefix");
     }
 
     #[test]
@@ -3352,31 +3356,31 @@ mod settle_mode_tests {
         // snip36：选择器为 v3 双门入口，calldata 与 v2 同形（无承诺尾部）
         // ——合约侧随 cairo ≥2.12 迁移上链后生效（SNIP36_INTEGRATION §4）。
         let hb = Felt::from(0xDDDDu64);
-        let segment: Vec<Felt> = (0..15).map(|i| Felt::from(200 + i as u64)).collect();
+        let segment: Vec<Felt> = (0..16).map(|i| Felt::from(200 + i as u64)).collect();
         let (selector, calldata) =
             settle_entry_calldata("snip36", hb, 44, &segment, Felt::from(0xC0BAu64), 37);
         assert_eq!(selector, "verify_and_settle_dapv_stark_private_v3");
-        assert_eq!(calldata.len(), 2 + 15);
+        assert_eq!(calldata.len(), 2 + 16);
         let (_, v2) = settle_entry_calldata("v2", hb, 44, &segment, Felt::ZERO, 0);
         assert_eq!(calldata, v2, "snip36 shares the v2 calldata shape");
     }
 
     #[test]
-    fn settle_entry_combined_takes_16_word_segment() {
+    fn settle_entry_combined_takes_17_word_segment() {
         // combined：选择器为合并信封入口，calldata = [hand_binding, hand_id,
-        // segment(16)]——segment 首词 chain_acc（证明公开输出），无承诺尾部。
+        // segment(17)]——segment 首词 chain_acc（证明公开输出），无承诺尾部。
         // 合约侧逐槽校验 segment[1]=MAGIC / [2]=hand_id / [5]=binding /
-        // [3]=digest / [15]=action_log（本测试只钉 calldata 形状）。
+        // [3]=digest / [16]=action_log（本测试只钉 calldata 形状）。
         let hb = Felt::from(0xEEEEu64);
-        let segment: Vec<Felt> = (0..16).map(|i| Felt::from(300 + i as u64)).collect();
+        let segment: Vec<Felt> = (0..17).map(|i| Felt::from(300 + i as u64)).collect();
         let (selector, calldata) =
             settle_entry_calldata("combined", hb, 45, &segment, Felt::from(0xC0BAu64), 37);
         assert_eq!(selector, "verify_and_settle_dapv_combined_private");
-        assert_eq!(calldata.len(), 2 + 16, "16 词段（v2 15 词 + 前置 chain_acc）");
+        assert_eq!(calldata.len(), 2 + 17, "17 词段（v2 16 词 + 前置 chain_acc）");
         assert_eq!(calldata[0], hb);
         assert_eq!(calldata[1], Felt::from(45u64));
         assert_eq!(calldata[2], Felt::from(300u64), "segment[0] = chain_acc");
-        assert_eq!(calldata[17], Felt::from(315u64), "segment[15] = action_log_digest");
+        assert_eq!(calldata[18], Felt::from(316u64), "segment[16] = action_log_digest");
     }
 
     #[test]
@@ -3518,7 +3522,7 @@ mod settle_mode_tests {
 
         // P2-M4：settle calldata 改为 verify_and_settle_dapv_proved_private
         // ——在 submit_dual_settlement 里由 settlement_private 公开段构建
-        // （[hand_binding, hand_id, segment(15), commitment, len]），构建期
+        // （[hand_binding, hand_id, segment(16), commitment, len]），构建期
         // 留空（赢家 payout commitment 需 async 查 vault）。
         assert!(dual.proved.settle_calldata.is_empty(), "filled at submit time");
         // 承诺与结构字段一致

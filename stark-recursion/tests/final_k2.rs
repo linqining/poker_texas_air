@@ -31,8 +31,10 @@ use stark_recursion::stark_final::{
 };
 use std::time::Instant;
 
-/// 金向量段形态的 K 手（第二手换 binding，与 groth16-wrap roundtrip 批量口径
-/// 同式；语句 fact 用调用方给的程序哈希派生——L1 腿 = 批程序钉扎哈希）。
+/// 金向量段形态的 K 手（wrap baseline 腿，16 词含字面 15 前缀；第二手换
+/// binding，与 groth16-wrap roundtrip 批量口径同式；语句 fact 用调用方给
+/// 的程序哈希派生）。九人桌迁移后批程序输出段与 wrap 段分形：
+/// 批段 17 词（字面 16 前缀 + cm×9），wrap 段随 Groth16 baseline 停在 16 词。
 fn golden_hands(k: u64, program_hash: Felt252) -> Vec<HandEntry> {
     let base_segment: Vec<Felt252> =
         golden::GOLDEN_OUTPUT.iter().map(|h| felt_from_hex(h).unwrap()).collect();
@@ -43,6 +45,44 @@ fn golden_hands(k: u64, program_hash: Felt252) -> Vec<HandEntry> {
             segment[HAND_BINDING_INDEX] = binding;
             let fact = WrapWitness { output: segment.clone() }.expected_fact(&program_hash);
             HandEntry { statement: BatchStatement { program_hash, hand_binding: binding, fact }, segment }
+        })
+        .collect()
+}
+
+/// 批程序（settlement_batch_private 九人桌版）段形态的 K 手段：17 词 =
+/// `[16, MAGIC, hand_id, digest, n, binding, cm×9, total, ald]`（groth16 金
+/// 向量 v2 段 15 词换字面前缀 16 + cm×9 补位 1 词）。L1 终证腿
+/// （parse_final_output/verify_final_output）消费此形状。
+fn batch_segments(k: u64) -> Vec<Felt252> {
+    let mut base: Vec<Felt252> =
+        golden::GOLDEN_OUTPUT.iter().map(|h| felt_from_hex(h).unwrap()).collect();
+    assert_eq!(base.len(), 16, "groth16 金向量 wrap 段 16 词");
+    base[0] = Felt252::from(16u64); // 字面前缀：段长 16（Serde 复刻）
+    base.push(Felt252::from(0x5E47u64)); // cm×9 补位词
+    assert_eq!(base.len(), 17);
+    let mut out = Vec::with_capacity(k as usize * 17);
+    for i in 0..k {
+        let mut seg = base.clone();
+        seg[HAND_BINDING_INDEX] = seg[HAND_BINDING_INDEX] + Felt252::from(i);
+        out.extend(seg);
+    }
+    out
+}
+
+/// 批段 → 语句面（与 FinalOutput::statements 同式：fact = poseidon([ph‖seg])、
+/// binding = seg[5]）——keccak 批根的载荷。
+fn batch_statements(program_hash: &Felt252, segments: &[Felt252]) -> Vec<BatchStatement> {
+    (0..segments.len() / 17)
+        .map(|i| {
+            let seg = &segments[i * 17..(i + 1) * 17];
+            let mut msg = Vec::with_capacity(18);
+            msg.push(*program_hash);
+            msg.extend(seg.iter().copied());
+            BatchStatement {
+                program_hash: *program_hash,
+                hand_binding: seg[HAND_BINDING_INDEX],
+                fact: poseidon_hash_many(&msg),
+            }
         })
         .collect()
 }
@@ -63,15 +103,17 @@ fn synth_final_output(segments: &[Felt252], acc: &Felt252, root: &[u8; 32], k: u
 fn final_k2_stark_path_end_to_end() {
     let t0 = Instant::now();
     let batch_ph = stark_recursion::stark_final::batch_program_hash().unwrap();
-    assert_eq!(BATCH_PROGRAM_HASH_HEX, "0x05c400b46a261c6672cd7581436754e05da2287ba8ecdc69778d06e4ef831803",
-        "批程序钉扎哈希 = prove-hand E2E 实测值（2026-09-29，参数无关）");
+    assert_eq!(BATCH_PROGRAM_HASH_HEX, "0x03977925c8f46d896d04f4b76c18874e0f9a05a4c860f0de56236518e9faf74d",
+        "批程序钉扎哈希 = prove-hand K=1 真出证实测值（2026-09-30 九人桌迁移后，参数无关）");
 
     // ── ① K=2 批语句 + keccak 批根（SettleBatch 同式）────────────────────
+    // wrap baseline 计划（16 词段 + 宿主 fact 校验）照常构造——⑤ 的压缩层
+    // 叶预映像继续吃 wrap 段；L1 终证腿的批根载荷换成 17 词批段派生的语句。
     let plan = BatchPlan::new(batch_ph, golden_hands(2, batch_ph)).expect("K=2 batch");
-    let keccak_root = plan.keccak_batch_root().unwrap();
+    let segments = batch_segments(2);
+    let keccak_root = keccak_batch_root(&batch_statements(&batch_ph, &segments)).unwrap();
 
     // ── ② L1 终证腿：公开输出 → 尾对拍 → 语句重派生 → 批根覆盖 ───────────
-    let segments = plan.hands.iter().flat_map(|h| h.segment.clone()).collect::<Vec<_>>();
     assert_eq!(segments.len(), 2 * SEGMENT_LEN);
     let acc0 = acc_genesis();
     let output = synth_final_output(&segments, &acc0, &keccak_root, 2);
@@ -87,8 +129,8 @@ fn final_k2_stark_path_end_to_end() {
 
     // ── ③ 批 2 绑定 acc_1（跨批链接 + 换链负例）──────────────────────────
     let plan2 = BatchPlan::new(batch_ph, golden_hands(2, batch_ph)).unwrap();
-    let root2 = plan2.keccak_batch_root().unwrap();
-    let segs2 = plan2.hands.iter().flat_map(|h| h.segment.clone()).collect::<Vec<_>>();
+    let segs2 = batch_segments(2);
+    let root2 = keccak_batch_root(&batch_statements(&batch_ph, &segs2)).unwrap();
     let output2 = synth_final_output(&segs2, &acc1, &root2, 2);
     let (_, acc2) = verify_final_output(&output2, &acc1, &root2).expect("批 2（绑定 acc_1）");
     assert_ne!(acc1, acc2);

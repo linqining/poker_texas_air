@@ -102,9 +102,12 @@ pub fn legal_auto_action(
     }
 }
 
-/// 动作日志词条上限（#18 Phase C 切片 2）：电路 main 参数上限 100（实测），
-/// 37 标量 + count + 30×2 词条槽 = 98，留 2 余量。每词条 2 词 = 日志打包词
-/// + 合法性词。超出上限的日志在结算构建期拒绝（链下照常结算，不上链）。
+/// 动作日志词条上限（#18 Phase C 切片 2）：电路词条区钉死 30 槽（§9.5），
+/// 9 席 v2 settle wire = 41 标量 + count + 30×2 词条槽 = 102 词。每词条
+/// 2 词 = 日志打包词 + 合法性词。超出上限的日志在结算构建期拒绝（链下
+/// 照常结算，不上链）。v2 单手电路已重构为 Span ABI（2026-09-30：单一
+/// `Span<felt252>` 参数，standalone 100 参上限不再约束），combined 路径
+/// 沿用同一词条区布局。
 pub const ACTION_LOG_MAX_ENTRIES: usize = 30;
 
 /// 动作日志 Poseidon 吸收链的域标签（starknet_keccak(b"zgame.action_log.v1")

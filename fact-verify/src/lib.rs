@@ -134,13 +134,14 @@ pub fn verify_cairo_proof_file_pinned(
 // ============================================================
 
 /// 批程序（settlement_batch_private，含 acc_prev/批根入参与电路内 poseidon
-/// 链接尾版）钉扎哈希。实测出处：prove-hand E2E（2026-09-29，K=1/4/8/32/64
-/// 出证 program_hash 一致；prover 参数无关）。
+/// 链接尾版）钉扎哈希。实测出处：prove-hand E2E K=1 真出证（2026-09-30
+/// 九人桌迁移后电路；历史 8 人桌钉值 0x05c400b46a261c6672cd7581436754e05da2287ba8ecdc69778d06e4ef831803）。
 pub const PINNED_BATCH_PROGRAM_HASH: &str =
-    "0x05c400b46a261c6672cd7581436754e05da2287ba8ecdc69778d06e4ef831803";
+    "0x03977925c8f46d896d04f4b76c18874e0f9a05a4c860f0de56236518e9faf74d";
 
-/// 每手公开段长度 / 链尾长度（与 stark-recursion stark_final 同值）。
-pub const BATCH_SEGMENT_LEN: usize = 16;
+/// 每手公开段长度 / 链尾长度（与 stark-recursion stark_final 同值；九人桌
+/// 迁移后批段 = 字面 16 前缀 + 16 词语句段）。
+pub const BATCH_SEGMENT_LEN: usize = 17;
 pub const BATCH_TAIL_LEN: usize = 4;
 
 /// 批证明公开输出的累加链尾（输出末 4 felt）。
@@ -180,13 +181,13 @@ pub fn batch_fact_mirror(
     poseidon_hash_many(&msg)
 }
 
-/// 从批证明公开输出解析累加链尾（fail-closed：len 前缀 / 16k+4 形状）。
+/// 从批证明公开输出解析累加链尾（fail-closed：len 前缀 / 17k+4 形状）。
 ///
 /// 输出形状（K=1 E2E 实测）：`[len] ++ 16k 手段 ++ [acc_prev, root_hi, root_lo,
-/// batch_fact]`，len = 16k+4。
+/// batch_fact]`，len = 17k+4。
 ///
 /// # Errors
-/// 输出过短 / len 前缀与元素数不符 / 非 16k+4 形状。
+/// 输出过短 / len 前缀与元素数不符 / 非 17k+4 形状。
 pub fn parse_batch_chain_tail(output: &[starknet_crypto::Felt]) -> anyhow::Result<BatchChainTail> {
     anyhow::ensure!(
         output.len() >= 1 + BATCH_SEGMENT_LEN + BATCH_TAIL_LEN,
@@ -200,7 +201,7 @@ pub fn parse_batch_chain_tail(output: &[starknet_crypto::Felt]) -> anyhow::Resul
     let elements = output.len() - 1;
     anyhow::ensure!(
         (elements - BATCH_TAIL_LEN) % BATCH_SEGMENT_LEN == 0,
-        "batch output not 16k+4 shape"
+        "batch output not 17k+4 shape"
     );
     let k = (elements - BATCH_TAIL_LEN) / BATCH_SEGMENT_LEN;
     let t = elements - BATCH_TAIL_LEN;
@@ -214,7 +215,7 @@ pub fn parse_batch_chain_tail(output: &[starknet_crypto::Felt]) -> anyhow::Resul
 }
 
 /// L1 批量终证腿全链验证：验证证明 + 钉扎批程序哈希 + 解析链尾 +
-/// 电路内 batch_fact 宿主镜像对拍 + acc/根回显断言（16k+4 形状）。
+/// 电路内 batch_fact 宿主镜像对拍 + acc/根回显断言（17k+4 形状）。
 ///
 /// # Errors
 /// 验证失败 / 哈希不符 / 形状不符 / 链尾对拍失败 / acc·根回显不符。
@@ -294,14 +295,16 @@ mod tests {
     use starknet_crypto::Felt;
     // ── L1 批量终证腿：真实批证明（settlement_batch_private，K=1）──────
 
-    /// 真实批证明工件（prove-batch.sh 阶段 B 产物，2026-09-29 E2E）。
+    /// 真实批证明工件（9 人桌重采：batch_inputs 两阶段 + prove-hand 阶段 B
+    /// 产物，2026-09-30；旧 8 人桌工件已被替换，provenance 见同目录 README）。
     const BATCH_PROOF: &str = "../proving-tool/output/settlement-batch/proof.json";
-    /// 批根（manifest.json 的 keccak_batch_root；K=1 语句集 keccak 折叠）。
+    /// 批根（manifest.json 的 keccak_batch_root；K=1 语句集 keccak 折叠；
+    /// 9 人桌重采 run 的阶段 B 实测）。
     const BATCH_ROOT_HEX: &str =
-        "0xab4821e599993a8544f148522dfcea1ad50a11727b7b3a4759a4b9e82fb86165";
-    /// 批 1 累加链头（genesis acc=0 出证；尾字 batch_fact）。
+        "0xb078968da79556fc1ccefbc7ef466fe172e87b172724398fd0f4de70e4326d58";
+    /// 批 1 累加链头（genesis acc=0 出证；尾字 batch_fact，实测）。
     const BATCH_FACT_HEX: &str =
-        "0x041fb9bae6ddbd26b7425354f855571179323cab3c8a57b7590562c4feef6ced";
+        "0x055a0418c9ec47c23386f02c2c322f68b756f6c42e796e236b986ca99ec8bbdc";
 
     /// 真实批证明：验证 + 钉扎 + 链尾对拍（starknet-crypto 第二实现对拍
     /// stark_final 宿主镜像与电路内 HashState）。

@@ -1,5 +1,5 @@
 //! fold_batch — 牌桌手级聚合签名验证 + acc 链折叠（**生产版·多桌**：
-//! 并入 98 词 settle wire，FoldDesign v2；多桌规格 out/fold-multitable-spec.md）。
+//! 并入 102 词 settle wire，FoldDesign v2；多桌规格 out/fold-multitable-spec.md）。
 //!
 //! 一批 = **T 张牌桌（T ≥ 1）的桌段串接**：每桌 roster（该桌玩家的公钥集）
 //! 只进一次电路、keyagg 只算一次；每手 = `settlement_stmt::settlement_statement`
@@ -8,20 +8,20 @@
 //! 折进 acc 链。**T=1 时 wire 与公开输出与单桌生产版逐词一致**（桌段自定界
 //! 串接、无全局 T 词——多桌规格 §2/§8，金样回归钉死）。
 //!
-//! ## 公开输出（生产形状，fold-spec D1 + 多桌 D1a 修订）
+//! ## 公开输出（生产形状，fold-spec D1 + 多桌 D1a 修订 + 9 人桌迁移）
 //!
-//! 每手公开段 = **17 词** = combined 16 词信封原样 + roster_digest 尾插
-//! index 16；main 返回 (ΣK) 段 17 词平铺（runner 序列化为 `[len, elements…]`）：
+//! 每手公开段 = **18 词** = combined 17 词信封原样 + roster_digest 尾插
+//! index 17；main 返回 (ΣK) 段 18 词平铺（runner 序列化为 `[len, elements…]`）：
 //!
 //! ```text
-//! 段 index:  0          1        2        3                4        5        6..=13  14      15     16
-//!            chain_acc  MAGIC   hand_id  registered_digest n_expected binding cm×8   total   ald    roster_digest
+//! 段 index:  0          1        2        3                4        5        6..=14  15      16     17
+//!            chain_acc  MAGIC   hand_id  registered_digest n_expected binding cm×9   total   ald    roster_digest
 //! ```
 //!
-//! - word 0–15 与 combined 信封逐词同位（`combined.cairo` 输出 = [new_acc]
-//!   ++ settlement 15 词公开段），全部既有槽位锚（MAGIC@1、digest@3、n@4、
-//!   binding@5、cm@6..13、total@14、ald@15）零位移复用；唯一新增语义收口
-//!   在 index 16（roster_digest，消费面对照 `roster_registry` 注册值——
+//! - word 0–16 与 combined 信封逐词同位（`combined.cairo` 输出 = [new_acc]
+//!   ++ settlement 16 词公开段），全部既有槽位锚（MAGIC@1、digest@3、n@4、
+//!   binding@5、cm@6..14、total@15、ald@16）零位移复用；唯一新增语义收口
+//!   在 index 17（roster_digest，消费面对照 `roster_registry` 注册值——
 //!   H1 单射 ⇒ wire pks == 注册 pks）。
 //! - **word 0 = 批终 acc 复制**（Q-1 定案）：本程序只有一次 acc 折叠
 //!   （`poseidon([prev_acc] ++ claims)`，跨桌 claims 按桌序串接后仍一批一个
@@ -29,8 +29,8 @@
 //!   同一批终 acc，使每手段独立成 fact（`poseidon([ph‖seg])`）时都钉住整批
 //!   链状态；两链 acc 公式不同源（fold claim 带域标签），跨链 acc 不对等是
 //!   有意设计（fold-spec D5-4）。
-//! - **word 16 = 本桌 roster_digest（D1a 多桌修订：桌内常量）**：每桌算一次、
-//!   桌内段复制（电路结构保证）；不同桌的段在 slot 16 携不同值，段本身
+//! - **word 17 = 本桌 roster_digest（D1a 多桌修订：桌内常量）**：每桌算一次、
+//!   桌内段复制（电路结构保证）；不同桌的段在 slot 17 携不同值，段本身
 //!   零改动。批内同值检查放宽为链层 run 分组语义（chain.rs，多桌规格 §4）。
 //!
 //! ## 与 agg0/agg1 测量原型的关系（攻击复审后的生产形状）
@@ -49,7 +49,7 @@
 //!      P_t——同 pks 集不同人数的两桌 μ 不同，多桌规格 §5），
 //!      P̄_t = Σ μ_i·pk_i；roster_digest = poseidon([roster_label, n_t]
 //!      ++ pks) 电路内从同一桌 wire pks 重算；
-//!   3. roster_digest **作为每手公开段 index 16 词**（本桌的）——soundness
+//!   3. roster_digest **作为每手公开段 index 17 词**（本桌的）——soundness
 //!      不在电路内闭合：换 pks 电路照样自洽（wire pks 仍自由），闭合点在
 //!      消费面对照 roster_registry 注册值（H1 单射 ⇒ wire pks == 注册 pks）。
 //!      切片阶段 = host parity 门模拟注册面（fold_batch_test T9/T10 与
@@ -59,10 +59,10 @@
 //!      cm_digest, roster_digest_t])——**真槽映射（D2，以 settlement_stmt.cairo
 //!      实际布局为准）**：hand_binding = wire[3]、m1 = wire[1]
 //!      （registered_digest）、m2 = wire[2]（n_expected）、cm_digest =
-//!      poseidon(wire[28..=35])（8 词 c0..c7 压缩）。**ald（wire[36]）不是
+//!      poseidon(wire[31..=39])（9 词 c0..c8 压缩）。**ald（wire[40]）不是
 //!      M_h 独立槽（D2a）**：约束 1 把 ald 吸收进 digest 且断言
 //!      digest == registered_digest = wire[1] ∈ M_h，ACTION_CHAIN_MISMATCH
-//!      另钉链根 == wire[36]——改 ald 必改 digest 必破 m1。hand_binding 进
+//!      另钉链根 == wire[40]——改 ald 必改 digest 必破 m1。hand_binding 进
 //!      c ⇒ 跨手重放 (R̄,z̄) 必改 c（T3）；**roster_digest_t 进 M_h、P̄_t
 //!      进 c ⇒ 跨桌混签必拒**（桌 A 手配桌 B roster ⇒ M_h/c 变 ⇒ 方程
 //!      z̄·G − c·P̄_B − R̄_A ≠ O ⇒ RESIDUAL_NOT_IDENTITY——多桌规格 §5）；
@@ -74,19 +74,19 @@
 //! ## wire 布局（inputs Span，生产版·多桌：桌段自定界串接，无全局 T 词）
 //!
 //! ```text
-//! [P_1, (pkx, pky)×P_1, K_1, (settle 98 词, R̄x, R̄y, z̄)×K_1]
+//! [P_1, (pkx, pky)×P_1, K_1, (settle 102 词, R̄x, R̄y, z̄)×K_1]
 //!   ++ [P_2, pks_2, K_2, blocks×K_2] ++ … ++ [P_T, pks_T, K_T, blocks×K_T]
 //! ```
 //!
-//! - 每桌头 = 单桌头的原样复用（P 运行时变长解析）；每手块 = settle 98 词
-//!   + 签名见证 3 词（与单桌块逐词同形）；词数 = Σ_t(2 + 2·P_t + 101·K_t)。
+//! - 每桌头 = 单桌头的原样复用（P 运行时变长解析）；每手块 = settle 102 词
+//!   + 签名见证 3 词（与单桌块逐词同形）；词数 = Σ_t(2 + 2·P_t + 105·K_t)。
 //! - 电路按 cursor 消费桌段：越过本桌 blocks 后 `cursor == words.len()`
 //!   即终止——**桌数由 wire 长度自证**，无 T 与实际桌数不一致的检查面。
 //! - 桌序 = wire 序 = 段序 = claims 序（多桌规格 §2）；T=1 退化 = 单桌头 +
 //!   一层 K 循环，逐词一致。
-//! - settle 98 词 = `settlement_stmt.cairo` wire 布局：
-//!   `[hand_id, registered_digest, n_expected, hand_binding, p0..p7, s0..s7,
-//!   m0..m7, c0..c7, action_log_digest, action_count, w0..w59]`。
+//! - settle 102 词 = `settlement_stmt.cairo` wire 布局：
+//!   `[hand_id, registered_digest, n_expected, hand_binding, p0..p8, s0..s8,
+//!   m0..m8, c0..c8, action_log_digest, action_count, w0..w59]`。
 //!
 //! main 的完整 inputs = `[prev_acc, span_len] ++ 上述 Span`（Span 参数
 //! [len, elements…] 摊平，与 combined.cairo 同约定）。
@@ -126,19 +126,19 @@ const SIG_LABEL: felt252 = 'poker/fold-batch/sig.v1';
 const CLAIM_LABEL: felt252 = 'poker/fold-batch/claim.v1';
 
 /// settle wire 词数（settlement_stmt.cairo SETTLE_WORDS 同值）。
-const SETTLE_WORDS: usize = 98;
-/// cm 槽起点：c0..c7 = settle wire[28..=35]（settlement_stmt.cairo :194
-/// 以 settle.at(28 + i)、i∈0..8 吸收的实测布局）。
-const CM_START: usize = 28;
-/// cm 槽词数（8 词 c0..c7 压缩进 cm_digest，D2/K-4）。
-const CM_WORDS: usize = 8;
+const SETTLE_WORDS: usize = 102;
+/// cm 槽起点：c0..c8 = settle wire[31..=39]（settlement_stmt.cairo
+/// 以 settle.at(31 + i)、i∈0..9 吸收的实测布局）。
+const CM_START: usize = 31;
+/// cm 槽词数（9 词 c0..c8 压缩进 cm_digest，D2/K-4）。
+const CM_WORDS: usize = 9;
 /// 每手签名见证词数（R̄x, R̄y, z̄）。
 const SIG_WORDS: usize = 3;
-/// 每手 wire 块词数 = settle 98 + 签名见证 3。
+/// 每手 wire 块词数 = settle 102 + 签名见证 3。
 const HAND_WORDS: usize = SETTLE_WORDS + SIG_WORDS;
 /// settlement_statement 公开段词数（[MAGIC … ald]，combined.cairo 输出尾）。
-const STMT_WORDS: usize = 15;
-/// 每手公开段词数 = [acc] ++ 语句公开段 15 ++ [roster_digest]（D1）。
+const STMT_WORDS: usize = 16;
+/// 每手公开段词数 = [acc] ++ 语句公开段 16 ++ [roster_digest]（D1）。
 pub const SEGMENT_LEN: usize = STMT_WORDS + 2;
 
 #[executable]
@@ -150,7 +150,7 @@ fn main(prev_acc: felt252, words: Span<felt252>) -> Array<felt252> {
         .unwrap();
     // 跨桌 claims 按桌序（桌内手序）append——acc 单次折叠的输入（Q-1/M6）
     let mut claims: Array<felt252> = array![];
-    // 语句公开段缓冲（ΣK×15 词；acc 为批常量、roster_digest 为桌内常量，
+    // 语句公开段缓冲（ΣK×16 词；acc 为批常量、roster_digest 为桌内常量，
     // 末尾统一插——Q-1/D1a）
     let mut stmt_words: Array<felt252> = array![];
     // 逐手段的本桌 roster_digest（D1a 多桌修订：桌内常量、跨桌可异）
@@ -202,7 +202,7 @@ fn main(prev_acc: felt252, words: Span<felt252>) -> Array<felt252> {
         let mut block: usize = cursor + 2 + 2 * n_players;
         let mut j: usize = 0;
         while j < n_hands {
-            // 本手 98 词 settle wire；语句函数内全部 assert（digest 按实际人数
+            // 本手 102 词 settle wire；语句函数内全部 assert（digest 按实际人数
             // 折叠、动作日志整链重放、sign∈{0,1}、|delta|≤u64、NOT_ZERO_SUM、
             // COUNT_MISMATCH、认领承诺），fail-closed。
             let settle = words.slice(block, SETTLE_WORDS);
@@ -212,7 +212,7 @@ fn main(prev_acc: felt252, words: Span<felt252>) -> Array<felt252> {
 
             // M_h 真槽（D2）：hand_binding=wire[3]、m1=wire[1]
             // （registered_digest）、m2=wire[2]（n_expected）、
-            // cm_digest=poseidon(wire[28..=35])（8 词 c0..c7 压缩）。
+            // cm_digest=poseidon(wire[31..=39])（9 词 c0..c8 压缩）。
             let hand_binding = *settle.at(3);
             let m1 = *settle.at(1);
             let m2 = *settle.at(2);
@@ -268,7 +268,7 @@ fn main(prev_acc: felt252, words: Span<felt252>) -> Array<felt252> {
                 Option::Some(_) => panic_with_felt252('RESIDUAL_NOT_IDENTITY'),
             }
 
-            // 语句公开段 15 词入批缓冲 + 本手段记本桌 digest
+            // 语句公开段 16 词入批缓冲 + 本手段记本桌 digest
             let mut w: usize = 0;
             while w < STMT_WORDS {
                 stmt_words.append(*seg.at(w));
@@ -295,8 +295,8 @@ fn main(prev_acc: felt252, words: Span<felt252>) -> Array<felt252> {
     }
     let acc = poseidon_hash_span(acc_in.span());
 
-    // ---- 公开输出：(ΣK) 段 × 17 词平铺，段 = [acc] ++ 语句公开段(15) ++
-    // [本桌 roster_digest]（D1：word 0–15 = combined 信封同位、index 16 =
+    // ---- 公开输出：(ΣK) 段 × 18 词平铺，段 = [acc] ++ 语句公开段(16) ++
+    // [本桌 roster_digest]（D1：word 0–16 = combined 信封同位、index 17 =
     // 本桌 roster_digest——D1a 多桌修订；acc 为批常量、roster_digest 为
     // 桌内常量）
     let stmts = stmt_words.span();

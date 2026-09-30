@@ -1,10 +1,11 @@
-//! fold 批测试（FoldDesign v2 **生产形状·多桌**：fold_batch.cairo 并 98 词
-//! settle wire + foldagg.rs 镜像；多桌规格 out/fold-multitable-spec.md）。
+//! fold 批测试（FoldDesign v2 **生产形状·多桌**：fold_batch.cairo 并 102 词
+//! settle wire + foldagg.rs 镜像；多桌规格 out/fold-multitable-spec.md；
+//! 2026-09-30 九人桌迁移后语料/布局常量右移）。
 //!
 //! 测试清单（T 编号沿用设计，M 编号 = 多桌规格 §9 矩阵；负例名后缀
 //! `_attack_*` 防回归语义漂移）：
-//! - T1 正例（heavy）：2/5/8 人诚实聚合，K=8 手批 → 出证 verified +
-//!   17 词段形状（[acc]++语句段++[roster_digest]）双 parity +
+//! - T1 正例（heavy）：2/5/9 人诚实聚合，K=8 手批 → 出证 verified +
+//!   18 词段形状（[acc]++语句段++[roster_digest]）双 parity +
 //!   `--check-only` 独立复验（P5 completeness 的电路级兑现）；
 //! - T2 z̄+1 篡改 → 电路 panic 无证明（heavy；forge0_bad 方向已确认可行）；
 //! - T3 跨手重放 (R̄,z̄) → 电路 panic（c 含 hand_binding）；
@@ -88,12 +89,12 @@ fn det(seed: u64, i: u64) -> Felt {
     poseidon_hash_many(&[Felt::from(seed), Felt::from(i), Felt::from(0xF01Du64)])
 }
 
-/// 铸一条确定性诚实 settle wire（98 词，settlement_stmt 布局；指定
+/// 铸一条确定性诚实 settle wire（102 词，settlement_stmt 布局；指定
 /// hand_binding；空动作日志、双席零和）——KAT 与攻击负例共用的槽词来源。
 fn settle_wire(hand_id: u64, hb: Felt, seed: u64) -> Vec<Felt> {
     let players: Vec<Felt> = (0..2u64).map(|i| det(seed, 50 + i) + Felt::ONE).collect();
     let deltas: Vec<i128> = vec![1_000_000, -1_000_000];
-    let cms: Vec<Felt> = (0..8u64).map(|i| det(seed, 60 + i)).collect();
+    let cms: Vec<Felt> = (0..9u64).map(|i| det(seed, 60 + i)).collect();
     let ald = poseidon_hash_many(&[action_log_domain()]);
     build_settle_statement(hand_id, hb, &players, &deltas, &cms, ald, &[])
         .expect("settle statement must build")
@@ -188,8 +189,8 @@ fn t4_host_parity_roster_digest_and_pbar_attack_T4() {
 /// 固定 2 人 KAT fixture 的公式值（与 fold_batch.cairo 逐 felt parity 的
 /// 期望侧；十六进制钉死防域分离/换序回归）。生产形状：M_h 真槽取自
 /// settle wire——m1 = wire[1]（registered_digest，由语句 digest 公式定）、
-/// m2 = wire[2]（n_expected = 2）、cm_digest = poseidon(wire[28..=35])
-/// （8 词 c0..c7 压缩，Q-2）。
+/// m2 = wire[2]（n_expected = 2）、cm_digest = poseidon(wire[31..=39])
+/// （9 词 c0..c8 压缩，Q-2 + 9 人桌迁移重钉）。
 fn kat_fixture() -> (Vec<(Felt, Felt)>, hand_verify_native::foldagg::AggregatedHand) {
     let sks = vec![det(KAT_SEED, 0), det(KAT_SEED, 1)];
     let ws = vec![det(KAT_SEED, 100), det(KAT_SEED, 101)];
@@ -229,7 +230,7 @@ fn t8_kat_labels_mu_mh_c_pinned_attack_T8() {
         "roster_digest drifted"
     );
 
-    // M_h 真槽（D2）：m1 = wire[1]、m2 = wire[2]、cm_digest = poseidon(wire[28..=35])
+    // M_h 真槽（D2）：m1 = wire[1]、m2 = wire[2]、cm_digest = poseidon(wire[31..=39])
     let m1 = agg.hand.m1();
     let m2 = agg.hand.m2();
     let cm_digest = agg.hand.cm_digest();
@@ -242,7 +243,7 @@ fn t8_kat_labels_mu_mh_c_pinned_attack_T8() {
     assert_eq!(
         cm_digest,
         Felt::from_hex(KAT_CM_DIGEST).expect("kat cm_digest"),
-        "cm_digest drifted: 8-word c0..c7 compression (wire[28..=35]) changed"
+        "cm_digest drifted: 9-word c0..c8 compression (wire[31..=39]) changed"
     );
     // 两路径一致：独立内联重算 cm_digest 与 FoldHand 派生同值
     assert_eq!(cm_digest, cm_digest_from_wire(&agg.hand.settle));
@@ -265,14 +266,16 @@ fn t8_kat_labels_mu_mh_c_pinned_attack_T8() {
 
 // KAT 钉值（固定 fixture：seed 0xFA17、2 人 roster、settle wire 由
 // settle_wire(1, det(0xFA17,7), 0xFA17) 派生；改动 = 域分离/换序/槽位漂移，
-// T8 必红）。KAT_MU0/KAT_ROSTER_DIGEST 沿用切片轮钉值（roster 侧公式与
-// fixture 未变）；M_h 真槽/8 词 cm 压缩随生产版重钉（Q-2）：
+// T8 必红）。9 人桌迁移（2026-09-30）：KAT_MU0/KAT_ROSTER_DIGEST/KAT_M1
+// 沿用切片轮钉值（roster/digest 侧公式与 fixture 前 2 席语料不变，实测
+// 未漂移）；KAT_CM_DIGEST/KAT_MH/KAT_C 随 cm×9 压缩重钉（断言失败输出
+// 的 left 值即真实运行采集，非手算）：
 const KAT_MU0: &str = "0340622f9a217eb20b2b9351112177337faa294eb02c0fb5035bfd3e8ac17ce6";
 const KAT_ROSTER_DIGEST: &str = "04ac85cd07aebad095fef54ed9a8456effe0e05f56e6b30f074fbfc0a65817ce";
 const KAT_M1: &str = "0579bd25d99b3c011f316568bd440da7f44fec8460b62e4caef2a675672241fc";
-const KAT_CM_DIGEST: &str = "07329cda3409da1dd910e55e83172d7b929e1abde6fb73eaf316201ebf89af5d";
-const KAT_MH: &str = "441193921bf8aa1ee109e51a3941b27d4fc40495132ba3caf4e82d393f898db";
-const KAT_C: &str = "4c1d844328471adac952b0a3b5b5feb422b54f3f9368584311a447eba0b7020";
+const KAT_CM_DIGEST: &str = "69d003b5d735953145749dd74674fa4c411bb4ebbe475124dfb365faccdbe14";
+const KAT_MH: &str = "0b03e88e70c9c51405faea27537d03c7e1fc477610327ea6a68a749a4a09fdb";
+const KAT_C: &str = "7537f4ba3b536c5ea05ab0a2a4fcc1603dd76056edf0cfa436f4388afbe64c7";
 
 // ---------------------------------------------------------------------------
 // host 负例（公式层，不需要 prove-hand——门禁常跑）
@@ -345,7 +348,7 @@ fn bdn_three_round_nonce_commitment_mirror() {
     assert_eq!(err, "NONCE_COMMIT_MISMATCH");
 }
 
-/// wire 形状：build_batch_wire 词数 = 2 + 2P + 101K，每手块 = settle 98 词
+/// wire 形状：build_batch_wire 词数 = 2 + 2P + 105K，每手块 = settle 102 词
 /// + (R̄x, R̄y, z̄)（电路头注释同布局；槽位锚逐位检查）。
 #[test]
 fn wire_layout_matches_circuit_contract() {
@@ -356,8 +359,8 @@ fn wire_layout_matches_circuit_contract() {
     assert_eq!(wire[1 + 2 * 3], Felt::from(4u64)); // K
     for (j, h) in hands.iter().enumerate() {
         let base = 2 + 2 * 3 + HAND_BLOCK_WORDS * j;
-        // settle 98 词原样摊平（hand_id@0、registered_digest@1、
-        // n_expected@2、hand_binding@3、cm 槽@28..=35……）
+        // settle 102 词原样摊平（hand_id@0、registered_digest@1、
+        // n_expected@2、hand_binding@3、cm 槽@31..=39……）
         assert_eq!(&wire[base..base + SETTLE_WORDS], h.hand.settle.as_slice());
         assert_eq!(wire[base + 3], h.hand.hand_binding());
         // 签名见证紧跟 settle wire
@@ -386,8 +389,8 @@ fn mh_slots_derive_from_settle_wire() {
     assert_ne!(mh2, h.m_h);
 }
 
-/// cm 槽起点（settle wire[28..=35]，settlement_stmt.cairo :194 布局）。
-const SETTLE_CM_SLOT: usize = 28;
+/// cm 槽起点（settle wire[31..=39]，settlement_stmt.cairo 布局）。
+const SETTLE_CM_SLOT: usize = 31;
 
 /// acc 链公式对拍：expected acc == fold_acc(0, claims)（两路径一致）。
 #[test]
@@ -404,14 +407,14 @@ fn acc_chain_formula_parity() {
 // heavy：真 prove-hand 电路跑（#[ignore]；--release -- --ignored --nocapture）
 // ---------------------------------------------------------------------------
 
-/// **T1 正例**：2/5/8 人诚实聚合，K=8 手批 → verified + 17 词段形状
-/// （[acc]++语句段(15)++[roster_digest]）双 parity + 独立复验。bench 表列
+/// **T1 正例**：2/5/9 人诚实聚合，K=8 手批 → verified + 18 词段形状
+/// （[acc]++语句段(16)++[roster_digest]）双 parity + 独立复验。bench 表列
 /// = steps / trace rows / EC_OP / poseidon / prove ms / total ms / proof B。
 #[test]
 #[ignore]
 fn t1_honest_fold_batch_roundtrip() {
     let params = canonical_params();
-    for players in [2usize, 5, 8] {
+    for players in [2usize, 5, 9] {
         let (pks, hands, anchor) = honest_batch(players, 8, KAT_SEED + players as u64);
         let t = std::time::Instant::now();
         let outcome = prove_fold_batch(
@@ -427,7 +430,7 @@ fn t1_honest_fold_batch_roundtrip() {
         assert!(outcome.ec_ops > 0, "EC must ride EC_OP in the cairo trace");
         assert!(outcome.cairo_acc == anchor.expected_acc);
         assert!(outcome.cairo_roster_digest == anchor.roster_digest);
-        // 生产段形状（D1）：K 段 × 17 词；acc@0 与 roster_digest@16 批常量
+        // 生产段形状（D1）：K 段 × 18 词；acc@0 与 roster_digest@17 批常量
         // 同值；MAGIC@1 = 'SP2M_OK'（combined 信封同位）
         assert_eq!(outcome.segments.len(), 8);
         for seg in &outcome.segments {
@@ -796,14 +799,14 @@ fn m8_t1_wire_matches_pre_multitable_golden() {
 }
 
 /// **M2（host 层）**：多桌 wire 自定界布局——`[P_t, pks×P_t, K_t, blocks×K_t]`
-/// 串接、无全局 T 词；桌 2 头紧跟桌 1 blocks；每手块 = settle 98 +
+/// 串接、无全局 T 词；桌 2 头紧跟桌 1 blocks；每手块 = settle 102 +
 /// (R̄x, R̄y, z̄) 与单桌块逐词同形。
 #[test]
 fn m2_multitable_wire_layout_self_delimiting_tables() {
     let ta = honest_table(3, 2, KAT_SEED + 420);
     let tb = honest_table(2, 1, KAT_SEED + 421);
     let wire = tables_wire(&[ta.clone(), tb.clone()]);
-    // 词数 = Σ_t(2 + 2·P_t + 101·K_t)——无 T 词、无 padding 词
+    // 词数 = Σ_t(2 + 2·P_t + 105·K_t)——无 T 词、无 padding 词
     let expect_len = (2 + 2 * 3 + HAND_BLOCK_WORDS * 2) + (2 + 2 * 2 + HAND_BLOCK_WORDS * 1);
     assert_eq!(wire.len(), expect_len);
     // 桌 1 头：P_1=3 @0（不是 T！）、K_1=2 @ 1+2·3（电路 words.at(cursor+1+2P)）
@@ -971,7 +974,8 @@ fn m1c_t_window_rejects_empty_and_over_max_attack_MT5() {
 // 多桌 heavy（#[ignore]；--release -- --ignored --nocapture）
 // ---------------------------------------------------------------------------
 
-/// **M8（heavy 层）**：T=1 出证与重构前金样逐 felt 一致——段（17 词×K）、
+/// **M8（heavy 层）**：T=1 出证与金样逐 felt 一致——段（18 词×K，9 人桌
+/// 迁移后重采）、
 /// 批终 acc、roster_digest 全对（verified 由 prove_fold_batch 内部已门）。
 #[test]
 #[ignore]
@@ -1014,8 +1018,8 @@ fn m8_t1_golden_roundtrip_heavy() {
     );
 }
 
-/// 多桌 heavy 正例的共用断言：verified（prove 成功）+ 逐手段 word1..=15 ==
-/// host expected_segment + seg[16] == 本桌锚 + 全部段 slot0 同值 ==
+/// 多桌 heavy 正例的共用断言：verified（prove 成功）+ 逐手段 word1..=16 ==
+/// host expected_segment + seg[17] == 本桌锚 + 全部段 slot0 同值 ==
 /// fold_acc(prev, claims 桌序串接)（M9-1 断言面，规格 §9）。
 fn assert_multitable_outcome(
     prev_acc: Felt,
@@ -1034,7 +1038,7 @@ fn assert_multitable_outcome(
             assert_eq!(
                 seg[FOLD_ROSTER_INDEX],
                 anchors[t].roster_digest,
-                "slot16 must equal the OWNING table's anchor digest (hand {j} table {t})"
+                "slot17 must equal the OWNING table's anchor digest (hand {j} table {t})"
             );
             let expected_seg =
                 parse_settle_wire(&h.hand.settle).expect("parse").expected_segment().expect("seg");
@@ -1047,12 +1051,12 @@ fn assert_multitable_outcome(
     assert_eq!(outcome.cairo_acc, acc);
 }
 
-/// **M9-1(a)**：T=2 不同人数桌（P=8/K=8 + P=2/K=8，ΣK=16）。
+/// **M9-1(a)**：T=2 不同人数桌（P=9/K=8 + P=2/K=8，ΣK=16——9 人桌口径）。
 #[test]
 #[ignore]
 fn m9_1a_multitable_two_tables_distinct_player_counts() {
     let tables = vec![
-        honest_table(8, 8, KAT_SEED + 450),
+        honest_table(9, 8, KAT_SEED + 450),
         honest_table(2, 8, KAT_SEED + 451),
     ];
     let anchors = expected_public_output_tables(Felt::ZERO, &tables);
@@ -1065,12 +1069,12 @@ fn m9_1a_multitable_two_tables_distinct_player_counts() {
         canonical_params().as_deref(),
     )
     .expect("two-table batch must prove");
-    assert_eq!(outcome.table_players, vec![8, 2]);
+    assert_eq!(outcome.table_players, vec![9, 2]);
     assert_eq!(outcome.table_hands, vec![8, 8]);
     assert_eq!(outcome.n_hands, 16);
     assert_multitable_outcome(Felt::ZERO, &tables, &anchors, &outcome);
     println!(
-        "| M9-1a T=2 (8×8+2×8) | steps {} | trace 2^{} | EC_OP {} | poseidon {} | total {} ms |",
+        "| M9-1a T=2 (9×8+2×8) | steps {} | trace 2^{} | EC_OP {} | poseidon {} | total {} ms |",
         outcome.steps,
         outcome.steps.next_power_of_two().ilog2(),
         outcome.ec_ops,
@@ -1104,13 +1108,14 @@ fn m9_1b_multitable_same_size_distinct_rosters() {
     );
 }
 
-/// **M9-1(c)**：预算上限拼批——T=8 全 8 人 ΣK=64（M1-c 政策边界）。
-/// 验收门（M1-d）：steps ≤ 2^20 桶且实测余量 ≥ 1.5×（steps·3 ≤ 2^20·2）。
+/// **M9-1(c)**：预算上限拼批——T=8 全 9 人 ΣK=64（M1-c 政策边界，9 人桌
+/// 迁移后的新最坏情形）。验收门（M1-d）：steps ≤ 2^20 桶且实测余量 ≥ 1.5×
+/// （steps·3 ≤ 2^20·2）。
 #[test]
 #[ignore]
 fn m9_1c_multitable_budget_t8_sumk64() {
     let tables: Vec<FoldTable> = (0..8u64)
-        .map(|i| honest_table(8, 8, KAT_SEED + 500 + i))
+        .map(|i| honest_table(9, 8, KAT_SEED + 500 + i))
         .collect();
     let anchors = expected_public_output_tables(Felt::ZERO, &tables);
     let outcome = prove_fold_batch_multitable(

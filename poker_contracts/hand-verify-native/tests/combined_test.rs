@@ -1,5 +1,5 @@
 //! 合并信封测试（form-③ combined）：一次 prove-hand 出一份 Stwo 证明，
-//! 公开输出 = [new_acc] ++ settlement 公开段（16 词），双 parity 门
+//! 公开输出 = [new_acc] ++ settlement 公开段（17 词），双 parity 门
 //! （acc / segment）+ `--check-only` 独立复验 + 负例。
 //!
 //! Heavy（spawn 真实 Cairo 管线）：`#[ignore]`-gated。运行：
@@ -78,7 +78,7 @@ fn combined_single_proof_roundtrip() {
     let wall = t.elapsed();
     assert!(outcome.ec_ops > 0, "EC must be in the cairo trace");
     assert!(outcome.proof_bytes > 0);
-    // 公开段锚定：MAGIC 之后 15 词（segment parity 已在驱动内断言）。
+    // 公开段锚定：MAGIC 之后 16 词（segment parity 已在驱动内断言）。
     assert!(outcome.public_output.contains(&magic), "segment missing");
     println!(
         "| combined {seats}p | steps {} | EC_OP {} | total {} ms (compile {} / run {} / prove {}) | \
@@ -129,7 +129,7 @@ fn combined_rejects_cross_hand_binding() {
 }
 
 /// 前缀折叠 digest 的公式对拍：n=3 时与「按实际人数折叠」一致，
-/// 与「8 槽全吸收」不同——钉死 settlement_stmt.cairo 的修复语义。
+/// 与「9 槽全吸收」不同——钉死 settlement_stmt.cairo 的修复语义。
 #[test]
 fn combined_digest_prefix_fold_semantics() {
     let (tasks, settle, _hb) = honest_fixture(2);
@@ -145,12 +145,12 @@ fn combined_digest_prefix_fold_semantics() {
     let n_fold = poseidon_hash_many(&fields);
     assert_eq!(settle.expected_digest(), n_fold, "must match on-chain n-fold");
     let mut padded = fields.clone();
-    for _ in n..8 {
+    for _ in n..9 {
         padded.extend([Felt::ZERO, Felt::ZERO, Felt::ZERO]);
     }
     assert_ne!(
         poseidon_hash_many(&padded),
         n_fold,
-        "8-slot fold must differ for n<8 (the standalone-circuit latent bug)"
+        "9-slot fold must differ for n<9 (the fixed-slot absorption latent bug)"
     );
 }

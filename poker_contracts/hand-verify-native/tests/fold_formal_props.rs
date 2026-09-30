@@ -16,7 +16,7 @@
 //!   `p3_zero_coeff_cancels_honest`、`p3_rogue_uniqueness_exhaustive_f101`
 //!   （`rogue_solution_unique` 的小域穷举）
 //! - P4 binding 无重复/不可重组：`p4_binding_binds_claim`、`p4_batch_no_recombination`
-//! - P5 completeness 诚实路径：`p5_honest_aggregate_completeness`（2/5/8 人 roster
+//! - P5 completeness 诚实路径：`p5_honest_aggregate_completeness`（2/5/9 人 roster
 //!   真曲线聚合）、`p5_fold_chain_honest_parity`
 //!
 //! 聚合公式逐条来自设计任务书「构造选型」节：
@@ -303,7 +303,7 @@ proptest! {
     /// DIGEST_MISMATCH、COUNT_MISMATCH、动作链良构断言）；任一席 delta 扰动
     /// → fail-closed 拒绝；registered_digest 篡改 → DIGEST_MISMATCH。
     #[test]
-    fn p2_zero_sum_proptest(seed in any::<u64>(), seats in 2usize..=8usize) {
+    fn p2_zero_sum_proptest(seed in any::<u64>(), seats in 2usize..=9usize) {
         let deltas = random_zero_sum_deltas(seed, seats);
         let (players, cms) = players_and_cms(seed, seats);
         let hb = det_felt(seed, 7);
@@ -323,7 +323,7 @@ proptest! {
         .expect("zero-sum statement must build");
         // 宿主段公式（与 settlement_stmt.cairo 约束 1-4 同源）全过
         let seg = st.expected_segment().expect("expected_segment ok");
-        prop_assert_eq!(seg.len(), 15);
+        prop_assert_eq!(seg.len(), 16);
         prop_assert_eq!(seg[0], hand_verify_native::combined::segment_magic());
         // 零和不变式（整数域，P2a 的 u64 量级前提在生成器里成立）
         let int_sum: i128 = deltas.iter().sum();
@@ -334,7 +334,7 @@ proptest! {
             .filter(|d| **d > 0)
             .map(|d| *d as u64)
             .sum();
-        let total_felt = u64::from_be_bytes(seg[13].to_bytes_be()[24..32].try_into().unwrap());
+        let total_felt = u64::from_be_bytes(seg[14].to_bytes_be()[24..32].try_into().unwrap());
         prop_assert_eq!(total_felt, total);
         // digest 绑定（Lean Settlement.digest_binds_magnitude 实例）：
         // 篡改任一 magnitude 后 digest 必须不再匹配
@@ -368,19 +368,19 @@ proptest! {
 #[test]
 fn p2b_zero_sum_boundaries() {
     let max = i128::from(u64::MAX);
-    let players: Vec<Felt> = (0..8).map(|i| det_felt(77, i) + Felt::from(1u8)).collect();
-    let cms: Vec<Felt> = (0..8).map(|i| det_felt(78, i)).collect();
+    let players: Vec<Felt> = (0..9).map(|i| det_felt(77, i) + Felt::from(1u8)).collect();
+    let cms: Vec<Felt> = (0..9).map(|i| det_felt(78, i)).collect();
     let hb = det_felt(79, 0);
     let ald = poseidon_hash_many(&[hand_verify_native::combined::action_log_domain()]);
     // (a) 单赢家 u64::MAX + 单输家 −u64::MAX：零和、total = u64::MAX（槽上界内极值）
-    let deltas = [max, -max, 0, 0, 0, 0, 0, 0];
+    let deltas = [max, -max, 0, 0, 0, 0, 0, 0, 0];
     let st = hand_verify_native::combined::build_settle_statement(2, hb, &players, &deltas, &cms, ald, &[])
         .expect("u64::MAX zero-sum must build");
     let seg = st.expected_segment().expect("boundary segment ok");
-    let total_felt = u64::from_be_bytes(seg[13].to_bytes_be()[24..32].try_into().unwrap());
+    let total_felt = u64::from_be_bytes(seg[14].to_bytes_be()[24..32].try_into().unwrap());
     assert_eq!(total_felt, u64::MAX);
     // (b) 双赢家各 u64::MAX：零和成立但 total 溢出 u64 → 宿主 fail-closed
-    let deltas2 = [max, -max, max, -max, 0, 0, 0, 0];
+    let deltas2 = [max, -max, max, -max, 0, 0, 0, 0, 0];
     let st2 = hand_verify_native::combined::build_settle_statement(3, hb, &players, &deltas2, &cms, ald, &[])
         .expect("(b) build passes: zero-sum and |delta| bounds hold");
     let err = st2.expected_segment().err().expect("total must overflow u64");
@@ -537,11 +537,11 @@ proptest! {
 // P5 —— completeness：诚实路径全部通过（固定种子）
 // ---------------------------------------------------------------------------
 
-/// **P5（聚合完备性 + 篡改拒绝）**：2/5/8 人 roster 诚实聚合必过验证方程；
+/// **P5（聚合完备性 + 篡改拒绝）**：2/5/9 人 roster 诚实聚合必过验证方程；
 /// z̄±1 / R̄ 篡改 / 未注册 P̄ / 少一人（部分签名缺失）全部 fail-closed。
 #[test]
 fn p5_honest_aggregate_completeness() {
-    for &k in &[2usize, 5usize, 8usize] {
+    for &k in &[2usize, 5usize, 9usize] {
         let sks: Vec<Felt> = (0..k as u64).map(|i| det_felt(0xA11CE + k as u64, i)).collect();
         let ws: Vec<Felt> = (0..k as u64).map(|i| det_felt(0xB0B + k as u64, i)).collect();
         let hb = det_felt(0xC0C, k as u64);

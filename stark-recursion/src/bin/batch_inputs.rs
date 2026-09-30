@@ -2,11 +2,11 @@
 //!
 //! 两阶段工作流（与 prove-hand 的 run 顺序对齐）：
 //!
-//! 1. **阶段 A（--phase a）**：从基础单手输入（98 felt JSON 数组）合成 K 手
+//! 1. **阶段 A（--phase a）**：从基础单手输入（102 felt JSON 数组）合成 K 手
 //!    （每手 hand_id/hand_binding 递增、digest 由 host 重算），输出
 //!    prove-hand `--inputs` JSON（占位链尾 acc=hi=lo=0）→ 先跑一次拿
 //!    program_hash 与真实公开段。
-//! 2. **阶段 B（--phase b）**：读阶段 A 的 public_outputs.json（16·K 手段 +
+//! 2. **阶段 B（--phase b）**：读阶段 A 的 public_outputs.json（17·K 手段 +
 //!    4 felt 链尾），host 侧派生语句集 → keccak 批根（groth16-wrap
 //!    batch::keccak_batch_root，与 zchain SettleBatch.sol 逐式一致）→
 //!    hi/lo 拆分 → 输出带真实链尾的 `--inputs` JSON + 清单 JSON
@@ -91,7 +91,7 @@ fn print_help() {
     println!(
         "batch_inputs —— L1 批量终证腿输入/清单生成器\n\
          --phase a|b           a=合成 K 手占位输入；b=从真实公开段派生批根/链尾\n\
-         --base-input PATH     基础单手输入（98 felt hex JSON 数组）\n\
+         --base-input PATH     基础单手输入（102 felt hex JSON 数组）\n\
          --hands N             手数（2 的幂，≤64）\n\
          --acc HEX             累加链接入 acc_prev（b 阶段必填；首批 0x0）\n\
          --program-hash HEX    批程序哈希（b 阶段必填；阶段 A 出证后取）\n\
@@ -102,13 +102,13 @@ fn print_help() {
 }
 
 /// 每手入参长度（与 settlement_batch_private.cairo HAND_INPUT_LEN 一致）。
-const HAND_INPUT_LEN: usize = 98;
-/// 每手公开段长度（wrap_circuit.rs:44 OUTPUT_LEN）。
-const SEGMENT_LEN: usize = 16;
+const HAND_INPUT_LEN: usize = 102;
+/// 每手公开段长度（settlement_batch_private 输出段 = 字面 16 前缀 + 语句 16）。
+const SEGMENT_LEN: usize = 17;
 /// 链尾长度：acc_prev / root_hi / root_lo / batch_fact。
 const TAIL_LEN: usize = 4;
-/// digest 的 sponge 载荷：hand_id + 8×(player, sign, mag) + action_log_digest。
-const DIGEST_MSG_LEN: usize = 1 + 8 * 3 + 1;
+/// digest 的 sponge 载荷：hand_id + 9×(player, sign, mag) + action_log_digest。
+const DIGEST_MSG_LEN: usize = 1 + 9 * 3 + 1;
 
 /// 读手 i 的第 slot 个入参（flat 布局与电路 read() 一致）。
 fn hand_input_felt(flat: &[Felt252], hand_idx: usize, slot: usize) -> Felt252 {
@@ -120,12 +120,12 @@ fn hand_input_felt(flat: &[Felt252], hand_idx: usize, slot: usize) -> Felt252 {
 fn hand_digest(flat: &[Felt252], hand_idx: usize) -> Felt252 {
     let mut msg = Vec::with_capacity(DIGEST_MSG_LEN);
     msg.push(hand_input_felt(flat, hand_idx, 0)); // hand_id
-    for i in 0..8usize {
+    for i in 0..9usize {
         msg.push(hand_input_felt(flat, hand_idx, 4 + i)); // players
-        msg.push(hand_input_felt(flat, hand_idx, 12 + i)); // signs
-        msg.push(hand_input_felt(flat, hand_idx, 20 + i)); // mags
+        msg.push(hand_input_felt(flat, hand_idx, 13 + i)); // signs
+        msg.push(hand_input_felt(flat, hand_idx, 22 + i)); // mags
     }
-    msg.push(hand_input_felt(flat, hand_idx, 36)); // action_log_digest
+    msg.push(hand_input_felt(flat, hand_idx, 40)); // action_log_digest
     poseidon_hash_many(&msg)
 }
 
@@ -146,7 +146,7 @@ fn synthesize_hands(base: &[Felt252], hands: usize) -> Result<Vec<Felt252>> {
     Ok(flat)
 }
 
-/// 写 prove-hand --inputs JSON：[k, acc_prev, root_hi, root_lo, 98k(len), flat…]。
+/// 写 prove-hand --inputs JSON：[k, acc_prev, root_hi, root_lo, 102k(len), flat…]。
 fn write_program_inputs(
     path: &PathBuf,
     k: usize,
@@ -169,7 +169,7 @@ fn write_program_inputs(
 }
 
 /// 从 public_outputs.json 提取 (program_hash, 手段序列, 链尾)。
-/// 输出形状（K=1 E2E 实测钉死）：[len=16k+4] ++ 16k 手段 ++ [acc, hi, lo, fact]。
+/// 输出形状（9 人桌）：[len=17k+4] ++ 17k 手段 ++ [acc, hi, lo, fact]。
 fn parse_proof_output(
     path: &PathBuf,
 ) -> Result<(Felt252, Vec<Felt252>, [Felt252; TAIL_LEN])> {
@@ -196,7 +196,7 @@ fn parse_proof_output(
     let total = out.len() - 1;
     anyhow::ensure!(
         total >= SEGMENT_LEN + TAIL_LEN && (total - TAIL_LEN) % SEGMENT_LEN == 0,
-        "output elements {total} 不满足 16k+4 形状"
+        "output elements {total} 不满足 17k+4 形状"
     );
     let k = (total - TAIL_LEN) / SEGMENT_LEN;
     let segments = out[1..1 + k * SEGMENT_LEN].to_vec();

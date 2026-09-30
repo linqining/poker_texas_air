@@ -33,7 +33,7 @@
 
 **判定：规格 M1–M9 九项定案全部落地，五门禁全绿，评审 1 轮 4 发现全部修复并经工作流复核不再报出（本报告会话对 4 项修复逐一独立复核确认）；单桌退化以重构前金样钉死逐词一致；多桌预算端点 T=8 ΣK=64 实测 409,563 steps（2^20 的 39.06%、余量 2.56×，过 M1-d 门 1.5×）；程序哈希已由 0x02a42b… 重钉为 0x074f0a…（本会话实读 `stark_final.rs:67` 确认在位）。带收尾条件（见 §6）。**
 
-一句话理由：立项三大改面——电路（桌段自定界串接 + 每桌 keyagg/roster_digest + slot16 桌内常量）、host 镜像（FoldTable/多桌 wire/出证后逐桌锚门）、链层（M4-c 三检放宽 + T_MAX run 计数）——均已实现并测试（本会话复跑：hand-verify-native debug 12 个 target 合计 **64 passed / 0 failed / 22 ignored**；stark-recursion lib **40 passed / 0 failed**；scarb build Finished 零 error）；heavy 切片门禁 **20 passed / 0 failed in 44.60s**（【门禁材料】实跑，含 M8 金样 heavy 回放、M9-1a/b/c 三正例、M9-2 四负例/正控、T7 全档扫描）；合约层 snforge **130 passed / 0 failed**（【实施材料】，本会话未复跑 snforge——含 Sepolia fork 测试依赖外网）。跨桌攻击闭合点（M5）两层验证且分级不同：**电路层为本会话/门禁实跑实证**（m9_2a/b panic 无 proof.json——heavy 门禁 20/0 内；host 镜像 m5 本会话复跑 ok），**消费面层为 snforge 材料转引**（合约跨桌 swap 负例测试在库本会话 grep 实证，15/0 运行结果转引未复跑）。**但以下事项未闭合**（详见 §6）：多桌形状（T=8 ΣK=64）笼内复测未做（Q-M3 复核前提）；与全量协议迁移同批评审未做（提案原文要求）；C5/C6 沿袭未开始；工作树未提交（提交由用户执行）；另有一个本报告会话新核出的缺口——**fold_parity 侧 heavy 对拍 t13/t14 不在任何门禁命令面内、本批未跑**（host 形已绿，见 §3.3）。
+一句话理由：立项三大改面——电路（桌段自定界串接 + 每桌 keyagg/roster_digest + slot16 桌内常量）、host 镜像（FoldTable/多桌 wire/出证后逐桌锚门）、链层（M4-c 三检放宽 + T_MAX run 计数）——均已实现并测试（本会话复跑：hand-verify-native debug 12 个 target 合计 **64 passed / 0 failed / 22 ignored**；stark-recursion lib **40 passed / 0 failed**；scarb build Finished 零 error）；heavy 切片门禁 **20 passed / 0 failed in 44.60s**（【门禁材料】实跑，含 M8 金样 heavy 回放、M9-1a/b/c 三正例、M9-2 四负例/正控、T7 全档扫描）；合约层 snforge **130 passed / 0 failed**（【实施材料】，本会话未复跑 snforge——含 Sepolia fork 测试依赖外网）。跨桌攻击闭合点（M5）两层验证且分级不同：**电路层为本会话/门禁实跑实证**（m9_2a/b panic 无 proof.json——heavy 门禁 20/0 内；host 镜像 m5 本会话复跑 ok），**消费面层为 snforge 材料转引**（合约跨桌 swap 负例测试在库本会话 grep 实证，15/0 运行结果转引未复跑）。**但以下事项未闭合**（详见 §6）：多桌形状笼内复测已于 2026-09-30 四场景补测闭合（§6.1，三门禁全绿）；与全量协议迁移同批评审未做（提案原文要求）；C5/C6 沿袭未开始；工作树未提交（提交由用户执行）；另有一个本报告会话新核出的缺口——**fold_parity 侧 heavy 对拍 t13/t14 不在任何门禁命令面内、本批未跑**（host 形已绿，见 §3.3）。
 
 规格定案落地状态总览（逐项详对照见 §1）：
 
@@ -224,13 +224,27 @@ prove-hand 出证栈对电路 panic 的 stderr **只含** `An ASSERT_EQ instruct
 | **实施会话实跑（【实施材料】转引，本会话未复跑）** | snforge `settlement_fold_private_tests` 15/0 与全量 130/0 + Sepolia fork（block 15861106）；`cargo clippy -p stark-recursion --lib`（12 warnings 全在会话前位置）；`cargo build -p hand-verify-native`（0 error）；m9_3c 手动 prove-hand 探针（span ±1 双向 VM 越界）；m9_2 系磁盘证据核查（m9-2a/b 目录无 proof.json、m9-2c proof.json 15MB + summary verified:True）；**金样捕获时 PANIC 探针**——捕获测试同时在 stderr 断言无 felt panic 标签（证明捕获语料的出证路径干净、金样非 panic 产物）；**output 目录 tag 全量审计**——grep 清点两测试文件全部 `out_dir("…")` 输出目录标签共 33 处，确认单桌既有测试与多桌新测试不共用输出目录（防产物互相覆盖导致的假阳性/误读旧产物）；`grep -rn 'slot 16 非批常量…'` 无残留引用 |
 | **评审会话实跑（【评审材料】转引；修复结论本会话独立复核）** | 4 发现的证据命令（m8 heavy summary 取证 0x74f0a7…/12347、mtime 时间线 stat、grep fold_parity_test 无多桌命中、断言面实读）；修复后复核未再报出 + stillOpen 空——4 项修复本会话均已实读/复跑独立确认（§3.4） |
 
-**未验证/未覆盖（诚实清单）**：t13/t14 heavy 对拍（不在门禁命令面，§3.3）；snforge 全量与 Sepolia fork 测试（本会话未跑）；heavy 切片门禁本会话未复跑（以【门禁材料】20/0 为准）；多桌形状笼内复测（T=8 ΣK=64 的 steps/RSS/MemoryCurrent，Q-M3 前提）；ΣK>64 专项新负例（拒绝面零改动、由既有政策测试承载）；t13 与 T1 的 steps 微差归因（【前批报告】§2.3 已注，本批未涉及）；部署动作未发生（owner 上链 `set_fold_program_hash(0x074f0a…)` 待部署时执行）；Lean 复核未做——悬置已消除为事实：Lean 的 Fold 层**在库且引用 fold_batch**（`src/airs_lean/AirsLean/Fold.lean`，模块自述「牌桌折叠协议（fold_batch）安全属性层」；另有 `Fold/Chain.lean`——本会话 `grep -rln fold_batch src/airs_lean/` 实证命中），但其属性是否隐含单桌形状前提（如 slot16 批常量）本会话未复核，归 §6.2 同批评审一并核对。
+**未验证/未覆盖（诚实清单）**：t13/t14 heavy 对拍（不在门禁命令面，§3.3）；snforge 全量与 Sepolia fork 测试（本会话未跑）；heavy 切片门禁本会话未复跑（以【门禁材料】20/0 为准）；ΣK>64 专项新负例（拒绝面零改动、由既有政策测试承载）；t13 与 T1 的 steps 微差归因（【前批报告】§2.3 已注，本批未涉及）；部署动作未发生（owner 上链 `set_fold_program_hash(0x074f0a…)` 待部署时执行）；Lean 复核未做——悬置已消除为事实：Lean 的 Fold 层**在库且引用 fold_batch**（`src/airs_lean/AirsLean/Fold.lean`，模块自述「牌桌折叠协议（fold_batch）安全属性层」；另有 `Fold/Chain.lean`——本会话 `grep -rln fold_batch src/airs_lean/` 实证命中），但其属性是否隐含单桌形状前提（如 slot16 批常量）本会话未复核，归 §6.2 同批评审一并核对。~~多桌形状笼内复测~~ → **已于 2026-09-30 补测闭合（§6.1）**。
 
 ---
 
 ## 6. 剩余条件
 
-1. **笼内复测多桌形状（Q-M3 前提）**：T=8 ΣK=64 拼批在内存受限产证机（沿用【前批报告】§5.3 C3 口径：steps / 峰值 RSS / MemoryCurrent 三门禁；环境基准见 §3.1 运行环境段——RSS/MemoryCurrent 必须回笼内取数，本机 Darwin arm64 数字不可代）的复测未做——本批 steps 端点为本机实测（409,563、余量 2.56×、trace 2^19）；Q-M3（T_MAX=8 终值复核放宽）明确以待跑项落库后复核。「放宽空间在政策不在桶」= T_MAX 终值受限于评审政策而非 trace 桶容量——steps 模型上界仅占 2^20 地板 47.7%（桶远未满），把 T_MAX 调大不会先撞桶。
+1. ~~**笼内复测多桌形状（Q-M3 前提）**~~ → **✅ 已完成（2026-09-30 补测，四场景三门禁全绿）**：
+   - **环境与方法**：stark 产证机笼内（阿里云 Linux x86_64、4 vCPU/7.3G、cgroup v2），每场景独立 `systemd-run` 瞬态单元 `fold-mt-<name>.service`，属性对齐 monad-fold@.service 探针纪律（Slice=zchain-recursion.slice、MemoryMax=4600M、MemorySwapMax=0、CPUQuota=300%、Nice=5，取严判定）；被测物 = 本仓库同源码交叉编译 musl 静态二进制（`fold_batch_test` 新哈希 8568f23f…、`prove-hand` 与前批同哈希 e963fd7d… 证 proving-tool 零改动），SHA256 双侧核对；采样 = 无 memory.peak 内核下 100ms 轮询本单元 memory.current 取峰 + texas.service MemoryCurrent 全程探针。
+   - **四场景结果**（steps 与本机逐字一致——交叉编译/环境不改电路语义的直接证据）：
+
+     | 场景 | steps（笼内 = 本机） | 峰值 RSS（4600M 单元帽） | oom_kill | texas 漂移 | 笼内耗时 |
+     |---|---|---|---|---|---|
+     | k64 单桌回归（FOLD_PERF_ONLY=64 t7） | 398,146（2^19） | 3,224 MiB（**70%**） | 0 | 0.00% | 38.8s（prove 34.2s） |
+     | mt8 最坏形状（T=8×8 人 ΣK=64，m9_1c） | 409,563（2^19） | 3,221 MiB（**70%**） | 0 | 0.00% | 51.6s |
+     | mt2a 两桌异人数（8p×8h+2p×8h，m9_1a） | 98,685（2^17） | 1,839 MiB（39%） | 0 | 0.00% | 28.1s |
+     | mt2b 两桌同规模（8p×4h+8p×4h，m9_1b） | 52,885 | 1,731 MiB（37%） | 0 | 0.00% | 18.3s |
+
+   - **判定**：最坏多桌形状峰值与单桌 K=64 基本重合（3,221 vs 3,224 MiB——同落 2^19 桶，8 份 keyagg 只加 steps 不动内存）；对 4600M 单元帽余量 30%，texas 全程 active 且零漂移，四场景 exit=0、零 OOM。**Q-M3（T_MAX=8 终值复核）的待跑前提已满足**——数据支持维持 T_MAX=8（若评审想放宽，约束在政策不在资源：桶占用 39%、单元帽 70%，二者都有空间，但放宽属 §6.2 同批评审裁定面）。
+   - **本机对照口径（同日 Darwin arm64 实测）**：T7 全档 K=1/8/32/64 = 7,897/51,254/199,922/398,146 steps（多桌化簿记漂移 +38/+115/+379/+731，K=64 per-hand 6,221）；m9_1c 5.5s / m9_1a 2.6s / m9_1b 3.0s；本机全树峰值 RSS 4.47-4.57 GiB（线程数多于笼内 4 线程，口径不可直比，如实标注）。
+   - **局限（诚实标注）**：内存峰值 100ms 采样粒度（余量 30% 量级覆盖该误差）；prove-hand 每场景首跑含 cairo 编译（笼内耗时含编译，时长非纯 prove 口径）；texas 计数器全程同值与前批 C3 观察一致（无法区分真零扰动与计数器冻结，服务 active 为旁证）。
+   - **复现物料**：`out/mt-cage-retest/`（cage-run-mt.sh、run-mt-all.sh、result-all.txt 全量证据）；服务器侧留档 `/root/.zmonad-tmp/fold-mt/`（verdict/log/samples ×4；二进制已清理，再生成命令见目录 README）。
 2. **与全量协议迁移同批评审**：提案原文（proposal:255-257）要求多桌参数化与全量协议迁移同批评审、电路规范改动先行——本批为电路+host+链+合约+测试的全栈落地，评审未做；Q-M1（电路是否加 2≤P_t≤8 断言）、Q-M2（K_t=0 电路侧一行 panic）、Q-M4（heavy 铸造臂）三个实现期定案应随该评审一并裁定；**Lean Fold 层的属性前提核对**（§5 未验证清单：Fold.lean/Fold/Chain.lean 在库引用 fold_batch，多桌化后其是否隐含单桌形状——如 slot16 批常量——须逐条核对）同批进行。C6 的 poseidon-as-RO 实例化论证对多桌 μ(n_t) 构造同样适用，一并交外部评审。
 3. **C5/C6 沿袭**：前批未开始项原样沿袭——C5 声明域纪律文档（fold 模式宣称边界：真验 STARK 站点 + roster 对照前提 + 事实登记面降级声明；多桌下「同 pks 不同 n_t ⇒ μ 不同」的玩家自核说明应补入）；C6 聚合协议外部评审（nonce 并发会话/Drijvers 面 + poseidon-as-RO）。
 4. **提交由用户执行**：全部改动在工作树未 commit。应提交清单 = 8 个修改文件中的 7 个代码/测试文件（`out/poker-fold-implementation-report.md` 的修改为前批报告的工作树更新，是否随批提交由用户定）+ 4 个未跟踪新件（`tests/golden/`、`scripts/pin_fold_program_hash.sh`、`out/fold-multitable-spec.md`、`out/fold-multitable-workflow.ts`；`out/c3-cage-retest/` 为前批产物）。注意 `scripts/pin_fold_program_hash.sh` 当前未跟踪——不提交则重钉自动化在他处不可复现。部署序列（owner `set_fold_program_hash(0x074f0a…)`、部署时双跑对拍）沿【前批报告】§5.9 提醒。**材料归档（可审计性）**：四份工作流材料 JSON（【实施材料】/【评审材料】/【门禁材料】/【钉扎材料】）未落盘本仓库——heavy 20/0、snforge 130/0、评审 4 发现、钉扎 before/after 均挂其上；本报告会话无权写报告以外文件、未代归档，建议用户随提交将材料 JSON（或其 SHA256 清单）归档至 out/ 供独立复核；过渡措施 = 本报告已将其关键数字与文案逐条内嵌（§3.1/§3.2/§5）。

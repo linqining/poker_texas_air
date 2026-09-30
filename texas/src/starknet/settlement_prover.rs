@@ -4,22 +4,28 @@
 //! 与 P2-M1/M2 的分工：
 //! - 根 crate `settlement_private_circuit.rs`：语句/参考实现（starknet_crypto）；
 //! - `proving-tool/src/settlement_private.cairo` + `scripts/prove-settlement.sh` +
-//!   `scripts/prover_service.py`：Cairo1 电路与 Stwo 证明（8.6s 实测）；
+//!   `scripts/prover_service.py`：Cairo1 电路与 Stwo 证明——**已迁 9 席**
+//!   （2026-09-30 Span ABI 重构：单一 `Span<felt252>` wire 102 词，
+//!   `[len, elements…]` 摊平，见 [`V2_CIRCUIT_INPUT_WORDS`]）；
 //! - **本模块**：从结算明文（`HandSettlement` 同源的 players/deltas/digest）构建
 //!   电路请求，async 读取赢家 payout commitment（vault），把 inputs JSON 导出到
 //!   workload 目录（best-effort，绝不阻塞结算），并通过 HTTP 向 prover 服务
 //!   （`STARKNET_PROVER_URL`，指向 `prover_service.py`）请求证明 attestation。
 //!
 //! 隐私模型：只有 inputs JSON 落盘（witness，operator 主机本地）；公开段
-//! `[MAGIC, hand_id, digest, n, binding, cm_0..cm_7]` 由服务端独立重算校验——
-//! prover 返回的 digest 必须等于请求的 registered_digest，cms 必须等于本地
-//! 推导，任何不匹配/失败都只告警（结算路径不由本模块决定）。
+//! `[MAGIC, hand_id, digest, n, binding, cm_0..cm_8]`（16 词，9 人桌口径）
+//! 由服务端独立重算校验——prover 返回的 digest 必须等于请求的
+//! registered_digest，cms 必须等于本地推导，任何不匹配/失败都只告警
+//! （结算路径不由本模块决定）。
 
 use starknet::core::utils::starknet_keccak;
 use starknet_crypto::Felt;
 
-/// 参与者上限（与根 crate / Cairo 电路一致）。
-pub const MAX_PARTICIPANTS: usize = 8;
+/// 参与者上限（9 人桌口径，与 combined 电路 / v2 单手电路（settlement_
+/// private.cairo，2026-09-30 Span ABI 迁移后）/ 合约参与窗口 `2..=9`
+/// 一致）。根 crate 参考实现（`src/settlement_private_circuit.rs`）
+/// 同步 9 席。
+pub const MAX_PARTICIPANTS: usize = 9;
 /// Cairo 电路的 Magic 标记（'SP2M_OK' = 0x5350324d5f4f4b）。
 pub fn prove_magic() -> Felt {
     const BYTES: [u8; 32] = {
@@ -53,7 +59,7 @@ pub struct SettlementPrivateRequest {
     pub hand_id: u32,
     pub hand_binding: [u8; 32],
     pub registered_digest: [u8; 32],
-    /// 固定 8 槽，未用槽位零 felt。
+    /// 固定 9 槽，未用槽位零 felt。
     pub players: [[u8; 32]; MAX_PARTICIPANTS],
     /// 规格分解 sign ∈ {0,1}（d ≥ 0 → 1）。
     pub signs: [u8; MAX_PARTICIPANTS],
@@ -90,7 +96,7 @@ pub fn build_request(
     }
     let mut padded_players = [[0u8; 32]; MAX_PARTICIPANTS];
     if players.len() > MAX_PARTICIPANTS || deltas_wei.len() > MAX_PARTICIPANTS {
-        return Err("participants exceed circuit maximum of 8".into());
+        return Err("participants exceed circuit maximum of 9".into());
     }
     let mut sum: i128 = 0;
     let mut n_participants: u32 = 0;
@@ -184,8 +190,12 @@ pub async fn fetch_payout_commitments(
 }
 
 impl SettlementPrivateRequest {
-    /// Cairo `main` 的 37 个入参（顺序与 settlement_private.cairo 签名一致；
-    /// 第 37 = 动作日志哈希，#18 Phase B）。
+    /// settle wire 的 102 词（布局与 settlement_stmt.cairo /
+    /// settlement_private.cairo 的 Span wire 逐槽一致）：4 头词 + p/s/m/c×9 +
+    /// ald@40（第 41 词，#18 Phase B）+ count@41 + 词条区 60 词。发往 v2
+    /// 单手电路时按 Span ABI 摊平（[`Self::flat_inputs_hex`]：`[102] ++
+    /// wire`）；combined 语句序列化（prove_combined）直接消费结构体字段，
+    /// 不经本方法。
     pub fn inputs_felts(&self) -> Vec<Felt> {
         let mut felts = Vec::with_capacity(5 + 4 * MAX_PARTICIPANTS);
         felts.push(Felt::from(self.hand_id));
@@ -208,7 +218,9 @@ impl SettlementPrivateRequest {
             wire_felt(&self.action_log_digest).expect("canonical action log digest"),
         );
         // #18 Phase C 切片 2：词条区 = [count] ++ 30×[日志词, 合法性词]
-        // （不足补零）——与 Cairo 电路 main 签名逐位对齐（参数上限 100 实测）。
+        // （不足补零）——与 Cairo 电路 Span wire 的 42..102 槽逐位对齐
+        // （2026-09-30 Span ABI 重构后 standalone 100 参上限不再约束：
+        // main 只有一个 Span 参数）。
         use crate::pokergame::actions::ACTION_LOG_MAX_ENTRIES;
         let count = self.action_entries.len() / 2; // 扁平存储：2 词/词条
         felts.push(Felt::from(count as u64));
@@ -224,14 +236,20 @@ impl SettlementPrivateRequest {
         felts
     }
 
-    /// prove-hand `--inputs` JSON（hex felt 数组）。
+    /// prove-hand flat 输入（hex 形态）：Span ABI `[len, elements…]` 摊平
+    /// （与 combined / fold_batch / settlement_batch 同约定）——`[102] ++
+    /// settle wire 102 词`，共 103 hex。HTTP prover 体与导出 JSON 同源。
+    pub fn flat_inputs_hex(&self) -> Vec<String> {
+        let wire = self.inputs_felts();
+        let mut hexes: Vec<String> = Vec::with_capacity(1 + wire.len());
+        hexes.push(format!("0x{:x}", Felt::from(wire.len() as u64)));
+        hexes.extend(wire.iter().map(|f| format!("0x{f:x}")));
+        hexes
+    }
+
+    /// prove-hand `--inputs` JSON（hex felt 数组，Span ABI 摊平形态）。
     pub fn inputs_json(&self) -> String {
-        let hexes: Vec<String> = self
-            .inputs_felts()
-            .iter()
-            .map(|f| format!("0x{f:x}"))
-            .collect();
-        serde_json::to_string(&hexes).expect("inputs json")
+        serde_json::to_string(&self.flat_inputs_hex()).expect("inputs json")
     }
 
     /// 本地推导赢家认领承诺（与合约公式一致：
@@ -258,8 +276,10 @@ impl SettlementPrivateRequest {
     }
 
     /// 期望公开段（felt 形态）：`[MAGIC, hand_id, digest, n, binding,
-    /// cm_0..cm_7, total_winnings, action_log_digest]`（15 felt）——v2 合约
-    /// 托管金额 = total_winnings（电路内累加），尾词对注册的动作日志承诺
+    /// cm_0..cm_8, total_winnings, action_log_digest]`（16 felt，9 人桌）——
+    /// v2 合约入口的段长（SETTLEMENT_SEGMENT_LEN=16）与 combined 信封
+    /// （前插 chain_acc 后 17 词）的基底。v2 合约托管金额 =
+    /// total_winnings（电路内累加），尾词对注册的动作日志承诺
     /// 逐 felt 比对（#18 Phase B）。
     pub fn public_segment_felts(&self) -> Vec<Felt> {
         let mut segment = vec![
@@ -305,12 +325,28 @@ impl SettlementPrivateRequest {
     }
 }
 
+/// v2 单手电路（settlement_private.cairo）的 settle wire 词数（Span ABI，
+/// 2026-09-30 重构 + 9 人桌迁移：`fn main(words: Span<felt252>)`，flat
+/// 输入 = `[102] ++ wire`）。在发往该电路的调用点显式对长度：把「远端
+/// 解析深处失配」提前为「近处可读错误」，不静默。
+const V2_CIRCUIT_INPUT_WORDS: usize = 102;
+
 /// 导出到 workload 目录（best-effort，绝不阻塞结算）：
-/// `settlement-private-{hand_id}-{binding:x}.inputs.json`。
+/// `settlement-private-{hand_id}-{binding:x}.inputs.json`——Span ABI 摊平
+/// 形态（`[102] ++ wire`），v2 prove-settlement 管线与 combined 语句同源
+/// 可复用。
 pub fn export_settlement_private_inputs(
     req: &SettlementPrivateRequest,
     dir: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
+    let words = req.inputs_felts().len();
+    if words != V2_CIRCUIT_INPUT_WORDS {
+        tracing::warn!(
+            "[settlement-private] inputs are {words} words but the v2 single-hand circuit \
+             settle wire is {V2_CIRCUIT_INPUT_WORDS} — the exported file cannot be consumed \
+             by the v2 prove pipeline"
+        );
+    }
     let path = dir.join(format!(
         "settlement-private-{}-{:x}.inputs.json",
         req.hand_id,
@@ -380,13 +416,23 @@ impl HttpSettlementProver {
         &self,
         req: &SettlementPrivateRequest,
     ) -> Result<SettlementPrivateAttestation, String> {
+        // 显式前置闸：v2 单手电路的 settle wire 固定 102 词（Span ABI，
+        // [`V2_CIRCUIT_INPUT_WORDS`]）。失配只会在远端电路解析深处失败——
+        // 在这里以可读错误拒绝，不静默。
+        let words = req.inputs_felts().len();
+        if words != V2_CIRCUIT_INPUT_WORDS {
+            return Err(format!(
+                "v2 single-hand circuit expects a {V2_CIRCUIT_INPUT_WORDS}-word settle wire \
+                 (9-seat Span ABI), request has {words}"
+            ));
+        }
         let Some(url) = self.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) else {
             return Err("settlement prover URL not configured".into());
         };
         let body = serde_json::json!({
             "circuit": "settlement_private",
             "hand_id": req.hand_id,
-            "inputs": req.inputs_felts().iter().map(|f| format!("0x{f:x}")).collect::<Vec<_>>(),
+            "inputs": req.flat_inputs_hex(),
         });
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(super::dual_settle::PROVER_ATTEST_TIMEOUT.as_secs() + 15))
@@ -492,9 +538,9 @@ impl CombinedTask {
 pub struct CombinedProofOutput {
     /// 折叠链新累计承诺（= public_output[0]）。
     pub cairo_acc: Felt,
-    /// 16 词公开输出 `[chain_acc] ++ v2 公开段(15)`——combined 合约入口的
+    /// 17 词公开输出 `[chain_acc] ++ v2 公开段(16)`——combined 合约入口的
     /// segment 参数原样。
-    pub public_output: [Felt; 16],
+    pub public_output: [Felt; 17],
     /// 出证 Cairo 程序哈希（prove-hand 报告值）。
     pub program_hash: Felt,
     pub steps: u64,
@@ -504,12 +550,12 @@ pub struct CombinedProofOutput {
 
 impl CombinedProofOutput {
     /// combined fact-registry 锚：`fact = poseidon([combined_program_hash ‖
-    /// 整段 16 词])`——与合约 `fact_for_segment(combined_program_hash,
+    /// 整段 17 词])`——与合约 `fact_for_segment(combined_program_hash,
     /// segment)`（poker_dual_settlement.cairo:302）及 v2 版
-    /// [`SettlementPrivateRequest::settlement_fact`] 同式（段长 16、首词
+    /// [`SettlementPrivateRequest::settlement_fact`] 同式（段长 17、首词
     /// chain_acc）。
     pub fn settlement_fact(&self, combined_program_hash: Felt) -> [u8; 32] {
-        let mut fields = Vec::with_capacity(1 + 16);
+        let mut fields = Vec::with_capacity(1 + 17);
         fields.push(combined_program_hash);
         fields.extend(self.public_output);
         starknet_crypto::poseidon_hash_many(&fields).to_bytes_be()
@@ -676,9 +722,9 @@ impl HttpSettlementProver {
             .enumerate()
             .map(|(i, w)| parse_felt(w, &format!("public_output[{i}]")))
             .collect::<Result<_, _>>()?;
-        let public_output: [Felt; 16] = public
+        let public_output: [Felt; 17] = public
             .try_into()
-            .map_err(|v: Vec<Felt>| format!("public_output len {} != 16", v.len()))?;
+            .map_err(|v: Vec<Felt>| format!("public_output len {} != 17", v.len()))?;
         if public_output[1] != prove_magic() {
             return Err("combined public_output[1] != MAGIC (wire drift)".into());
         }
@@ -727,7 +773,7 @@ mod tests {
 
     fn sample_request() -> SettlementPrivateRequest {
         let players = [sample_felt(1), sample_felt(2), sample_felt(3)];
-        let deltas = [3_000_i128, -2_000, -1_000, 0, 0, 0, 0, 0]; // chips 口径做单测
+        let deltas = [3_000_i128, -2_000, -1_000, 0, 0, 0, 0, 0, 0]; // chips 口径做单测（9 槽）
         let mut commitments = [[0u8; 32]; MAX_PARTICIPANTS];
         commitments[0] = sample_felt_bytes(0x21);
         build_request(
@@ -746,30 +792,32 @@ mod tests {
     fn inputs_match_cairo_signature_order() {
         let req = sample_request();
         let felts = req.inputs_felts();
-        // 37 标量 + 1 计数 + 30×2 词条槽（#18 Phase C 切片 2）。
-        assert_eq!(felts.len(), 38 + 60);
+        // 41 标量 + 1 计数 + 30×2 词条槽 = 102（9 席 settle wire，与
+        // settlement_stmt.cairo / settlement_private.cairo Span wire 逐槽一致；
+        // 发往 v2 电路的调用点有显式长度闸）。
+        assert_eq!(felts.len(), 42 + 60);
         assert_eq!(felts[0], Felt::from(42u32), "hand_id first");
         assert_eq!(felts[1], Felt::from_bytes_be(&req.registered_digest));
         assert_eq!(felts[2], Felt::from(3u32), "n_participants");
         assert_eq!(felts[3], Felt::from_bytes_be(&req.hand_binding));
         assert_eq!(felts[4], sample_felt(1), "p0");
-        // signs 组在 players 组（8 个）之后
-        assert_eq!(felts[12], Felt::from(1u64), "s0");
-        assert_eq!(felts[13], Felt::from(0u64), "s1（负数 → 0）");
+        // signs 组在 players 组（9 个）之后
+        assert_eq!(felts[13], Felt::from(1u64), "s0");
+        assert_eq!(felts[14], Felt::from(0u64), "s1（负数 → 0）");
         // mags 组
-        assert_eq!(felts[20], Felt::from(3_000u64), "m0");
+        assert_eq!(felts[22], Felt::from(3_000u64), "m0");
         // commitments 组
-        assert_eq!(felts[28], sample_felt(0x21), "c0");
-        // 第 37 入参 = 动作日志哈希（#18 Phase B）
-        assert_eq!(felts[36], sample_felt(0xA7), "action log digest last");
+        assert_eq!(felts[31], sample_felt(0x21), "c0");
+        // 第 41 入参 = 动作日志哈希（#18 Phase B）
+        assert_eq!(felts[40], sample_felt(0xA7), "action log digest last");
         // 词条区：count=2 + 槽 0 = [日志, 0]（非 auto）+ 槽 1 = [日志, 合法性]。
-        assert_eq!(felts[37], Felt::from(2u64), "action count");
-        assert_eq!(felts[38], sample_felt(0xB1), "entry0 log");
-        assert_eq!(felts[39], Felt::ZERO, "entry0 legality (non-auto)");
-        assert_eq!(felts[40], sample_felt(0xB2), "entry1 log");
-        assert_eq!(felts[41], sample_felt(0xB3), "entry1 legality");
-        assert_eq!(felts[42], Felt::ZERO, "padding slot starts");
-        assert_eq!(felts[37 + 60], Felt::ZERO, "last padding slot");
+        assert_eq!(felts[41], Felt::from(2u64), "action count");
+        assert_eq!(felts[42], sample_felt(0xB1), "entry0 log");
+        assert_eq!(felts[43], Felt::ZERO, "entry0 legality (non-auto)");
+        assert_eq!(felts[44], sample_felt(0xB2), "entry1 log");
+        assert_eq!(felts[45], sample_felt(0xB3), "entry1 legality");
+        assert_eq!(felts[46], Felt::ZERO, "padding slot starts");
+        assert_eq!(felts[41 + 60], Felt::ZERO, "last padding slot");
     }
 
     #[test]
@@ -784,7 +832,7 @@ mod tests {
             42,
             sample_felt(0xAA),
             &tampered_players,
-            &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0],
+            &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0, 0],
             &req.commitments,
             sample_felt(0xA7),
             &sample_entries(),
@@ -796,7 +844,7 @@ mod tests {
             42,
             sample_felt(0xAA),
             &[sample_felt(1), sample_felt(2), sample_felt(3)],
-            &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0],
+            &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0, 0],
             &req.commitments,
             sample_felt(0xA8),
             &sample_entries(),
@@ -808,7 +856,7 @@ mod tests {
     #[test]
     fn zero_sum_violation_rejected() {
         let players = [sample_felt(1), sample_felt(2), sample_felt(3)];
-        let err = build_request(42, sample_felt(0xAA), &players, &[3_001, -2_000, -1_000, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS], sample_felt(0xA7), &sample_entries())
+        let err = build_request(42, sample_felt(0xAA), &players, &[3_001, -2_000, -1_000, 0, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS], sample_felt(0xA7), &sample_entries())
             .err()
             .expect("non-zero-sum must be rejected");
         assert!(err.contains("zero-sum"));
@@ -817,7 +865,7 @@ mod tests {
     #[test]
     fn winner_without_commitment_rejected() {
         let players = [sample_felt(1), sample_felt(2), sample_felt(3)];
-        let err = build_request(42, sample_felt(0xAA), &players, &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS], sample_felt(0xA7), &sample_entries())
+        let err = build_request(42, sample_felt(0xAA), &players, &[3_000, -2_000, -1_000, 0, 0, 0, 0, 0, 0], &[[0u8; 32]; MAX_PARTICIPANTS], sample_felt(0xA7), &sample_entries())
             .err()
             .expect("winner without commitment must be rejected");
         assert!(err.contains("payout commitment"));
@@ -831,8 +879,8 @@ mod tests {
         assert!(segment[0].starts_with("0x5350324d5f4f4b"), "MAGIC='SP2M_OK'");
         assert_eq!(segment[1], "0x2a", "hand_id=42");
         assert_eq!(segment[3], "0x3", "n_participants");
-        // 非赢家 cm 全零
-        for cm in &segment[6..13] {
+        // 非赢家 cm 全零（cm×9：槽 5..14，赢家 0 → 6..14 全零）
+        for cm in &segment[6..14] {
             assert_eq!(cm, "0x0");
         }
         // 赢家 cm 与合约公式一致
@@ -846,9 +894,9 @@ mod tests {
         ]);
         assert_eq!(segment[5], format!("0x{expected_cm:x}"));
         // total_winnings = Σ 赢家 |delta|（chips 口径样例 = 3000）
-        assert_eq!(segment[13], format!("0x{:x}", Felt::from(3_000u64)));
+        assert_eq!(segment[14], format!("0x{:x}", Felt::from(3_000u64)));
         // #18 Phase B：尾词 = 动作日志哈希
-        assert_eq!(segment[14], format!("0x{:x}", sample_felt(0xA7)));
+        assert_eq!(segment[15], format!("0x{:x}", sample_felt(0xA7)));
     }
 
     #[test]
@@ -872,18 +920,26 @@ mod tests {
     fn inputs_json_is_hex_array() {
         let req = sample_request();
         let parsed: Vec<String> = serde_json::from_str(&req.inputs_json()).expect("json");
-        assert_eq!(parsed.len(), 38 + 60);
+        // Span ABI 摊平：[102] ++ settle wire 102 词。
+        assert_eq!(parsed.len(), 1 + 42 + 60);
+        assert_eq!(parsed[0], "0x66", "Span 长度前缀 = 102");
         assert!(parsed.iter().all(|h| h.starts_with("0x")));
+        assert_eq!(parsed[1], "0x2a", "flat[1] = wire[0] = hand_id");
+        assert_eq!(
+            parsed[2],
+            format!("0x{:x}", Felt::from_bytes_be(&req.registered_digest)),
+            "flat[2] = wire[1] = registered_digest"
+        );
     }
 
     /// combined fact 参考测试：`fact = poseidon([combined_program_hash ‖
-    /// 整段 16 词])` 必须与合约 `fact_for_segment`（poker_dual_settlement.
+    /// 整段 17 词])` 必须与合约 `fact_for_segment`（poker_dual_settlement.
     /// cairo:302，PoseidonTrait 逐词 update）同式——用
     /// starknet_crypto::poseidon_hash_many 独立重算钉死，并断言链首词
     /// chain_acc 进 fact（改 acc 必改 fact）。
     #[test]
     fn combined_settlement_fact_matches_contract_formula() {
-        let mut public = [Felt::ZERO; 16];
+        let mut public = [Felt::ZERO; 17];
         public[0] = sample_felt(0x11); // chain_acc
         public[1] = prove_magic(); // MAGIC 'SP2M_OK'
         for w in public.iter_mut().skip(2) {
@@ -905,7 +961,7 @@ mod tests {
         assert_eq!(
             fact,
             starknet_crypto::poseidon_hash_many(&fields),
-            "combined fact 必须与 poseidon_hash_many([ph ‖ segment16]) 逐词同式"
+            "combined fact 必须与 poseidon_hash_many([ph ‖ segment17]) 逐词同式"
         );
         // 确定性与绑定：同 ph 同 fact；换 ph / 改 chain_acc 首词 → fact 变。
         assert_eq!(
@@ -924,19 +980,19 @@ mod tests {
     }
 
     /// CLI stdout 契约解析的负例面（不 spawn 子进程，只钉 wire 形状断言）：
-    /// 16 词 + MAGIC 锚 + cairo_acc == public_output[0]。
+    /// 17 词 + MAGIC 锚 + cairo_acc == public_output[0]。
     #[test]
     fn combined_output_shape_invariants() {
         let req = sample_request();
-        // 请求侧不产出 combined 输出；这里仅钉住 v2 段（15 词）与 combined
-        // 段（16 词）的前缀关系：combined[1..16] == v2 segment。
+        // 请求侧不产出 combined 输出；这里仅钉住 v2 段（16 词）与 combined
+        // 段（17 词）的前缀关系：combined[1..17] == v2 segment。
         let v2 = req.public_segment_felts();
-        assert_eq!(v2.len(), 15);
-        let mut combined = [Felt::ZERO; 16];
+        assert_eq!(v2.len(), 16);
+        let mut combined = [Felt::ZERO; 17];
         combined[0] = Felt::from(0xACCu64);
-        combined[1..16].copy_from_slice(&v2);
+        combined[1..17].copy_from_slice(&v2);
         assert_eq!(combined[1], prove_magic());
-        assert_eq!(combined[15], Felt::from_bytes_be(&req.action_log_digest));
+        assert_eq!(combined[16], Felt::from_bytes_be(&req.action_log_digest));
     }
 }
 

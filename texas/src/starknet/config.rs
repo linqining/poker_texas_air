@@ -69,8 +69,9 @@ pub struct StarknetConfig {
     /// proof_facts 优先 + fact-registry 降级双门（**合约侧随 cairo ≥2.12
     /// 迁移上链后生效**，选中现网会 revert，属预期）；`combined` =
     /// `verify_and_settle_dapv_combined_private`——P 层 + settlement 合并
-    /// 信封（combined.cairo 一次出证），16 词公开段（v2 段前置 chain_acc）、
-    /// 单 fact 门 `fact = poseidon([combined_program_hash ‖ 段16])`。
+    /// 信封（combined.cairo 一次出证），17 词公开段（v2 16 词段前置
+    /// chain_acc）、单 fact 门 `fact = poseidon([combined_program_hash ‖
+    /// 段17])`。
     /// 未知值一律回退 v2。
     pub dapv_settle_entry: String,
     /// combined 入口的程序哈希（`STARKNET_COMBINED_PROGRAM_HASH`，hex，
