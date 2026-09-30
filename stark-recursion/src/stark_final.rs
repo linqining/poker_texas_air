@@ -55,6 +55,17 @@ use groth16_wrap::poseidon::poseidon_hash_many;
 pub const BATCH_PROGRAM_HASH_HEX: &str =
     "0x05c400b46a261c6672cd7581436754e05da2287ba8ecdc69778d06e4ef831803";
 
+/// fold 链批程序（生产版 17 词段，规格 out/fold-spec.md §1/D1）的钉扎程序哈希。
+///
+/// **尚未钉扎**：生产 fold 程序（98 词 settle wire 并入 + 17 词公开段，替代
+/// 切片版 fold_batch.cairo:191-194 的 2 词输出）尚未编译落库——无法凭空
+/// 造哈希，本常量钉空串，[`fold_batch_program_hash`] 在钉扎前 fail-closed。
+/// 钉扎纪律与 [`BATCH_PROGRAM_HASH_HEX`] 相同：程序编译出证后钉入实测哈希
+/// （哈希只钉程序不钉参数；重编程序必然换哈希 → 同步更新此处与
+/// fact-verify 钉扎）。**不动** [`BATCH_PROGRAM_HASH_HEX`]——它钉的是
+/// settlement_batch_private 16 词段在证程序（规格 D3b/K-1）。
+pub const FOLD_BATCH_PROGRAM_HASH_HEX: &str = "";
+
 /// 批程序 L1 腿钉扎的 prover 参数（≤6G 硬约束的成立前提，见模块注释）。
 ///
 /// canonical_small 预处理迹 = 10,161,776 cells（common/src/prover_params.rs
@@ -66,6 +77,10 @@ pub const BATCH_PROVER_PARAMS_NOTE: &str =
 
 /// 每手公开段长度（wrap_circuit.rs:44 OUTPUT_LEN 同值）。
 pub const SEGMENT_LEN: usize = 16;
+/// fold 链每手公开段长度：combined 16 词信封原样 + roster_digest 尾插
+/// index 16（规格 out/fold-spec.md §1/D1、D3b——**与 [`SEGMENT_LEN`] 并存
+/// 不共享**，combined fallback 在证材料全部绑定 16）。
+pub const FOLD_SEGMENT_LEN: usize = 17;
 /// 手 binding 在手段内的槽位（wrap_circuit.rs:50 HAND_BINDING_INDEX 同值）。
 pub const HAND_BINDING_INDEX: usize = 5;
 /// 链尾长度：acc_prev / root_hi / root_lo / batch_fact。
@@ -75,6 +90,10 @@ pub const HAND_INPUT_LEN: usize = 98;
 
 /// 电路内链尾公式的宿主镜像：
 /// `batch_fact = poseidon_hash_many([acc_prev, root_hi, root_lo, k] ++ segments)`。
+///
+/// 对 `segments` 切片长度不敏感（逐词吸收）——**fold 链（17 词段）原样复用
+/// 同式**（规格 D3b：电路内 batch_fact 公式逐字沿用，fold 平行版只换段长
+/// 与程序钉扎，不改链接公式）。
 ///
 /// corelib HashState（new/update/finalize）与 poseidon_hash_many 的构造等价性：
 /// 配对吸收（s0/s1 交替 +1）、奇数残位补 1、末尾一次置换取 s0——三态逐例
@@ -186,6 +205,100 @@ pub fn parse_final_output(output: &[Felt252]) -> Result<FinalOutput> {
         batch_fact: output[4 + k * SEGMENT_LEN],
     };
     Ok(FinalOutput { k, segments, tail })
+}
+
+/// fold 批程序钉扎哈希的 [`Felt252`]（fold 终证语句层用）。
+///
+/// # Errors
+/// 钉扎为空（生产 fold 程序未编译落库，规格 D3b/开放点 Q-2 同批落库）或
+/// 常量非法 hex。
+pub fn fold_batch_program_hash() -> Result<Felt252> {
+    anyhow::ensure!(
+        !FOLD_BATCH_PROGRAM_HASH_HEX.is_empty(),
+        "FOLD_BATCH_PROGRAM_HASH_HEX not pinned yet: the production fold batch program \
+         (17-word segment, fold-spec D1/D3b) must be compiled and proven before pinning"
+    );
+    felt_from_hex(FOLD_BATCH_PROGRAM_HASH_HEX).context("FOLD_BATCH_PROGRAM_HASH_HEX")
+}
+
+/// 从 fold 批证明公开输出解析的批终证（17 词段版，规格 D3b）。
+///
+/// 顶层形状与 [`FinalOutput`] 同构：`[len] ++ K×17 词段 ++ 链尾(4)`——链尾
+/// （acc 链接/批根拆分/电路内 batch_fact）与 combined 完全同构，段长换
+/// [`FOLD_SEGMENT_LEN`]；电路内链接公式原样复用 [`expected_batch_fact`]
+/// （对段长不敏感）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldFinalOutput {
+    /// 手数（= (elements − TAIL_LEN) / FOLD_SEGMENT_LEN）。
+    pub k: usize,
+    /// 17·K 手段（每手段 word 0–15 = combined 信封同位（批终 acc@0、MAGIC@1、
+    /// hand_id@2、digest@3、n@4、binding@5、cm×8@6..13、total@14、ald@15），
+    /// word 16 = roster_digest 批常量——规格 D1 布局）。
+    pub segments: Vec<Felt252>,
+    /// 链尾（公开输出的最后 4 felt；与 combined 同构）。
+    pub tail: ChainTail,
+}
+
+impl FoldFinalOutput {
+    /// 逐手语句派生：fact = poseidon([program_hash ‖ seg_17])、binding =
+    /// seg[5]（[`crate::chain::FOLD_BINDING_INDEX`] 同值）。
+    ///
+    /// # Errors
+    /// 手段数非 17 的倍数（构造已保证；防御性保留）。
+    pub fn statements(&self, program_hash: &Felt252) -> Result<Vec<BatchStatement>> {
+        anyhow::ensure!(
+            self.segments.len() % FOLD_SEGMENT_LEN == 0,
+            "fold segments not a multiple of {FOLD_SEGMENT_LEN}"
+        );
+        Ok((0..self.k)
+            .map(|i| {
+                let seg =
+                    &self.segments[i * FOLD_SEGMENT_LEN..(i + 1) * FOLD_SEGMENT_LEN];
+                let mut msg = Vec::with_capacity(FOLD_SEGMENT_LEN + 1);
+                msg.push(*program_hash);
+                msg.extend_from_slice(seg);
+                BatchStatement {
+                    program_hash: *program_hash,
+                    hand_binding: seg[crate::chain::FOLD_BINDING_INDEX],
+                    fact: poseidon_hash_many(&msg),
+                }
+            })
+            .collect())
+    }
+}
+
+/// 从 fold 批证明公开输出解析（fail-closed 形状检查；形状 = `[len] ++
+/// K×17 ++ 尾 4`，规格 D3b——[`parse_final_output`] 的 fold 平行版，两解析器
+/// 互拒对方段形即 D3c 禁混批的解析层闸）。
+///
+/// # Errors
+/// 输出过短 / len 前缀与元素数不符 / 手段数与 17k+4 形状不符。
+pub fn parse_fold_final_output(output: &[Felt252]) -> Result<FoldFinalOutput> {
+    anyhow::ensure!(
+        output.len() >= 1 + FOLD_SEGMENT_LEN + TAIL_LEN,
+        "fold output too short: {} felts",
+        output.len()
+    );
+    let declared = output[0];
+    let elements = output.len() - 1;
+    anyhow::ensure!(
+        declared == Felt252::from(elements as u64),
+        "fold output len prefix != element count（形状漂移，fail-closed）"
+    );
+    anyhow::ensure!(
+        elements >= FOLD_SEGMENT_LEN + TAIL_LEN
+            && (elements - TAIL_LEN) % FOLD_SEGMENT_LEN == 0,
+        "fold output elements {elements} does not match 17k+{TAIL_LEN} shape"
+    );
+    let k = (elements - TAIL_LEN) / FOLD_SEGMENT_LEN;
+    let segments = output[1..1 + k * FOLD_SEGMENT_LEN].to_vec();
+    let tail = ChainTail {
+        acc_prev: output[1 + k * FOLD_SEGMENT_LEN],
+        root_hi: output[2 + k * FOLD_SEGMENT_LEN],
+        root_lo: output[3 + k * FOLD_SEGMENT_LEN],
+        batch_fact: output[4 + k * FOLD_SEGMENT_LEN],
+    };
+    Ok(FoldFinalOutput { k, segments, tail })
 }
 
 /// 终证语句层全链验证（提交上链前的 fail-closed 闸门；上链后合约对
@@ -389,6 +502,154 @@ mod tests {
         let mut bad2 = vec![Felt252::from(18u64)];
         bad2.extend(std::iter::repeat_n(Felt252::from(0u64), 18));
         assert!(parse_final_output(&bad2).is_err());
+    }
+
+    /// fold 金向量段形态的 K 手段（17 词：[批终 acc] ++ golden v2 段 15 ++
+    /// [roster_digest]，批终 acc/roster 全手同值——Q-1/D1a 批常量）。
+    fn fold_segments(k: usize, program_hash: &Felt252) -> Vec<Felt252> {
+        let base_v2: Vec<Felt252> = golden::GOLDEN_OUTPUT
+            .iter()
+            .skip(1)
+            .map(|h| felt_from_hex(h).unwrap())
+            .collect();
+        assert_eq!(base_v2.len(), 15);
+        let roster_d = poseidon_hash_many(&[Felt252::from(0x1057u64), Felt252::from(k as u64)]);
+        let batch_acc =
+            poseidon_hash_many(&[Felt252::from(0xB47Cu64), Felt252::from(k as u64)]);
+        let _ = program_hash;
+        let mut segs = Vec::with_capacity(k * FOLD_SEGMENT_LEN);
+        for i in 0..k {
+            let mut seg = vec![batch_acc];
+            seg.extend_from_slice(&base_v2);
+            seg[GHW_BINDING_IDX] = seg[GHW_BINDING_IDX] + Felt252::from(i as u64);
+            seg.push(roster_d);
+            assert_eq!(seg.len(), FOLD_SEGMENT_LEN);
+            segs.extend_from_slice(&seg);
+        }
+        segs
+    }
+
+    /// 合成 fold 批程序公开输出（形状 = [len] ++ K×17 ++ [acc,hi,lo,fact]，
+    /// 与 combined 形状同构、段长 17；E2E 对拍待生产 fold 程序落库）。
+    fn synth_fold_final_output(
+        segments: &[Felt252],
+        acc: &Felt252,
+        root: &[u8; 32],
+        k: usize,
+    ) -> Vec<Felt252> {
+        let (hi, lo) = split_root_hi_lo(root);
+        let fact = expected_batch_fact(acc, &hi, &lo, k, segments);
+        let mut output = vec![Felt252::from((segments.len() + TAIL_LEN) as u64)];
+        output.extend_from_slice(segments);
+        output.extend_from_slice(&[*acc, hi, lo, fact]);
+        output
+    }
+
+    /// parse_fold_final_output：K=2 合成输出往返（含 expected_batch_fact
+    /// 原样复用对拍——对 17 词段长度不敏感，D3b）+ 形状负例（len 前缀漂移/
+    /// 短输出/16 词段混入）。
+    #[test]
+    fn parse_fold_final_output_shape_and_rejects() {
+        let ph = batch_program_hash().unwrap();
+        let segs = fold_segments(2, &ph);
+        assert_eq!(segs.len(), 2 * FOLD_SEGMENT_LEN);
+        let acc = Felt252::from(7u64);
+        let mut root = [9u8; 32];
+        let (hi, lo) = split_root_hi_lo(&root);
+        let fact = expected_batch_fact(&acc, &hi, &lo, 2, &segs);
+        let mut output = vec![Felt252::from((segs.len() + TAIL_LEN) as u64)];
+        output.extend_from_slice(&segs);
+        output.extend_from_slice(&[acc, hi, lo, fact]);
+        let parsed = parse_fold_final_output(&output).unwrap();
+        assert_eq!(parsed.k, 2);
+        assert_eq!(parsed.segments, segs);
+        assert_eq!(parsed.tail.acc_prev, acc);
+        assert_eq!(parsed.tail.batch_fact, fact);
+        // 链尾公式原样复用：尾字 == expected_batch_fact(…, 17 词段)。
+        assert_eq!(
+            parsed.tail.batch_fact,
+            expected_batch_fact(&acc, &parsed.tail.root_hi, &parsed.tail.root_lo, 2, &segs),
+            "fold 链尾复用同式（段长无关，D3b）"
+        );
+
+        // len 前缀漂移拒绝
+        let mut bad = output.clone();
+        bad[0] = Felt252::from(999u64);
+        assert!(parse_fold_final_output(&bad).is_err());
+        // 短输出拒绝
+        assert!(parse_fold_final_output(&output[..5]).is_err());
+        // 16 词段混入 fold 解析（combined 形状 → elements=36，36-4=32 非 17 倍数）
+        let combined_style = {
+            let mut o = vec![Felt252::from((2 * SEGMENT_LEN + TAIL_LEN) as u64)];
+            o.extend(std::iter::repeat_n(Felt252::from(1u64), 2 * SEGMENT_LEN + TAIL_LEN));
+            o
+        };
+        assert!(
+            parse_fold_final_output(&combined_style).is_err(),
+            "16 词段形状必须被 fold 解析拒绝（D3c 解析层闸）"
+        );
+        // 反向：17 词段混入 combined 解析同样拒绝
+        assert!(
+            parse_final_output(&output).is_err(),
+            "17 词段形状必须被 combined 解析拒绝（D3c 解析层闸）"
+        );
+    }
+
+    /// fold 语句派生：fact = poseidon([ph ‖ seg_17])（与 chain::fold_expected_fact
+    /// 跨模块同式）、binding = seg[5]；换 ph 必改 fact（D3c 第 2 层）；钉扎
+    /// 未落库时 fold_batch_program_hash fail-closed（如实，不伪造可用哈希）。
+    #[test]
+    fn fold_final_output_statements_and_pinning() {
+        let ph = batch_program_hash().unwrap();
+        let segs = fold_segments(2, &ph);
+        let parsed = FoldFinalOutput {
+            k: 2,
+            segments: segs.clone(),
+            tail: ChainTail {
+                acc_prev: Felt252::from(0u64),
+                root_hi: Felt252::from(0u64),
+                root_lo: Felt252::from(0u64),
+                batch_fact: Felt252::from(0u64),
+            },
+        };
+        let statements = parsed.statements(&ph).unwrap();
+        assert_eq!(statements.len(), 2);
+        for (i, st) in statements.iter().enumerate() {
+            let seg = &segs[i * FOLD_SEGMENT_LEN..(i + 1) * FOLD_SEGMENT_LEN];
+            assert_eq!(st.program_hash, ph);
+            assert_eq!(st.hand_binding, seg[crate::chain::FOLD_BINDING_INDEX], "binding = seg[5]");
+            assert_eq!(
+                felt_to_hex(&st.fact),
+                felt_to_hex(&crate::chain::fold_expected_fact(&ph, seg)),
+                "与 chain::fold_expected_fact 跨模块同式"
+            );
+        }
+        // 两手 binding 互异（金向量逐手递增）
+        assert_ne!(statements[0].hand_binding, statements[1].hand_binding);
+        // 换 ph：同段内容不同程序哈希 → fact 必不同（两链禁混批锚）
+        let other = parsed.statements(&(ph + Felt252::from(1u64))).unwrap();
+        assert_ne!(statements[0].fact, other[0].fact);
+        // 非 17 倍数段防御性拒绝
+        let bad = FoldFinalOutput {
+            k: 2,
+            segments: segs[..2 * FOLD_SEGMENT_LEN - 1].to_vec(),
+            tail: parsed.tail.clone(),
+        };
+        assert!(bad.statements(&ph).is_err());
+        // 钉扎纪律（两态皆不破）：生产 fold 程序未落库前 fail-closed，且失败
+        // 必须是「钉扎缺失」而非其它；落库后访问器必须精确还原钉扎哈希。
+        match fold_batch_program_hash() {
+            Ok(h) => assert_eq!(felt_to_hex(&h), FOLD_BATCH_PROGRAM_HASH_HEX),
+            Err(e) => assert!(
+                format!("{e}").contains("not pinned"),
+                "未钉扎时的失败必须是钉扎缺失: {e}"
+            ),
+        }
+        // shared 常量不动（D3/K-1）：combined 钉扎哈希与 SEGMENT_LEN 保持
+        // 16 词在役值，fold 走新常量。
+        assert_eq!(SEGMENT_LEN, 16);
+        assert!(!BATCH_PROGRAM_HASH_HEX.is_empty(), "combined 钉扎在役");
+        assert_eq!(FOLD_SEGMENT_LEN, 17);
     }
 
     /// verify_final_output 正例：语句重派生 → keccak 根还原 → 全链一致；

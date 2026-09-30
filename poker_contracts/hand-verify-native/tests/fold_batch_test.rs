@@ -1,22 +1,27 @@
-//! fold 批切片测试（FoldDesign v2 最小切片，fold_batch.cairo + foldagg.rs）。
+//! fold 批测试（FoldDesign v2 **生产形状**：fold_batch.cairo 并 98 词 settle
+//! wire + foldagg.rs 镜像）。
 //!
 //! 测试清单（T 编号沿用设计，负例名后缀 `_attack_*` 防回归语义漂移）：
-//! - T1 正例（heavy）：2/5/8 人诚实聚合 → 出证 verified + [acc,roster_digest]
-//!   双 parity + `--check-only` 独立复验（P5 completeness 的电路级兑现）；
+//! - T1 正例（heavy）：2/5/8 人诚实聚合，K=8 手批 → 出证 verified +
+//!   17 词段形状（[acc]++语句段++[roster_digest]）双 parity +
+//!   `--check-only` 独立复验（P5 completeness 的电路级兑现）；
 //! - T2 z̄+1 篡改 → 电路 panic 无证明（heavy；forge0_bad 方向已确认可行）；
 //! - T3 跨手重放 (R̄,z̄) → 电路 panic（c 含 hand_binding）；
-//! - T4 改性：slice 无注册面 → host-parity 断言（公式漂移检测，
-//!   **对 soundness 零证明力**——soundness 闭合点在 roster_registry，T9/T10）；
+//! - T4 改性：host-parity 断言（公式漂移检测，**对 soundness 零证明力**
+//!   ——soundness 闭合点在 roster_registry，T9/T10）；
 //! - T5 伪造 prev_acc → 出证后 parity 门拒（recurse.rs:485-499 同款，heavy）；
 //! - T6 off-curve / 恒等点 → 电路 panic（满阶依据：n 素 / cofactor=1 /
 //!   无 2-torsion，审方 F-1 实测）；
-//! - T7 perf（heavy）：K=1/8/32/64 @ P=8 steps/RSS 扫描，验收线 = K=1 总量
-//!   ≤2.2k（1,628 keyagg 实测锚 + 范围检查余量）、批量边际 ≤2.2k/手、
-//!   批 ≤2^20 桶；
-//! - T8 KAT：BDN 域标签 / μ / M_h / c 逐 felt 钉死（缺口 4）；
+//! - T7 perf（heavy）：K=1/8/32/64 @ P=8 生产形状 steps/RSS 扫描。验收线
+//!   （fold-spec §3 诚实边界）：K=1 总量 ≤ combined 每手 12,160 + keyagg
+//!   批固定层 1,628；批量边际 ≤ combined 每手 12,160（steps 轴底线——生产
+//!   fold ≈11.3k/手估算 = keyagg 1,628 + 结算边际 9,405 + 签名层，结构性
+//!   收益在单批单证/fact 密度 64×，不在 steps）；批 ≤ 2^20 桶；
+//! - T8 KAT：BDN 域标签 / μ / M_h 真槽 / c / cm_digest 逐 felt 钉死（缺口 4
+//!   + Q-2：cm_digest 8 词压缩十六进制钉值随生产版落库）；
 //! - T9 forge0（heavy，_attack_A1）：wire pks 换攻击者钥 + 攻击者自签 →
 //!   电路算术自洽照样出证，**断言点 = 出证后 host parity 门拒**
-//!   （roster_digest ≠ 注册锚；生产对应 roster_registry 对照）；
+//!   （roster_digest ≠ 注册锚；生产对应 roster_registry 对照 segment[16]）；
 //! - T10 agg1_forge（heavy，_attack_A2）：整组换 roster / n=1 同理门拒；
 //! - T11/T12（heavy）：T9/T10 的 z̄+1 正控——电路对非签名的拒绝路径活跃，
 //!   防「负例因电路坏而假阳性」。
@@ -34,12 +39,14 @@ use std::path::PathBuf;
 
 use starknet_crypto::{poseidon_hash_many, Felt};
 
+use hand_verify_native::combined::{action_log_domain, build_settle_statement, segment_magic};
 use hand_verify_native::foldagg::{
     aggregate_nonces, aggregate_sign, build_batch_wire, challenge_raw, claim_word,
-    ec_order_felt, expected_public_output, fold_acc, host_verify_batch, key_coeff_raw,
-    mint_fold_hands, mint_roster_sks, msg_digest, nonce_commit, prove_fold_batch,
-    prove_fold_batch_unchecked, roster_digest, roster_pks_from_sks, verify_equation,
-    FoldHand, NonceCommit, PER_HAND_STEPS_GATE,
+    cm_digest_from_wire, ec_order_felt, expected_public_output, fold_acc, host_verify_batch,
+    key_coeff_raw, mint_fold_hands, mint_roster_sks, msg_digest, nonce_commit, prove_fold_batch,
+    prove_fold_batch_unchecked, roster_digest, roster_pks_from_sks, verify_equation, FOLD_SEGMENT_LEN,
+    FOLD_ROSTER_INDEX, HAND_BLOCK_WORDS, KEYAGG_STEPS_ANCHOR, COMBINED_PER_HAND_STEPS,
+    SETTLE_WORDS, NonceCommit,
 };
 use hand_verify_native::recurse::write_prod_params;
 
@@ -59,6 +66,18 @@ fn out_dir(tag: &str) -> PathBuf {
 
 fn det(seed: u64, i: u64) -> Felt {
     poseidon_hash_many(&[Felt::from(seed), Felt::from(i), Felt::from(0xF01Du64)])
+}
+
+/// 铸一条确定性诚实 settle wire（98 词，settlement_stmt 布局；指定
+/// hand_binding；空动作日志、双席零和）——KAT 与攻击负例共用的槽词来源。
+fn settle_wire(hand_id: u64, hb: Felt, seed: u64) -> Vec<Felt> {
+    let players: Vec<Felt> = (0..2u64).map(|i| det(seed, 50 + i) + Felt::ONE).collect();
+    let deltas: Vec<i128> = vec![1_000_000, -1_000_000];
+    let cms: Vec<Felt> = (0..8u64).map(|i| det(seed, 60 + i)).collect();
+    let ald = poseidon_hash_many(&[action_log_domain()]);
+    build_settle_statement(hand_id, hb, &players, &deltas, &cms, ald, &[])
+        .expect("settle statement must build")
+        .wire_words()
 }
 
 /// 诚实批：P 人 roster + K 手（确定性），返回 (roster_pks, hands, anchor)。
@@ -86,7 +105,7 @@ fn canonical_params() -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// T4 —— host-parity 断言（改性：slice 无注册面；对 soundness 零证明力）
+// T4 —— host-parity 断言（改性：切片无注册面；对 soundness 零证明力）
 // ---------------------------------------------------------------------------
 
 /// **T4（改性，_attack_T4）**：foldagg 公式层自洽——roster_digest 输出 ==
@@ -114,19 +133,20 @@ fn t4_host_parity_roster_digest_and_pbar_attack_T4() {
 }
 
 // ---------------------------------------------------------------------------
-// T8 —— KAT：BDN 域标签 / μ / M_h / c 逐 felt 钉死（缺口 4）
+// T8 —— KAT：BDN 域标签 / μ / M_h 真槽 / c / cm_digest 逐 felt 钉死
 // ---------------------------------------------------------------------------
 
 /// 固定 2 人 KAT fixture 的公式值（与 fold_batch.cairo 逐 felt parity 的
-/// 期望侧；十六进制钉死防域分离/换序回归）。
+/// 期望侧；十六进制钉死防域分离/换序回归）。生产形状：M_h 真槽取自
+/// settle wire——m1 = wire[1]（registered_digest，由语句 digest 公式定）、
+/// m2 = wire[2]（n_expected = 2）、cm_digest = poseidon(wire[28..=35])
+/// （8 词 c0..c7 压缩，Q-2）。
 fn kat_fixture() -> (Vec<(Felt, Felt)>, hand_verify_native::foldagg::AggregatedHand) {
     let sks = vec![det(KAT_SEED, 0), det(KAT_SEED, 1)];
     let ws = vec![det(KAT_SEED, 100), det(KAT_SEED, 101)];
     let hb = det(KAT_SEED, 7);
-    let m1 = det(KAT_SEED, 8);
-    let m2 = Felt::from(2u64);
-    let cm_digest = det(KAT_SEED, 9);
-    let agg = aggregate_sign(&sks, &ws, hb, m1, m2, cm_digest).expect("kat mint");
+    let settle = settle_wire(1, hb, KAT_SEED);
+    let agg = aggregate_sign(&sks, &ws, &settle).expect("kat mint");
     let pks = roster_pks_from_sks(&sks);
     (pks, agg)
 }
@@ -147,7 +167,7 @@ fn t8_kat_labels_mu_mh_c_pinned_attack_T8() {
     assert_eq!(hand_verify_native::foldagg::sig_label(), ascii("poker/fold-batch/sig.v1"));
     assert_eq!(hand_verify_native::foldagg::claim_label(), ascii("poker/fold-batch/claim.v1"));
 
-    // μ_0 / roster_digest / M_h / c —— 字节钉死（poseidon_hash_many 出口）
+    // μ_0 / roster_digest —— 字节钉死（poseidon_hash_many 出口）
     let mu0 = key_coeff_raw(2, pks[0].0, pks[0].1);
     assert_eq!(
         mu0,
@@ -159,7 +179,25 @@ fn t8_kat_labels_mu_mh_c_pinned_attack_T8() {
         Felt::from_hex(KAT_ROSTER_DIGEST).expect("kat rd"),
         "roster_digest drifted"
     );
-    let m_h = msg_digest(agg.hand.hand_binding, agg.hand.m1, agg.hand.m2, agg.hand.cm_digest, agg.roster_digest);
+
+    // M_h 真槽（D2）：m1 = wire[1]、m2 = wire[2]、cm_digest = poseidon(wire[28..=35])
+    let m1 = agg.hand.m1();
+    let m2 = agg.hand.m2();
+    let cm_digest = agg.hand.cm_digest();
+    assert_eq!(
+        m1,
+        Felt::from_hex(KAT_M1).expect("kat m1"),
+        "m1 slot drifted: registered_digest (wire[1]) formula changed"
+    );
+    assert_eq!(m2, Felt::from(2u64), "m2 slot must be wire[2] n_expected");
+    assert_eq!(
+        cm_digest,
+        Felt::from_hex(KAT_CM_DIGEST).expect("kat cm_digest"),
+        "cm_digest drifted: 8-word c0..c7 compression (wire[28..=35]) changed"
+    );
+    // 两路径一致：独立内联重算 cm_digest 与 FoldHand 派生同值
+    assert_eq!(cm_digest, cm_digest_from_wire(&agg.hand.settle));
+    let m_h = msg_digest(agg.hand.hand_binding(), m1, m2, cm_digest, agg.roster_digest);
     assert_eq!(m_h, agg.m_h, "host M_h two-path mismatch");
     assert_eq!(
         agg.m_h,
@@ -176,12 +214,16 @@ fn t8_kat_labels_mu_mh_c_pinned_attack_T8() {
     let _ = ec_order_felt();
 }
 
-// KAT 钉值（固定 fixture：seed 0xFA17、2 人 roster、hand_binding/m1/m2/
-// cm_digest 派生见 kat_fixture；改动 = 域分离/换序破坏，T8 必红）：
+// KAT 钉值（固定 fixture：seed 0xFA17、2 人 roster、settle wire 由
+// settle_wire(1, det(0xFA17,7), 0xFA17) 派生；改动 = 域分离/换序/槽位漂移，
+// T8 必红）。KAT_MU0/KAT_ROSTER_DIGEST 沿用切片轮钉值（roster 侧公式与
+// fixture 未变）；M_h 真槽/8 词 cm 压缩随生产版重钉（Q-2）：
 const KAT_MU0: &str = "0340622f9a217eb20b2b9351112177337faa294eb02c0fb5035bfd3e8ac17ce6";
 const KAT_ROSTER_DIGEST: &str = "04ac85cd07aebad095fef54ed9a8456effe0e05f56e6b30f074fbfc0a65817ce";
-const KAT_MH: &str = "01aa3515b5df9a1d68ab32f8955acf39e70d49a083ad544c9df7f229ff46563a";
-const KAT_C: &str = "01fac0aff2472b18fd19b52c317e65b12446bd37b23df5c5153a0957c4218109";
+const KAT_M1: &str = "0579bd25d99b3c011f316568bd440da7f44fec8460b62e4caef2a675672241fc";
+const KAT_CM_DIGEST: &str = "07329cda3409da1dd910e55e83172d7b929e1abde6fb73eaf316201ebf89af5d";
+const KAT_MH: &str = "441193921bf8aa1ee109e51a3941b27d4fc40495132ba3caf4e82d393f898db";
+const KAT_C: &str = "4c1d844328471adac952b0a3b5b5feb422b54f3f9368584311a447eba0b7020";
 
 // ---------------------------------------------------------------------------
 // host 负例（公式层，不需要 prove-hand——门禁常跑）
@@ -201,16 +243,16 @@ fn t2_host_zbar_plus_one_rejects_attack_T2() {
 fn t3_host_cross_hand_replay_rejects_attack_T3() {
     let (pks, hands, _anchor) = honest_batch(2, 2, KAT_SEED + 1);
     let h1 = &hands[0];
-    let hb2 = hands[1].hand.hand_binding;
+    let hb2 = hands[1].hand.hand_binding();
     // 用 h1 的 (R̄,z̄) + h2 的 binding 重算 c：必不闭合
     let pbar = hand_verify_native::foldagg::agg_pubkey(&pks).expect("pbar");
-    let m_h2 = msg_digest(hb2, h1.hand.m1, h1.hand.m2, h1.hand.cm_digest, h1.roster_digest);
+    let m_h2 = msg_digest(hb2, h1.hand.m1(), h1.hand.m2(), h1.hand.cm_digest(), h1.roster_digest);
     let c_replay = challenge_raw(hb2, m_h2, pbar, h1.hand.rbar);
     assert_ne!(c_replay, h1.c, "challenge must bind hand_binding");
     let err = verify_equation(pbar, h1.hand.rbar, c_replay, h1.hand.zbar).expect_err("replay");
     assert_eq!(err, "RESIDUAL_NOT_IDENTITY");
     // claim 绑定：不同 binding 的 M_h 必得不同 claim
-    assert_ne!(claim_word(h1.hand.hand_binding, h1.m_h), claim_word(hb2, m_h2));
+    assert_ne!(claim_word(h1.hand.hand_binding(), h1.m_h), claim_word(hb2, m_h2));
 }
 
 /// **T6 host 面**：off-curve / 恒等点 fail-closed（满阶依据：n 素 /
@@ -254,15 +296,49 @@ fn bdn_three_round_nonce_commitment_mirror() {
     assert_eq!(err, "NONCE_COMMIT_MISMATCH");
 }
 
-/// wire 形状：build_batch_wire 词数 = 2 + 2P + 7K（电路头注释同布局）。
+/// wire 形状：build_batch_wire 词数 = 2 + 2P + 101K，每手块 = settle 98 词
+/// + (R̄x, R̄y, z̄)（电路头注释同布局；槽位锚逐位检查）。
 #[test]
 fn wire_layout_matches_circuit_contract() {
     let (pks, hands, _anchor) = honest_batch(3, 4, KAT_SEED + 2);
     let wire = build_batch_wire(&pks, &hands.iter().map(|h| h.hand.clone()).collect::<Vec<_>>());
-    assert_eq!(wire.len(), 2 + 2 * 3 + 7 * 4);
+    assert_eq!(wire.len(), 2 + 2 * 3 + HAND_BLOCK_WORDS * 4);
     assert_eq!(wire[0], Felt::from(3u64)); // P
     assert_eq!(wire[1 + 2 * 3], Felt::from(4u64)); // K
+    for (j, h) in hands.iter().enumerate() {
+        let base = 2 + 2 * 3 + HAND_BLOCK_WORDS * j;
+        // settle 98 词原样摊平（hand_id@0、registered_digest@1、
+        // n_expected@2、hand_binding@3、cm 槽@28..=35……）
+        assert_eq!(&wire[base..base + SETTLE_WORDS], h.hand.settle.as_slice());
+        assert_eq!(wire[base + 3], h.hand.hand_binding());
+        // 签名见证紧跟 settle wire
+        assert_eq!(wire[base + SETTLE_WORDS], h.hand.rbar.0);
+        assert_eq!(wire[base + SETTLE_WORDS + 1], h.hand.rbar.1);
+        assert_eq!(wire[base + SETTLE_WORDS + 2], h.hand.zbar);
+    }
 }
+
+/// M_h 真槽对拍：m1/m2/cm_digest 从 settle wire 槽位派生（D2）——
+/// m2（n_expected=2）≠ roster 人数（3）即证槽语义独立于 roster 规模。
+#[test]
+fn mh_slots_derive_from_settle_wire() {
+    let (pks, hands, _anchor) = honest_batch(3, 1, KAT_SEED + 4);
+    let h = &hands[0];
+    assert_eq!(pks.len(), 3);
+    assert_eq!(h.hand.m1(), h.hand.settle[1], "m1 must be wire[1] registered_digest");
+    assert_eq!(h.hand.m2(), h.hand.settle[2], "m2 must be wire[2] n_expected");
+    assert_ne!(h.hand.m2(), Felt::from(pks.len() as u64), "m2 ≠ roster size（槽语义独立）");
+    assert_eq!(h.hand.cm_digest(), cm_digest_from_wire(&h.hand.settle));
+    // 篡改任一 cm 槽词 → cm_digest 必变 → M_h 必变（共签消息绑定）
+    let mut tampered = h.hand.settle.clone();
+    tampered[SETTLE_CM_SLOT] = tampered[SETTLE_CM_SLOT] + Felt::ONE;
+    assert_ne!(cm_digest_from_wire(&tampered), h.hand.cm_digest());
+    let mh2 = msg_digest(h.hand.hand_binding(), h.hand.m1(), h.hand.m2(), cm_digest_from_wire(&tampered), h.roster_digest);
+    assert_ne!(mh2, h.m_h);
+}
+
+/// cm 槽起点（settle wire[28..=35]，settlement_stmt.cairo :194 布局）。
+const SETTLE_CM_SLOT: usize = 28;
 
 /// acc 链公式对拍：expected acc == fold_acc(0, claims)（两路径一致）。
 #[test]
@@ -279,9 +355,9 @@ fn acc_chain_formula_parity() {
 // heavy：真 prove-hand 电路跑（#[ignore]；--release -- --ignored --nocapture）
 // ---------------------------------------------------------------------------
 
-/// **T1 正例**：2/5/8 人诚实聚合，K=8 手批 → verified + [acc,roster_digest]
-/// 双 parity + 独立复验。bench 表列 = steps / trace rows / EC_OP / poseidon
-/// / prove ms / total ms / proof B。
+/// **T1 正例**：2/5/8 人诚实聚合，K=8 手批 → verified + 17 词段形状
+/// （[acc]++语句段(15)++[roster_digest]）双 parity + 独立复验。bench 表列
+/// = steps / trace rows / EC_OP / poseidon / prove ms / total ms / proof B。
 #[test]
 #[ignore]
 fn t1_honest_fold_batch_roundtrip() {
@@ -302,6 +378,15 @@ fn t1_honest_fold_batch_roundtrip() {
         assert!(outcome.ec_ops > 0, "EC must ride EC_OP in the cairo trace");
         assert!(outcome.cairo_acc == anchor.expected_acc);
         assert!(outcome.cairo_roster_digest == anchor.roster_digest);
+        // 生产段形状（D1）：K 段 × 17 词；acc@0 与 roster_digest@16 批常量
+        // 同值；MAGIC@1 = 'SP2M_OK'（combined 信封同位）
+        assert_eq!(outcome.segments.len(), 8);
+        for seg in &outcome.segments {
+            assert_eq!(seg.len(), FOLD_SEGMENT_LEN);
+            assert_eq!(seg[0], anchor.expected_acc);
+            assert_eq!(seg[1], segment_magic(), "segment[1] must be MAGIC 'SP2M_OK'");
+            assert_eq!(seg[FOLD_ROSTER_INDEX], anchor.roster_digest);
+        }
         println!(
             "| T1 P={players} K=8 | steps {} | trace_rows(padded) {} | EC_OP {} | poseidon {} | \
              total {} ms (compile {} / run {} / prove {}) | reverify {} ms | proof {} B |",
@@ -325,7 +410,8 @@ fn t1_honest_fold_batch_roundtrip() {
 #[ignore]
 fn t2_zbar_plus_one_panics_no_proof_attack_T2() {
     let (pks, hands, _anchor) = honest_batch(2, 2, KAT_SEED + 10);
-    let mut wire_hands: Vec<FoldHand> = hands.iter().map(|h| h.hand.clone()).collect();
+    let mut wire_hands: Vec<hand_verify_native::foldagg::FoldHand> =
+        hands.iter().map(|h| h.hand.clone()).collect();
     wire_hands[1].zbar = wire_hands[1].zbar + Felt::ONE;
     let dir = out_dir("t2-zbar-plus-one");
     let err = prove_fold_batch_unchecked(Felt::ZERO, &pks, &wire_hands, &dir, None)
@@ -334,16 +420,14 @@ fn t2_zbar_plus_one_panics_no_proof_attack_T2() {
     assert!(!dir.join("proof.json").exists(), "panic must leave no proof");
 }
 
-/// **T3**：跨手重放——手 2 携手 1 的 (R̄,z̄)（binding 不同）→ 电路 panic。
+/// **T3**：跨手重放——手 2 携手 1 的 (R̄,z̄)（settle wire 不同 → binding
+/// 不同）→ 电路 panic。
 #[test]
 #[ignore]
 fn t3_cross_hand_replay_panics_attack_T3() {
     let (pks, hands, _anchor) = honest_batch(2, 2, KAT_SEED + 11);
-    let replayed = FoldHand {
-        hand_binding: hands[1].hand.hand_binding,
-        m1: hands[1].hand.m1,
-        m2: hands[1].hand.m2,
-        cm_digest: hands[1].hand.cm_digest,
+    let replayed = hand_verify_native::foldagg::FoldHand {
+        settle: hands[1].hand.settle.clone(),
         rbar: hands[0].hand.rbar,
         zbar: hands[0].hand.zbar,
     };
@@ -410,29 +494,23 @@ fn t6_off_curve_pk_panics_attack_T6() {
 }
 
 /// **T9（_attack_A1，forge0 复现形状）**：wire pks 全换攻击者钥、攻击者对
-/// 自己 roster 诚实自签 → 电路算术自洽**照样出证**（证明 wire pks 在电路内
-/// 仍自由——这就是修复 1 第 3 步把 roster_digest 推成公开输出词的原因）；
-/// 断言点 = 出证后 host parity 门拒（cairo roster_digest ≠ 注册锚）。
-/// 生产对应 = 合约 roster_registry 对照 segment[16]（H1 单射）。
+/// 自己 roster 诚实自签（settle wire/槽词与诚实手相同——攻「签名身份」不攻
+/// 消息）→ 电路算术自洽**照样出证**（证明 wire pks 在电路内仍自由——这就是
+/// 修复 1 第 3 步把 roster_digest 推成公开输出词的原因）；断言点 = 出证后
+/// host parity 门拒（cairo roster_digest ≠ 注册锚）。生产对应 = 合约
+/// roster_registry 对照 segment[16]（H1 单射）。
 #[test]
 #[ignore]
 fn t9_forge0_attacker_roster_parity_gate_rejects_attack_A1() {
     let params = canonical_params();
     // 注册面（host 模拟）：诚实 2 人 roster 的锚
     let (_hpks, hhands, anchor) = honest_batch(2, 1, KAT_SEED + 20);
-    // 攻击者：整批换钥 + 自签（同 hand_binding/槽词——攻「签名身份」不攻消息）
+    // 攻击者：整批换钥 + 自签（同一 settle wire——攻「签名身份」不攻消息）
     let attacker_sks = vec![det(KAT_SEED, 777), det(KAT_SEED, 778)];
     let apks = roster_pks_from_sks(&attacker_sks);
     let ws = vec![det(KAT_SEED, 779), det(KAT_SEED, 780)];
-    let forged = aggregate_sign(
-        &attacker_sks,
-        &ws,
-        hhands[0].hand.hand_binding,
-        hhands[0].hand.m1,
-        hhands[0].hand.m2,
-        hhands[0].hand.cm_digest,
-    )
-    .expect("attacker self-sign");
+    let forged =
+        aggregate_sign(&attacker_sks, &ws, &hhands[0].hand.settle).expect("attacker self-sign");
     // 电路必须接受（攻击者的聚合签名对自己的 roster 成立）
     let dir = out_dir("t9-forge0");
     let proved = prove_fold_batch(
@@ -461,15 +539,8 @@ fn t10_agg1_forge_swapped_roster_rejected_attack_A2() {
     let attacker_sks = vec![det(KAT_SEED, 887)];
     let apks = roster_pks_from_sks(&attacker_sks);
     let ws = vec![det(KAT_SEED, 888)];
-    let forged = aggregate_sign(
-        &attacker_sks,
-        &ws,
-        hhands[0].hand.hand_binding,
-        hhands[0].hand.m1,
-        hhands[0].hand.m2,
-        hhands[0].hand.cm_digest,
-    )
-    .expect("attacker self-sign");
+    let forged =
+        aggregate_sign(&attacker_sks, &ws, &hhands[0].hand.settle).expect("attacker self-sign");
     let err = prove_fold_batch(
         Felt::ZERO,
         &apks,
@@ -490,15 +561,9 @@ fn t11_forged_roster_zbar_plus_one_panics_attack_A1_control() {
     let attacker_sks = vec![det(KAT_SEED, 777), det(KAT_SEED, 778)];
     let apks = roster_pks_from_sks(&attacker_sks);
     let ws = vec![det(KAT_SEED, 779), det(KAT_SEED, 780)];
-    let mut forged = aggregate_sign(
-        &attacker_sks,
-        &ws,
-        det(KAT_SEED, 20),
-        det(KAT_SEED, 21),
-        Felt::from(2u64),
-        det(KAT_SEED, 22),
-    )
-    .expect("attacker self-sign");
+    let hb = det(KAT_SEED, 20);
+    let settle = settle_wire(11, hb, KAT_SEED + 30);
+    let mut forged = aggregate_sign(&attacker_sks, &ws, &settle).expect("attacker self-sign");
     forged.hand.zbar = forged.hand.zbar + Felt::ONE;
     let dir = out_dir("t11-forge-zbar-plus-one");
     let err = prove_fold_batch_unchecked(Felt::ZERO, &apks, &[forged.hand], &dir, None)
@@ -513,15 +578,9 @@ fn t12_swapped_roster_zbar_plus_one_panics_attack_A2_control() {
     let attacker_sks = vec![det(KAT_SEED, 887)];
     let apks = roster_pks_from_sks(&attacker_sks);
     let ws = vec![det(KAT_SEED, 888)];
-    let mut forged = aggregate_sign(
-        &attacker_sks,
-        &ws,
-        det(KAT_SEED, 30),
-        det(KAT_SEED, 31),
-        Felt::from(1u64),
-        det(KAT_SEED, 32),
-    )
-    .expect("attacker self-sign");
+    let hb = det(KAT_SEED, 30);
+    let settle = settle_wire(12, hb, KAT_SEED + 31);
+    let mut forged = aggregate_sign(&attacker_sks, &ws, &settle).expect("attacker self-sign");
     forged.hand.zbar = forged.hand.zbar + Felt::ONE;
     let dir = out_dir("t12-n1-zbar-plus-one");
     let err = prove_fold_batch_unchecked(Felt::ZERO, &apks, &[forged.hand], &dir, None)
@@ -529,10 +588,13 @@ fn t12_swapped_roster_zbar_plus_one_panics_attack_A2_control() {
     assert!(err.contains("circuit rejected"), "unexpected: {err}");
 }
 
-/// **T7 perf**：K=1/8/32/64 @ P=8，steps + 耗时扫描（RSS 由外层
-/// `/usr/bin/time -l` 采集）。验收线：K=1 总量 ≤2.2k steps（1,628 keyagg
-/// 实测锚 + 范围检查余量）、批量边际 (steps(K)−steps(1))/(K−1) ≤2.2k/手、
-/// 批 ≤2^20 桶。`FOLD_PERF_ONLY=<K>` 只跑单档（分档采 RSS 用）。
+/// **T7 perf**：K=1/8/32/64 @ P=8，生产形状 steps + 耗时扫描（RSS 由外层
+/// `/usr/bin/time -l` 采集）。验收线（生产形状，提案 §3.1 诚实边界）：
+/// K=1 总量 ≤ combined 每手 12,160 + keyagg 批固定层 1,628（一批只付一次）；
+/// 批量边际 ≤ combined 每手 12,160（steps 轴底线——生产 fold ≈11.3k/手
+/// 估算 = keyagg 1,628 + 结算边际 9,405 + 签名层；结构性收益在单批单证/
+/// fact 密度 64×，不在 steps）；批 ≤ 2^20 桶。`FOLD_PERF_ONLY=<K>` 只跑
+/// 单档（分档采 RSS 用）。
 #[test]
 #[ignore]
 fn t7_perf_sweep_steps_gate() {
@@ -576,19 +638,20 @@ fn t7_perf_sweep_steps_gate() {
         );
         step_rows.push((k, outcome.steps));
     }
-    // 验收线（按设计 T7）：K=1 总量（含 roster keyagg）与批量边际都 ≤ 2.2k
+    // 验收线（生产形状）：K=1（keyagg 批固定层 + 1 手）与批量边际都不得
+    // 劣于 combined 每手整证口径
     let k1 = step_rows.iter().find(|(k, _)| *k == 1).map(|(_, s)| *s);
     if let Some(s1) = k1 {
         assert!(
-            s1 <= PER_HAND_STEPS_GATE,
-            "K=1 (roster + 1 hand) steps {s1} > {PER_HAND_STEPS_GATE} (1,628 anchor + margin)"
+            s1 <= COMBINED_PER_HAND_STEPS + KEYAGG_STEPS_ANCHOR,
+            "K=1 (keyagg + 1 hand) steps {s1} > combined per-hand {COMBINED_PER_HAND_STEPS} + keyagg anchor {KEYAGG_STEPS_ANCHOR}"
         );
         for &(k, s) in &step_rows {
             if k > 1 {
                 let marginal = (s - s1) / (k as u64 - 1);
                 assert!(
-                    marginal <= PER_HAND_STEPS_GATE,
-                    "per-hand marginal {marginal} > {PER_HAND_STEPS_GATE} at K={k}"
+                    marginal <= COMBINED_PER_HAND_STEPS,
+                    "per-hand marginal {marginal} > combined per-hand {COMBINED_PER_HAND_STEPS} at K={k}"
                 );
             }
         }

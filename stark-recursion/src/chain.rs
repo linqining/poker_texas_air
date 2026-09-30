@@ -1,13 +1,17 @@
 //! 聚合链 host 层：K 手语句 → 批 → 叶预映像/H1 → 折叠计划 → 累加链接。
 //!
-//! 两种手段形态（同一骨架，不同叶载荷）：
+//! 三种手段形态（同一骨架，不同叶载荷）：
 //! - **wrap（baseline，保留勿动）**：[`HandEntry`] 段 = prove-hand 公开内存
 //!   段 16 词（长度前缀 15 + 'SP2M_OK' + 14），fact 由
 //!   `WrapWitness::expected_fact` 吞含前缀整段；
 //! - **combined（本层新形态）**：[`CombinedHandEntry`] 输出 = combined.cairo
 //!   合并信封公开输出 16 词（`[chain_acc] ++ v2 公开段 15`，无长度前缀），
 //!   fact = [`combined_expected_fact`]（program_hash 后跟整段 16 词——
-//!   合约 `fact_for_segment` 同式）。
+//!   合约 `fact_for_segment` 同式）；
+//! - **fold（fold 链，规格 out/fold-spec.md §1/D1）**：[`FoldHandEntry`] 输出 =
+//!   combined 16 词信封原样 + roster_digest 尾插 index 16（17 词），fact =
+//!   [`fold_expected_fact`]（与 combined 同式——`fact_for_segment` 对段长
+//!   通用，两链 fact 不等源由 program_hash 分槽保证，规格 D3c 第 2 层）。
 //!
 //! # 公式出处（凡「精确镜像」均为逐式复刻，测试钉死）
 //!
@@ -304,6 +308,190 @@ impl CombinedBatchPlan {
     pub fn leaf_preimage(&self) -> Vec<Felt252> {
         let mut preimage =
             Vec::with_capacity(1 + self.hands.len() * COMBINED_OUTPUT_LEN);
+        preimage.push(self.program_hash);
+        for hand in &self.hands {
+            preimage.extend_from_slice(&hand.output);
+        }
+        preimage
+    }
+
+    /// 本批（单叶形态）的叶输出 H1（leaf_io.rs:44-63 精确镜像，见
+    /// [`leaf_output_words`]）。
+    ///
+    /// # Errors
+    /// 内部编码失败（不发生：输入均为合法 felt）。
+    pub fn leaf_output_words(&self) -> Result<[u32; ROOT_OUTPUT_WORDS]> {
+        leaf_output_words(&self.leaf_preimage())
+    }
+}
+
+/// fold 链（生产 fold 批程序）每手公开输出词数：combined 16 词信封**原样**
+/// + roster_digest 尾插 index 16（规格 out/fold-spec.md §1/D1）。
+///
+/// word 0–15 与 combined 信封逐词同位（chain_acc@0、MAGIC@1、hand_id@2、
+/// digest@3、n@4、binding@5、cm@6..=13、total@14、ald@15），消费面唯一新增
+/// 语义收口在 index 16。**与 [`COMBINED_OUTPUT_LEN`] 并存不共享**（规格
+/// D3/K-1：改共享常量即报废 combined fallback 在役路径——在库负例测试
+/// `combined_batch_plan_rejects_bad_shapes` 拒绝 17 词）。
+pub const FOLD_OUTPUT_LEN: usize = 17;
+
+/// fold 输出槽位（生产 fold 程序 17 词段布局；MAGIC/binding 与 combined
+/// 同位零位移复用，规格 D1）。索引值与 `COMBINED_MAGIC_INDEX`/
+/// `COMBINED_BINDING_INDEX` 相同是**布局巧合的显式锚定**——fold 段 word
+/// 0–15 就是 combined 信封同位词，不是同一个常量的两个名字。
+pub const FOLD_MAGIC_INDEX: usize = 1;
+pub const FOLD_BINDING_INDEX: usize = 5;
+/// roster_digest 尾插槽（一批 K 手**同值批常量**，规格 D1a：roster 每批进
+/// 电路一次，K 个段各自重复携带，使每手段独立成 fact/binding 语句）。
+pub const FOLD_ROSTER_INDEX: usize = 16;
+
+/// 一条 fold 手语句 + 其 17 词公开输出见证。
+///
+/// output = `[chain_acc(批终), MAGIC, hand_id, registered_digest, n_expected,
+/// hand_binding, cm_0..cm_7, total_winnings, action_log_digest, roster_digest]`
+/// ——生产 fold 批程序的公开段（规格 D1）；与 [`CombinedHandEntry`] 独立
+/// 类型（`chain.rs:213-219` 先例：fold/combined 条目互插是编译期错误）。
+#[derive(Debug, Clone)]
+pub struct FoldHandEntry {
+    pub statement: BatchStatement,
+    /// 17 词 fold 公开输出（word 0–15 = combined 信封同位 + slot 16 roster）。
+    pub output: Vec<Felt252>,
+}
+
+/// fold fact：`poseidon_hash_many([program_hash ‖ 整段 17 词输出])`——与
+/// [`combined_expected_fact`] 同式（合约 `fact_for_segment` 对 16/17 词段长
+/// 均通用，规格 D4b）。两链 fact 不等源**不在公式**而在 program_hash 分槽
+/// （fold 新程序 ⇒ 新哈希，合约侧 `fold_program_hash` 与
+/// `combined_program_hash` 两个存储槽，规格 D3c 第 2 层）。
+#[must_use]
+pub fn fold_expected_fact(program_hash: &Felt252, output: &[Felt252]) -> Felt252 {
+    combined_expected_fact(program_hash, output)
+}
+
+/// K 手 fold 批计划（= SHARP 一个 task 的语句面，生产 fold 批程序信封形态）。
+///
+/// 与 [`BatchPlan`]（wrap）/ [`CombinedBatchPlan`]（combined）并列的第三个
+/// 独立类型（规格 D3a/K-1）：不用 enum 泛化的理由同 combined——段语义
+/// （slot 16 roster 批常量）与禁混批闸不同，独立类型让旧路径零改动、
+/// 编译期即禁止混装；K 政策/keccak 根/叶 H1 经共享函数复用
+/// （`check_hand_count` / `keccak_batch_root` / [`leaf_output_words`]）。
+#[derive(Debug, Clone)]
+pub struct FoldBatchPlan {
+    pub program_hash: Felt252,
+    pub hands: Vec<FoldHandEntry>,
+}
+
+impl FoldBatchPlan {
+    /// 构造并逐条校验（fail-closed，逐手标注序号）。镜像
+    /// `CombinedBatchPlan::new`（chain.rs:247-281）的五连检：
+    /// 1..=MAX_HANDS_PER_LEAF、条数 2 的幂、输出形状（恰 17 词、
+    /// `output[1] == MAGIC`、`output[5] == statement.hand_binding`）、
+    /// fact 宿主重算一致（[`fold_expected_fact`]）、binding 无重复——
+    /// 外加规格 D1a/Q-1 钉死的批常量三检：slot 0（批终 acc）全手同值、
+    /// slot 16（roster_digest）非零且全手同值（合约 fold 入口消费面同款
+    /// 断言，规格 §4.4 检查 #10 的 host 镜像）。
+    ///
+    /// # acc 链信任边界（与 [`CombinedBatchPlan`] 同界，如实声明）
+    ///
+    /// slot 0 = fold 链**批终 acc**（一批 K 手同值——电路在全部 claims 折叠
+    /// 后输出一次 acc，fold_batch.cairo:180-187；规格开放点 Q-1 钉死为批终
+    /// acc 复制而非逐手跑动 acc）。本层**不可校验**该 acc 是否真链在上一批
+    /// 之后（claims/prev_acc 均不在公开输出里）——生产者侧把关（hand-verify-
+    /// native `foldagg` 的 host parity 门 + 注册面锚对照，fold_batch_test
+    /// T5/T9/T10 门形）。本层保证：批 acc 与 roster_digest 进 fact 预映像
+    /// ——篡改任一段词必改 fact（批根/终证语句随之全变）。统一漂移批 acc
+    /// （全手同改+重算 fact）可通过本层形状检（同 combined 信任边界），
+    /// 由 SettleBatch 根/终证语句捕获。
+    ///
+    /// # Errors
+    /// 任一校验失败（含具体手序号）。
+    pub fn new(program_hash: Felt252, hands: Vec<FoldHandEntry>) -> Result<Self> {
+        check_hand_count(hands.len())?;
+        let magic = Felt252::from(groth16_wrap::wrap_circuit::SEGMENT_MAGIC);
+        let mut seen_bindings: Vec<Felt252> = Vec::with_capacity(hands.len());
+        let mut batch_acc: Option<Felt252> = None;
+        let mut roster_d: Option<Felt252> = None;
+        for (i, hand) in hands.iter().enumerate() {
+            if hand.output.len() != FOLD_OUTPUT_LEN {
+                return Err(anyhow!(
+                    "hand {i}: fold output len = {}, expected {FOLD_OUTPUT_LEN}（combined 16 词信封 + roster_digest 尾插，规格 D1）",
+                    hand.output.len()
+                ));
+            }
+            if hand.output[FOLD_MAGIC_INDEX] != magic {
+                return Err(anyhow!(
+                    "hand {i}: output[{FOLD_MAGIC_INDEX}] must be MAGIC 'SP2M_OK' (0x5350324d5f4f4b)"
+                ));
+            }
+            // D1a/Q-1 批常量锚：slot 0 与 slot 16 在一批内同值。
+            let acc = hand.output[0];
+            match batch_acc {
+                Some(prev) if prev != acc => {
+                    return Err(anyhow!(
+                        "hand {i}: chain_acc != batch anchor（Q-1：slot 0 是批终 acc，K 段同值）"
+                    ));
+                }
+                None => batch_acc = Some(acc),
+                _ => {}
+            }
+            let rd = hand.output[FOLD_ROSTER_INDEX];
+            if rd == Felt252::from(0u64) {
+                return Err(anyhow!(
+                    "hand {i}: output[{FOLD_ROSTER_INDEX}] roster_digest must be non-zero（合约消费面同款断言）"
+                ));
+            }
+            match roster_d {
+                Some(prev) if prev != rd => {
+                    return Err(anyhow!(
+                        "hand {i}: roster_digest != batch anchor（D1a：slot 16 是批常量，K 段同值）"
+                    ));
+                }
+                None => roster_d = Some(rd),
+                _ => {}
+            }
+            let fact = fold_expected_fact(&program_hash, &hand.output);
+            if fact != hand.statement.fact {
+                return Err(anyhow!(
+                    "hand {i}: fact != poseidon(program_hash ‖ fold output_17)（宿主重算不一致）"
+                ));
+            }
+            let binding_felt = hand.output[FOLD_BINDING_INDEX];
+            if binding_felt != hand.statement.hand_binding {
+                return Err(anyhow!(
+                    "hand {i}: hand_binding != output[{FOLD_BINDING_INDEX}]"
+                ));
+            }
+            if seen_bindings.contains(&binding_felt) {
+                return Err(anyhow!("hand {i}: duplicate hand_binding（SettleBatch DuplicateBinding 同政策）"));
+            }
+            seen_bindings.push(binding_felt);
+        }
+        Ok(Self { program_hash, hands })
+    }
+
+    /// 语句切片（keccak 根与链上公开输入的载荷；形状与 wrap/combined 同构）。
+    #[must_use]
+    pub fn statements(&self) -> Vec<BatchStatement> {
+        self.hands.iter().map(|h| h.statement).collect()
+    }
+
+    /// keccak 批根（SettleBatch 链上校验并登记的根；精确复用 groth16-wrap
+    /// 实现——statements 形状未变，批根不受 fold 重定基影响）。
+    ///
+    /// # Errors
+    /// 条数非 2 的幂（构造时已拒，防御性保留）。
+    pub fn keccak_batch_root(&self) -> Result<[u8; 32]> {
+        keccak_batch_root(&self.statements()).context("keccak batch root")
+    }
+
+    /// 叶任务预映像：`[program_hash] ++ concat(K × output_17)`。
+    ///
+    /// 与 leaf_proof_format `Plain.output_preimage` 同形状（"the task's
+    /// program hash followed by the task's raw output"——fold 任务的原
+    /// 始输出即 17 词公开段）。
+    #[must_use]
+    pub fn leaf_preimage(&self) -> Vec<Felt252> {
+        let mut preimage = Vec::with_capacity(1 + self.hands.len() * FOLD_OUTPUT_LEN);
         preimage.push(self.program_hash);
         for hand in &self.hands {
             preimage.extend_from_slice(&hand.output);
@@ -709,6 +897,188 @@ mod tests {
             drifted_plan.keccak_batch_root().unwrap(),
             "chain_acc 漂移必改批根（fact 绑定生效）"
         );
+    }
+
+    /// fold 金向量手：17 词输出 = [批终 acc] ++ golden v2 段 15 词 ++
+    /// [roster_digest]（规格 D1 布局）。批终 acc 与 roster 全手同值
+    /// （Q-1/D1a 批常量），hand_id/binding 逐手递增；fact 用
+    /// [`fold_expected_fact`]。roster_digest 用确定性 poseidon 值（本测试
+    /// 只钉链格式形状，不涉曲线点）。
+    fn fold_golden_hands(k: u64) -> (Felt252, Felt252, Vec<FoldHandEntry>) {
+        let program_hash = felt_from_hex(golden::GOLDEN_PROGRAM_HASH).unwrap();
+        let base_v2: Vec<Felt252> = golden::GOLDEN_OUTPUT
+            .iter()
+            .skip(1) // wrap 段 [0] = 长度前缀 15，combined/fold 段无前缀
+            .map(|h| felt_from_hex(h).unwrap())
+            .collect();
+        assert_eq!(base_v2.len(), 15, "v2 公开段 15 词");
+        let roster_d = poseidon_hash_many(&[Felt252::from(0x1057u64), Felt252::from(k)]);
+        // 确定性批终 acc（批级折叠形态；只求金向量可复现）。
+        let claims: Vec<Felt252> = (0..k)
+            .map(|i| poseidon_hash_many(&[Felt252::from(0xC1A1u64), Felt252::from(i)]))
+            .collect();
+        let mut acc_in = vec![acc_genesis()];
+        acc_in.extend_from_slice(&claims);
+        let batch_acc = poseidon_hash_many(&acc_in);
+        let hands = (0..k)
+            .map(|i| {
+                let binding = felt_from_hex(golden::GOLDEN_HAND_BINDING).unwrap()
+                    + Felt252::from(i);
+                let mut output = Vec::with_capacity(FOLD_OUTPUT_LEN);
+                output.push(batch_acc);
+                output.extend(base_v2.iter().copied());
+                output[2] = Felt252::from(2_000u64 + i); // hand_id 槽位
+                output[FOLD_BINDING_INDEX] = binding;
+                assert_eq!(output.len(), FOLD_OUTPUT_LEN - 1);
+                output.push(roster_d); // slot 16 尾插
+                let fact = fold_expected_fact(&program_hash, &output);
+                FoldHandEntry {
+                    statement: BatchStatement { program_hash, hand_binding: binding, fact },
+                    output,
+                }
+            })
+            .collect();
+        (program_hash, roster_d, hands)
+    }
+
+    /// K=2 fold 批：构造校验全过；keccak 根与直接复用一致；叶预映像形状
+    /// [ph] ++ K×17；批终 acc/roster 批常量全手同值（Q-1/D1a）；根对语句
+    /// 顺序敏感；H1 可算且确定。
+    #[test]
+    fn fold_batch_plan_k2_builds_and_roots() {
+        let (ph, roster_d, hands) = fold_golden_hands(2);
+        let plan = FoldBatchPlan::new(ph, hands.clone()).expect("K=2 fold plan");
+        let root = plan.keccak_batch_root().unwrap();
+        let direct = keccak_batch_root(&plan.statements()).unwrap();
+        assert_eq!(root, direct);
+        // 批常量形状：slot 0（批终 acc）与 slot 16（roster）全手同值。
+        assert_eq!(hands[0].output[0], hands[1].output[0], "批终 acc 一批同值（Q-1）");
+        assert_eq!(hands[0].output[FOLD_ROSTER_INDEX], hands[1].output[FOLD_ROSTER_INDEX]);
+        assert_eq!(hands[0].output[FOLD_ROSTER_INDEX], roster_d);
+        // 布局同位（D1）：word 0–15 与 combined 信封逐词同位——fold 输出
+        // 去掉 slot 16 尾词的前 16 词即 combined 信封形状（word 0 各链 acc）。
+        assert_eq!(hands[0].output.len(), FOLD_OUTPUT_LEN);
+        assert_eq!(hands[0].output[FOLD_MAGIC_INDEX], Felt252::from(groth16_wrap::wrap_circuit::SEGMENT_MAGIC));
+        // 叶预映像形状与顺序敏感。
+        let preimage = plan.leaf_preimage();
+        assert_eq!(preimage.len(), 1 + 2 * FOLD_OUTPUT_LEN);
+        assert_eq!(preimage[0], ph);
+        assert_eq!(&preimage[1..18], hands[0].output.as_slice());
+        assert_eq!(&preimage[18..35], hands[1].output.as_slice());
+        let mut swapped = hands.clone();
+        swapped.reverse();
+        let swapped_root = FoldBatchPlan::new(ph, swapped).unwrap().keccak_batch_root().unwrap();
+        assert_ne!(root, swapped_root, "批根必须对语句顺序敏感");
+        let w = plan.leaf_output_words().unwrap();
+        assert_ne!(w, [0u32; ROOT_OUTPUT_WORDS]);
+        // determinism
+        assert_eq!(plan.leaf_output_words().unwrap(), w);
+    }
+
+    /// fold fact 公式钉死：`poseidon([program_hash ‖ 整段 17 词])`（与
+    /// combined_expected_fact 同式）；roster 尾词参与预映像；换 ph 必改
+    /// fact（D3c 第 2 层：两链 fact 不等源由 program_hash 分槽保证）。
+    #[test]
+    fn fold_fact_formula_and_chain_separation() {
+        let (ph, _roster_d, hands) = fold_golden_hands(1);
+        let hand = &hands[0];
+        // 独立重算（不经 helper）。
+        let mut msg = Vec::with_capacity(1 + FOLD_OUTPUT_LEN);
+        msg.push(ph);
+        msg.extend(hand.output.iter().copied());
+        assert_eq!(
+            felt_to_hex(&fold_expected_fact(&ph, &hand.output)),
+            felt_to_hex(&poseidon_hash_many(&msg)),
+            "fold fact 必须逐词同式"
+        );
+        assert_eq!(fold_expected_fact(&ph, &hand.output), combined_expected_fact(&ph, &hand.output),
+            "同式（fact_for_segment 对段长通用）——不等源在 ph 分槽");
+        // roster 尾词参与：去 slot 16 的 16 词 fact ≠ 17 词 fact。
+        let truncated = hand.output[..16].to_vec();
+        assert_ne!(
+            fold_expected_fact(&ph, &truncated),
+            hand.statement.fact,
+            "roster_digest 是预映像尾词（改 roster 必改 fact）"
+        );
+        // 换 ph：同一 17 词内容、不同链程序哈希 → fact 必不同（禁混批锚）。
+        let other_ph = ph + Felt252::from(1u64);
+        assert_ne!(fold_expected_fact(&other_ph, &hand.output), hand.statement.fact);
+    }
+
+    /// fold 批负例：词数 16/18、MAGIC 篡改、批终 acc 不一致（Q-1 门）、
+    /// roster 槽为零/不一致（D1a 门）、binding 不一致、fact 篡改、binding
+    /// 重复、K=3 非 2 的幂——全部 fail-closed。
+    #[test]
+    fn fold_batch_plan_rejects_bad_shapes() {
+        let (ph, _roster_d, mut hands) = fold_golden_hands(2);
+        assert!(FoldBatchPlan::new(ph, vec![]).is_err(), "空批拒绝");
+        // 16 词（combined 形状混入 fold 链——D3c 运行期防线）
+        let short = {
+            let mut h = hands[0].clone();
+            h.output.pop();
+            h
+        };
+        let err = FoldBatchPlan::new(ph, vec![short, hands[1].clone()]).expect_err("16 词必须拒绝");
+        assert!(format!("{err}").contains("hand 0"), "逐手标注序号：{err}");
+        // 18 词
+        let long = {
+            let mut h = hands[0].clone();
+            h.output.push(Felt252::from(1u64));
+            h
+        };
+        assert!(FoldBatchPlan::new(ph, vec![long, hands[1].clone()]).is_err());
+        // MAGIC 篡改
+        let bad_magic = {
+            let mut h = hands[0].clone();
+            h.output[FOLD_MAGIC_INDEX] += Felt252::from(1u64);
+            h
+        };
+        assert!(FoldBatchPlan::new(ph, vec![bad_magic, hands[1].clone()]).is_err());
+        // 批终 acc 手间不一致（Q-1 批常量门）
+        let mut acc_drift = hands.clone();
+        acc_drift[1].output[0] += Felt252::from(1u64);
+        acc_drift[1].statement.fact = fold_expected_fact(&ph, &acc_drift[1].output);
+        assert!(
+            FoldBatchPlan::new(ph, acc_drift).is_err(),
+            "slot 0 非批常量必须拒绝（Q-1）"
+        );
+        // roster 槽为零（合约消费面同款断言的 host 镜像）
+        let zero_roster = {
+            let mut h = hands[0].clone();
+            h.output[FOLD_ROSTER_INDEX] = Felt252::from(0u64);
+            h.statement.fact = fold_expected_fact(&ph, &h.output);
+            h
+        };
+        assert!(FoldBatchPlan::new(ph, vec![zero_roster, hands[1].clone()]).is_err());
+        // roster 槽手间不一致（D1a 批常量门）
+        let mut roster_drift = hands.clone();
+        roster_drift[1].output[FOLD_ROSTER_INDEX] += Felt252::from(1u64);
+        roster_drift[1].statement.fact = fold_expected_fact(&ph, &roster_drift[1].output);
+        assert!(FoldBatchPlan::new(ph, roster_drift).is_err(), "slot 16 非批常量必须拒绝");
+        // binding 与段槽位不一致
+        let bad_binding = {
+            let mut h = hands[0].clone();
+            h.statement.hand_binding += Felt252::from(0x1234u64);
+            h
+        };
+        assert!(FoldBatchPlan::new(ph, vec![bad_binding, hands[1].clone()]).is_err());
+        // fact 篡改
+        let bad_fact = {
+            let mut h = hands[0].clone();
+            h.statement.fact = Felt252::from(7u64);
+            h
+        };
+        assert!(FoldBatchPlan::new(ph, vec![bad_fact, hands[1].clone()]).is_err());
+        // binding 重复
+        let mut dup = hands.clone();
+        dup[1].output[FOLD_BINDING_INDEX] = dup[0].output[FOLD_BINDING_INDEX];
+        dup[1].statement.hand_binding = dup[0].statement.hand_binding;
+        dup[1].statement.fact = fold_expected_fact(&ph, &dup[1].output);
+        assert!(FoldBatchPlan::new(ph, dup).is_err(), "binding 重复拒绝");
+        // K=3 非 2 的幂
+        let third = hands[0].clone();
+        hands.push(third);
+        assert!(FoldBatchPlan::new(ph, hands).is_err(), "K=3 非 2 的幂拒绝");
     }
 
     /// K=2 批：构造校验全过；keccak 根与 groth16-wrap 直接复用一致（同函数自证）；

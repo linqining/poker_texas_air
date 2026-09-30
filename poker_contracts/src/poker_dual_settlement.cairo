@@ -231,6 +231,33 @@ pub trait IPokerDualSettlement<TContractState> {
     fn set_combined_program_hash(ref self: TContractState, program_hash: felt252);
     /// View：钉死的合并信封 program hash。
     fn combined_program_hash(self: @TContractState) -> felt252;
+    /// fold 链注册面（规格 out/fold-spec.md §4.2）：owner-gated 一次性注册
+    /// 一张桌的 roster。链上重算
+    /// `roster_digest = poseidon(['poker/fold-batch/roster.v1', n] ++ pks)`
+    /// ——标签与 fold 电路 `fold_batch.cairo:67` 的 ROSTER_LABEL 逐字节
+    /// 一致，使注册值与电路公式同源（消费面对照 = segment[16] 直读）。
+    /// `n` 限 2..=8、`pks.len() == 2·n`；不验 on-curve（合约无 EC 能力，
+    /// 垃圾 pks 只会登记一个电路必然 panic 的 digest，不出证即不出金）。
+    /// digest 已注册时拒绝（注册值不可改写）；pks 全文随事件可取，供
+    /// 玩家自核注册面。
+    fn register_roster(ref self: TContractState, table_id: u64, n: felt252, pks: Span<felt252>);
+    /// View：roster_digest 是否已注册。
+    fn roster_registered(self: @TContractState, roster_digest: felt252) -> bool;
+    /// Owner-gated：钉死 fold 批程序的 program hash（fold 入口 fact 绑定
+    /// 根，与 combined_program_hash 分槽——两链禁混批的承重件之一）。
+    fn set_fold_program_hash(ref self: TContractState, program_hash: felt252);
+    /// View：钉死的 fold 批程序 program hash。
+    fn fold_program_hash(self: @TContractState) -> felt252;
+    /// fold 链批结算入口（规格 §4.4）：17 词公开段 = combined 16 词信封
+    /// 原样 + 尾插 roster_digest（index 16）。校验序列与 combined 入口
+    /// 逐项同构，仅两处增量：段长 17 与 segment[16] 对照 roster 注册面。
+    /// fact 门复用 settlement_facts（owner/prover 登记），绑 fold 哈希。
+    fn verify_and_settle_dapv_fold_private(
+        ref self: TContractState,
+        hand_binding: felt252,
+        hand_id: u64,
+        segment: Span<felt252>,
+    );
     /// View: 该手是否为 v2（金额藏在 cm 中，consume_claim 走隐藏模式）。
     fn amounts_hidden(self: @TContractState, hand_binding: felt252) -> bool;
     /// Owner-gated: set the claim escrow helper that receives the winners'
@@ -275,6 +302,12 @@ pub mod PokerDualSettlement {
     const SETTLEMENT_SEGMENT_LEN: usize = 15;
     /// 合并信封公开段：v2 15 词前置 chain_acc（fact 消费整段 16 词）。
     const COMBINED_SEGMENT_LEN: usize = 16;
+    /// fold 批公开段：combined 16 词信封原样 + 尾插 roster_digest
+    /// （index 16；word 0–15 与 combined 逐词同位，规格 out/fold-spec.md D1）。
+    /// 三态共存：各入口自断言各段长，禁混批（D3c 第 3 层）。
+    const FOLD_SEGMENT_LEN: usize = 17;
+    /// roster 域标签（与 fold_batch.cairo:67 电路 ROSTER_LABEL 逐字节一致）。
+    const ROSTER_LABEL: felt252 = 'poker/fold-batch/roster.v1';
 
     /// SNIP-36 proof_facts 布局常量（对齐 starknet-privacy 参考实现的
     /// ProofFacts 序列化与 sequencer `starknet_proof_verifier` 0.14.3 回归
@@ -555,6 +588,12 @@ fn dapv_prelude(
         /// #18 Phase B：注册时钉住的每手动作日志承诺
         /// （v2 公开段尾词必须逐 felt 等于该值）。
         action_logs: Map<felt252, felt252>,
+        /// fold 链注册面：roster_digest → 已注册（键 = fold 公开段
+        /// segment[16] 的值本身——电路输出词即注册成员证明）。
+        roster_registry: Map<felt252, bool>,
+        /// fold 链程序哈希（fold 入口 fact 绑定根，与 combined_program_hash
+        /// 分槽——两链禁混批 D3c 第 2 层的承重件）。
+        fold_program_hash: felt252,
         #[substorage(v0)]
         ownable: OwnableComponent::Storage,
     }
@@ -575,6 +614,8 @@ fn dapv_prelude(
         DualProofSettledProvedPrivate: DualProofSettledProvedPrivate,
         DualProofSettledSnip36: DualProofSettledSnip36,
         DualProofSettledCombined: DualProofSettledCombined,
+        RosterRegistered: RosterRegistered,
+        DualProofSettledFold: DualProofSettledFold,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -626,6 +667,30 @@ fn dapv_prelude(
         participant_count: u32,
         /// 合并信封公开输出的累计承诺链值（PCD 链尾锚，第三方复验入口）。
         chain_acc: felt252,
+        total_winnings: u256,
+    }
+
+    /// roster 注册事件：pks 全文随事件可取，供玩家自核注册面
+    /// （规格 out/fold-spec.md §4.2 / 提案 F-4 纪律的取数入口）。
+    #[derive(Drop, starknet::Event)]
+    struct RosterRegistered {
+        table_id: u64,
+        n: felt252,
+        roster_digest: felt252,
+        pks: Span<felt252>,
+    }
+
+    /// fold 批结算事件：DualProofSettledCombined 加 roster_digest 一字段
+    /// （规格 §4.4 表 #13）。
+    #[derive(Drop, starknet::Event)]
+    struct DualProofSettledFold {
+        hand_binding: felt252,
+        settlement_digest: felt252,
+        participant_count: u32,
+        /// fold 链累计承诺（公开段 word 0，fold 链自己的 PCD 锚）。
+        chain_acc: felt252,
+        /// 本批 roster 承诺（公开段 word 16，已对照注册面）。
+        roster_digest: felt252,
         total_winnings: u256,
     }
 
@@ -1294,6 +1359,51 @@ fn dapv_prelude(
             self.combined_program_hash.read()
         }
 
+        /// fold 链注册面（规格 out/fold-spec.md §4.2）：owner-gated +
+        /// 链上重算 roster_digest（与电路公式同源）+ 一次性写入。
+        fn register_roster(
+            ref self: ContractState,
+            table_id: u64,
+            n: felt252,
+            pks: Span<felt252>,
+        ) {
+            self.ownable.assert_only_owner();
+            let n_u32: u32 = n.try_into().expect('n fits u32');
+            assert!(n_u32 >= 2_u32 && n_u32 <= 8_u32, "Participant count out of range");
+            assert!(pks.len() == 2 * n_u32, "Roster pks length mismatch");
+            // 与 fold_batch.cairo:66-67 电路同式：poseidon([LABEL, n] ++ pks)。
+            let mut roster_in: Array<felt252> = array![ROSTER_LABEL, n];
+            let mut w: u32 = 0;
+            while w < pks.len() {
+                roster_in.append(*pks.at(w));
+                w += 1;
+            }
+            let roster_digest = poseidon_hash_span(roster_in.span());
+            // 一次性：注册值不可改写（键 = 电路公开输出词本身）。
+            assert!(
+                !self.roster_registry.read(roster_digest),
+                "Roster already registered"
+            );
+            self.roster_registry.write(roster_digest, true);
+            self.emit(RosterRegistered { table_id, n, roster_digest, pks });
+        }
+
+        fn roster_registered(self: @ContractState, roster_digest: felt252) -> bool {
+            self.roster_registry.read(roster_digest)
+        }
+
+        /// Owner-gated：钉死 fold 批程序的 program hash（逐字复刻
+        /// set_combined_program_hash 模式：owner + 非零断言 + 独立存储槽）。
+        fn set_fold_program_hash(ref self: ContractState, program_hash: felt252) {
+            self.ownable.assert_only_owner();
+            assert!(program_hash != 0, "Zero program hash");
+            self.fold_program_hash.write(program_hash);
+        }
+
+        fn fold_program_hash(self: @ContractState) -> felt252 {
+            self.fold_program_hash.read()
+        }
+
         /// 合并信封私密结算：16 词公开段（v2 段前置 chain_acc）+ 单 fact 门。
         /// 字段校验与 v2 逐项对齐（索引 +1）；chain_acc 随事件 emit。
         fn verify_and_settle_dapv_combined_private(
@@ -1356,6 +1466,84 @@ fn dapv_prelude(
                     settlement_digest: registered_digest,
                     participant_count: n,
                     chain_acc,
+                    total_winnings,
+                },
+            );
+        }
+
+        /// fold 批私密结算：17 词公开段（combined 16 词信封 + 尾插
+        /// roster_digest）。校验序列与 combined 入口逐项同构，仅两处增量：
+        /// 段长 17（FOLD_SEGMENT_LEN）与 segment[16] 对照 roster 注册面
+        /// （规格 out/fold-spec.md §4.4 #10——C1 的闭合点）。fact 门复用
+        /// settlement_facts（不新增 ACL），绑 fold_program_hash 分槽哈希。
+        fn verify_and_settle_dapv_fold_private(
+            ref self: ContractState,
+            hand_binding: felt252,
+            hand_id: u64,
+            segment: Span<felt252>,
+        ) {
+            assert!(hand_binding != 0, "Zero binding");
+            assert!(
+                !self.settled_bindings.read(hand_binding),
+                "Hand already settled"
+            );
+            assert!(
+                segment.len() == FOLD_SEGMENT_LEN,
+                "Segment length mismatch"
+            );
+            assert!(
+                *segment.at(1) == SETTLEMENT_SEGMENT_MAGIC,
+                "Segment magic mismatch"
+            );
+            assert!(*segment.at(2) == hand_id.into(), "Segment hand_id mismatch");
+            assert!(*segment.at(5) == hand_binding, "Segment binding mismatch");
+            let n: u32 = (*segment.at(4)).try_into().expect('n fits u32');
+            assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
+            let registered_digest = read_registered_digest(@self, hand_binding);
+            assert!(*segment.at(3) == registered_digest, "Segment digest mismatch");
+            assert!(
+                *segment.at(15) == self.action_logs.read(hand_binding),
+                "Segment action log mismatch"
+            );
+            // —— fold 增量 1：roster 对照（段尾词必须已注册且非零）——
+            let roster_digest = *segment.at(16);
+            assert!(
+                roster_digest != 0 && self.roster_registry.read(roster_digest),
+                "Roster not registered"
+            );
+            // —— fact 门：fold 哈希分槽（两链禁混批 D3c 第 2/3 层）——
+            let program_hash = self.fold_program_hash.read();
+            assert!(program_hash != 0, "Fold program hash not set");
+            let fact = fact_for_segment(program_hash, segment);
+            assert!(
+                self.settlement_facts.read(fact),
+                "Settlement fact not registered"
+            );
+            let chain_acc = *segment.at(0);
+
+            // —— 派奖：与 combined 入口同构 ——
+            let total_u128: u128 = (*segment.at(14)).try_into().expect('total fits u128');
+            let total_winnings: u256 = total_u128.into();
+            assert!(total_winnings > 0_u256, "No winnings to escrow");
+            let vault_addr = self.vault_address.read();
+            let helper = self.claim_helper.read();
+            assert!(!helper.is_zero(), "Claim helper not set");
+            let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
+            vault.settlement_fund_escrow(helper, hand_binding, total_winnings);
+            let mut i: u32 = 0;
+            while i < 8_u32 {
+                self.claim_cms.write((hand_binding, i), *segment.at(6 + i));
+                i += 1;
+            }
+            self.amounts_hidden.write(hand_binding, true);
+            self.settled_bindings.write(hand_binding, true);
+            self.emit(
+                DualProofSettledFold {
+                    hand_binding,
+                    settlement_digest: registered_digest,
+                    participant_count: n,
+                    chain_acc,
+                    roster_digest,
                     total_winnings,
                 },
             );
@@ -1735,6 +1923,24 @@ mod settlement_combined_private_tests {
         s.dual
             .verify_and_settle_dapv_combined_private(s.hand_binding, 42, s.segment.span());
     }
+
+    #[test]
+    #[should_panic(expected: "Segment length mismatch")]
+    fn combined_rejects_17_word_fold_segment() {
+        // 消费面禁混批（规格 out/fold-spec.md D3c 第 3 层镜像）：fold 的
+        // 17 词段（combined 16 词信封 + 尾插 roster 词）过不了 combined
+        // 入口——combined fallback 只吃 16 词，行为不得被 fold 增量破坏。
+        let s = setup(true);
+        let mut longer = array![];
+        let mut w: u32 = 0;
+        while w < s.segment.len() {
+            longer.append(*s.segment.at(w));
+            w += 1;
+        }
+        longer.append(0x5157); // 伪装 roster 词
+        s.dual
+            .verify_and_settle_dapv_combined_private(s.hand_binding, 42, longer.span());
+    }
 }
 
 // ============================================================
@@ -1924,6 +2130,341 @@ mod settlement_proved_private_tests {
         );
     }
 }
+// ============================================================
+// Tests (snforge): fold 批结算——17 词公开段（combined 16 词信封 +
+// 尾插 roster_digest），roster 注册面（owner-gated + 链上重算 digest）
+// 与 fold 哈希分槽 fact 门。规格 out/fold-spec.md §4/D3c/D5。
+// ============================================================
+
+#[cfg(test)]
+mod settlement_fold_private_tests {
+    use core::hash::HashStateTrait;
+    use core::poseidon::{poseidon_hash_span, PoseidonTrait};
+    use starknet::{ContractAddress, get_contract_address};
+    use snforge_std::{
+        ContractClassTrait, DeclareResultTrait, declare, spy_events,
+        EventSpyAssertionsTrait,
+    };
+    use snforge_std::cheatcodes::execution_info::caller_address::{
+        start_cheat_caller_address,
+    };
+
+    use super::mock_vault::IMockVaultDispatcherTrait;
+    use super::mock_vault::IMockVaultDispatcher;
+    use super::{
+        IPokerDualSettlement, IPokerDualSettlementDispatcher,
+        IPokerDualSettlementDispatcherTrait,
+    };
+
+    /// roster 域标签（与合约常量及 fold_batch.cairo:67 电路逐字节一致）。
+    const ROSTER_LABEL: felt252 = 'poker/fold-batch/roster.v1';
+    const MAGIC: felt252 = 0x5350324d5f4f4b;
+    /// fold 批程序哈希（与 combined 0xC0FFEE 分槽——禁混批 D3c 第 2 层）。
+    const FOLD_HASH: felt252 = 0xF17D;
+    const COMBINED_HASH: felt252 = 0xC0FFEE;
+
+    /// 与合约事件同名的本地镜像（键 = sn_keccak(变体名)、数据 = 字段顺序
+    /// 序列化）——合约内 Event 枚举未导出，按 snforge 标准做法本地重声明
+    /// 同形枚举后 `assert_emitted` 逐字段比对。
+    #[derive(Drop, starknet::Event)]
+    struct RosterRegistered {
+        table_id: u64,
+        n: felt252,
+        roster_digest: felt252,
+        pks: Span<felt252>,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct DualProofSettledFold {
+        hand_binding: felt252,
+        settlement_digest: felt252,
+        participant_count: u32,
+        chain_acc: felt252,
+        roster_digest: felt252,
+        total_winnings: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    enum MirrorEvent {
+        RosterRegistered: RosterRegistered,
+        DualProofSettledFold: DualProofSettledFold,
+    }
+
+    fn deploy_contract(name: ByteArray, calldata: @Array<felt252>) -> ContractAddress {
+        let class = declare(name).unwrap().contract_class();
+        let (address, _) = class.deploy(calldata).unwrap();
+        address
+    }
+
+    /// 部署 mock vault + dual（test 合约为 owner 与 initial_prover），
+    /// 不做任何注册——ACL 负例与注册正例测试各自补齐前置。
+    fn deploy_dual() -> IPokerDualSettlementDispatcher {
+        let test_addr = get_contract_address();
+        let vault = deploy_contract("MockVault", @array![]);
+        let dual_addr = deploy_contract(
+            "PokerDualSettlement",
+            @array![test_addr.into(), vault.into(), test_addr.into()],
+        );
+        IPokerDualSettlementDispatcher { contract_address: dual_addr }
+    }
+
+    /// 链上同式重算 roster_digest：poseidon([ROSTER_LABEL, n] ++ pks)
+    /// （与合约 register_roster 及 fold_batch.cairo:66-67 电路同公式）。
+    fn roster_digest_of(n: felt252, pks: Span<felt252>) -> felt252 {
+        let mut roster_in = array![ROSTER_LABEL, n];
+        let mut w: u32 = 0;
+        while w < pks.len() {
+            roster_in.append(*pks.at(w));
+            w += 1;
+        }
+        poseidon_hash_span(roster_in.span())
+    }
+
+    #[derive(Drop)]
+    struct FoldSetup {
+        dual: IPokerDualSettlementDispatcher,
+        vault: IMockVaultDispatcher,
+        hand_binding: felt252,
+        segment: Array<felt252>,
+        total: felt252,
+        chain_acc: felt252,
+        roster_digest: felt252,
+        pks: Array<felt252>,
+        n: felt252,
+    }
+
+    /// 完整前置：部署 + claim helper + 三 program hash 就位 + register_hand
+    /// （digest=0x9900、action_log=0xA11CE）+ register_roster（n=2、pks 4 词）
+    /// + 构造 17 词 fold 段（赢家 seat0 +3000，cm0 = poseidon([0x21,
+    /// binding, 3000, 0])，尾词 = roster_digest）+ `with_fold_fact` 控制
+    /// fold 哈希 fact 登记。`tamper_roster` 把段尾换成未注册 digest。
+    fn setup(tamper_roster: bool, with_fold_fact: bool) -> FoldSetup {
+        let test_addr = get_contract_address();
+        let vault = deploy_contract("MockVault", @array![]);
+        let dual_addr = deploy_contract(
+            "PokerDualSettlement",
+            @array![test_addr.into(), vault.into(), test_addr.into()],
+        );
+        let dual = IPokerDualSettlementDispatcher { contract_address: dual_addr };
+        dual.set_claim_helper(test_addr);
+        dual.set_circuit_program_hash(0x1111);
+        dual.set_combined_program_hash(COMBINED_HASH);
+        dual.set_fold_program_hash(FOLD_HASH);
+
+        let hand_binding: felt252 = 0xEEEE;
+        let hand_id: u64 = 45;
+        let digest: felt252 = 0x9900;
+        let action_log: felt252 = 0xA11CE;
+        dual.register_hand(hand_binding, digest, 0, action_log, 0, 0, 0);
+
+        // roster 注册（owner = test 合约）。roster 人数 n=2 与该手公开段
+        // participant 数 3 是两个独立量（规格 D2 槽语义分离）。
+        let n: felt252 = 2;
+        let pks = array![0xAA11, 0xBB22, 0xCC33, 0xDD44];
+        let roster_digest = roster_digest_of(n, pks.span());
+        dual.register_roster(7, n, pks.span());
+
+        // 17 词 fold 段 = 16 词 combined 信封原样 + 尾插 roster_digest。
+        let chain_acc: felt252 = 0xACCE55;
+        let mut segment = array![chain_acc, MAGIC, hand_id.into(), digest, 3, hand_binding];
+        let mut ch = PoseidonTrait::new();
+        ch = ch.update(0x21);
+        ch = ch.update(hand_binding);
+        ch = ch.update(3000);
+        ch = ch.update(0);
+        segment.append(ch.finalize());
+        let mut w: u32 = 0;
+        while w < 7_u32 {
+            segment.append(0);
+            w += 1;
+        }
+        segment.append(3000);
+        segment.append(action_log);
+        let tail_roster: felt252 =
+            if tamper_roster { roster_digest + 1 } else { roster_digest };
+        segment.append(tail_roster);
+
+        if with_fold_fact {
+            let mut f = PoseidonTrait::new();
+            f = f.update(FOLD_HASH);
+            let mut w: u32 = 0;
+            while w < segment.len() {
+                f = f.update(*segment.at(w));
+                w += 1;
+            }
+            dual.register_settlement_fact(f.finalize());
+        }
+
+        FoldSetup {
+            dual,
+            vault: IMockVaultDispatcher { contract_address: vault },
+            hand_binding,
+            segment,
+            total: 3000,
+            chain_acc,
+            roster_digest,
+            pks,
+            n,
+        }
+    }
+
+    // ===== 注册面正例 + 事件断言 =====
+
+    #[test]
+    fn fold_register_roster_emits_event_and_sets_view() {
+        let dual = deploy_dual();
+        let n: felt252 = 2;
+        let pks = array![0x1234, 0x5678, 0x9ABC, 0xDEF0];
+        let digest = roster_digest_of(n, pks.span());
+        assert!(!dual.roster_registered(digest), "must be unregistered first");
+
+        let mut spy = spy_events();
+        dual.register_roster(3, n, pks.span());
+        spy.assert_emitted(
+            @array![(
+                dual.contract_address,
+                MirrorEvent::RosterRegistered(
+                    RosterRegistered {
+                        table_id: 3, n, roster_digest: digest, pks: pks.span(),
+                    },
+                ),
+            )],
+        );
+        assert!(dual.roster_registered(digest), "roster must be registered");
+    }
+
+    #[test]
+    fn fold_honest_segment_settles_and_emits_fold_event() {
+        let s = setup(false, true);
+        assert!(s.dual.fold_program_hash() == FOLD_HASH, "fold hash view");
+        assert!(s.dual.roster_registered(s.roster_digest), "roster view");
+        let mut spy = spy_events();
+        s.dual.verify_and_settle_dapv_fold_private(s.hand_binding, 45, s.segment.span());
+        spy.assert_emitted(
+            @array![(
+                s.dual.contract_address,
+                MirrorEvent::DualProofSettledFold(
+                    DualProofSettledFold {
+                        hand_binding: s.hand_binding,
+                        settlement_digest: 0x9900,
+                        participant_count: 3,
+                        chain_acc: s.chain_acc,
+                        roster_digest: s.roster_digest,
+                        total_winnings: s.total.into(),
+                    },
+                ),
+            )],
+        );
+        assert!(s.dual.hand_settled(s.hand_binding), "hand must be settled");
+        assert!(s.dual.amounts_hidden(s.hand_binding), "amounts hidden");
+        // claim_cms 来自公开段 cm 槽（seat0 = 赢家承诺）。
+        let mut ch = PoseidonTrait::new();
+        ch = ch.update(0x21);
+        ch = ch.update(s.hand_binding);
+        ch = ch.update(3000);
+        ch = ch.update(0);
+        assert!(s.dual.claim_cm(s.hand_binding, 0) == ch.finalize(), "cm0 from segment");
+        assert!(s.dual.claim_cm(s.hand_binding, 1) == 0, "non-winner cm zero");
+        let total_u256: u256 = s.total.into();
+        assert!(
+            s.vault.escrowed_for(s.hand_binding) == total_u256,
+            "escrow equals total_winnings"
+        );
+    }
+
+    // ===== 注册面 ACL / 一次性 =====
+
+    #[test]
+    #[should_panic(expected: 'Caller is not the owner')]
+    fn fold_register_roster_rejects_non_owner() {
+        let dual = deploy_dual();
+        let outsider: ContractAddress = 0xdead_beef.try_into().unwrap();
+        start_cheat_caller_address(dual.contract_address, outsider);
+        dual.register_roster(1, 2, array![1, 2, 3, 4].span());
+    }
+
+    #[test]
+    #[should_panic(expected: 'Caller is not the owner')]
+    fn fold_set_program_hash_rejects_non_owner() {
+        let dual = deploy_dual();
+        let outsider: ContractAddress = 0xdead_beef.try_into().unwrap();
+        start_cheat_caller_address(dual.contract_address, outsider);
+        dual.set_fold_program_hash(0x99);
+    }
+
+    #[test]
+    #[should_panic(expected: "Roster already registered")]
+    fn fold_register_roster_rejects_duplicate() {
+        let s = setup(false, true); // setup 内已注册 (n=2, 同一组 pks)
+        s.dual.register_roster(9, s.n, s.pks.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Roster pks length mismatch")]
+    fn fold_register_roster_rejects_bad_pks_len() {
+        let dual = deploy_dual();
+        // n=2 应配 4 词 pks，只给 3 词。
+        dual.register_roster(1, 2, array![1, 2, 3].span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Participant count out of range")]
+    fn fold_register_roster_rejects_n_out_of_window() {
+        let dual = deploy_dual();
+        dual.register_roster(1, 9, array![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18].span());
+    }
+
+    // ===== fold 结算负例（规格 D5 第 6 条：4 条 should_panic）=====
+
+    #[test]
+    #[should_panic(expected: "Roster not registered")]
+    fn fold_unregistered_roster_reverts() {
+        // 段尾 roster_digest 换成未注册值——roster 对照在 fact 门之前，
+        // 无需 fact 即可命中断言。
+        let s = setup(true, false);
+        s.dual.verify_and_settle_dapv_fold_private(s.hand_binding, 45, s.segment.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Segment length mismatch")]
+    fn fold_rejects_16_word_combined_segment() {
+        // 消费面禁混批（D3c 第 3 层）：combined 16 词段过不了 fold 入口。
+        let s = setup(false, true);
+        let mut short = array![];
+        let mut w: u32 = 0;
+        while w < 16_u32 {
+            short.append(*s.segment.at(w));
+            w += 1;
+        }
+        s.dual.verify_and_settle_dapv_fold_private(s.hand_binding, 45, short.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Settlement fact not registered")]
+    fn fold_rejects_combined_hash_fact() {
+        // 两链 program_hash 分槽（D3c 第 2 层）：combined 哈希下登记的
+        // fact 不能为 fold 段买单。
+        let s = setup(false, false);
+        let mut f = PoseidonTrait::new();
+        f = f.update(COMBINED_HASH);
+        let mut w: u32 = 0;
+        while w < s.segment.len() {
+            f = f.update(*s.segment.at(w));
+            w += 1;
+        }
+        s.dual.register_settlement_fact(f.finalize());
+        s.dual.verify_and_settle_dapv_fold_private(s.hand_binding, 45, s.segment.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Hand already settled")]
+    fn fold_replay_reverts() {
+        let s = setup(false, true);
+        s.dual.verify_and_settle_dapv_fold_private(s.hand_binding, 45, s.segment.span());
+        s.dual.verify_and_settle_dapv_fold_private(s.hand_binding, 45, s.segment.span());
+    }
+}
+
 /// P2-M3 测试用 MockVault：记录 escrow 划转，payout_commitment 返回常数。
 #[cfg(test)]
 mod mock_vault {

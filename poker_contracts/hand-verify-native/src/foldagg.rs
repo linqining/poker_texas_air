@@ -1,9 +1,10 @@
 //! foldagg — `cairo/src/fold_batch.cairo` 的 host 侧：BDN 手级聚合铸造/验证
-//! 镜像 + 批 wire 构造 + prove-hand 出证驱动（FoldDesign v2 最小切片）。
+//! 镜像 + 批 wire 构造 + prove-hand 出证驱动（FoldDesign v2 **生产版**）。
 //!
 //! 与 `combined.rs`（每手合并信封）的分工：fold 批把**同一张牌桌**的 K 手
-//! 折成一份证明——roster/keyagg 每批一次、每手只剩 3 次 poseidon + 单方程
-//! EC 检查 + z̄ 范围检查，公开输出 2 词 `[acc, roster_digest]`。
+//! 折成一份证明——roster/keyagg 每批一次、每手 = settle 语句约束 + 3 次
+//! poseidon + 单方程 EC 检查 + z̄ 范围检查，公开输出 K 段 17 词
+//! `[acc] ++ settlement 公开段(15) ++ [roster_digest]`（fold-spec D1）。
 //!
 //! 公式与电路逐 felt parity（T8 KAT 钉死）：
 //! - roster_digest = poseidon([roster_label, n] ++ (pkx, pky)×n)
@@ -11,12 +12,14 @@
 //!   交 `Point::mul`——与 Cairo `add_mul` 同纪律，群阶自动归约 mod n）
 //! - P̄ = Σ μ_i·pk_i
 //! - M_h = poseidon([m_label, hand_binding, m1, m2, cm_digest, roster_digest])
-//!   （m1/m2/cm_digest = 生产 settle wire[1]/[2]/cm 覆盖槽的切片占位——
-//!   修复 2/4：registered_digest、n_expected、认领承诺全进共签消息）
+//!   **真槽（D2，与电路逐位同源）**：m1 = settle wire[1]（registered_digest）、
+//!   m2 = wire[2]（n_expected）、cm_digest = poseidon(wire[28..=35])（8 词
+//!   c0..c7 压缩）；ald（wire[36]）经语句内 digest 断言传递钉死（D2a），
+//!   不是 M_h 独立槽
 //! - c = poseidon([sig_label, hand_binding, M_h, P̄x, P̄y, R̄x, R̄y])（raw）
 //! - z̄ = Σ(w_i + c·μ_i·sk_i) mod n（铸侧）；验证方程 z̄·G − c·P̄ − R̄ == O
 //! - claim_i = poseidon([claim_label, hand_binding, M_h])；
-//!   acc = poseidon([prev_acc] ++ claims)
+//!   acc = poseidon([prev_acc] ++ claims)（批终 acc，每段 slot 0 同值——Q-1）
 //!
 //! BDN 三轮（nonce 承诺，抗 Drijvers 式并发会话的最低配置，risk-4）：
 //! round1 各签名者对 nonce 承诺 t_i = poseidon([nonce_label, R_i 坐标])；
@@ -80,6 +83,26 @@ fn scalar_to_felt(s: StarkScalar) -> Felt {
 }
 
 // ---------------------------------------------------------------------------
+// settle wire 形状常量（与 cairo/src/settlement_stmt.cairo / fold_batch.cairo
+// 逐位同步——fold-spec D1/D2）
+// ---------------------------------------------------------------------------
+
+/// settle wire 词数（settlement_stmt.cairo SETTLE_WORDS 同值）。
+pub const SETTLE_WORDS: usize = 98;
+/// cm 槽起点：c0..c7 = settle wire[28..=35]（settlement_stmt.cairo :194 布局）。
+pub const SETTLE_CM_START: usize = 28;
+/// cm 槽词数（8 词压缩进 cm_digest）。
+pub const SETTLE_CM_WORDS: usize = 8;
+/// 每手签名见证词数（R̄x, R̄y, z̄）。
+pub const SIG_WORDS: usize = 3;
+/// 每手 wire 块词数 = settle 98 + 签名见证 3（电路 HAND_WORDS 同值）。
+pub const HAND_BLOCK_WORDS: usize = SETTLE_WORDS + SIG_WORDS;
+/// 每手公开段词数 = [acc] ++ 语句公开段 15 ++ [roster_digest]（D1）。
+pub const FOLD_SEGMENT_LEN: usize = 17;
+/// roster_digest 在每手段内的槽位（消费面唯一新增语义收口，D1）。
+pub const FOLD_ROSTER_INDEX: usize = 16;
+
+// ---------------------------------------------------------------------------
 // 公式层（与 fold_batch.cairo 逐 felt parity）
 // ---------------------------------------------------------------------------
 
@@ -111,6 +134,13 @@ pub fn agg_pubkey(pks: &[(Felt, Felt)]) -> Result<(Felt, Felt), String> {
         acc = acc + pk.mul(key_coeff_raw(pks.len(), *x, *y));
     }
     acc.to_affine().ok_or_else(|| "agg_pubkey: P̄ is identity (RO fixed point?)".to_string())
+}
+
+/// cm_digest = poseidon(settle wire[28..=35])（c0..c7 8 词压缩，D2/Q-2——
+/// 切片的 2 词占位 poseidon([cm0,cm1]) 不迁移）。
+pub fn cm_digest_from_wire(settle: &[Felt]) -> Felt {
+    assert_eq!(settle.len(), SETTLE_WORDS, "settle wire must be 98 words");
+    poseidon_hash_many(&settle[SETTLE_CM_START..SETTLE_CM_START + SETTLE_CM_WORDS])
 }
 
 /// M_h = poseidon([m_label, hand_binding, m1, m2, cm_digest, roster_digest])。
@@ -191,20 +221,42 @@ pub fn verify_equation(
 // BDN 三轮铸造镜像（round1 nonce 承诺 → round2 揭 R_i → round3 部分签名）
 // ---------------------------------------------------------------------------
 
-/// 一手折叠加法语句的 wire 槽（fold_batch.cairo per-hand 7 词的 host 形状）。
+/// 一手折叠的 wire 槽（fold_batch.cairo per-hand 101 词块的 host 形状）。
 ///
-/// m1/m2/cm_digest：生产形状 = settle wire[1]（registered_digest）、wire[2]
-/// （n_expected）、cm_digest = poseidon(c0..c7 槽)（修复 2/4）；切片不含
-/// 98 词 settle wire，host 铸造时以确定性派生词占位——**槽语义与占位值
-/// 都在共签消息里**（改性即破签名），这是切片对修复 2/4 的可测承载。
+/// `settle` = 98 词 settle wire（settlement_stmt.cairo 布局）；M_h 真槽
+/// m1/m2/cm_digest 不再是独立槽——由 [`FoldHand::m1`]/[`FoldHand::m2`]/
+/// [`FoldHand::cm_digest`] 从 wire 槽位派生（与电路逐位同源，D2）。
+/// **槽语义与槽值都在共签消息里**（改性即破签名），这是修复 2/4 的承载。
 #[derive(Debug, Clone)]
 pub struct FoldHand {
-    pub hand_binding: Felt,
-    pub m1: Felt,
-    pub m2: Felt,
-    pub cm_digest: Felt,
+    /// 98 词 settle wire（[hand_id, registered_digest, n_expected,
+    /// hand_binding, p×8, s×8, m×8, c×8, ald, count, w×60]）。
+    pub settle: Vec<Felt>,
     pub rbar: (Felt, Felt),
     pub zbar: Felt,
+}
+
+impl FoldHand {
+    /// hand_binding = wire[3]（与 combined.cairo 同取法）。
+    pub fn hand_binding(&self) -> Felt {
+        self.settle[3]
+    }
+
+    /// m1 = wire[1]（registered_digest）——M_h 真槽（D2）。
+    pub fn m1(&self) -> Felt {
+        self.settle[1]
+    }
+
+    /// m2 = wire[2]（n_expected）——M_h 真槽（D2；与 roster 人数是两个
+    /// 独立量，生产版逐字复制 wire[2]）。
+    pub fn m2(&self) -> Felt {
+        self.settle[2]
+    }
+
+    /// cm_digest = poseidon(wire[28..=35])（8 词 c0..c7 压缩，D2）。
+    pub fn cm_digest(&self) -> Felt {
+        cm_digest_from_wire(&self.settle)
+    }
 }
 
 /// round1：nonce 承诺 t = poseidon([nonce_label, R 坐标])（承诺先行）。
@@ -263,20 +315,18 @@ pub struct AggregatedHand {
     pub claim: Felt,
 }
 
-/// BDN 三轮诚实聚合（host 镜像）：roster pks 由 sks 派生，m1/m2/cm_digest
-/// 为调用方给定的槽词。铸侧全走标量域（mod n），验证侧走 raw-felt EC——
-/// 与「电路读 wire、群阶自动归约」逐 felt 对齐。
-#[allow(clippy::too_many_arguments)]
-pub fn aggregate_sign(
-    sks: &[Felt],
-    ws: &[Felt],
-    hand_binding: Felt,
-    m1: Felt,
-    m2: Felt,
-    cm_digest: Felt,
-) -> Result<AggregatedHand, String> {
+/// BDN 三轮诚实聚合（host 镜像）：roster pks 由 sks 派生，M_h 真槽值从
+/// settle wire 槽位派生（与电路逐位同源）。铸侧全走标量域（mod n），
+/// 验证侧走 raw-felt EC——与「电路读 wire、群阶自动归约」逐 felt 对齐。
+pub fn aggregate_sign(sks: &[Felt], ws: &[Felt], settle: &[Felt]) -> Result<AggregatedHand, String> {
     if sks.len() != ws.len() || sks.is_empty() {
         return Err("aggregate_sign: sks/ws length mismatch or empty".into());
+    }
+    if settle.len() != SETTLE_WORDS {
+        return Err(format!(
+            "aggregate_sign: settle wire len {} != {SETTLE_WORDS}",
+            settle.len()
+        ));
     }
     let g = Point::generator();
     let pks: Vec<(Felt, Felt)> = sks
@@ -289,6 +339,12 @@ pub fn aggregate_sign(
     // BDN 三轮
     let commits: Vec<NonceCommit> = ws.iter().map(|w| nonce_commit(*w)).collect();
     let rbar = aggregate_nonces(&commits)?;
+    // M_h 真槽（D2）：hand_binding=wire[3]、m1=wire[1]、m2=wire[2]、
+    // cm_digest=poseidon(wire[28..=35])——与 fold_batch.cairo 逐位同源。
+    let hand_binding = settle[3];
+    let m1 = settle[1];
+    let m2 = settle[2];
+    let cm_digest = cm_digest_from_wire(settle);
     let m_h = msg_digest(hand_binding, m1, m2, cm_digest, rd);
     let c = challenge_raw(hand_binding, m_h, pbar, rbar);
 
@@ -300,7 +356,7 @@ pub fn aggregate_sign(
     }
 
     Ok(AggregatedHand {
-        hand: FoldHand { hand_binding, m1, m2, cm_digest, rbar, zbar: scalar_to_felt(zbar) },
+        hand: FoldHand { settle: settle.to_vec(), rbar, zbar: scalar_to_felt(zbar) },
         roster_digest: rd,
         pbar,
         m_h,
@@ -310,7 +366,7 @@ pub fn aggregate_sign(
 }
 
 /// 批的期望公开输出（parity 门期望侧）：
-/// acc = fold_acc(prev, claims)，roster_digest = H(wire pks)。
+/// acc = fold_acc(prev, claims)（批终 acc），roster_digest = H(wire pks)。
 /// （T4 改性：这是 host-parity 断言，对 soundness **零证明力**——它只钉
 /// 公式漂移；「pks == 注册 pks」的 soundness 闭合点在生产 roster_registry，
 /// 切片负例 T9/T10 走 prove 后 parity 门拒绝。）
@@ -324,7 +380,58 @@ pub fn expected_public_output(
     RosterAnchor { roster_digest: rd, expected_acc: fold_acc(prev_acc, &claims) }
 }
 
+/// settle wire（98 词）→ host 语句对象（[`crate::combined::SettleStatement`]，
+/// `expected_segment` 的期望侧重算入口）。
+///
+/// 高位非零的数值词按 u64 界拒绝（host 解析纪律；语句真约束——digest 折叠/
+/// NOT_ZERO_SUM/COUNT_MISMATCH/动作链——由电路 settlement_statement 全量
+/// assert，本解析只服务 host 预检与 parity 期望侧）。
+pub fn parse_settle_wire(w: &[Felt]) -> Result<crate::combined::SettleStatement, String> {
+    if w.len() != SETTLE_WORDS {
+        return Err(format!("settle wire len {} != {SETTLE_WORDS}", w.len()));
+    }
+    let u64_at = |i: usize| -> Result<u64, String> {
+        let b = w[i].to_bytes_be();
+        if b[..24].iter().any(|&x| x != 0) {
+            return Err(format!("settle wire word {i} exceeds u64 (host parse)"));
+        }
+        Ok(u64::from_be_bytes(b[24..32].try_into().expect("8 bytes")))
+    };
+    let count = u64_at(37)?;
+    if count > 30 {
+        return Err(format!("settle wire action count {count} > 30 (host parse)"));
+    }
+    let mut signs = [0u64; 8];
+    let mut magnitudes = [0u64; 8];
+    for i in 0..8 {
+        signs[i] = u64_at(12 + i)?;
+        magnitudes[i] = u64_at(20 + i)?;
+    }
+    let mut entries = Vec::with_capacity(count as usize);
+    for i in 0..count as usize {
+        entries.push([w[38 + 2 * i], w[39 + 2 * i]]);
+    }
+    Ok(crate::combined::SettleStatement {
+        hand_id: u64_at(0)?,
+        registered_digest: w[1],
+        n_expected: u64_at(2)?,
+        hand_binding: w[3],
+        players: w[4..12].try_into().expect("8 player slots"),
+        signs,
+        magnitudes,
+        commitments: w[SETTLE_CM_START..SETTLE_CM_START + SETTLE_CM_WORDS]
+            .try_into()
+            .expect("8 commitment slots"),
+        action_log_digest: w[36],
+        action_entries: entries,
+    })
+}
+
 /// host 直验一批（fail-closed 预检；公式层与电路同序）。
+///
+/// 语句层 host 镜像（`parse_settle_wire` + `expected_segment`）只承担公式
+/// 漂移检测（T4 语义，对 soundness 零证明力）——真约束由电路
+/// settlement_statement 全量 assert。
 pub fn host_verify_batch(
     roster_pks: &[(Felt, Felt)],
     hands: &[AggregatedHand],
@@ -341,6 +448,7 @@ pub fn host_verify_batch(
         if h.roster_digest != rd {
             return Err("hand roster_digest mismatch".into());
         }
+        parse_settle_wire(&h.hand.settle)?.expected_segment()?;
         verify_equation(pbar, h.hand.rbar, h.c, h.hand.zbar)?;
     }
     Ok(())
@@ -350,10 +458,10 @@ pub fn host_verify_batch(
 // wire 摊平 + prove-hand 驱动（recurse.rs:218-322 模式）
 // ---------------------------------------------------------------------------
 
-/// batch wire：`[P, (pkx,pky)×P, K, (hand_binding, m1, m2, cm_digest,
-/// R̄x, R̄y, z̄)×K]`（fold_batch.cairo 头注释同布局）。
+/// batch wire：`[P, (pkx,pky)×P, K, (settle 98 词, R̄x, R̄y, z̄)×K]`
+/// （fold_batch.cairo 头注释同布局；词数 = 2 + 2P + 101K）。
 pub fn build_batch_wire(roster_pks: &[(Felt, Felt)], hands: &[FoldHand]) -> Vec<Felt> {
-    let mut w = Vec::with_capacity(2 + 2 * roster_pks.len() + 7 * hands.len());
+    let mut w = Vec::with_capacity(2 + 2 * roster_pks.len() + HAND_BLOCK_WORDS * hands.len());
     w.push(Felt::from(roster_pks.len() as u64));
     for (x, y) in roster_pks {
         w.push(*x);
@@ -361,10 +469,12 @@ pub fn build_batch_wire(roster_pks: &[(Felt, Felt)], hands: &[FoldHand]) -> Vec<
     }
     w.push(Felt::from(hands.len() as u64));
     for h in hands {
-        w.push(h.hand_binding);
-        w.push(h.m1);
-        w.push(h.m2);
-        w.push(h.cm_digest);
+        assert_eq!(
+            h.settle.len(),
+            SETTLE_WORDS,
+            "FoldHand.settle must be a 98-word settle wire"
+        );
+        w.extend_from_slice(&h.settle);
         w.push(h.rbar.0);
         w.push(h.rbar.1);
         w.push(h.zbar);
@@ -415,10 +525,13 @@ pub struct FoldOutcome {
     pub n_players: usize,
     pub n_hands: usize,
     pub wire_words: usize,
+    /// 批终 acc（每段 slot 0 同值——Q-1）。
     pub cairo_acc: Felt,
     pub cairo_roster_digest: Felt,
     pub expected_acc: Felt,
     pub expected_roster_digest: Felt,
+    /// K 段 17 词公开段（[acc] ++ 语句段 15 ++ [roster_digest]）。
+    pub segments: Vec<Vec<Felt>>,
     pub total_ms: u128,
     pub cairo_prove_ms: u64,
     pub cairo_run_ms: u64,
@@ -432,8 +545,14 @@ pub struct FoldOutcome {
     pub out_dir: PathBuf,
 }
 
-/// 每手 steps 边际的验收线（T7：1,628 实测锚 + 范围检查余量）。
-pub const PER_HAND_STEPS_GATE: u64 = 2_200;
+/// combined 每手基线（1 手/证，9p 同机实测 12,160 steps——提案 §3.1 同机
+/// 复测口径转引；2p 锚 7,204 见 docs/combined-perf-2026-09-29.md:14）。
+/// 生产 fold 的 steps 验收底线：每手边际不得劣于 combined 每手整证。
+pub const COMBINED_PER_HAND_STEPS: u64 = 12_160;
+
+/// keyagg 批固定层实测锚（P=8：1,628 = 404+8×153，提案 §3.1 转引）。
+/// K=1 的门 = COMBINED_PER_HAND_STEPS + 本锚（批固定层只付一次）。
+pub const KEYAGG_STEPS_ANCHOR: u64 = 1_628;
 
 fn spawn_prove_hand(
     inputs_path: &Path,
@@ -491,14 +610,15 @@ pub fn prove_fold_batch_unchecked(
     ))
 }
 
-/// 出证一批 fold 语句并过双 parity 门（T1 主路径）。
+/// 出证一批 fold 语句并过 parity 门（T1 主路径）。
 ///
 /// 门序（对 A1/A2 的诚实承载——电路内 wire pks 仍自由，soundness 闭合点
-/// 在消费面）：先出证（电路只保证算术一致 + 单方程成立），后对照注册面
-/// 锚（`anchor` = RosterAnchor；切片 = host 重算，生产 = roster_registry）。
-/// `cairo_roster_digest != anchor.roster_digest` ⇒ 换 roster 攻击被拒
-/// （T9/T10）；`cairo_acc != anchor.expected_acc` ⇒ acc 链绑定被拒（T5）。
-/// 最后 `--check-only` 独立复验证明文件。
+/// 在消费面）：先出证（电路只保证算术一致 + 语句约束 + 单方程成立），后
+/// 对照注册面锚（`anchor` = RosterAnchor；切片 = host 重算，生产 =
+/// roster_registry）。`cairo 段 slot16 != anchor.roster_digest` ⇒ 换 roster
+/// 攻击被拒（T9/T10）；`段 slot0 != anchor.expected_acc` ⇒ acc 链绑定被拒
+/// （T5）；段 word 1..=15 另对 host `expected_segment` 重算（输出形状/
+/// 语句公式漂移门，T4 语义）。最后 `--check-only` 独立复验证明文件。
 pub fn prove_fold_batch(
     prev_acc: Felt,
     roster_pks: &[(Felt, Felt)],
@@ -543,27 +663,48 @@ pub fn prove_fold_batch(
         })
         .collect::<Result<_, _>>()?;
     // runner 把 Array 返回序列化为 [len, ...elements]（forge0 单词返回 =
-    // ["0x1","0x1"] 实证）——取 [2, acc, roster_digest]。
-    if public.len() != 3 || public[0] != Felt::from(2u64) {
+    // ["0x1","0x1"] 实证）——生产版返回 K×17 词段平铺，取 [17K, K×17 词]。
+    let segment_words = hands.len() * FOLD_SEGMENT_LEN;
+    if public.len() != 1 + segment_words || public[0] != Felt::from(segment_words as u64) {
         return Err(format!(
-            "expected [2, acc, roster_digest] public words, got {} words",
+            "expected [len, {segment_words} segment words] public output, got {} words",
             public.len()
         ));
     }
-    let (cairo_acc, cairo_rd) = (public[1], public[2]);
-
-    // ---- parity 门（注册面切片模拟，出证后对照）----
-    if cairo_rd != anchor.roster_digest {
-        return Err(format!(
-            "roster digest parity failure (unregistered roster): cairo 0x{:x} != registered 0x{:x}",
-            cairo_rd, anchor.roster_digest
-        ));
+    let mut segments: Vec<Vec<Felt>> = Vec::with_capacity(hands.len());
+    for j in 0..hands.len() {
+        segments.push(
+            public[1 + j * FOLD_SEGMENT_LEN..1 + (j + 1) * FOLD_SEGMENT_LEN].to_vec(),
+        );
     }
-    if cairo_acc != anchor.expected_acc {
-        return Err(format!(
-            "acc parity failure: cairo 0x{:x} != host 0x{:x}",
-            cairo_acc, anchor.expected_acc
-        ));
+    let cairo_acc = segments[0][0];
+    let cairo_rd = segments[0][FOLD_ROSTER_INDEX];
+
+    // ---- parity 门（注册面切片模拟，出证后对照；roster 门先行——T9/T10
+    // 的失败面是 roster 对照，T5 的失败面才是 acc）----
+    for (j, h) in hands.iter().enumerate() {
+        let seg = &segments[j];
+        if seg[FOLD_ROSTER_INDEX] != anchor.roster_digest {
+            return Err(format!(
+                "roster digest parity failure (unregistered roster) at hand {j}: \
+                 cairo 0x{:x} != registered 0x{:x}",
+                seg[FOLD_ROSTER_INDEX], anchor.roster_digest
+            ));
+        }
+        if seg[0] != anchor.expected_acc {
+            return Err(format!(
+                "acc parity failure at hand {j}: cairo 0x{:x} != host 0x{:x}",
+                seg[0], anchor.expected_acc
+            ));
+        }
+        // 输出形状/语句公式漂移门（T4 语义）：段 word 1..=15 必须 ==
+        // host expected_segment（同一 settle wire 的 host 镜像重算）。
+        let expected_seg = parse_settle_wire(&h.hand.settle)?.expected_segment()?;
+        if seg[1..FOLD_ROSTER_INDEX] != *expected_seg.as_slice() {
+            return Err(format!(
+                "segment parity failure at hand {j}: cairo statement words != host expected_segment"
+            ));
+        }
     }
 
     // ---- --check-only 独立复验 ----
@@ -592,6 +733,7 @@ pub fn prove_fold_batch(
         cairo_roster_digest: cairo_rd,
         expected_acc: anchor.expected_acc,
         expected_roster_digest: anchor.roster_digest,
+        segments,
         total_ms,
         cairo_prove_ms: timings["prove"].as_u64().unwrap_or(0),
         cairo_run_ms: timings["run_witness"].as_u64().unwrap_or(0),
@@ -633,7 +775,36 @@ pub fn roster_pks_from_sks(sks: &[Felt]) -> Vec<(Felt, Felt)> {
     sks.iter().map(|sk| g.mul(*sk).to_affine().expect("sk·G affine")).collect()
 }
 
-/// 铸一张 K 手 × n 人诚实 fold 批（slot 词确定性派生；BDN nonce 从 seed 链）。
+/// 铸一条诚实 98 词 settle wire（`combined::build_settle_statement` 生产
+/// 接缝）：双席参与零和（seat0 赢 / seat1 输、余席 0），n_expected = 2 与
+/// roster 人数语义独立——钉 m2 = wire[2] 槽（D2）；空动作日志；赢家承诺
+/// 非零（cm 输出公式由语句函数承载）。
+fn mint_settle_wire(
+    hand_id: u64,
+    hb: Felt,
+    n_players: usize,
+    seed: u64,
+    k: u64,
+) -> Result<Vec<Felt>, String> {
+    if !(2..=8).contains(&n_players) {
+        return Err(format!("mint_settle_wire: roster size {n_players} outside 2..=8"));
+    }
+    let players: Vec<Felt> =
+        (0..n_players as u64).map(|i| det_felt(seed + 7, 50 + i) + Felt::ONE).collect();
+    let total: i128 = 1_000_000 + 7 * k as i128;
+    let mut deltas: Vec<i128> = vec![0; n_players];
+    deltas[0] = total;
+    deltas[1] = -total;
+    let commitments: Vec<Felt> = (0..8u64).map(|i| det_felt(seed + 7, 60 + i)).collect();
+    let ald = poseidon_hash_many(&[crate::combined::action_log_domain()]);
+    let st = crate::combined::build_settle_statement(
+        hand_id, hb, &players, &deltas, &commitments, ald, &[],
+    )?;
+    Ok(st.wire_words())
+}
+
+/// 铸一张 K 手 × n 人诚实 fold 批（settle wire 确定性派生；BDN nonce 从
+/// seed 链）。roster pks 必须来自同一 seed 的 [`mint_roster_sks`]。
 pub fn mint_fold_hands(
     roster_pks: &[(Felt, Felt)],
     hand_seeds: &[u64],
@@ -643,15 +814,12 @@ pub fn mint_fold_hands(
     let mut hands = Vec::with_capacity(hand_seeds.len());
     for (k, hs) in hand_seeds.iter().enumerate() {
         let hb = poseidon_hash_many(&[Felt::from(*hs), Felt::from(0xF01D_u64)]);
-        let m1 = poseidon_hash_many(&[hb, Felt::from(k as u64), Felt::from(0xD16Du64)]);
-        let m2 = Felt::from(roster_pks.len() as u64); // n_expected 槽语义
-        let cm0 = poseidon_hash_many(&[hb, det_felt(seed, 900 + k as u64)]);
-        let cm1 = poseidon_hash_many(&[hb, det_felt(seed, 950 + k as u64)]);
-        let cm_digest = poseidon_hash_many(&[cm0, cm1]); // c0..c7 槽的切片压缩
+        let hand_id = 100 + k as u64;
+        let settle = mint_settle_wire(hand_id, hb, roster_pks.len(), seed, k as u64)?;
         let ws: Vec<Felt> = (0..roster_pks.len() as u64)
             .map(|i| det_felt(*hs, 100 + i))
             .collect();
-        hands.push(aggregate_sign(&sks, &ws, hb, m1, m2, cm_digest)?);
+        hands.push(aggregate_sign(&sks, &ws, &settle)?);
     }
     Ok(hands)
 }
