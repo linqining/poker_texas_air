@@ -537,6 +537,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "batch-poster"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "batch-poster",
+ "groth16-wrap",
+ "hex",
+ "serde",
+ "serde_json",
+ "settle-queue",
+ "sha3",
+ "stark-recursion",
+ "starknet",
+ "starknet-txmgr",
+ "starknet-types-core",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "bigdecimal"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3472,6 +3493,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "settle-queue"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "sha1"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3893,6 +3923,18 @@ dependencies = [
  "starknet-core",
  "starknet-crypto 0.8.1",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "starknet-txmgr"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "starknet",
+ "starknet-types-core",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

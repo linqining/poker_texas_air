@@ -877,8 +877,24 @@ fn stage0_log9_jump_measurement() {
 /// kicks into a dedicated cascade batch (first row Kick, ascending seats,
 /// terminal continuation last). Every segment proves, verifies, and passes
 /// the native shuffle-chain verification with its sidecar slice.
+///
+/// 栈说明：本用例的证明/验证链在 libtest 默认 2MiB 测试线程上深递归会栈
+/// 溢出（HEAD 先在问题——git stash 验证回退工作树改动同样溢出，16MiB 栈
+/// 下通过，验证记录见 out/fold-9seat-migration.md）。按
+/// `src/blake3_flock.rs` `flock_pool` 的 64MiB 先例，把整个用例放大栈
+/// 线程上跑，使 debug 门禁 `cargo test` 不依赖 RUST_MIN_STACK 环境变量。
 #[test]
 fn stage0_reconstruct_segment_single_batch() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .name("stage0-reconstruct".into())
+        .spawn(stage0_reconstruct_segment_single_batch_inner)
+        .expect("spawn big-stack test thread")
+        .join()
+        .expect("stage0 reconstruct segment test thread panicked");
+}
+
+fn stage0_reconstruct_segment_single_batch_inner() {
     let mut rng = StdRng::seed_from_u64(0x57A6_E007);
     // Fresh builder; the preflop is replayed on it so the deck lineage and
     // the sidecar stay consistent inside this test.

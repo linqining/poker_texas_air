@@ -20,6 +20,40 @@ game-layer facts recorded in `texas/src/starknet/prove_log.rs`. Settlement
 digests bind the hand's action log (`action_log_digest` tail word, #18
 Phase B).
 
+## 结算任务持久化投递层（settle-queue，2026-10-01 立项）
+
+2026-10-01 起，结算投递层从 texas 进程内静态（hooks.rs 的
+PENDING_SETTLE/SETTLE_OK/SETTLE_ATTEMPTS——重启即丢）升级为持久化队列
+（`settle-queue/`，正式状态表；todo #50）。要点：
+
+- **条目与判别**：单手键 `(table_id, hand_id)` 仅做队列去重；路由判别器
+  `SettleRoute{Legacy, Dual}` 绑 `STARKNET_SETTLEMENT_MODE`
+  （`texas/src/starknet/config.rs:136-149`，仅认 legacy|snip36）而非
+  `STARKNET_DAPV_SETTLE_ENTRY`（后者无 legacy 值，只作 Dual 路内合约
+  入口参数随条目携带）。与 `SettlementExit`（`appchain/exit.rs:59-65`，
+  parse 自 "starknet"|"legacy"）的映射：Starknet 变体按 settlement_mode
+  细分 SettleRoute，**Appchain 不入队**。
+- **单写者文件归属协议**：queue WAL（`queue.jsonl`）唯一写者 = texas
+  （append 入队、构建期死信标记、Dual→Legacy 降级迁移——仅由 texas 依据
+  poster sidecar 死信回读触发）；poster（`batch-poster/`）独占 sidecar
+  （poster-state.json 游标与在途快照 + receipts/ + dead/ + batches/，
+  原子写），只读 WAL。**DeadLetter 双源归属**：构建期死信 texas 写 WAL、
+  投递期死信（重试耗尽，含降级后仍耗尽）poster 写 `dead/<key>.json`。
+- **Dual→Legacy 单向降级迁移**：对齐 snip36 失败回退 legacy 的
+  「结算永不丢失」语义（`hooks.rs:423-427`）——dual 腿重试耗尽 → poster
+  死信 → texas 降级重投（legacy 保底 payload 由 texas 入队时预构建）→
+  poster 清死信按 legacy 重投；重启对账续投。
+- **fold 批不进队列键域**：批级状态在 poster sidecar，
+  `batch_key = keccak_root` 同时是 zchain 侧幂等键与 MonadProofEnvelope
+  主键，`members` 引用单手键——批键做批幂等，单手键只做队列去重。
+
+三层分工勿越界：**prove_log 仍是对账事实源**（`take_settle_input`
+`texas/src/starknet/prove_log.rs:434` 入队）；**settle-queue 只管投递
+进度**（状态机的 Receipted ≠ 业务终态）；**settle_receipt 的 SettleStatus
+（`texas/src/starknet/settle_receipt.rs:36`，Settled/Refused/Failed）仍是
+业务终态权威**。texas 侧接线（入队源/发送面切换）见 todo #50 剩余项——
+接线落地前 hooks.rs 现行为不变。
+
 ## 2026-09-14 单一状态重构（mirror 双状态模式移除）
 
 **动机**：AIR 是 preimage→postimage 行约束，postimage 由宿主计算——控制

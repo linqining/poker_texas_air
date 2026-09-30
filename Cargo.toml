@@ -15,11 +15,14 @@ resolver = "2"
 exclude = ["third_party", "third_party/flock", "third_party/flock/crates/flock-core", "third_party/flock/crates/flock-prover", "third_party/flock/crates/flock-cuda-ffi", "fuzz"]
 members = [
     ".",
+    "batch-poster",
     "groth16-wrap",
     "hand-bench",
     "poker_contracts/hand-verify-native",
     "poker_l1",
+    "settle-queue",
     "stark-recursion",
+    "starknet-txmgr",
     "vm-common",
     "texas",
 ]

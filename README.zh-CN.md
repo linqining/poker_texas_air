@@ -250,10 +250,16 @@ verifier——让验证密钥与约束成为链上事实。
 
 ## 仓库导览
 
-这是一个大仓库（6 个 workspace crate、约 230 个一方 Rust 源文件，另有
+这是一个大仓库（11 个 workspace crate、约 230 个一方 Rust 源文件，另有
 vendored 的 StarkWare proving 栈、25 个 Cairo 合约文件、43 个 Lean 文件；
 mental-poker 协议 crate 拆分在独立仓库
 [`poker_protocol`](https://github.com/linqining/poker_protocol)，见 ①）。
+其中三个构成结算持久化投递层（2026-10）：结算任务持久化队列
+**`settle-queue/`**（texas 独写 WAL + poster 独写 sidecar，参照 zkSync
+`eth_sender`）、Starknet 交易管理层 **`starknet-txmgr/`**（nonce 保序/
+加价重发/失败熔断，参照 op-service/txmgr 与 zkSync `eth_tx_manager`）、
+常驻批量上链 daemon **`batch-poster/`**（cadence + fold 攒批，参照
+op-batcher 与 Arbitrum batch poster）。
 自底向上分五层组织：
 
 ```mermaid
@@ -452,6 +458,9 @@ deployer 种子。
    适合 GPU 映射。设计目标：递归流水线达到秒级证明、走向实时；这是基于运算
    剖面的工程估算，不是实测结论。
 4. 真 `hand_verify.cairo` 电路（替换 `proving-tool` 中的 bench 替身）。
+5. **批量上链**——`settle-queue` / `starknet-txmgr` / `batch-poster` 三
+   crate 落地结算持久化投递层（2026-10 立项）；下一步把结算发送面从
+   进程内静态切到该层（见 `docs/TODO.md` #50）。
 
 ## 商业与合作
 

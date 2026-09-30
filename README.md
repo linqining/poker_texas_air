@@ -282,10 +282,17 @@ verification key and constraints become chain facts. Design details:
 
 ## Repository guide
 
-This is a large repo (6 workspace crates, ~230 first-party Rust source files
+This is a large repo (11 workspace crates, ~230 first-party Rust source files
 plus the vendored StarkWare proving stack, 25 Cairo contract files, 43 Lean
 files; the mental-poker protocol crates live in the separate
 [`poker_protocol`](https://github.com/linqining/poker_protocol) repo, see ①).
+Three of them form the persistent settlement-delivery layer (2026-10): the
+durable settle-task queue **`settle-queue/`** (single-writer WAL + poster
+sidecar, after zkSync `eth_sender`), the Starknet transaction manager
+**`starknet-txmgr/`** (nonce ordering / fee bump / circuit breaker, after
+op-service/txmgr and zkSync `eth_tx_manager`), and the resident batch-posting
+daemon **`batch-poster/`** (cadence + fold batching, after op-batcher and
+Arbitrum's batch poster).
 It is organized in five layers, bottom-up:
 
 ```mermaid
@@ -491,6 +498,10 @@ commit private keys or deployer seeds.
    recursive pipeline, making it real-time; this is an engineering estimate
    from the operation profile, not a measured result.
 4. Real `hand_verify.cairo` circuit (replacing the bench stand-in in `proving-tool`).
+5. **Batched settlement posting** — the `settle-queue` / `starknet-txmgr` /
+   `batch-poster` crates land the durable delivery layer (2026-10); wiring the
+   live settle path off the in-process maps onto it is the next milestone
+   (see `docs/TODO.md` #50).
 
 ## Business & contact
 

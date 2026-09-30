@@ -319,6 +319,48 @@ poseidon / snip36-execution / MIGRATION / deadlock-review / RFP 对齐等）
   回归：poker_protocol 66（+用户置换语义/非双射拒绝 2 例）、texas 114
   全绿。
 
+- [ ] **50. 批量上链 rollup 程序（op-batcher 形态）（2026-10-01 立项）**：
+  立项依据 = 2026-09-30 业界调研（StarkEx/SHARP、OP Stack、Arbitrum、
+  zkSync、Polygon zkEVM、Linea、Scroll 七体系的批量提交器形态比对）：
+  共性结论是独立 crate + 持久化队列（先落库再发交易、重启对账续投）+
+  专门交易管理层（nonce 保序/加价重发/失败熔断）+ cadence 攒批节奏 +
+  监控最小集（pending 数/最老年龄/in-flight/余额）+ 手动逃生口；
+  调研结论另确认现状短板——结算+calldata+提交内嵌 texas、
+  `prove_log.rs` 只是结算输入雏形、出证（prove-batch.sh 手动）与上链
+  之间无常驻组件。
+  **poker 侧三子项（2026-10-01 骨架已落地）**：
+  ① `settle-queue/`——结算任务持久化投递队列（正式状态表）：单手键
+  `(table_id, hand_id)` 去重 + `SettleRoute{Legacy,Dual}` 判别绑
+  `STARKNET_SETTLEMENT_MODE`（texas config.rs:136-149；DAPV_SETTLE_ENTRY
+  只作 Dual 路内入口参数）+ 投递状态机（Enqueued→Picked→Submitted→
+  Receipted|DeadLetter，Dual→Legacy 单向降级迁移）+ 单写者文件归属协议
+  （texas 独写 queue WAL / poster 独写 sidecar，DeadLetter 双源归属）；
+  ② `starknet-txmgr/`——Starknet 交易管理层（参照 op-service/txmgr +
+  zkSync eth_tx_manager）：`StarknetSend` 注入接缝（生产实现包 texas
+  已依赖的 starknet 0.17 Provider，测试内存 mock）、nonce 租约与链上
+  推断、每轮只推进第一笔保序、v3 资源上限与 RBF 加价重发、在途交易表
+  （SendState 多 gas 变体）、wait_call_visible（吸收 submit.rs
+  wait_register_visible 语义）、幂等重放分类（is_register_replay/
+  is_settle_replay 文案匹配）、有界重试 + 失败熔断（fail-closed）；
+  ③ `batch-poster/`——常驻批量上链 daemon（参照 op-batcher +
+  Arbitrum batch_poster）：Legacy 两笔 / Dual 双笔 / 降级驱动契约、fold
+  攒批（K≤64 且 2 的幂、batch_key=keccak_root 批级幂等键、
+  ProofSource 出证含 prove-batch.sh 两阶段腿包装与 program_hash 钉扎
+  对拍、MonadProofEnvelope 工件落盘 `TEXAS_MONAD_SPOOL_DIR`）、status
+  JSON 端点 + 手动 drain 逃生口。
+  待办（本项剩余）：texas 侧接线——入队源接 `prove_log::take_settle_input`
+  （消除 hooks.rs 进程内 PENDING_SETTLE/SETTLE_OK/SETTLE_ATTEMPTS 的
+  重启即丢）、submit_settlement/submit_dual_settlement 发送面换走
+  txmgr（calldata 构建不动）、settle_receipt 读 sidecar 回填。
+  **zchain 侧四子项（对端，另仓落地）**：SettleDispatcher trait 族
+  （settlement-adapter；其 SettleDispatchTask 键域带 `"settle:"` 前缀，
+  幂等键 = 本侧 batch_key/keccak_root）、`--mode settle` 常驻模式
+  （monad_settlementd，经 `--settle-inbox` 拾取 TEXAS_MONAD_SPOOL_DIR
+  工件）、EvmTxManager（L1 发送面）、FactQueue（zchain 自家 L1 proof
+  分块 fact 通道：Spooled→ChunkSent→ChunkConfirmed→Finalized，幂等键为
+  裸 fact hash——不消费 Monad 工件，勿与 settle 通道混同）。
+  （调研文件暂未入库——入库后补注出处。）
+
 ## 三、结算隐私（实机项——2026-09-11 用户确认完成）
 
 - [x] 一笔真实零明文结算联调（原 #11 剩余；2026-09-11 用户实机对局完成）。
