@@ -458,6 +458,29 @@ async fn snip36_settle_flow(
 
     // 2. 异步出证（阻塞调用移入 spawn_blocking；hand_binding = 注册值）。
     let binding = super::dual_settle::prepare_handbatch_binding(&mirror, &settlement);
+    // combined 入口（STARKNET_DAPV_SETTLE_ENTRY=combined）的 P 任务，产源
+    // 与上方 materials 同源：每手一个 action-sig 批次 payload（与 snip36
+    // 递归信封 prove_batch_blocking 同一构造）。构造失败/无材料 = 空集：
+    // combined 腿诚实跳过（不出无 P 语句的退化证明），结算走既有回退。
+    let combined_tasks = match &binding {
+        Ok(b) if !materials.is_empty() => {
+            match super::settlement_prover::CombinedTask::from_materials(
+                input.table_id,
+                settlement.hand_id,
+                b.hand_binding,
+                &materials,
+            ) {
+                Ok(tasks) => tasks,
+                Err(e) => {
+                    tracing::warn!(
+                        "[combined] table {table_id} hand {hand_id}: P task build failed: {e} — combined leg skipped"
+                    );
+                    Vec::new()
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
     let prove_result = if materials.is_empty() {
         Err("no signed actions — proving skipped".to_string())
     } else {
@@ -507,12 +530,13 @@ async fn snip36_settle_flow(
         }
     }
 
-    // 3. 保底：对账已通过的 settlement 经 dual 线性入口上链
-    //    （register_hand + verify_and_settle_dapv_stark）。
-    submit_dual_fallback(table_id, &mirror, &settlement).await;
+    // 3. 保底：对账已通过的 settlement 经 dual 入口上链——entry=combined 时
+    //    submit_dual_settlement 会先试合并信封证明腿（16 词段 + 单 fact），
+    //    失败照旧回退线性（register_hand + verify_and_settle_dapv_stark）。
+    submit_dual_fallback(table_id, &mirror, &settlement, combined_tasks).await;
 }
 
-/// 结算保底腿：dual 线性结算（无证明依赖）。
+/// 结算保底腿：dual 结算（combined 证明腿 + 线性兜底）。
 ///
 /// 2026-09-07 起 legacy PokerSettlement（0x76a0b49a）在链上是 2026-08-31
 /// 的 4 参 `settle_hand` ABI（#18 Phase B 只改了源码未重部署），且构造时
@@ -525,6 +549,7 @@ async fn submit_dual_fallback(
     table_id: u32,
     mirror: &super::vm_session::VmTable,
     settlement: &super::submit::HandSettlement,
+    combined_tasks: Vec<super::settlement_prover::CombinedTask>,
 ) {
     let Some(chain) = super::chain() else { return };
     let dual_addr = chain.config.dual_settlement_address.clone();
@@ -569,6 +594,7 @@ async fn submit_dual_fallback(
         &settlement.players_remapped,
         &settlement.deltas,
         &departed,
+        &combined_tasks,
     )
     .await
     {

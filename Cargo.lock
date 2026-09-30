@@ -1687,6 +1687,7 @@ dependencies = [
  "bincode",
  "num-bigint",
  "poker-protocol-core",
+ "proptest",
  "serde_json",
  "starknet-crypto 0.8.1",
  "starknet-curve 0.6.0",

@@ -3,6 +3,8 @@
 //! 所有地址留空时进入 dev 模式（跳过链上校验/提交，仅记账 + 生成 calldata），
 //! 保证本地无 RPC 也能跑完整牌局流程。
 
+use starknet_crypto::Felt;
+
 /// 1 STRK = 10^18 wei，1 STRK = 1000 chips → 1 chip = 10^15 wei。
 /// pSTRK/swap 已下线，筹码直接锚定原生 STRK。
 pub const WEI_PER_CHIP: u128 = 1_000_000_000_000_000;
@@ -65,8 +67,22 @@ pub struct StarknetConfig {
     /// ——hand_verify + stark verify 双 fact 认证（P2-M4，dual v4）；
     /// `snip36` = `verify_and_settle_dapv_stark_private_v3`——SNIP-36
     /// proof_facts 优先 + fact-registry 降级双门（**合约侧随 cairo ≥2.12
-    /// 迁移上链后生效**，选中现网会 revert，属预期）。未知值一律回退 v2。
+    /// 迁移上链后生效**，选中现网会 revert，属预期）；`combined` =
+    /// `verify_and_settle_dapv_combined_private`——P 层 + settlement 合并
+    /// 信封（combined.cairo 一次出证），16 词公开段（v2 段前置 chain_acc）、
+    /// 单 fact 门 `fact = poseidon([combined_program_hash ‖ 段16])`。
+    /// 未知值一律回退 v2。
     pub dapv_settle_entry: String,
+    /// combined 入口的程序哈希（`STARKNET_COMBINED_PROGRAM_HASH`，hex，
+    /// 默认空）。空 = 读链上 `combined_program_hash` 视图（owner 经
+    /// `set_combined_program_hash` 钉扎）；非空时优先（fact 计算与哈希
+    /// 一致性校验的本地真源）。
+    pub combined_program_hash: String,
+    /// hand-verify-native 可执行路径（`STARKNET_COMBINED_NATIVE_BIN`，
+    /// 默认空 = 自动发现：仓根 target/release/hand-verify-native，
+    /// 见 settlement_prover::discover_combined_native_bin）。空且发现
+    /// 失败 → combined 证明腿报错回退，不阻塞结算。
+    pub combined_native_bin: String,
     /// 外部 batch-prover 服务端点（`STARKNET_PROVER_URL`）。proved 模式的
     /// attestation 来源；服务器只提交 workload、接收 attestation，绝不
     /// 进程内跑 prover。当前 HTTP 客户端为存根（必然报错 → 回退 linear），
@@ -135,6 +151,9 @@ impl StarknetConfig {
                 &std::env::var("STARKNET_SETTLE_MODE").unwrap_or_default(),
             ),
             dapv_settle_entry: std::env::var("STARKNET_DAPV_SETTLE_ENTRY").unwrap_or_default(),
+            combined_program_hash: std::env::var("STARKNET_COMBINED_PROGRAM_HASH")
+                .unwrap_or_default(),
+            combined_native_bin: std::env::var("STARKNET_COMBINED_NATIVE_BIN").unwrap_or_default(),
             prover_url: std::env::var("STARKNET_PROVER_URL")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
@@ -200,8 +219,19 @@ impl StarknetConfig {
         match self.dapv_settle_entry.trim() {
             "proved_private" => "proved_private",
             "snip36" => "snip36",
+            "combined" => "combined",
             _ => "v2",
         }
+    }
+
+    /// combined 入口程序哈希（felt 形态；空/非法 hex → None，调用方回退
+    /// 链上 `combined_program_hash` 视图）。
+    pub fn combined_program_hash_felt(&self) -> Option<Felt> {
+        let t = self.combined_program_hash.trim();
+        if t.is_empty() {
+            return None;
+        }
+        Felt::from_hex(t.trim_start_matches("0x").trim_start_matches("0X")).ok()
     }
 
     /// 结算上链是否可用（需要 RPC + settlement 合约 + 操作员密钥）。

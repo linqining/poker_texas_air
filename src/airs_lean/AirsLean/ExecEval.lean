@@ -379,21 +379,45 @@ theorem fund_move_eval_sound {preStack postStack preBet postBet preTB postTB amo
     {sc bc tc : AddCarry} {w : FundMoveBits}
     (h : ∀ r ∈ fundMoveEval preStack postStack preBet postBet preTB postTB amount sc bc tc w,
       r = 0) : FundMoveSat preStack postStack preBet postBet preTB postTB amount sc bc tc := by
-  have lift : ∀ (p : List M31), p ∈ fundMovePieces preStack postStack preBet postBet preTB postTB amount sc bc tc w → ∀ r : M31, r ∈ p →
-      r ∈ fundMoveEval preStack postStack preBet postBet preTB postTB amount sc bc tc w := by
-    intro p hp r hr
-    exact mem_foldr_append (fundMovePieces preStack postStack preBet postBet preTB postTB amount sc bc tc w) [] p hp hr
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
-  · exact limbsRes_sound (fun r hr => h r (lift _ (List.Mem.head _) r hr)))
-  · exact limbsRes_sound (fun r hr => h r (lift _ (List.Mem.tail _ (List.Mem.head _)) r hr)))
-  · exact limbsRes_sound (fun r hr => h r (lift _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _))) r hr)))
-  · exact limbsRes_sound (fun r hr => h r (lift _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _)))) r hr)))
-  · exact limbsRes_sound (fun r hr => h r (lift _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _))))) r hr)))
-  · exact limbsRes_sound (fun r hr => h r (lift _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _)))))) r hr)))
-  · exact limbsRes_sound (fun r hr => h r (lift _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _))))))) r hr)))
-  · exact add_sat_eval_sound (fun r hr => h r (lift _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _)))))))) r hr)))
-  · exact add_sat_eval_sound (fun r hr => h r (lift _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _))))))))) r hr)))
-  · exact add_sat_eval_sound (fun r hr => h r (lift _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _)))))))))) r hr)))
+  -- 把 foldr(·++·) 一次性展开成 10 段成员命题的析取（`List.mem_append` 逐层
+  -- 重写；末段空表消去为 `False`，析取末尾残留的 `∨ False` 不影响
+  -- `Or.inr^k (Or.inl hr)` 注入）。此后各段全部是**语法一致**的成员命题，
+  -- 不触发 `addSatEval`/`limbsRes` 大项的 defeq whnf 展开（那一走就是
+  -- 数百个 cons，会撞心跳上限）。
+  simp only [fundMoveEval, fundMovePieces, List.foldr_cons, List.foldr_nil,
+    List.mem_append, List.not_mem_nil] at h
+  have d1 : InLimbRange preStack := limbsRes_sound fun r hr => h r (Or.inl hr)
+  have d2 : InLimbRange postStack := limbsRes_sound fun r hr => h r (Or.inr (Or.inl hr))
+  have d3 : InLimbRange preBet := limbsRes_sound fun r hr => h r (Or.inr (Or.inr (Or.inl hr)))
+  have d4 : InLimbRange postBet :=
+    limbsRes_sound fun r hr => h r (Or.inr (Or.inr (Or.inr (Or.inl hr))))
+  have d5 : InLimbRange preTB :=
+    limbsRes_sound fun r hr => h r (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hr)))))
+  have d6 : InLimbRange postTB :=
+    limbsRes_sound fun r hr => h r (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hr))))))
+  have d7 : InLimbRange amount :=
+    limbsRes_sound fun r hr =>
+      h r (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hr)))))))
+  have g1 : ∀ r ∈ addResEval postStack amount preStack sc.c0 sc.c1 sc.c2, r = 0 :=
+    fun r hr =>
+      h r (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hr))))))))
+  have g2 : ∀ r ∈ addResEval preBet amount postBet bc.c0 bc.c1 bc.c2, r = 0 :=
+    fun r hr =>
+      h r (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hr)))))))))
+  have g3 : ∀ r ∈ addResEval preTB amount postTB tc.c0 tc.c1 tc.c2, r = 0 :=
+    fun r hr =>
+      h r (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr
+        (Or.inl hr))))))))))
+  obtain ⟨e0, e1, e2, e3, b0, b1, b2⟩ :=
+    (addResEval_zero_iff postStack amount preStack sc.c0 sc.c1 sc.c2).mp g1
+  obtain ⟨f0, f1, f2, f3, u0, u1, u2⟩ :=
+    (addResEval_zero_iff preBet amount postBet bc.c0 bc.c1 bc.c2).mp g2
+  obtain ⟨k0, k1, k2, k3, v0, v1, v2⟩ :=
+    (addResEval_zero_iff preTB amount postTB tc.c0 tc.c1 tc.c2).mp g3
+  exact ⟨d1, d2, d3, d4, d5, d6, d7,
+    ⟨d2, d7, d1, b0, b1, b2, e0, e1, e2, e3⟩,
+    ⟨d3, d7, d4, u0, u1, u2, f0, f1, f2, f3⟩,
+    ⟨d5, d7, d6, v0, v1, v2, k0, k1, k2, k3⟩⟩
 
 /-- **命题 → 可执行**：`FundMoveSat` 成立时，规范 bit witness 下
 `fundMoveEval` 全零。 -/
@@ -403,25 +427,32 @@ theorem fund_move_eval_complete {preStack postStack preBet postBet preTB postTB 
     ∀ r ∈ fundMoveEval preStack postStack preBet postBet preTB postTB amount sc bc tc
       (fundMoveBitsOf preStack postStack preBet postBet preTB postTB amount), r = 0 := by
   obtain ⟨r1, r2, r3, r4, r5, r6, r7, s1, s2, s3⟩ := h
-  have hpc := fundMovePieces preStack postStack preBet postBet preTB postTB amount sc bc tc
-    (fundMoveBitsOf preStack postStack preBet postBet preTB postTB amount)
+  -- 取出三次 AddSat 的方程与 boolean 分量：末三段直接经
+  -- `addResEval_zero_iff.mpr` 以**语法相同**的 `addResEval` 项消去，
+  -- 避开 `addSatEval` 大项的 defeq 展开（`List.append` whnf 需走
+  -- 3×68 个 cons，会在心跳上限内超时）。
+  obtain ⟨_, _, _, ab0, ab1, ab2, ae0, ae1, ae2, ae3⟩ := s1
+  obtain ⟨_, _, _, bb0, bb1, bb2, be0, be1, be2, be3⟩ := s2
+  obtain ⟨_, _, _, cb0, cb1, cb2, ce0, ce1, ce2, ce3⟩ := s3
   intro r hr
-  have hr' : r ∈ (fundMovePieces preStack postStack preBet postBet preTB postTB amount sc bc tc
-      (fundMoveBitsOf preStack postStack preBet postBet preTB postTB amount)).foldr (· ++ ·) [] := hr
-  obtain ⟨hinit | ⟨p, hp, hrp⟩⟩ := foldr_mem_cases _ [] hr'
-  · exact absurd hinit (by simp [fundMovePieces])
-  rcases hp with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | (rfl | hnil)
-  · exact limbsRes_complete r1 r hrp
-  · exact limbsRes_complete r2 r hrp
-  · exact limbsRes_complete r3 r hrp
-  · exact limbsRes_complete r4 r hrp
-  · exact limbsRes_complete r5 r hrp
-  · exact limbsRes_complete r6 r hrp
-  · exact limbsRes_complete r7 r hrp
-  · exact add_sat_eval_complete s1 r hrp
-  · exact add_sat_eval_complete s2 r hrp
-  · exact add_sat_eval_complete s3 r hrp
-  · exact absurd hnil (by simp)
+  -- 与 sound 侧同一展开：foldr(·++·) → 10 段成员命题的析取，逐段消去。
+  simp only [fundMoveEval, fundMovePieces, List.foldr_cons, List.foldr_nil,
+    List.mem_append, List.not_mem_nil] at hr
+  rcases hr with h1 | h1 | h1 | h1 | h1 | h1 | h1 | h1 | h1 | (h1 | hF)
+  · exact limbsRes_complete r1 r h1
+  · exact limbsRes_complete r2 r h1
+  · exact limbsRes_complete r3 r h1
+  · exact limbsRes_complete r4 r h1
+  · exact limbsRes_complete r5 r h1
+  · exact limbsRes_complete r6 r h1
+  · exact limbsRes_complete r7 r h1
+  · exact (addResEval_zero_iff postStack amount preStack sc.c0 sc.c1 sc.c2).mpr
+      ⟨ae0, ae1, ae2, ae3, ab0, ab1, ab2⟩ r h1
+  · exact (addResEval_zero_iff preBet amount postBet bc.c0 bc.c1 bc.c2).mpr
+      ⟨be0, be1, be2, be3, bb0, bb1, bb2⟩ r h1
+  · exact (addResEval_zero_iff preTB amount postTB tc.c0 tc.c1 tc.c2).mpr
+      ⟨ce0, ce1, ce2, ce3, cb0, cb1, cb2⟩ r h1
+  · exact hF.elim
 
 /-- **Phase 3 主桥**：可执行求值全零 ⇒ u64 资金守恒。
 stwo_lean 主循环（`verifyMain`）接受的证明，其组件约束商项消没的

@@ -213,6 +213,24 @@ pub trait IPokerDualSettlement<TContractState> {
         p_batch_commitment: felt252,
         p_batch_len: u32,
     );
+    /// 合并信封（2026-09-29）：**一份** Stwo 证明同时覆盖 P 层（hand_verify
+    /// σ 批量校验，EC_OP 进 trace）与 settlement_private 语句，公开段
+    /// 16 词 = `[chain_acc, MAGIC, hand_id, digest, n, binding, cm_0..cm_7,
+    /// total_winnings, action_log_digest]`（v2 15 词段前置 chain_acc）。
+    /// 单 fact 门：`fact = poseidon([combined_program_hash ++ segment])`——
+    /// 电路内已断言每条 P 任务的 hand_binding == settle 段 binding，故单
+    /// fact 即同时锚定「这手的签名验证」与「这手的结算语句」。派奖/幂等/
+    /// 事件与 v2 一致；chain_acc 仅随事件 emit（PCD 链尾锚，供第三方复验）。
+    fn verify_and_settle_dapv_combined_private(
+        ref self: TContractState,
+        hand_binding: felt252,
+        hand_id: u64,
+        segment: Span<felt252>,
+    );
+    /// Owner-gated：钉死合并信封程序的 program hash（fact 绑定根）。
+    fn set_combined_program_hash(ref self: TContractState, program_hash: felt252);
+    /// View：钉死的合并信封 program hash。
+    fn combined_program_hash(self: @TContractState) -> felt252;
     /// View: 该手是否为 v2（金额藏在 cm 中，consume_claim 走隐藏模式）。
     fn amounts_hidden(self: @TContractState, hand_binding: felt252) -> bool;
     /// Owner-gated: set the claim escrow helper that receives the winners'
@@ -255,6 +273,8 @@ pub mod PokerDualSettlement {
     // #18 Phase B：段长 14 → 15（尾词 = 动作日志哈希，对注册承诺比对）。
     const SETTLEMENT_SEGMENT_MAGIC: felt252 = 0x5350324d5f4f4b;
     const SETTLEMENT_SEGMENT_LEN: usize = 15;
+    /// 合并信封公开段：v2 15 词前置 chain_acc（fact 消费整段 16 词）。
+    const COMBINED_SEGMENT_LEN: usize = 16;
 
     /// SNIP-36 proof_facts 布局常量（对齐 starknet-privacy 参考实现的
     /// ProofFacts 序列化与 sequencer `starknet_proof_verifier` 0.14.3 回归
@@ -530,6 +550,8 @@ fn dapv_prelude(
         p_batch_lens: Map<felt252, u32>,
         /// hand_verify（hand_batch σ 批量校验 STARK）的 program hash。
         hand_verify_program_hash: felt252,
+        /// 合并信封（P 层 + settlement 一份证明）的 program hash。
+        combined_program_hash: felt252,
         /// #18 Phase B：注册时钉住的每手动作日志承诺
         /// （v2 公开段尾词必须逐 felt 等于该值）。
         action_logs: Map<felt252, felt252>,
@@ -552,6 +574,7 @@ fn dapv_prelude(
         DualProofSettledPrivateV2: DualProofSettledPrivateV2,
         DualProofSettledProvedPrivate: DualProofSettledProvedPrivate,
         DualProofSettledSnip36: DualProofSettledSnip36,
+        DualProofSettledCombined: DualProofSettledCombined,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -593,6 +616,16 @@ fn dapv_prelude(
         settlement_digest: felt252,
         participant_count: u32,
         p_batch_commitment: felt252,
+        total_winnings: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct DualProofSettledCombined {
+        hand_binding: felt252,
+        settlement_digest: felt252,
+        participant_count: u32,
+        /// 合并信封公开输出的累计承诺链值（PCD 链尾锚，第三方复验入口）。
+        chain_acc: felt252,
         total_winnings: u256,
     }
 
@@ -1250,6 +1283,83 @@ fn dapv_prelude(
                 },
             );
         }
+
+        fn set_combined_program_hash(ref self: ContractState, program_hash: felt252) {
+            self.ownable.assert_only_owner();
+            assert!(program_hash != 0, "Zero program hash");
+            self.combined_program_hash.write(program_hash);
+        }
+
+        fn combined_program_hash(self: @ContractState) -> felt252 {
+            self.combined_program_hash.read()
+        }
+
+        /// 合并信封私密结算：16 词公开段（v2 段前置 chain_acc）+ 单 fact 门。
+        /// 字段校验与 v2 逐项对齐（索引 +1）；chain_acc 随事件 emit。
+        fn verify_and_settle_dapv_combined_private(
+            ref self: ContractState,
+            hand_binding: felt252,
+            hand_id: u64,
+            segment: Span<felt252>,
+        ) {
+            assert!(hand_binding != 0, "Zero binding");
+            assert!(
+                !self.settled_bindings.read(hand_binding),
+                "Hand already settled"
+            );
+            assert!(
+                segment.len() == COMBINED_SEGMENT_LEN,
+                "Segment length mismatch"
+            );
+            assert!(
+                *segment.at(1) == SETTLEMENT_SEGMENT_MAGIC,
+                "Segment magic mismatch"
+            );
+            assert!(*segment.at(2) == hand_id.into(), "Segment hand_id mismatch");
+            assert!(*segment.at(5) == hand_binding, "Segment binding mismatch");
+            let n: u32 = (*segment.at(4)).try_into().expect('n fits u32');
+            assert!(n >= 2_u32 && n <= 8_u32, "Participant count out of range");
+            let registered_digest = read_registered_digest(@self, hand_binding);
+            assert!(*segment.at(3) == registered_digest, "Segment digest mismatch");
+            assert!(
+                *segment.at(15) == self.action_logs.read(hand_binding),
+                "Segment action log mismatch"
+            );
+            // 单 fact 门：合并证明（P 层 + settlement）锚定整段 16 词。
+            let program_hash = self.combined_program_hash.read();
+            assert!(program_hash != 0, "Combined program hash not set");
+            let fact = fact_for_segment(program_hash, segment);
+            assert!(
+                self.settlement_facts.read(fact),
+                "Settlement fact not registered"
+            );
+            let chain_acc = *segment.at(0);
+
+            let total_u128: u128 = (*segment.at(14)).try_into().expect('total fits u128');
+            let total_winnings: u256 = total_u128.into();
+            assert!(total_winnings > 0_u256, "No winnings to escrow");
+            let vault_addr = self.vault_address.read();
+            let helper = self.claim_helper.read();
+            assert!(!helper.is_zero(), "Claim helper not set");
+            let vault = super::IVaultDispatcherDispatcher { contract_address: vault_addr };
+            vault.settlement_fund_escrow(helper, hand_binding, total_winnings);
+            let mut i: u32 = 0;
+            while i < 8_u32 {
+                self.claim_cms.write((hand_binding, i), *segment.at(6 + i));
+                i += 1;
+            }
+            self.amounts_hidden.write(hand_binding, true);
+            self.settled_bindings.write(hand_binding, true);
+            self.emit(
+                DualProofSettledCombined {
+                    hand_binding,
+                    settlement_digest: registered_digest,
+                    participant_count: n,
+                    chain_acc,
+                    total_winnings,
+                },
+            );
+        }
     }
 }
 
@@ -1481,6 +1591,149 @@ mod settlement_private_v2_tests {
             .verify_and_settle_dapv_stark_private_v2(s.hand_binding, 42, s.segment.span());
         s.dual
             .verify_and_settle_dapv_stark_private_v2(s.hand_binding, 42, s.segment.span());
+    }
+}
+
+// ============================================================
+// Tests (snforge): 合并信封结算——单 fact 门消费 16 词公开段
+// （v2 段前置 chain_acc），派奖/幂等与 v2 一致。
+// ============================================================
+
+#[cfg(test)]
+mod settlement_combined_private_tests {
+    use core::hash::HashStateTrait;
+    use core::poseidon::PoseidonTrait;
+    use starknet::{ContractAddress, get_contract_address};
+    use snforge_std::{ContractClassTrait, DeclareResultTrait, declare};
+    use super::mock_vault::IMockVaultDispatcherTrait;
+    use super::mock_vault::IMockVaultDispatcher;
+    use super::{
+        IPokerDualSettlement, IPokerDualSettlementDispatcher,
+        IPokerDualSettlementDispatcherTrait,
+    };
+
+    const COMBINED_HASH: felt252 = 0xC0FFEE;
+    const MAGIC: felt252 = 0x5350324d5f4f4b;
+
+    fn deploy_contract(name: ByteArray, calldata: @Array<felt252>) -> ContractAddress {
+        let class = declare(name).unwrap().contract_class();
+        let (address, _) = class.deploy(calldata).unwrap();
+        address
+    }
+
+    #[derive(Drop)]
+    struct Setup {
+        dual: IPokerDualSettlementDispatcher,
+        vault: IMockVaultDispatcher,
+        hand_binding: felt252,
+        segment: Array<felt252>,
+        total: felt252,
+        chain_acc: felt252,
+    }
+
+    fn setup(with_fact: bool) -> Setup {
+        let test_addr = get_contract_address();
+        let vault = deploy_contract("MockVault", @array![]);
+        let dual_addr = deploy_contract(
+            "PokerDualSettlement",
+            @array![test_addr.into(), vault.into(), test_addr.into()],
+        );
+        let dual = IPokerDualSettlementDispatcher { contract_address: dual_addr };
+        dual.set_claim_helper(test_addr);
+        dual.set_circuit_program_hash(0x1111);
+        dual.set_combined_program_hash(COMBINED_HASH);
+
+        let hand_binding: felt252 = 0xDDDD;
+        let hand_id: u64 = 42;
+        let digest: felt252 = 0x9900;
+        let action_log: felt252 = 0xA11CE;
+        dual.register_hand(hand_binding, digest, 0, action_log, 0, 0, 0);
+
+        // 16 词合并段 = [chain_acc] ++ 15 词 v2 段（赢家 seat0 +3000）。
+        let chain_acc: felt252 = 0xACCE55;
+        let mut segment = array![chain_acc, MAGIC, hand_id.into(), digest, 3, hand_binding];
+        // cm0 = poseidon([0x21, binding, 3000, 0])，其余 0。
+        let mut ch = PoseidonTrait::new();
+        ch = ch.update(0x21);
+        ch = ch.update(hand_binding);
+        ch = ch.update(3000);
+        ch = ch.update(0);
+        let cm0 = ch.finalize();
+        segment.append(cm0);
+        let mut w: u32 = 0;
+        while w < 7_u32 {
+            segment.append(0);
+            w += 1;
+        }
+        segment.append(3000);
+        segment.append(action_log);
+
+        if with_fact {
+            let mut f = PoseidonTrait::new();
+            f = f.update(COMBINED_HASH);
+            let mut w: u32 = 0;
+            while w < segment.len() {
+                f = f.update(*segment.at(w));
+                w += 1;
+            }
+            dual.register_settlement_fact(f.finalize());
+        }
+
+        Setup { dual, vault: IMockVaultDispatcher { contract_address: vault }, hand_binding, segment, total: 3000, chain_acc }
+    }
+
+    #[test]
+    fn combined_honest_segment_settles_with_single_fact() {
+        let s = setup(true);
+        assert!(s.dual.combined_program_hash() == COMBINED_HASH, "hash view");
+        s.dual
+            .verify_and_settle_dapv_combined_private(s.hand_binding, 42, s.segment.span());
+        assert!(s.dual.hand_settled(s.hand_binding), "hand must be settled");
+        let mut ch = PoseidonTrait::new();
+        ch = ch.update(0x21);
+        ch = ch.update(s.hand_binding);
+        ch = ch.update(3000);
+        ch = ch.update(0);
+        assert!(s.dual.claim_cm(s.hand_binding, 0) == ch.finalize(), "cm0 from segment");
+        assert!(s.dual.claim_cm(s.hand_binding, 1) == 0, "non-winner cm zero");
+        let total_u256: u256 = s.total.into();
+        assert!(
+            s.vault.escrowed_for(s.hand_binding) == total_u256,
+            "escrow equals total_winnings"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected: "Settlement fact not registered")]
+    fn combined_missing_fact_reverts() {
+        let s = setup(false);
+        s.dual
+            .verify_and_settle_dapv_combined_private(s.hand_binding, 42, s.segment.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Segment length mismatch")]
+    fn combined_wrong_length_reverts() {
+        let s = setup(true);
+        // 15 词段（v2 形态）必须被拒绝——合并入口只吃 16 词。
+        let mut short = array![];
+        let mut w: u32 = 1;
+        while w < s.segment.len() {
+            short.append(*s.segment.at(w));
+            w += 1;
+        }
+        s.dual
+            .verify_and_settle_dapv_combined_private(s.hand_binding, 42, short.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Hand already settled")]
+    fn combined_replay_reverts() {
+        let s = setup(true);
+        s.dual
+            .verify_and_settle_dapv_combined_private(s.hand_binding, 42, s.segment.span());
+        s.dual
+            .verify_and_settle_dapv_combined_private(s.hand_binding, 42, s.segment.span());
     }
 }
 

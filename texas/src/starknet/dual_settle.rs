@@ -1114,10 +1114,16 @@ async fn winners_registered(players_remapped: &[Felt], deltas: &[i128]) -> bool 
 /// - `snip36`：`verify_and_settle_dapv_stark_private_v3`——SNIP-36
 ///   proof_facts 优先 + fact-registry 降级双门，calldata 与 v2 同形
 ///   （**合约侧随 cairo ≥2.12 迁移上链后生效**，见
-///   docs/design/SNIP36_INTEGRATION.md §4；选中未上链的入口会 revert）。
+///   docs/design/SNIP36_INTEGRATION.md §4；选中未上链的入口会 revert）；
+/// - `combined`：`verify_and_settle_dapv_combined_private`——P 层 + settlement
+///   合并信封（combined.cairo 一次出证），calldata `[hand_binding, hand_id,
+///   segment(16)]`（v2 段前置 chain_acc，**必须来自 prove_combined 的公开
+///   输出**，不可本地拼装——chain_acc 是证明内折叠值），单 fact 门
+///   `fact = poseidon([combined_program_hash ‖ 段16])`（合约
+///   `fact_for_segment` 同式）。
 ///
-/// 三个入口共用 register_hand_proved 注册（bindings/action_logs 同写）与
-/// 同一公开段；差异只在 fact 消费方式与 calldata 尾部。
+/// 各入口共用 register_hand_proved 注册（bindings/action_logs 同写）；差异在
+/// fact 消费方式与 calldata 形状。
 pub fn settle_entry_calldata(
     entry: &str,
     hand_binding: Felt,
@@ -1139,6 +1145,9 @@ pub fn settle_entry_calldata(
             ("verify_and_settle_dapv_proved_private", calldata)
         }
         "snip36" => ("verify_and_settle_dapv_stark_private_v3", calldata),
+        // combined：segment 为 16 词公开输出（[chain_acc] ++ v2 段），由
+        // prove_combined 结果传入（长度由合约 COMBINED_SEGMENT_LEN 再门）。
+        "combined" => ("verify_and_settle_dapv_combined_private", calldata),
         // "v2" 与任何未知值：默认稳定入口（回退保证）
         _ => ("verify_and_settle_dapv_stark_private_v2", calldata),
     }
@@ -1268,6 +1277,53 @@ async fn local_register_settlement_fact(
         .first()
         .ok_or("empty circuit_program_hash return")?;
     let fact = Felt::from_bytes_be(&req.settlement_fact(program_hash.to_bytes_be())?);
+    register_settlement_fact_tx(&chain, dual_addr, fact).await
+}
+
+/// combined 腿的 fact 登记：程序哈希取 config
+/// （`STARKNET_COMBINED_PROGRAM_HASH`）> 链上 `combined_program_hash` 视图；
+/// 与证明公开的 program_hash 不一致（Cairo 源漂移）→ Err（fail-closed，
+/// 不登记错 fact）。combined 的证明由 operator 自己 spawn 的子进程出具，
+/// 所以 operator 直登 fact 与 v2 的 dev-local 语义一致（生产 remote v2 才
+/// 依赖外部 prover 登记）。
+async fn local_register_combined_settlement_fact(
+    output: &super::settlement_prover::CombinedProofOutput,
+) -> Result<String, String> {
+    let chain = super::chain().ok_or("starknet chain not initialized")?;
+    let dual_addr = super::chain::parse_felt(&chain.config.dual_settlement_address)
+        .ok_or("invalid dual settlement contract address")?;
+    let program_hash = match chain.config.combined_program_hash_felt() {
+        Some(ph) => ph,
+        None => *chain
+            .call_contract(
+                dual_addr,
+                super::chain::selector("combined_program_hash"),
+                vec![],
+            )
+            .await?
+            .first()
+            .ok_or("empty combined_program_hash return")?,
+    };
+    if program_hash == Felt::ZERO {
+        return Err("combined program hash not set (owner set_combined_program_hash)".into());
+    }
+    if output.program_hash != program_hash {
+        return Err(format!(
+            "combined proof program hash {:#x} != pinned {:#x} (cairo source drift)",
+            output.program_hash, program_hash
+        ));
+    }
+    let fact = Felt::from_bytes_be(&output.settlement_fact(program_hash));
+    register_settlement_fact_tx(&chain, dual_addr, fact).await
+}
+
+/// `register_settlement_fact` 的 operator 直登核心（v2 dev-local 与
+/// combined 腿共用）。
+async fn register_settlement_fact_tx(
+    chain: &super::StarknetChain,
+    dual_addr: Felt,
+    fact: Felt,
+) -> Result<String, String> {
     let operator = chain.operator().await.ok_or("operator account unavailable")?;
     let result = operator
         .execute_v3(vec![Call {
@@ -1281,12 +1337,97 @@ async fn local_register_settlement_fact(
     Ok(format!("{:#x}", result.transaction_hash))
 }
 
+/// combined 证明腿：读 acc 链状态 → spawn hand-verify-native CLI 出证。
+/// P 任务产源接缝：调用方传入（hooks 从 `action_sig_materials` 构造，见
+/// [`super::settlement_prover::CombinedTask::from_materials`]）；空任务 =
+/// 无已签名动作，诚实跳过（不出无 P 语句的退化证明）。任一步失败返回
+/// Err（调用方回退 linear，结算不阻塞）。
+async fn prove_combined_segment(
+    chain: &super::StarknetChain,
+    req: &super::settlement_prover::SettlementPrivateRequest,
+    dual: &DualSettlement,
+    tasks: &[super::settlement_prover::CombinedTask],
+) -> Result<super::settlement_prover::CombinedProofOutput, String> {
+    if tasks.is_empty() {
+        return Err(
+            "no P tasks (no signed actions / payload build failed) — combined proof skipped"
+                .into(),
+        );
+    }
+    let prover = super::settlement_prover::HttpSettlementProver::new(None);
+    let out_dir = std::path::Path::new(&chain.config.prover_work_dir)
+        .join(format!("hand-{}-combined", dual.hand_id));
+    let prev_acc = read_combined_acc()?;
+    prover
+        .prove_combined(
+            tasks,
+            req,
+            prev_acc,
+            &out_dir,
+            &chain.config.combined_native_bin,
+        )
+        .await
+}
+
+/// combined acc 链状态文件（env `STARKNET_COMBINED_ACC_STATE`，默认
+/// `data/combined_acc.txt`，相对 cwd）。文件不存在 = GENESIS（Felt::ZERO）；
+/// 内容为单行 hex。链状态是 operator 侧不变量（合约只 emit chain_acc、
+/// 不校验连续性）——读失败 fail-closed（combined 腿放弃回退），写失败
+/// 告警（下一手需人工对账恢复，见 [`write_combined_acc`]）。
+fn combined_acc_state_path() -> std::path::PathBuf {
+    std::env::var("STARKNET_COMBINED_ACC_STATE")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("data/combined_acc.txt"))
+}
+
+fn read_combined_acc() -> Result<Felt, String> {
+    read_combined_acc_at(&combined_acc_state_path())
+}
+
+fn read_combined_acc_at(path: &std::path::Path) -> Result<Felt, String> {
+    if !path.exists() {
+        return Ok(Felt::ZERO); // GENESIS（hand-verify-native GENESIS_ACC 同值）
+    }
+    let raw =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let t = raw.trim().trim_start_matches("0x").trim_start_matches("0X");
+    if t.is_empty() {
+        return Err(format!("combined acc state {} is empty (corrupt)", path.display()));
+    }
+    Felt::from_hex(t).map_err(|e| {
+        format!(
+            "combined acc state {} not a felt hex ({e:?}) — manual reconciliation required",
+            path.display()
+        )
+    })
+}
+
+/// 原子写（临时文件 + rename，同目录同文件系统）：并发读者只会看到旧值或
+/// 新值，不会看到半行。
+fn write_combined_acc(acc: Felt) -> Result<(), String> {
+    write_combined_acc_at(&combined_acc_state_path(), acc)
+}
+
+fn write_combined_acc_at(path: &std::path::Path, acc: Felt) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, format!("0x{acc:x}\n"))
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        format!("rename {} → {}: {e}", tmp.display(), path.display())
+    })
+}
+
 pub async fn submit_dual_settlement(
     dual: &DualSettlement,
     dual_address: &str,
     players_remapped: &[Felt],
     deltas: &[i128],
     departed: &[String],
+    combined_tasks: &[super::settlement_prover::CombinedTask],
 ) -> Result<(String, String), String> {
     let chain = super::chain().ok_or("starknet chain not initialized")?;
     let contract = super::chain::parse_felt(dual_address)
@@ -1297,8 +1438,15 @@ pub async fn submit_dual_settlement(
     // entry=snip36：证明源 = create_proof 交易的虚拟 SNOS 证明（自托管
     // prover），不依赖 settlement_private 电路 prover/batch attestation——
     // 只要隐私公开段就绪（全体赢家 payout commitment 齐备）即具备提交条件。
+    // entry=combined：证明源 = operator spawn 的 hand-verify-native 合并
+    // 信封（combined.cairo，一次 Cairo 执行覆盖 P 层 + settlement）——
+    // 16 词公开段只能来自证明输出，证明失败/无 P 任务即回退 linear。
     let snip36_engaged = chain.config.dapv_settle_entry() == "snip36";
-    let mode = if chain.config.settle_mode == SettleMode::Proved || snip36_engaged {
+    let combined_engaged = chain.config.dapv_settle_entry() == "combined";
+    let mode = if chain.config.settle_mode == SettleMode::Proved
+        || snip36_engaged
+        || combined_engaged
+    {
         export_prover_workload(dual, std::path::Path::new(&chain.config.prover_work_dir));
         // prover 走向开关（shadow::prover_mode）：dev 本地模式在进程内
         // 校验并出具 attestation（fact 由 operator 直登），生产 remote
@@ -1309,14 +1457,18 @@ pub async fn submit_dual_settlement(
         // best-effort：任何失败只告警，绝不阻塞结算（与 batch prover 同语义）。
         // P2-M4/M3：请求成功时构建公开段（15 felt），按
         // STARKNET_DAPV_SETTLE_ENTRY 选择 settle 入口（v2 默认 / proved_private）。
+        // entry=combined：v2 段不直接上链——只作为 prove_combined 的 settle
+        // 语句真源，上链段 = 证明公开输出（[chain_acc] ++ v2 段）。
         let mut proved_settle: Option<(&'static str, Vec<Felt>)> = None;
+        let mut combined_output: Option<super::settlement_prover::CombinedProofOutput> = None;
         {
             // 本地模式无外部电路 prover：url 置空（configured=false），
             // 下面以 local_prover 为总门进段构建 + fact 直登。
             let settlement_prover = super::settlement_prover::HttpSettlementProver::new(
                 if local_prover { None } else { chain.config.prover_url.clone() },
             );
-            if local_prover || settlement_prover.configured() || snip36_engaged {
+            if local_prover || settlement_prover.configured() || snip36_engaged || combined_engaged
+            {
                 match super::settlement_prover::prepare_request(
                     dual.hand_id,
                     dual.hand_binding,
@@ -1332,21 +1484,66 @@ pub async fn submit_dual_settlement(
                             &req,
                             std::path::Path::new(&chain.config.prover_work_dir),
                         );
-                        let segment = req.public_segment_felts();
-                        let (selector, calldata) = settle_entry_calldata(
-                            chain.config.dapv_settle_entry(),
-                            dual.hand_binding,
-                            dual.hand_id,
-                            &segment,
-                            dual.proved.p_batch_commitment,
-                            dual.proved.p_batch_len,
-                        );
-                        tracing::info!(
-                            "[dapv] settle entry = {selector} (segment {} felts)",
-                            segment.len()
-                        );
-                        proved_settle = Some((selector, calldata));
-                        if local_prover {
+                        if combined_engaged {
+                            // combined 腿：证明先行——16 词段只能来自证明公开
+                            // 输出（chain_acc 是证明内折叠值，本地拼不出）。
+                            match prove_combined_segment(chain, &req, dual, combined_tasks).await {
+                                Ok(out) => {
+                                    let segment = out.public_output.to_vec();
+                                    let (selector, calldata) = settle_entry_calldata(
+                                        "combined",
+                                        dual.hand_binding,
+                                        dual.hand_id,
+                                        &segment,
+                                        dual.proved.p_batch_commitment,
+                                        dual.proved.p_batch_len,
+                                    );
+                                    tracing::info!(
+                                        "[dapv] settle entry = {selector} (combined segment {} felts, chain_acc {:#x}, steps {})",
+                                        segment.len(),
+                                        out.cairo_acc,
+                                        out.steps
+                                    );
+                                    // fact 登记（operator 即 prover：证明由
+                                    // operator spawn 的子进程出具，直登与 v2
+                                    // dev-local 同语义）。失败即放弃 combined 腿
+                                    // ——settle 的 fact 断言必拒，发出去必 revert。
+                                    match local_register_combined_settlement_fact(&out).await {
+                                        Ok(tx) => {
+                                            tracing::info!(
+                                                "[combined] settlement fact registered tx={tx}"
+                                            );
+                                            proved_settle = Some((selector, calldata));
+                                            combined_output = Some(out);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "[combined] fact registration failed: {e} — combined leg aborted, falling back"
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => tracing::warn!(
+                                    "[combined] envelope proof failed: {e} — falling back (v2/linear)"
+                                ),
+                            }
+                        } else {
+                            let segment = req.public_segment_felts();
+                            let (selector, calldata) = settle_entry_calldata(
+                                chain.config.dapv_settle_entry(),
+                                dual.hand_binding,
+                                dual.hand_id,
+                                &segment,
+                                dual.proved.p_batch_commitment,
+                                dual.proved.p_batch_len,
+                            );
+                            tracing::info!(
+                                "[dapv] settle entry = {selector} (segment {} felts)",
+                                segment.len()
+                            );
+                            proved_settle = Some((selector, calldata));
+                        }
+                        if local_prover && !combined_engaged {
                             match local_register_settlement_fact(&req).await {
                                 Ok(tx) => tracing::info!(
                                     "[settlement-private] dev local attestation (no STARK proof) — fact registered tx={tx}"
@@ -1355,7 +1552,7 @@ pub async fn submit_dual_settlement(
                                     "[settlement-private] local fact registration failed (non-fatal): {e}"
                                 ),
                             }
-                        } else if settlement_prover.configured() {
+                        } else if settlement_prover.configured() && !combined_engaged {
                             match settlement_prover.prove_settlement_private(&req).await {
                                 Ok(att) => tracing::info!(
                                     "[settlement-private] attested (program {})",
@@ -1406,14 +1603,17 @@ pub async fn submit_dual_settlement(
         }
         // entry=snip36：公开段就绪即视为 Proved（协议内 SNOS 证明承载证明）；
         // batch attestation 保持观测性输出，不作门槛。
-        if snip36_engaged && proved_settle.is_some() {
+        // entry=combined：证明 + fact 登记落地（proved_settle 挂上）才视为
+        // Proved——combined 证明本身就是 fact 的凭证，不再依赖 batch
+        // attestation（P-batch 走线性兜底路径）。
+        if (snip36_engaged || combined_engaged) && proved_settle.is_some() {
             resolved = SettleMode::Proved;
         }
-        (resolved, proved_settle)
+        (resolved, proved_settle, combined_output)
     } else {
-        (SettleMode::Linear, None)
+        (SettleMode::Linear, None, None)
     };
-    let (mode, proved_settle) = mode;
+    let (mode, proved_settle, combined_output) = mode;
 
     // Part A Phase 1：STARKNET_SETTLE_PRIVATE=true 时走隐私结算入口
     // （赢家派奖进认领托管而非公开 chip 余额；输家仍公开扣款）。
@@ -1757,6 +1957,24 @@ pub async fn submit_dual_settlement(
         .send()
         .await
         .map_err(|e| format!("{settle_selector} submit failed: {e}"))?;
+
+    // combined 腿：settle 提交被接受后推进 acc 链状态（原子写）。
+    // 信任边界（如实声明）：`.send()` 接受 ≠ 落地——若交易最终未被包含，
+    // 状态文件会超前一手（下一手从"未来 acc"起折，链上各自独立校验、
+    // 仅 chain_acc 事件口径漂移）；恢复手段 = 从 DualProofSettledCombined
+    // 事件重放对账。并发两手同时结算时 acc 状态文件存在同类竞态——
+    // 生产应单 operator 串行结算（现状即如此）。
+    if let Some(out) = combined_output {
+        match write_combined_acc(out.cairo_acc) {
+            Ok(()) => tracing::info!(
+                "[combined] acc chain advanced to {:#x} (state file)",
+                out.cairo_acc
+            ),
+            Err(e) => tracing::warn!(
+                "[combined] acc state persist failed (next hand folds from stale acc): {e}"
+            ),
+        }
+    }
 
     Ok((
         register_hash,
@@ -3144,6 +3362,49 @@ mod settle_mode_tests {
     }
 
     #[test]
+    fn settle_entry_combined_takes_16_word_segment() {
+        // combined：选择器为合并信封入口，calldata = [hand_binding, hand_id,
+        // segment(16)]——segment 首词 chain_acc（证明公开输出），无承诺尾部。
+        // 合约侧逐槽校验 segment[1]=MAGIC / [2]=hand_id / [5]=binding /
+        // [3]=digest / [15]=action_log（本测试只钉 calldata 形状）。
+        let hb = Felt::from(0xEEEEu64);
+        let segment: Vec<Felt> = (0..16).map(|i| Felt::from(300 + i as u64)).collect();
+        let (selector, calldata) =
+            settle_entry_calldata("combined", hb, 45, &segment, Felt::from(0xC0BAu64), 37);
+        assert_eq!(selector, "verify_and_settle_dapv_combined_private");
+        assert_eq!(calldata.len(), 2 + 16, "16 词段（v2 15 词 + 前置 chain_acc）");
+        assert_eq!(calldata[0], hb);
+        assert_eq!(calldata[1], Felt::from(45u64));
+        assert_eq!(calldata[2], Felt::from(300u64), "segment[0] = chain_acc");
+        assert_eq!(calldata[17], Felt::from(315u64), "segment[15] = action_log_digest");
+    }
+
+    #[test]
+    fn combined_acc_state_roundtrip_atomic() {
+        // acc 状态文件：缺省 GENESIS（0）、读回一致、原子写（无 .tmp 残留）、
+        // 损坏内容 fail-closed。独立临时目录（_at 变体绕开全局 env）。
+        let dir = std::env::temp_dir().join(format!(
+            "zgame-combined-acc-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("acc.txt");
+        assert_eq!(read_combined_acc_at(&path).expect("genesis"), Felt::ZERO);
+        let acc = starknet_crypto::poseidon_hash_many(&[Felt::from(1u64), Felt::from(2u64)]);
+        write_combined_acc_at(&path, acc).expect("write");
+        assert_eq!(read_combined_acc_at(&path).expect("read back"), acc);
+        assert!(!dir.join("acc.tmp").exists(), "原子写不留临时文件");
+        // 覆写（rename 语义）+ 损坏内容拒绝。
+        let next = acc + Felt::ONE;
+        write_combined_acc_at(&path, next).expect("overwrite");
+        assert_eq!(read_combined_acc_at(&path).expect("read back 2"), next);
+        std::fs::write(&path, "not-hex!!\n").unwrap();
+        assert!(read_combined_acc_at(&path).is_err(), "损坏状态必须 fail-closed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn settle_entry_config_gate() {
         // 配置门：默认/未知值一律归一化为 v2；显式值 trim 后透传。
         let cfg = |v: &str| crate::starknet::config::StarknetConfig {
@@ -3156,6 +3417,7 @@ mod settle_mode_tests {
         assert_eq!(cfg("proved_private").dapv_settle_entry(), "proved_private");
         assert_eq!(cfg(" proved_private ").dapv_settle_entry(), "proved_private", "trim");
         assert_eq!(cfg("snip36").dapv_settle_entry(), "snip36");
+        assert_eq!(cfg("combined").dapv_settle_entry(), "combined");
     }
 
     #[test]

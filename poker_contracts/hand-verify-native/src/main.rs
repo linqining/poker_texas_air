@@ -9,6 +9,9 @@
 //!   amplified corpora, to demonstrate the O(log n)-verify property.
 //! - `vectors`   — emit golden transcript vectors (challenges, rho, digest)
 //!   for fixed inputs; the same vectors are pinned by an embedded test.
+//! - `combined`  — cross-workspace subprocess seam: prove one combined
+//!   envelope (P-layer tasks + settlement-private statement) and print a
+//!   one-line JSON result (see [`combined_cmd`] for the wire format).
 //!
 //! Run inside `hand-verify-native/`: `cargo run --release -- self-test`.
 
@@ -464,6 +467,280 @@ fn recurse_perf_cmd() {
     println!("recurse-perf: done");
 }
 
+/// combined 模式（跨 workspace 子进程缝）：从 JSON 输入驱动
+/// [`hand_verify_native::combined::prove_combined_layer`]，stdout 打一行
+/// JSON 结果——texas 等外部进程只消费这个稳定 CLI 契约，不链接本 crate。
+///
+/// # 输入 JSON（felt 一律 hex 字符串，可带/不带 0x）
+///
+/// ```json
+/// {
+///   "prev_acc": "0x…",              // 省略/null = GENESIS(0x0)
+///   "out_dir": "…",                 // 证明工件目录（必填）
+///   "params_path": null,            // prove-hand --params；null = 默认参数
+///   "settle": {
+///     "hand_id": 9,                 // u64
+///     "registered_digest": "0x…",
+///     "n_expected": 3,              // u64（非零 delta 计数）
+///     "hand_binding": "0x…",
+///     "players":     ["0x…" × 8],   // 尾部补位槽零
+///     "signs":       [0|1 × 8],     // u64
+///     "magnitudes":  [u64 × 8],
+///     "commitments": ["0x…" × 8],
+///     "action_log_digest": "0x…",
+///     "action_entries": [["0x…","0x…"], …]   // 每条 2 词，≤ 30 条
+///   },
+///   "tasks": [ { "hand_binding": "0x…", "payload": ["0x…", …] } ]
+/// }
+/// ```
+///
+/// # 输出（stdout 单行 JSON）
+///
+/// 成功：`{"ok":true,"cairo_acc":"0x…","public_output":[16×"0x…"],
+/// "program_hash":"0x…","steps":N,"total_ms":N,"out_dir":"…"}`——
+/// `public_output` 从 MAGIC 锚定为 16 词 `[chain_acc] ++ v2 公开段(15)`
+/// （prove-hand 辞書可能在段前回显 runner 词，锚定输出与 CombinedOutcome
+/// 语义一致）。失败：`{"ok":false,"error":"…"}`，退出码 1。
+fn combined_cmd() {
+    // 参数：--input <路径>；缺省或 "-" 读 stdin。
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let mut input_path: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--input" => {
+                i += 1;
+                input_path = Some(
+                    args.get(i)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            eprintln!("combined: --input requires a path");
+                            std::process::exit(2);
+                        })
+                );
+            }
+            other => {
+                eprintln!("combined: unknown argument {other} (usage: combined --input <json>)");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    let raw = match input_path.as_deref() {
+        None | Some("-") => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .unwrap_or_else(|e| {
+                    eprintln!("combined: read stdin: {e}");
+                    std::process::exit(2);
+                });
+            buf
+        }
+        Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("combined: read {path}: {e}");
+            std::process::exit(2);
+        }),
+    };
+    match combined_run(&raw) {
+        Ok(out) => println!("{out}"),
+        Err(e) => {
+            println!("{}", serde_json::json!({ "ok": false, "error": e }));
+            std::process::exit(1);
+        }
+    }
+}
+
+/// JSON 值 → felt（hex 字符串，fail-loud）。
+fn combined_felt(v: &serde_json::Value, ctx: &str) -> Result<Felt, String> {
+    let s = v
+        .as_str()
+        .ok_or_else(|| format!("{ctx}: expected a hex string"))?;
+    let t = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+    Felt::from_hex(t).map_err(|e| format!("{ctx}: bad felt hex {s:?}: {e:?}"))
+}
+
+/// JSON 值 → felt 数组。
+fn combined_felt_vec(v: &serde_json::Value, ctx: &str) -> Result<Vec<Felt>, String> {
+    v.as_array()
+        .ok_or_else(|| format!("{ctx}: expected an array"))?
+        .iter()
+        .enumerate()
+        .map(|(i, w)| combined_felt(w, &format!("{ctx}[{i}]")))
+        .collect()
+}
+
+/// JSON 对象字段 → 固定 8 槽 felt 数组。
+fn combined_felt8(obj: &serde_json::Value, key: &str) -> Result<[Felt; 8], String> {
+    let v = obj
+        .get(key)
+        .ok_or_else(|| format!("settle.{key}: missing (8 slots required)"))?;
+    let vec = combined_felt_vec(v, &format!("settle.{key}"))?;
+    vec.try_into()
+        .map_err(|_| format!("settle.{key}: expected exactly 8 slots"))
+}
+
+/// JSON 对象字段 → 固定 8 槽 u64 数组。
+fn combined_u64_8(obj: &serde_json::Value, key: &str) -> Result<[u64; 8], String> {
+    let arr = obj
+        .get(key)
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("settle.{key}: expected an array of 8 u64"))?;
+    if arr.len() != 8 {
+        return Err(format!("settle.{key}: expected exactly 8 slots, got {}", arr.len()));
+    }
+    let mut out = [0u64; 8];
+    for (i, v) in arr.iter().enumerate() {
+        out[i] = v
+            .as_u64()
+            .ok_or_else(|| format!("settle.{key}[{i}]: expected u64"))?;
+    }
+    Ok(out)
+}
+
+/// 解析后的 combined 输入（prove 之前的纯 wire 层，测试可独立钉死）。
+#[derive(Debug)]
+struct CombinedInput {
+    prev_acc: Felt,
+    out_dir: String,
+    params_path: Option<std::path::PathBuf>,
+    settle: hand_verify_native::combined::SettleStatement,
+    tasks: Vec<hand_verify_native::recurse::RecurseTask>,
+}
+
+/// 输入 JSON → 结构化输入（wire 解析层）。
+fn combined_parse(raw: &str) -> Result<CombinedInput, String> {
+    use hand_verify_native::combined::SettleStatement;
+    use hand_verify_native::recurse::RecurseTask;
+
+    let root: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("input JSON: {e}"))?;
+
+    let prev_acc = match root.get("prev_acc") {
+        Some(v) if !v.is_null() => combined_felt(v, "prev_acc")?,
+        _ => hand_verify_native::combined::GENESIS,
+    };
+    let out_dir = root
+        .get("out_dir")
+        .and_then(|v| v.as_str())
+        .ok_or("out_dir (string) is required")?
+        .to_string();
+    let params_path = match root.get("params_path") {
+        Some(v) if !v.is_null() => Some(std::path::PathBuf::from(
+            v.as_str().ok_or("params_path must be a string")?,
+        )),
+        _ => None,
+    };
+
+    let settle_v = root.get("settle").ok_or("settle object is required")?;
+    let settle = SettleStatement {
+        hand_id: settle_v
+            .get("hand_id")
+            .and_then(|v| v.as_u64())
+            .ok_or("settle.hand_id (u64) is required")?,
+        registered_digest: combined_felt(
+            settle_v.get("registered_digest").ok_or("settle.registered_digest is required")?,
+            "settle.registered_digest",
+        )?,
+        n_expected: settle_v
+            .get("n_expected")
+            .and_then(|v| v.as_u64())
+            .ok_or("settle.n_expected (u64) is required")?,
+        hand_binding: combined_felt(
+            settle_v.get("hand_binding").ok_or("settle.hand_binding is required")?,
+            "settle.hand_binding",
+        )?,
+        players: combined_felt8(settle_v, "players")?,
+        signs: combined_u64_8(settle_v, "signs")?,
+        magnitudes: combined_u64_8(settle_v, "magnitudes")?,
+        commitments: combined_felt8(settle_v, "commitments")?,
+        action_log_digest: combined_felt(
+            settle_v
+                .get("action_log_digest")
+                .ok_or("settle.action_log_digest is required")?,
+            "settle.action_log_digest",
+        )?,
+        action_entries: settle_v
+            .get("action_entries")
+            .and_then(|v| v.as_array())
+            .ok_or("settle.action_entries (array, may be empty) is required")?
+            .iter()
+            .enumerate()
+            .map(|(i, pair)| {
+                let words = combined_felt_vec(pair, &format!("settle.action_entries[{i}]"))?;
+                words
+                    .try_into()
+                    .map_err(|_| format!("settle.action_entries[{i}]: expected exactly 2 words"))
+            })
+            .collect::<Result<Vec<[Felt; 2]>, String>>()?,
+    };
+
+    let tasks: Vec<RecurseTask> = root
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .ok_or("tasks (array, may be empty) is required")?
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            Ok(RecurseTask {
+                hand_binding: combined_felt(
+                    t.get("hand_binding").ok_or(format!("tasks[{i}].hand_binding is required"))?,
+                    &format!("tasks[{i}].hand_binding"),
+                )?,
+                payload: combined_felt_vec(
+                    t.get("payload").ok_or(format!("tasks[{i}].payload is required"))?,
+                    &format!("tasks[{i}].payload"),
+                )?,
+            })
+        })
+        .collect::<Result<_, String>>()?;
+
+    Ok(CombinedInput { prev_acc, out_dir, params_path, settle, tasks })
+}
+
+/// 输入 JSON → prove_combined_layer → 结果 JSON。
+fn combined_run(raw: &str) -> Result<String, String> {
+    use hand_verify_native::combined::{prove_combined_layer, segment_magic};
+
+    let input = combined_parse(raw)?;
+    let outcome = prove_combined_layer(
+        &input.tasks,
+        &input.settle,
+        input.prev_acc,
+        std::path::Path::new(&input.out_dir),
+        input.params_path.as_deref(),
+    )?;
+
+    // 16 词锚定：[acc] ++ [MAGIC …]（与 prove_combined_layer 内部锚定同式；
+    // 公开段前若有 runner 回显词，这里剥掉）。
+    let magic = segment_magic();
+    let pos = outcome
+        .public_output
+        .iter()
+        .position(|w| *w == magic)
+        .ok_or("SEGMENT_MAGIC not found in public output")?;
+    // 切片 [pos-1, pos+15) 恰 16 词；pos+15 == len 是合法贴边情况，须放行。
+    if pos == 0 || pos + 15 > outcome.public_output.len() {
+        return Err("public output has no anchored 16-word segment".into());
+    }
+    let combined16 = outcome.public_output[pos - 1..pos + 15].to_vec();
+    if combined16[0] != outcome.cairo_acc {
+        return Err("anchored chain_acc != CombinedOutcome.cairo_acc".into());
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "cairo_acc": format!("0x{:x}", outcome.cairo_acc),
+        "public_output": combined16.iter().map(|f| format!("0x{f:x}")).collect::<Vec<_>>(),
+        "program_hash": format!("0x{:x}", outcome.program_hash),
+        "steps": outcome.steps,
+        "total_ms": outcome.total_ms,
+        "out_dir": outcome.out_dir.display().to_string(),
+    })
+    .to_string())
+}
+
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "self-test".into());
     match mode.as_str() {
@@ -474,14 +751,15 @@ fn main() {
         "mulbench" => mulbench(),
         "recurse" => recurse_cmd(),
         "recurse-perf" => recurse_perf_cmd(),
+        "combined" => combined_cmd(),
         "help" | "--help" | "-h" => {
             println!(
-                "usage: hand-verify-native [self-test|bench|vectors|compose|mulbench|recurse|recurse-perf]"
+                "usage: hand-verify-native [self-test|bench|vectors|compose|mulbench|recurse|recurse-perf|combined --input <json>]"
             );
         }
         other => {
             eprintln!(
-                "unknown mode: {other} (expected self-test | bench | vectors | compose | recurse)"
+                "unknown mode: {other} (expected self-test | bench | vectors | compose | recurse | combined)"
             );
             std::process::exit(2);
         }
@@ -539,5 +817,58 @@ mod tests {
             "0229a973a7e63c4611e15f3b3789607159a9c19e533dc869e5096617b13d39c4";
         pub const HAND_BINDING_SEED_1: &str =
             "07eaa6791d6dec73dd42d4db78de231bec25b88b39faac13dcbbbc271088dac0";
+    }
+
+    /// combined CLI wire 层：输入 JSON 解析（不触发 prove）钉死——外部进程
+    /// （texas prove_combined）按此形状产 JSON，这里钉住契约不漂移。
+    #[test]
+    fn combined_wire_parse() {
+        let raw = r#"{
+            "prev_acc": "0x123",
+            "out_dir": "/tmp/combined-wire-test",
+            "params_path": null,
+            "settle": {
+                "hand_id": 9,
+                "registered_digest": "0xabc",
+                "n_expected": 3,
+                "hand_binding": "0xB16D",
+                "players": ["0x1","0x2","0x3","0x0","0x0","0x0","0x0","0x0"],
+                "signs": [1,0,0,0,0,0,0,0],
+                "magnitudes": [3000,2000,1000,0,0,0,0,0],
+                "commitments": ["0x21","0x0","0x0","0x0","0x0","0x0","0x0","0x0"],
+                "action_log_digest": "0xA7",
+                "action_entries": [["0xB1","0x0"],["0xB2","0xB3"]]
+            },
+            "tasks": [
+                {"hand_binding": "0xB16D", "payload": ["0x1","0x2","0x3"]}
+            ]
+        }"#;
+        let input = combined_parse(raw).expect("wire parses");
+        assert_eq!(input.prev_acc, Felt::from(0x123u64));
+        assert_eq!(input.out_dir, "/tmp/combined-wire-test");
+        assert!(input.params_path.is_none());
+        assert_eq!(input.settle.hand_id, 9);
+        assert_eq!(input.settle.n_expected, 3);
+        assert_eq!(input.settle.players[2], Felt::from(3u64));
+        assert_eq!(input.settle.signs, [1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(input.settle.magnitudes[0], 3000);
+        assert_eq!(input.settle.action_entries.len(), 2);
+        assert_eq!(input.settle.action_entries[1], [Felt::from(0xB2u64), Felt::from(0xB3u64)]);
+        assert_eq!(input.tasks.len(), 1);
+        assert_eq!(input.tasks[0].hand_binding, Felt::from(0xB16Du64));
+        assert_eq!(input.tasks[0].payload, vec![Felt::from(1u64), Felt::from(2u64), Felt::from(3u64)]);
+
+        // prev_acc 缺省 → GENESIS；坏 hex / 槽数错误 fail-loud。
+        let genesis_json = r#"{"out_dir":"d","settle":{},"tasks":[]}"#;
+        assert!(combined_parse(genesis_json).is_err(), "settle 字段缺失必须报错");
+        let bad_hex = raw.replace("\"0x123\"", "\"not-hex\"");
+        let err = combined_parse(&bad_hex).expect_err("bad felt hex must fail");
+        assert!(err.contains("prev_acc"), "unexpected error: {err}");
+        let bad_slots = raw.replace(
+            "\"players\": [\"0x1\",\"0x2\",\"0x3\",\"0x0\",\"0x0\",\"0x0\",\"0x0\",\"0x0\"]",
+            "\"players\": [\"0x1\"]",
+        );
+        let err = combined_parse(&bad_slots).expect_err("slot count must be enforced");
+        assert!(err.contains("players"), "unexpected error: {err}");
     }
 }

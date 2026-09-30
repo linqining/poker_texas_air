@@ -15,6 +15,11 @@
 //! 3. `test/WrapBatchGolden.json`（部署/离线对拍用）。
 //!
 //! trusted setup：固定种子单方仪式（测试网口径）。
+//!
+//! `--parallel`：sub_count 个同形状电路互不依赖，各起一个 OS 线程并发
+//! prove（PK/VK 共享只读）。prove_with_pk 的 blinding RNG 固定种子
+//! （SETUP_SEED ^ 0xD1CE），证明与电路序号一一对应、与出证时序无关，
+//! 故产物与串行版逐字节一致；默认（无 flag）行为不变。
 
 use anyhow::{Context, Result};
 use groth16_wrap::batch::{self, BatchGoldenJson, BatchStatement};
@@ -37,6 +42,8 @@ fn main() -> Result<()> {
         Some(v) => v.parse().context("--sub-count")?,
         None => 2,
     };
+    // --parallel：布尔 flag（无值）。多电路并发出证，产物与串行逐字节一致。
+    let parallel = args.iter().any(|a| a == "--parallel");
     anyhow::ensure!(
         sub_n.is_power_of_two() && sub_count.is_power_of_two(),
         "sub-n/sub-count 须为 2 的幂"
@@ -146,24 +153,61 @@ fn main() -> Result<()> {
     // ---- 一次 setup（形状决定 VK），sub_count 个证明 ----
     let t = std::time::Instant::now();
     let pk = seeded_setup(circuits[0].clone())?;
+    let t_setup = t.elapsed();
     let constraints = {
         use ark_relations::gr1cs::ConstraintSynthesizer;
         let cs = ark_relations::gr1cs::ConstraintSystem::<groth16_wrap::Fr>::new_ref();
         circuits[0].clone().generate_constraints(cs.clone())?;
         cs.num_constraints()
     };
+    // prove：各电路互不依赖，共享同一 PK（只读）。--parallel 时每电路一个
+    // OS 线程并发出证；blinding RNG 固定种子 → 证明字节与串行版逐位一致，
+    // 结果按电路顺序收集（产物与 prove 时序无关）。
+    // 内存/墙钟边界（2026-09-29 M3 Pro 12 核 36GB 实测，2×K4 = 18,331,967
+    // 约束/电路、real8 语句，`/usr/bin/time -l` 口径）：ark-groth16 默认
+    // parallel feature（rayon 全局池 = 全核），两路 prove 共用同一线程池、
+    // CPU 不超订，但单电路 prove 工作集即 ~14GiB RSS，按电路数叠加：
+    // - 串行（默认）：全流程 573.9s（setup 204.0s + 2×prove ≈184s），峰值
+    //   RSS 20.1GiB、footprint 55.5GiB —— 串行本身已贴物理内存上限；
+    // - --parallel K4×2：两路并发 footprint ≥53.6GiB，swap 飙至 37GB 颠簸，
+    //   773.7s 仍未出完证（比串行慢）——本机（36GB）K4+ 不可并行；
+    // - --parallel K2×2（9.17M 约束/电路）：产物与串行逐字节一致，但墙钟
+    //   215.8s vs 串行 221.7s 仅 -2.7%（共享池下两路 prove 总 CPU 功不变、
+    //   几乎无重叠收益），footprint 24.0→43.4GiB。
+    // 结论：--parallel 不省墙钟、费内存（K4 换 swap 抖动）。默认串行；
+    // 仅 ≥64GB 机器可开它避免 swap（墙钟收益 ≈0）。要真正降墙钟需降约束
+    // 数 / 换证明系统 / 缓存 setup 产物，不在本 CLI 范围。
+    let proven: Vec<_> = if parallel && sub_count > 1 {
+        println!("prove mode: parallel（{sub_count} 电路各一线程并发）");
+        std::thread::scope(|s| -> Result<Vec<_>> {
+            let handles: Vec<_> = circuits
+                .iter()
+                .map(|c| s.spawn(|| prove_with_pk(&pk, c)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().map_err(|_| anyhow::anyhow!("prove 线程 panic"))?)
+                .collect()
+        })?
+    } else {
+        circuits
+            .iter()
+            .map(|c| prove_with_pk(&pk, c))
+            .collect::<Result<Vec<_>>>()?
+    };
     let mut proofs = Vec::with_capacity(sub_count);
     for (j, c) in circuits.iter().enumerate() {
-        let proof = prove_with_pk(&pk, c)?;
+        let proof = &proven[j];
         let mut publics = vec![c.program_hash];
         for h in &c.hands {
             publics.push(h.statement.hand_binding);
             publics.push(h.statement.fact);
         }
-        let ok = verify_with_vk(&pk.vk, &publics, &proof)?;
+        let ok = verify_with_vk(&pk.vk, &publics, proof)?;
         anyhow::ensure!(ok, "sub-proof {j} 本地 verify FAILED");
-        proofs.push((proof, publics));
+        proofs.push((proof.clone(), publics));
     }
+    println!("setup done in {:?}", t_setup);
     println!(
         "setup + {sub_count} prove done in {:?}（单电路约束 {constraints}）",
         t.elapsed()

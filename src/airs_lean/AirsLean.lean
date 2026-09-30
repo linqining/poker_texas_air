@@ -15,6 +15,7 @@ See `src/airs_lean/PLAN.md` for the full plan and `AirsLean.Top.Audit` for the
 top-level synthesis theorems and assumption registry.
 -/
 import AirsLean.Foundations
+import AirsLean.Fold
 import AirsLean.Soundness
 import AirsLean.ExecEval
 import AirsLean.Custody

@@ -441,6 +441,272 @@ impl HttpSettlementProver {
     }
 }
 
+/// combined 信封的 P 层任务（hand-verify-native `RecurseTask` 的 texas 侧
+/// wire 形态：跨 workspace 走 CLI 子进程缝，不链接其类型）。
+#[derive(Debug, Clone)]
+pub struct CombinedTask {
+    pub hand_binding: Felt,
+    pub payload: Vec<Felt>,
+}
+
+impl CombinedTask {
+    /// 从动作签名材料构造 P 任务（生产产源：`recursion_prover::
+    /// action_sig_materials` 的输出，与 snip36 递归信封同源）。payload 组装
+    /// 借 hand-verify-native 库依赖（texas 已直连，见 recursion_prover::
+    /// prove_batch_blocking 同用法）；宿主直验在 prove_combined_layer 内
+    /// fail-closed。
+    pub fn from_materials(
+        table_id: u32,
+        hand_id: u32,
+        hand_binding: Felt,
+        materials: &[super::recursion_prover::ActionSigMaterial],
+    ) -> Result<Vec<CombinedTask>, String> {
+        let statements: Vec<hand_verify_native::recurse::ActionSigStatement> = materials
+            .iter()
+            .map(|m| hand_verify_native::recurse::ActionSigStatement {
+                pk_x_hex: m.pk_x_hex.clone(),
+                pk_y_hex: m.pk_y_hex.clone(),
+                r_x_hex: m.r_x_hex.clone(),
+                r_y_hex: m.r_y_hex.clone(),
+                s_hex: m.s_hex.clone(),
+                table_id,
+                hand_id,
+                seq: m.seq,
+                action: m.action.clone(),
+                amount: m.amount,
+            })
+            .collect();
+        let payload = hand_verify_native::recurse::build_action_batch_payload(
+            hand_binding,
+            table_id,
+            hand_id,
+            &statements,
+        )?;
+        Ok(vec![CombinedTask { hand_binding, payload }])
+    }
+}
+
+/// combined 信封证明产出（hand-verify-native `combined --input` 的 stdout
+/// 契约解析结果）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CombinedProofOutput {
+    /// 折叠链新累计承诺（= public_output[0]）。
+    pub cairo_acc: Felt,
+    /// 16 词公开输出 `[chain_acc] ++ v2 公开段(15)`——combined 合约入口的
+    /// segment 参数原样。
+    pub public_output: [Felt; 16],
+    /// 出证 Cairo 程序哈希（prove-hand 报告值）。
+    pub program_hash: Felt,
+    pub steps: u64,
+    pub total_ms: u64,
+    pub out_dir: String,
+}
+
+impl CombinedProofOutput {
+    /// combined fact-registry 锚：`fact = poseidon([combined_program_hash ‖
+    /// 整段 16 词])`——与合约 `fact_for_segment(combined_program_hash,
+    /// segment)`（poker_dual_settlement.cairo:302）及 v2 版
+    /// [`SettlementPrivateRequest::settlement_fact`] 同式（段长 16、首词
+    /// chain_acc）。
+    pub fn settlement_fact(&self, combined_program_hash: Felt) -> [u8; 32] {
+        let mut fields = Vec::with_capacity(1 + 16);
+        fields.push(combined_program_hash);
+        fields.extend(self.public_output);
+        starknet_crypto::poseidon_hash_many(&fields).to_bytes_be()
+    }
+}
+
+/// hand-verify-native 可执行发现：显式路径 > 仓根 target（根 workspace
+/// 成员构建位）> poker_contracts 内嵌 workspace 遗留位。仓根从 cwd 与
+/// 当前可执行目录向上找（目录含 `poker_contracts/` 子目录即仓根）。
+/// 找不到返回 None（调用方报错回退，不阻塞结算）。
+pub fn discover_combined_native_bin(explicit: &str) -> Option<std::path::PathBuf> {
+    const BIN: &str = "hand-verify-native";
+    let trimmed = explicit.trim();
+    if !trimmed.is_empty() {
+        let p = std::path::PathBuf::from(trimmed);
+        return p.is_file().then_some(p);
+    }
+    let mut roots: Vec<std::path::PathBuf> = vec![];
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.extend(cwd.ancestors().map(|a| a.to_path_buf()));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.extend(dir.ancestors().map(|a| a.to_path_buf()));
+        }
+    }
+    for root in roots {
+        if !root.join("poker_contracts").is_dir() {
+            continue;
+        }
+        for cand in [
+            root.join("target/release").join(BIN),
+            root.join("poker_contracts/hand-verify-native/target/release").join(BIN),
+        ] {
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+/// combined 证明子进程超时（Cairo 编译 + 运行 + 证明 + check-only 复验，
+/// 实测量级 30-60 s；留 10× 余量——超时即回退，绝不卡死结算）。
+const COMBINED_PROVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+impl HttpSettlementProver {
+    /// combined 信封出证：spawn hand-verify-native CLI（`combined --input`），
+    /// 输入 JSON 写临时文件、解析 stdout 单行 JSON（跨 workspace 子进程缝，
+    /// wire 契约见 hand-verify-native src/main.rs `combined_cmd` 文档）。
+    ///
+    /// settle 语句由 [`SettlementPrivateRequest`]（本地重算 digest 的同一
+    /// 真源）序列化；任务由调用方给（生产产源
+    /// [`CombinedTask::from_materials`]）。证明内部的 acc/segment 双 parity
+    /// 门由 prove_combined_layer 强制（CLI 侧），此处只解析结果。
+    pub async fn prove_combined(
+        &self,
+        tasks: &[CombinedTask],
+        settle: &SettlementPrivateRequest,
+        prev_acc: Felt,
+        out_dir: &std::path::Path,
+        native_bin: &str,
+    ) -> Result<CombinedProofOutput, String> {
+        let bin = discover_combined_native_bin(native_bin).ok_or_else(|| {
+            format!(
+                "hand-verify-native binary not found (set STARKNET_COMBINED_NATIVE_BIN or \
+                 build: cargo build --release -p hand-verify-native)"
+            )
+        })?;
+        std::fs::create_dir_all(out_dir).map_err(|e| format!("combined out_dir: {e}"))?;
+
+        // 输入 JSON（felt 一律 hex；形状 = CLI combined_cmd 文档）。
+        let felt_hex = |f: &Felt| format!("0x{f:x}");
+        let mut players = Vec::with_capacity(MAX_PARTICIPANTS);
+        for p in &settle.players {
+            players.push(felt_hex(&wire_felt(p).map_err(|e| format!("players: {e}"))?));
+        }
+        let mut commitments = Vec::with_capacity(MAX_PARTICIPANTS);
+        for c in &settle.commitments {
+            commitments.push(felt_hex(&wire_felt(c).map_err(|e| format!("commitments: {e}"))?));
+        }
+        let mut action_entries: Vec<[String; 2]> = Vec::with_capacity(settle.action_entries.len() / 2);
+        for pair in settle.action_entries.chunks(2) {
+            action_entries.push([
+                felt_hex(&wire_felt(&pair[0]).map_err(|e| format!("action entry: {e}"))?),
+                felt_hex(&wire_felt(&pair[1]).map_err(|e| format!("action entry: {e}"))?),
+            ]);
+        }
+        let tasks_json: Vec<serde_json::Value> = tasks
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "hand_binding": felt_hex(&t.hand_binding),
+                    "payload": t.payload.iter().map(felt_hex).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let input = serde_json::json!({
+            "prev_acc": felt_hex(&prev_acc),
+            "out_dir": out_dir.display().to_string(),
+            "params_path": serde_json::Value::Null,
+            "settle": {
+                "hand_id": u64::from(settle.hand_id),
+                "registered_digest": felt_hex(&wire_felt(&settle.registered_digest)
+                    .map_err(|e| format!("registered_digest: {e}"))?),
+                "n_expected": u64::from(settle.n_participants),
+                "hand_binding": felt_hex(&wire_felt(&settle.hand_binding)
+                    .map_err(|e| format!("hand_binding: {e}"))?),
+                "players": players,
+                "signs": settle.signs.map(u64::from),
+                "magnitudes": settle.magnitudes,
+                "commitments": commitments,
+                "action_log_digest": felt_hex(&wire_felt(&settle.action_log_digest)
+                    .map_err(|e| format!("action_log_digest: {e}"))?),
+                "action_entries": action_entries,
+            },
+            "tasks": tasks_json,
+        });
+        let input_path = out_dir.join("combined-cli-input.json");
+        std::fs::write(&input_path, serde_json::to_string(&input).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("write combined input: {e}"))?;
+
+        // spawn（跨 workspace 子进程缝：不链接 combined 证明器本体）。
+        let run = tokio::process::Command::new(&bin)
+            .arg("combined")
+            .arg("--input")
+            .arg(&input_path)
+            .output();
+        let output = tokio::time::timeout(COMBINED_PROVE_TIMEOUT, run)
+            .await
+            .map_err(|_| "combined prove timed out".to_string())?
+            .map_err(|e| format!("spawn hand-verify-native: {e}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() {
+            let err = serde_json::from_str::<serde_json::Value>(&stdout)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+                .unwrap_or_else(|| {
+                    format!(
+                        "exit {:?}: {}",
+                        output.status.code(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )
+                });
+            return Err(format!("combined prove failed: {err}"));
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|e| format!("combined stdout JSON: {e}"))?;
+        if parsed.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            return Err(format!(
+                "combined prove rejected: {}",
+                parsed.get("error").and_then(|v| v.as_str()).unwrap_or("unknown")
+            ));
+        }
+        let parse_felt = |v: &serde_json::Value, ctx: &str| -> Result<Felt, String> {
+            let s = v.as_str().ok_or_else(|| format!("{ctx}: expected hex string"))?;
+            Felt::from_hex(s.trim_start_matches("0x")).map_err(|e| format!("{ctx}: {e:?}"))
+        };
+        let public: Vec<Felt> = parsed
+            .get("public_output")
+            .and_then(|v| v.as_array())
+            .ok_or("combined stdout missing public_output")?
+            .iter()
+            .enumerate()
+            .map(|(i, w)| parse_felt(w, &format!("public_output[{i}]")))
+            .collect::<Result<_, _>>()?;
+        let public_output: [Felt; 16] = public
+            .try_into()
+            .map_err(|v: Vec<Felt>| format!("public_output len {} != 16", v.len()))?;
+        if public_output[1] != prove_magic() {
+            return Err("combined public_output[1] != MAGIC (wire drift)".into());
+        }
+        let cairo_acc = parse_felt(
+            parsed.get("cairo_acc").ok_or("combined stdout missing cairo_acc")?,
+            "cairo_acc",
+        )?;
+        if cairo_acc != public_output[0] {
+            return Err("combined cairo_acc != public_output[0]".into());
+        }
+        Ok(CombinedProofOutput {
+            cairo_acc,
+            public_output,
+            program_hash: parse_felt(
+                parsed.get("program_hash").ok_or("combined stdout missing program_hash")?,
+                "program_hash",
+            )?,
+            steps: parsed.get("steps").and_then(|v| v.as_u64()).unwrap_or(0),
+            total_ms: parsed.get("total_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+            out_dir: parsed
+                .get("out_dir")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,6 +874,69 @@ mod tests {
         let parsed: Vec<String> = serde_json::from_str(&req.inputs_json()).expect("json");
         assert_eq!(parsed.len(), 38 + 60);
         assert!(parsed.iter().all(|h| h.starts_with("0x")));
+    }
+
+    /// combined fact 参考测试：`fact = poseidon([combined_program_hash ‖
+    /// 整段 16 词])` 必须与合约 `fact_for_segment`（poker_dual_settlement.
+    /// cairo:302，PoseidonTrait 逐词 update）同式——用
+    /// starknet_crypto::poseidon_hash_many 独立重算钉死，并断言链首词
+    /// chain_acc 进 fact（改 acc 必改 fact）。
+    #[test]
+    fn combined_settlement_fact_matches_contract_formula() {
+        let mut public = [Felt::ZERO; 16];
+        public[0] = sample_felt(0x11); // chain_acc
+        public[1] = prove_magic(); // MAGIC 'SP2M_OK'
+        for w in public.iter_mut().skip(2) {
+            *w = sample_felt(0x40);
+        }
+        let out = CombinedProofOutput {
+            cairo_acc: public[0],
+            public_output: public,
+            program_hash: sample_felt(0x77),
+            steps: 0,
+            total_ms: 0,
+            out_dir: String::new(),
+        };
+        let ph = sample_felt(0x5A);
+        let fact = Felt::from_bytes_be(&out.settlement_fact(ph));
+        // 独立重算（同 v2 版 settlement_fact 的对拍写法）。
+        let mut fields = vec![ph];
+        fields.extend(public);
+        assert_eq!(
+            fact,
+            starknet_crypto::poseidon_hash_many(&fields),
+            "combined fact 必须与 poseidon_hash_many([ph ‖ segment16]) 逐词同式"
+        );
+        // 确定性与绑定：同 ph 同 fact；换 ph / 改 chain_acc 首词 → fact 变。
+        assert_eq!(
+            fact.to_bytes_be(),
+            out.settlement_fact(ph),
+            "同语句同 program hash → 同 fact"
+        );
+        assert_ne!(fact.to_bytes_be(), out.settlement_fact(sample_felt(0x5B)));
+        let mut tampered = out.clone();
+        tampered.public_output[0] += Felt::ONE;
+        assert_ne!(
+            fact.to_bytes_be(),
+            tampered.settlement_fact(ph),
+            "chain_acc 是 fact 预映像首词（改 acc 必改 fact）"
+        );
+    }
+
+    /// CLI stdout 契约解析的负例面（不 spawn 子进程，只钉 wire 形状断言）：
+    /// 16 词 + MAGIC 锚 + cairo_acc == public_output[0]。
+    #[test]
+    fn combined_output_shape_invariants() {
+        let req = sample_request();
+        // 请求侧不产出 combined 输出；这里仅钉住 v2 段（15 词）与 combined
+        // 段（16 词）的前缀关系：combined[1..16] == v2 segment。
+        let v2 = req.public_segment_felts();
+        assert_eq!(v2.len(), 15);
+        let mut combined = [Felt::ZERO; 16];
+        combined[0] = Felt::from(0xACCu64);
+        combined[1..16].copy_from_slice(&v2);
+        assert_eq!(combined[1], prove_magic());
+        assert_eq!(combined[15], Felt::from_bytes_be(&req.action_log_digest));
     }
 }
 

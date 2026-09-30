@@ -917,6 +917,8 @@ async fn sepolia_settle_smoke() {
         dual_settlement_address: dual_addr.clone(),
         settlement_mode: "dapv".into(),
         dapv_settle_entry: "v2".into(),
+        combined_program_hash: String::new(),
+        combined_native_bin: String::new(),
         settle_mode: super::config::SettleMode::Linear,
         prover_url: None,
         prover_work_dir: "/tmp/zgame-prover".into(),
@@ -982,6 +984,9 @@ async fn sepolia_settle_smoke() {
             &dual_addr,
             &settlement.players_remapped,
             &settlement.deltas,
+            &[],
+            // combined 入口未在此测试启用（默认 v2）；P 任务产源见
+            // hooks::snip36_settle_flow 的 action_sig_materials 构造。
             &[],
         )
         .await

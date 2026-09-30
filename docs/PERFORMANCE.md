@@ -68,6 +68,40 @@ Regression gate: `cargo test --release --test recurse_test -- --ignored
 --nocapture recursion_prod_shape` (2-seat / 9-seat action-sig batches,
 parity gate + standalone reverify asserted).
 
+**Combined envelope (2026-09-29): one Stwo proof for BOTH the P layer and
+the settlement statement.** `cairo/src/combined.cairo` proves the action-sig
+batch (EC_OP in trace) *and* the settlement-private statement (digest /
+zero-sum / claim-cms / action-log chain) in ONE Cairo VM run — public output
+16 words `[chain_acc] ++ v2-segment]`, consumed on-chain by the new
+`verify_and_settle_dapv_combined_private` entry with a **single fact**
+(`combined_program_hash` slot; contract snforge 114/114 incl. 4 new tests).
+In-circuit binding assert: every P task's `hand_binding` == the settle
+section's — one proof semantically covers "this hand's signatures AND this
+hand's settlement". Measured (M3 Pro, prod params, exec cache warm):
+
+| shape | steps | prove | total (1 proof) | vs separate |
+|---|---|---|---|---|
+| 2p action-sig + 3-player settle | 7 204 | ~1.6–2.2 s | **2.2–2.9 s** | P-layer 2.2 s + settlement ~2 s ≈ 4.2 s |
+| 9p action-sig + 3-player settle | 12 160 | ~2.2 s | **2.85 s** | idem, one bucket up |
+
+Regression gate: `cargo test --release --test combined_test -- --ignored
+--nocapture` (honest 2p/9p roundtrip with dual parity [acc + segment] and
+standalone reverify; tampered-digest and cross-hand-binding negatives).
+
+**Bug found & fixed en route (prefix digest fold):** the standalone
+`proving-tool/src/settlement_private.cairo` circuit absorbs ALL 8 player
+slots into the settlement digest, while the on-chain registered digest
+(contract `compute_settlement_digest` / texas `submit.rs`) folds over the
+**actual** participant count — for any non-full table (n<8, i.e. almost
+every real table) the circuit's `DIGEST_MISMATCH` assert fires and **no
+proof exists** (fail-closed → v2 private leg silently falls back to public
+linear settlement). The shared `settlement_stmt.cairo` module fixes this:
+it absorbs only the trailing-zero-canonical prefix of non-zero players,
+matching the on-chain formula for every n ≤ 8 (pinned by the
+`combined_digest_prefix_fold_semantics` test). The stale standalone circuit
+is left untouched for the v2 path as-is; migrating v2 to the shared module
+is the follow-up.
+
 Prover parameters: production file = `canonical_small` trace + fast FRI
 (pow16 / 40 queries, blake2s channel). The fast tier passes the full test gate;
 a dedicated security review is still scheduled before it is used for
@@ -76,6 +110,7 @@ production proofs.
 **Next levers:** the prove phase is now the whole budget — fixed ~1.5–1.7 s +
 ~30 µs/step with no single hotspot (spread across trace generation, three
 trace commitments, composition and FRI; all rayon-parallel). In rough order:
+texas wiring onto the combined driver (one spawn per hand instead of two),
 container CPU-quota/toolchain parity (rayon pool sizing, pinned nightly with
 SIMD), Cairo step reduction inside the recursion program, GPU offload (§5).
 
@@ -151,6 +186,28 @@ fast FRI（pow16/q40、blake2s）；fast 档过全量门禁、投产前仍需专
 评审。**下一杠杆：prove 相位已是全部预算（固定 ~1.5–1.7 s + ~30 µs/步，
 无单一热点）；候选按序为容器 CPU 配额/工具链对齐、递归程序 Cairo 步数
 压缩、GPU（§5）。**
+
+**§2b 合并信封（2026-09-29）：P 层 + 结算语句一份 Stwo 证明**。
+`cairo/src/combined.cairo` 在**一次** Cairo VM 执行里同时证明 action-sig
+批次（EC_OP 进 trace）与 settlement-private 语句（digest/零和/认领
+承诺/动作日志链），公开输出 16 词 `[chain_acc] ++ v2 段]`，合约新入口
+`verify_and_settle_dapv_combined_private` **单 fact** 消费
+（`combined_program_hash` 槽；snforge 114/114 含 4 个新测试）；电路内
+绑定断言：每条 P 任务 hand_binding == settle 段 binding——一份证明语义
+上覆盖「这手的签名 + 这手的结算」。实测（M3 Pro、生产参数、缓存热）：
+2p+3人结算 7 204 步 **2.2–2.9 s**、9p+3人结算 12 160 步 **2.85 s**——
+对照分离路径（P 层 2.2 s + 结算 ~2 s ≈ 4.2 s）省近半，且链上一次
+fact 登记、一次验证。回归门：`cargo test --release --test combined_test
+-- --ignored --nocapture`（诚实 2p/9p 往返 + acc/segment 双 parity +
+check-only；篡改 digest 与跨手绑定负例）。**顺手发现并修复（digest
+前缀折叠）**：独立 `proving-tool/src/settlement_private.cairo` 电路把
+全部 8 槽吸进 settlement digest，而链上注册 digest（合约
+`compute_settlement_digest` / texas `submit.rs`）按**实际人数**折叠——
+非满桌（n<8，即几乎所有真实桌）电路 `DIGEST_MISMATCH` 必然中止、
+**出不了证明**（fail-closed → v2 私密腿静默回退公开结算）。共享
+`settlement_stmt.cairo` 修复为只吸收「尾部全零规范」的非零玩家前缀，
+对一切 n ≤ 8 与链上公式一致（`combined_digest_prefix_fold_semantics`
+测试钉死）；独立电路原样保留（v2 路径不变），迁移为后续项。
 
 **§3 链上 P 验证 EC_OP gas（主网校准）**：压缩后 N=2/4/9 ≈ 1.60M/3.12M/
 6.9M l2_gas（≈ 0.058/0.113/0.25 STRK）；压缩前为 956M–4.15G（35–150

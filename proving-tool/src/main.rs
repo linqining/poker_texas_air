@@ -96,6 +96,29 @@ struct Args {
     /// Disable the content-addressed executable compile cache (compile every run).
     #[arg(long)]
     no_exec_cache: bool,
+    /// Trace-height policy (memory optimization, 2026-09-29).
+    ///
+    /// - `auto`: pick the lowest-memory *sound* preprocessed-trace variant from the actual
+    ///   run resources: `canonical_small` (pp domain 2^20, pp tree lifting 2^21) when every
+    ///   builtin segment fits in 2^20 padded instances, else `canonical` (pp domain 2^25,
+    ///   lifting 2^26). Pedersen needs no special case: the witness adapts to the variant
+    ///   (wide vs narrow-window point tables, prover/src/witness/builtins.rs:48-66).
+    ///   Per-opcode trace components were always adaptive (next_power_of_two of their own
+    ///   instance counts, floor 2^4 SIMD lanes).
+    /// - `20`: explicit current floor — no behavior change.
+    /// - Any other N is rejected (fail-closed): the main-trace height has a hard semantic
+    ///   floor of 2^20 imposed by the always-present `range_check_20` full-range table
+    ///   component (cairo-air/src/components/range_check_20.rs:6, witness fixed
+    ///   `1 << LOG_SIZE` multiplicities, claim-carried via claims.rs flatten/log_sizes).
+    ///   Shrinking below 20 would change the AIR semantics and the serialized
+    ///   `CairoClaim` (proof format), which the default-preserving constraint forbids;
+    ///   lifting heights above the trace are the job of `--params`
+    ///   `lifting_size_policy: fixed`.
+    ///
+    /// Default (flag absent): exactly the previous behavior (`canonical`), proofs
+    /// byte-identical.
+    #[arg(long, value_name = "N|auto")]
+    trace_log_size: Option<String>,
 }
 
 /// Content-addressed executable compile cache outcome.
@@ -281,7 +304,11 @@ fn main() -> Result<()> {
     let steps: usize = resources.opcodes_instance_counter.values().sum();
 
     // 3. Prove.
-    let params = load_params(&args)?;
+    let mut params = load_params(&args)?;
+    if let Some(raw) = &args.trace_log_size {
+        let policy = parse_trace_log_size(raw)?;
+        apply_trace_log_size(&mut params, &policy, &resources)?;
+    }
     let t = Instant::now();
     let proof = prove_cairo::<Blake2sMerkleChannel>(prover_input, params.clone())
         .context("prove (stwo)")?;
@@ -444,6 +471,10 @@ fn main() -> Result<()> {
             "opcodes_instance_counter": resources.opcodes_instance_counter,
         },
         "public": public_outputs,
+        "trace_log_size": args
+            .trace_log_size
+            .clone()
+            .unwrap_or_else(|| "default".into()),
         "prover_params": serde_json::to_value(&params)?,
         "security_bits": params.fri_config.security_bits(),
     });
@@ -586,6 +617,110 @@ fn load_params(args: &Args) -> Result<ProverParameters> {
             Ok(serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?)
         }
         None => Ok(default_params()),
+    }
+}
+
+/// The protocol's semantic floor for the main-trace commitment height (log2).
+///
+/// Evidence (vendored fork, traced 2026-09-29):
+/// - `cairo-air/src/components/range_check_20.rs:6`: `pub const LOG_SIZE: u32 = 20`. The
+///   component is always present (`prover/src/witness/range_checks.rs` injects all 13
+///   range-check components unconditionally; `cairo_claim_generator.rs` registers them and
+///   `cairo-air/src/claims.rs` pushes their `LOG_SIZE` into `CairoClaim::log_sizes()`).
+/// - Its 2^20 rows are the *full 20-bit value table* (`seq_20` preprocessed column, 8
+///   multiplicity channels), not shrinkable padding: the witness allocates
+///   `AtomicMultiplicityColumn::new(1 << LOG_SIZE)` (`prover/src/witness/components/
+///   range_check_20.rs:18`) and `mul_opcode` feeds it with limbs of felt252
+///   multiplications, which reach up to 2^20-1 for arbitrary (e.g. poseidon-state) felts.
+/// - `prover/src/prover.rs:133-134` derives `trace_domain_log_size` as the max claim log
+///   size, so the committed trace domain is >= 2^20 for every program.
+///
+/// Going below 20 means changing the AIR (different value table) and the serialized claim
+/// (`Claim {}` carries no data; the size is a compile-time constant on both prover and
+/// verifier sides), i.e. a proof-format/verifier-contract change that would break the
+/// byte-identical-default requirement. The CLI therefore refuses it (fail-closed) instead
+/// of silently producing an incompatible proof.
+const TRACE_LOG_SIZE_FLOOR: u32 = 20;
+
+/// Parsed `--trace-log-size` value.
+#[derive(Clone, Debug)]
+enum TraceLogSize {
+    /// Pick the lowest-memory sound preprocessed-trace variant from actual run resources.
+    Auto,
+    /// Explicit trace-height floor. Only 20 (the protocol floor) is accepted.
+    Explicit(u32),
+}
+
+fn parse_trace_log_size(raw: &str) -> Result<TraceLogSize> {
+    if raw == "auto" {
+        return Ok(TraceLogSize::Auto);
+    }
+    let n: u32 = raw
+        .parse()
+        .with_context(|| format!("--trace-log-size '{raw}': expected 'auto' or a number"))?;
+    if n < TRACE_LOG_SIZE_FLOOR {
+        bail!(
+            "--trace-log-size {n} is below the protocol floor {TRACE_LOG_SIZE_FLOOR}: the \
+             always-present range_check_20 component is a full 20-bit value table (its 2^20 \
+             rows are semantics, not padding; mul_opcode looks up felt252 limbs there), and \
+             its size is baked into the serialized claim — shrinking it changes the proof \
+             format. See proving-tool/src/main.rs TRACE_LOG_SIZE_FLOOR for the evidence."
+        );
+    }
+    if n > TRACE_LOG_SIZE_FLOOR {
+        bail!(
+            "--trace-log-size {n} above the floor has no lever here: per-component trace \
+             heights are derived from actual usage and the preprocessed-trace variants cap \
+             at 2^20 (canonical_small) / 2^25 (canonical). To pin a taller commitment height \
+             for a recursion verifier, use --params with lifting_size_policy=fixed."
+        );
+    }
+    Ok(TraceLogSize::Explicit(n))
+}
+
+/// Applies the trace-height policy to the prover parameters.
+///
+/// `auto` uses the measured execution resources. The `canonical_small` preprocessed trace
+/// differs from `canonical` only in (a) `seq` columns capped at log 20 (vs 25) and (b)
+/// narrow-window Pedersen point tables. (a) is safe iff every builtin segment fits in
+/// 2^20 instances — each builtin's component log size equals its (padded) instance count,
+/// and that is the only driver of `seq_k` demand. (b) needs no guard: the witness itself
+/// adapts (`prover/src/witness/builtins.rs:48-66` picks `pedersen_builtin` on wide tables
+/// / `pedersen_builtin_narrow_windows` on narrow ones; a `pedersen_builtin: 0` segment
+/// key is a layout reservation, not usage). A mismatch would otherwise fail later with a
+/// missing-preprocessed-column panic; resolving it up front keeps the failure explicit.
+fn apply_trace_log_size(
+    params: &mut ProverParameters,
+    policy: &TraceLogSize,
+    resources: &ExecutionResources,
+) -> Result<()> {
+    match policy {
+        TraceLogSize::Explicit(n) => {
+            println!("trace-log-size: explicit {n} == protocol floor, no change");
+            Ok(())
+        }
+        TraceLogSize::Auto => {
+            let max_builtin_instances = resources
+                .builtin_instance_counter
+                .values()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            let fits_small = max_builtin_instances <= 1usize << TRACE_LOG_SIZE_FLOOR;
+            let variant = if fits_small {
+                PreProcessedTraceVariant::CanonicalSmall
+            } else {
+                PreProcessedTraceVariant::Canonical
+            };
+            println!(
+                "trace-log-size: auto -> {:?}  (max_builtin_instances={max_builtin_instances}, \
+                 small_cap={})",
+                variant,
+                1usize << TRACE_LOG_SIZE_FLOOR
+            );
+            params.preprocessed_trace = variant;
+            Ok(())
+        }
     }
 }
 

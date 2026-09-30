@@ -68,7 +68,7 @@ ok "批终证/公开输出/清单文件在位"
 
 FV_OUT=$("$FV" "$PROOF" --expect-program-hash "$PH_BATCH") || { echo "FAIL fact-verify 钉扎验证失败" >&2; exit 1; }
 echo "$FV_OUT" | grep -q "^OK" || { echo "FAIL fact-verify 未输出 OK" >&2; exit 1; }
-ok "fact-verify 钉扎验证 exit 0（program_hash=$PH_BATCH）"
+ok "fact-verify 钉扎验证 exit 0（program_hash=${PH_BATCH}）"
 
 python3 - "$OUT_JSON" "$MANIFEST" "$EXPECTED_FACT" "$ROOT" "$CAST" <<'EOF'
 import json, subprocess, sys
@@ -117,8 +117,9 @@ for p in dirs:
 assert len(bindings)==8, '单手 binding 重复'
 m=json.load(open(d['final']['manifest_path']))
 for i,s in enumerate(m['statements']):
-    o=json.load(open(os.path.join(dirs[i],'public_outputs.json')))['output']
-    assert o[1:17]==json.load(open(d['final']['public_outputs_path']))['output'][1+i*16:1+(i+1)*16], f'第 {i} 手公开段 != 批段'
+    h=json.load(open(os.path.join(dirs[i],'public_outputs.json')))['output']
+    seg=json.load(open(d['final']['public_outputs_path']))['output'][1+i*16:1+(i+1)*16]
+    assert h[:16]==seg, f'第 {i} 手公开段 != 批段'
 print('PASS  批公开段 == 8 手单证公开段（8×16 felt 逐位相等）；8 手 binding 唯一')
 EOF
 ok "批公开段 == 8 手单证公开段逐位相等 + 8 条 fact == BatchPlan 宿主重算（manifest 语句面）"
@@ -136,18 +137,19 @@ NEG2_TX="$(j "d['negativePseudoProof']['tx']")"
 PINNED="0x05c400b46a261c6672cd7581436754e05da2287ba8ecdc69778d06e4ef831803"
 
 SV_PH=$(rpc "$CAST" call "$SV" 'BATCH_PROGRAM_HASH()(uint256)')
+SV_PH="${SV_PH%% *}"   # 去掉 cast 的人类可读注记（如 "[2.607e75]"）
 [[ "$(python3 -c "print(hex(int('$SV_PH',10)))")" == "$(python3 -c "print(hex(int('$PINNED',16)))")" ]] || { echo "FAIL 链上 BATCH_PROGRAM_HASH != 钉扎值" >&2; exit 1; }
 ok "链上 BATCH_PROGRAM_HASH == 钉扎批程序哈希"
-SV_INBOX=$(rpc "$CAST" call "$SV" 'l1Inbox()(address)')
-[[ "${SV_INBOX,,}" == "${INBOX,,}" ]] || { echo "FAIL l1Inbox != $INBOX" >&2; exit 1; }
+SV_INBOX=$(rpc "$CAST" call "$SV" 'l1Inbox()(address)' | tr '[:upper:]' '[:lower:]')
+[[ "$SV_INBOX" == "$(echo "$INBOX" | tr '[:upper:]' '[:lower:]')" ]] || { echo "FAIL l1Inbox != $INBOX" >&2; exit 1; }
 ok "链上 l1Inbox == $SV_INBOX"
-SV_AUTH=$(rpc "$CAST" call "$SV" 'authority()(address)')
-[[ "${SV_AUTH,,}" == "${OP,,}" ]] || { echo "FAIL authority($SV_AUTH) != operator($OP)" >&2; exit 1; }
+SV_AUTH=$(rpc "$CAST" call "$SV" 'authority()(address)' | tr '[:upper:]' '[:lower:]')
+[[ "$SV_AUTH" == "$(echo "$OP" | tr '[:upper:]' '[:lower:]')" ]] || { echo "FAIL authority($SV_AUTH) != operator($OP)" >&2; exit 1; }
 ok "链上 authority == operator"
 
-LF=$(rpc "$CAST" call "$SV" 'latestFact()(uint256)')
+LF=$(rpc "$CAST" call "$SV" 'latestFact()(uint256)'); LF="${LF%% *}"
 [[ "$LF" == "0" ]] || { echo "FAIL latestFact=$LF 非零（fail-closed 被破坏）" >&2; exit 1; }
-SF=$(rpc "$CAST" call "$SV" 'settledFact(bytes32)(uint256)' "$ROOT")
+SF=$(rpc "$CAST" call "$SV" 'settledFact(bytes32)(uint256)' "$ROOT"); SF="${SF%% *}"
 [[ "$SF" == "0" ]] || { echo "FAIL settledFact(root)=$SF 非零" >&2; exit 1; }
 ok "fail-closed：latestFact==0 且 settledFact(root)==0（骨架期不落任何结算状态）"
 
@@ -164,15 +166,17 @@ t0='0xfdbe3de9a44396bb3ab8a6384d4d1c800968e59edb52369bc27f88b93d98ff48'
 hit=[l for l in rc.get('logs',[]) if l['topics'][0]==t0]
 assert hit, '无 BatchAnchored 事件'
 l=hit[0]
-assert l['topics'][1]=='0x%x'%int(idx), 'BatchAnchored index 不符'
+assert int(l['topics'][1],16)==int(idx), 'BatchAnchored index 不符'
 data=l['data'][2:]
 assert data[:64]==root[2:].rjust(64,'0'), 'BatchAnchored root 不符'
 assert int(data[64:128],16)==int(through_op), 'BatchAnchored throughOp 不符'
 bc=j('call',inbox,'batchCount()(uint64)')
-assert int(bc)==int(idx)+1, f'batchCount={bc} != index+1'
+bc=bc[0] if isinstance(bc,list) else bc
+bc=int(bc) if isinstance(bc,int) else int(bc,16)
+assert bc==int(idx)+1, f'batchCount={bc} != index+1'
 print('PASS  anchor 回执 status=0x1 + BatchAnchored(index/root/throughOp) 逐字段一致 + batchCount==index+1')
 EOF
-ok "anchor 回执/事件/计数全对（tx=$ANCHOR_TX）"
+ok "anchor 回执/事件/计数全对（tx=${ANCHOR_TX}）"
 
 python3 - "$NEG1_TX" "$NEG2_TX" "$RPC" "$CAST" <<'EOF'
 import json, subprocess, sys
@@ -180,10 +184,14 @@ neg1, neg2, rpc, CAST = sys.argv[1:5]
 def j(*a):
     r=subprocess.run([CAST,*a,'--rpc-url',rpc,'--json'],capture_output=True,text=True)
     return json.loads(r.stdout or '{}')
+def to_int(x):
+    if isinstance(x,int): return x
+    s=str(x)
+    return int(s,16) if s.startswith('0x') else int(s)
 for name,tx in [('neg1(篡改acc)',neg1),('neg2(伪证)',neg2)]:
-    txo=j('tx',tx); rc=j('receipt',tx)
-    assert rc.get('status')=='0x0', f'{name} status 非 0x0：{rc.get("status")}'
-    assert int(txo.get('gas'),16)==int(rc.get('gasUsed'),16), f'{name} gasUsed != gasLimit'
+    raw=j('tx',tx); raw=raw.get('data', raw); txo=raw.get('legacyTransaction', raw); rc=j('receipt',tx)
+    assert str(rc.get('status'))=='0x0', f'{name} status 非 0x0：{rc.get("status")}'
+    assert to_int(txo.get('gas'))==to_int(rc.get('gasUsed')), f'{name} gasUsed({rc.get("gasUsed")}) != gasLimit({txo.get("gas")})'
 print('PASS  两笔负例回执 status=0x0 且 gasUsed==gasLimit（fail-closed revert 真实上链）')
 EOF
 ok "伪证/篡改 acc 负例 revert（status=0x0）且 limit==used"
@@ -201,10 +209,14 @@ def j(*a):
 txs=[('verifierDeploy',d['verifierDeploy']['tx']),('anchor',d['anchor']['tx']),
      ('neg1',d['negativeTamperedAcc']['tx']),('neg2',d['negativePseudoProof']['tx'])]
 node_price=int(d['chain']['gasPriceWei'])
+def to_int(x):
+    if isinstance(x,int): return x
+    s=str(x)
+    return int(s,16) if s.startswith('0x') else int(s)
 total=0
 for name,tx in txs:
-    txo=j('tx',tx); rc=j('receipt',tx)
-    gas=int(txo.get('gas'),16); used=int(rc.get('gasUsed'),16); price=int(rc.get('effectiveGasPrice'),16)
+    raw=j('tx',tx); raw=raw.get('data', raw); txo=raw.get('legacyTransaction', raw); rc=j('receipt',tx)
+    gas=to_int(txo.get('gas')); used=to_int(rc.get('gasUsed')); price=to_int(rc.get('effectiveGasPrice'))
     assert gas==used, f'{name} gasUsed({used}) != gasLimit({gas})'
     assert price==node_price, f'{name} price({price}) != 节点价({node_price})'
     total+=gas*price
