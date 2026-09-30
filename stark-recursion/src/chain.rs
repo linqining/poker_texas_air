@@ -341,9 +341,17 @@ pub const FOLD_OUTPUT_LEN: usize = 17;
 /// 0–15 就是 combined 信封同位词，不是同一个常量的两个名字。
 pub const FOLD_MAGIC_INDEX: usize = 1;
 pub const FOLD_BINDING_INDEX: usize = 5;
-/// roster_digest 尾插槽（一批 K 手**同值批常量**，规格 D1a：roster 每批进
-/// 电路一次，K 个段各自重复携带，使每手段独立成 fact/binding 语句）。
+/// roster_digest 尾插槽（**桌内常量**，规格 D1a 的多桌超集 out/
+/// fold-multitable-spec.md §4/M4：roster 每桌进电路一次，桌内段各自重复
+/// 携带，使每手段独立成 fact/binding 语句；跨桌可异、不同桌允许同值
+/// ——同批玩家群开两桌合法。T=1 特例下退化为原批常量，D1a 原文仍真）。
 pub const FOLD_ROSTER_INDEX: usize = 16;
+
+/// fold 批桌数上限 T_MAX（多桌规格 M1-c/M4-c：slot 16 同值 run 数 = 桌数
+/// T，构造时断言 T ≤ 8）。**评审面政策而非 steps 硬门**——ΣK ≤ 64 政策下
+/// steps 最坏情形（T=64 全 8 人）≈ 2^20 桶的 47.7%；首版 T=8 拼批笼内
+/// 实测落库后可复核放宽（开放点 Q-M3）。
+pub const MAX_TABLES_PER_FOLD_BATCH: usize = 8;
 
 /// 一条 fold 手语句 + 其 17 词公开输出见证。
 ///
@@ -372,8 +380,8 @@ pub fn fold_expected_fact(program_hash: &Felt252, output: &[Felt252]) -> Felt252
 ///
 /// 与 [`BatchPlan`]（wrap）/ [`CombinedBatchPlan`]（combined）并列的第三个
 /// 独立类型（规格 D3a/K-1）：不用 enum 泛化的理由同 combined——段语义
-/// （slot 16 roster 批常量）与禁混批闸不同，独立类型让旧路径零改动、
-/// 编译期即禁止混装；K 政策/keccak 根/叶 H1 经共享函数复用
+/// （slot 16 roster 桌内常量，多桌规格 M4）与禁混批闸不同，独立类型让
+/// 旧路径零改动、编译期即禁止混装；K 政策/keccak 根/叶 H1 经共享函数复用
 /// （`check_hand_count` / `keccak_batch_root` / [`leaf_output_words`]）。
 #[derive(Debug, Clone)]
 pub struct FoldBatchPlan {
@@ -387,30 +395,36 @@ impl FoldBatchPlan {
     /// 1..=MAX_HANDS_PER_LEAF、条数 2 的幂、输出形状（恰 17 词、
     /// `output[1] == MAGIC`、`output[5] == statement.hand_binding`）、
     /// fact 宿主重算一致（[`fold_expected_fact`]）、binding 无重复——
-    /// 外加规格 D1a/Q-1 钉死的批常量三检：slot 0（批终 acc）全手同值、
-    /// slot 16（roster_digest）非零且全手同值（合约 fold 入口消费面同款
-    /// 断言，规格 §4.4 检查 #10 的 host 镜像）。
+    /// 外加 D1a/Q-1 钉死、多桌规格 M4-c 放宽后的三检：
+    /// slot 0（批终 acc）全手同值、slot 16（roster_digest）逐手非零
+    /// （合约 fold 入口消费面同款断言，规格 §4.4 检查 #10 的 host 镜像）、
+    /// slot 16 **桌内常量**——按段序切极大同值 run，run 数 = 桌数 T ≤
+    /// [`MAX_TABLES_PER_FOLD_BATCH`]；同 run 内同值由 run 定义自持（真正
+    /// 的桌内常量是电路结构事实，host 层不重复断言），**不同 run 允许
+    /// 同值**（同批玩家群开两桌合法）。
     ///
     /// # acc 链信任边界（与 [`CombinedBatchPlan`] 同界，如实声明）
     ///
-    /// slot 0 = fold 链**批终 acc**（一批 K 手同值——电路在全部 claims 折叠
-    /// 后输出一次 acc，fold_batch.cairo:180-187；规格开放点 Q-1 钉死为批终
-    /// acc 复制而非逐手跑动 acc）。本层**不可校验**该 acc 是否真链在上一批
-    /// 之后（claims/prev_acc 均不在公开输出里）——生产者侧把关（hand-verify-
-    /// native `foldagg` 的 host parity 门 + 注册面锚对照，fold_batch_test
-    /// T5/T9/T10 门形）。本层保证：批 acc 与 roster_digest 进 fact 预映像
-    /// ——篡改任一段词必改 fact（批根/终证语句随之全变）。统一漂移批 acc
-    /// （全手同改+重算 fact）可通过本层形状检（同 combined 信任边界），
-    /// 由 SettleBatch 根/终证语句捕获。
+    /// slot 0 = fold 链**批终 acc**（一批 ΣK 手同值——电路在跨桌 claims
+    /// 按桌序串接后**仍单次折叠**输出 acc，fold_batch.cairo:180-187、多桌
+    /// 规格 M6；规格开放点 Q-1 钉死为批终 acc 复制而非逐手跑动 acc）。
+    /// 本层**不可校验**该 acc 是否真链在上一批之后（claims/prev_acc 均
+    /// 不在公开输出里）——生产者侧把关（hand-verify-native `foldagg` 的
+    /// host parity 门 + 注册面锚对照，fold_batch_test T5/T9/T10 门形）。
+    /// 本层保证：批 acc 与 roster_digest 进 fact 预映像——篡改任一段词
+    /// 必改 fact（批根/终证语句随之全变）。统一漂移批 acc（全手同改+重算
+    /// fact）可通过本层形状检（同 combined 信任边界），由 SettleBatch 根/
+    /// 终证语句捕获。
     ///
     /// # Errors
-    /// 任一校验失败（含具体手序号）。
+    /// 任一校验失败（含具体手序号；T 超 T_MAX 的错误在批尾报 run 计数）。
     pub fn new(program_hash: Felt252, hands: Vec<FoldHandEntry>) -> Result<Self> {
         check_hand_count(hands.len())?;
         let magic = Felt252::from(groth16_wrap::wrap_circuit::SEGMENT_MAGIC);
         let mut seen_bindings: Vec<Felt252> = Vec::with_capacity(hands.len());
         let mut batch_acc: Option<Felt252> = None;
-        let mut roster_d: Option<Felt252> = None;
+        let mut table_runs: usize = 0;
+        let mut run_roster: Option<Felt252> = None;
         for (i, hand) in hands.iter().enumerate() {
             if hand.output.len() != FOLD_OUTPUT_LEN {
                 return Err(anyhow!(
@@ -423,7 +437,7 @@ impl FoldBatchPlan {
                     "hand {i}: output[{FOLD_MAGIC_INDEX}] must be MAGIC 'SP2M_OK' (0x5350324d5f4f4b)"
                 ));
             }
-            // D1a/Q-1 批常量锚：slot 0 与 slot 16 在一批内同值。
+            // Q-1 批常量锚：slot 0 跨桌仍批常量（多桌规格 M4-c 检查 #1 不动）。
             let acc = hand.output[0];
             match batch_acc {
                 Some(prev) if prev != acc => {
@@ -440,14 +454,15 @@ impl FoldBatchPlan {
                     "hand {i}: output[{FOLD_ROSTER_INDEX}] roster_digest must be non-zero（合约消费面同款断言）"
                 ));
             }
-            match roster_d {
-                Some(prev) if prev != rd => {
-                    return Err(anyhow!(
-                        "hand {i}: roster_digest != batch anchor（D1a：slot 16 是批常量，K 段同值）"
-                    ));
-                }
-                None => roster_d = Some(rd),
-                _ => {}
+            // D1a→M4-c：slot 16 从批常量放宽为桌内常量。按段序切极大同值
+            // run——与前一段 slot 16 不同即新 run；run 数 = 桌数 T（批尾断
+            // T ≤ T_MAX）。旧「跨批同值」match 分支按规格删除：手间不一致
+            // 不再批拒（那是合法的换桌边界）；桌内漂移在 host 平面层的可
+            // 见形态 = run 数膨胀，超 T_MAX 即拒——真正的桌内常量由电路
+            // 结构保证（roster 每桌算一次、桌内段复制）。
+            if run_roster.as_ref() != Some(&rd) {
+                table_runs += 1;
+                run_roster = Some(rd);
             }
             let fact = fold_expected_fact(&program_hash, &hand.output);
             if fact != hand.statement.fact {
@@ -465,6 +480,12 @@ impl FoldBatchPlan {
                 return Err(anyhow!("hand {i}: duplicate hand_binding（SettleBatch DuplicateBinding 同政策）"));
             }
             seen_bindings.push(binding_felt);
+        }
+        // M4-c/M9-4(d)：run 数 = 桌数 T，评审面政策上限 T_MAX。
+        if table_runs > MAX_TABLES_PER_FOLD_BATCH {
+            return Err(anyhow!(
+                "fold batch table count T={table_runs} > T_MAX={MAX_TABLES_PER_FOLD_BATCH}（slot 16 同值 run 数 = 桌数，多桌规格 M4-c）"
+            ));
         }
         Ok(Self { program_hash, hands })
     }
@@ -1006,8 +1027,9 @@ mod tests {
     }
 
     /// fold 批负例：词数 16/18、MAGIC 篡改、批终 acc 不一致（Q-1 门）、
-    /// roster 槽为零/不一致（D1a 门）、binding 不一致、fact 篡改、binding
-    /// 重复、K=3 非 2 的幂——全部 fail-closed。
+    /// roster 槽为零（D1a 门；手间不一致不再批拒——多桌规格 M4-c 放宽为
+    /// run 分组，正例/超 T_MAX 负例见 multitable 测试）、binding 不一致、
+    /// fact 篡改、binding 重复、K=3 非 2 的幂——全部 fail-closed。
     #[test]
     fn fold_batch_plan_rejects_bad_shapes() {
         let (ph, _roster_d, mut hands) = fold_golden_hands(2);
@@ -1050,11 +1072,9 @@ mod tests {
             h
         };
         assert!(FoldBatchPlan::new(ph, vec![zero_roster, hands[1].clone()]).is_err());
-        // roster 槽手间不一致（D1a 批常量门）
-        let mut roster_drift = hands.clone();
-        roster_drift[1].output[FOLD_ROSTER_INDEX] += Felt252::from(1u64);
-        roster_drift[1].statement.fact = fold_expected_fact(&ph, &roster_drift[1].output);
-        assert!(FoldBatchPlan::new(ph, roster_drift).is_err(), "slot 16 非批常量必须拒绝");
+        // M4-c：旧「slot 16 手间不一致即拒」分支已删——[A,B] 现在是合法的
+        // 两桌批（run 数 2 ≤ T_MAX），正例见 fold_batch_plan_multitable_*；
+        // 拒绝面收窄为 run 数超 T_MAX（桌内漂移的 host 可见形态）。
         // binding 与段槽位不一致
         let bad_binding = {
             let mut h = hands[0].clone();
@@ -1079,6 +1099,135 @@ mod tests {
         let third = hands[0].clone();
         hands.push(third);
         assert!(FoldBatchPlan::new(ph, hands).is_err(), "K=3 非 2 的幂拒绝");
+    }
+
+    /// 多桌金向量手（多桌规格 §4/M4-c 的 host 平面层）：按桌段尺寸表切
+    /// run——桌 t 的段连续、slot 16 = 桌内常量 roster_t（逐桌确定性
+    /// poseidon 值，桌间互异）、slot 0 批终 acc 仍全手同值（Q-1 不放宽）、
+    /// binding 逐手全局唯一。fact 用 [`fold_expected_fact`] 逐手重算。
+    fn fold_multitable_hands(table_sizes: &[u64]) -> (Felt252, Vec<FoldHandEntry>) {
+        let program_hash = felt_from_hex(golden::GOLDEN_PROGRAM_HASH).unwrap();
+        let base_v2: Vec<Felt252> = golden::GOLDEN_OUTPUT
+            .iter()
+            .skip(1) // wrap 段 [0] = 长度前缀 15，combined/fold 段无前缀
+            .map(|h| felt_from_hex(h).unwrap())
+            .collect();
+        assert_eq!(base_v2.len(), 15, "v2 公开段 15 词");
+        let k_total: u64 = table_sizes.iter().sum();
+        // 确定性批终 acc（跨桌 claims 桌序串接后仍单次折叠，规格 M6）。
+        let claims: Vec<Felt252> = (0..k_total)
+            .map(|i| poseidon_hash_many(&[Felt252::from(0xC1A1u64), Felt252::from(i)]))
+            .collect();
+        let mut acc_in = vec![acc_genesis()];
+        acc_in.extend_from_slice(&claims);
+        let batch_acc = poseidon_hash_many(&acc_in);
+        let mut hands = Vec::with_capacity(k_total as usize);
+        let mut idx: u64 = 0;
+        for (t, &kt) in table_sizes.iter().enumerate() {
+            let roster_t = poseidon_hash_many(&[
+                Felt252::from(0x1057u64),
+                Felt252::from(0x7AB1Eu64), // multitable 盐：与单桌 helper 的 rd 派生区分
+                Felt252::from(t as u64),
+            ]);
+            for _ in 0..kt {
+                let binding = felt_from_hex(golden::GOLDEN_HAND_BINDING).unwrap()
+                    + Felt252::from(idx);
+                let mut output = Vec::with_capacity(FOLD_OUTPUT_LEN);
+                output.push(batch_acc);
+                output.extend(base_v2.iter().copied());
+                output[2] = Felt252::from(2_000u64 + idx); // hand_id 槽位
+                output[FOLD_BINDING_INDEX] = binding;
+                output.push(roster_t); // slot 16 尾插 = 本桌 digest
+                let fact = fold_expected_fact(&program_hash, &output);
+                hands.push(FoldHandEntry {
+                    statement: BatchStatement { program_hash, hand_binding: binding, fact },
+                    output,
+                });
+                idx += 1;
+            }
+        }
+        (program_hash, hands)
+    }
+
+    /// 多桌正例（M4-c/M9-1 的 host 平面层）：T=2 两桌**不同段数**（4+12=
+    /// ΣK16，2 的幂）不同 roster → run 分组通过；跨桌不同 roster 合法；
+    /// 批终 acc 仍批常量（Q-1 不动）；keccak 根/叶预映像照常；不同 run 同值
+    /// （同批玩家群开两桌）合法；T=8 边界通过；T=1 单桌退化回归。
+    #[test]
+    fn fold_batch_plan_multitable_two_tables_builds() {
+        let (ph, hands) = fold_multitable_hands(&[4, 12]);
+        let plan =
+            FoldBatchPlan::new(ph, hands.clone()).expect("T=2 两桌批计划通过（M4-c run 分组）");
+        // run 结构：前 4 手桌 A 同 roster、后 12 手桌 B 同 roster、两值互异。
+        let roster_a = hands[0].output[FOLD_ROSTER_INDEX];
+        let roster_b = hands[4].output[FOLD_ROSTER_INDEX];
+        assert_ne!(roster_a, roster_b, "跨桌不同 roster 是合法形态");
+        for h in &hands[..4] {
+            assert_eq!(h.output[FOLD_ROSTER_INDEX], roster_a, "桌 A 段内同值");
+        }
+        for h in &hands[4..] {
+            assert_eq!(h.output[FOLD_ROSTER_INDEX], roster_b, "桌 B 段内同值");
+        }
+        // slot 0 批终 acc 跨桌仍批常量（M4-c 检查 #1 不动）。
+        for (i, h) in hands.iter().enumerate() {
+            assert_eq!(h.output[0], hands[0].output[0], "hand {i}: acc 批常量");
+        }
+        // 根与叶预映像照常（桌结构对语句层不可见，MT-3）。
+        let root = plan.keccak_batch_root().unwrap();
+        assert_eq!(root, keccak_batch_root(&plan.statements()).unwrap());
+        assert_eq!(plan.leaf_preimage().len(), 1 + 16 * FOLD_OUTPUT_LEN);
+        // 不同 run 允许同值：把两桌 digest 抹成同值仍是 2 个 run ≤ T_MAX。
+        let (ph2, hands2) = fold_multitable_hands(&[8, 8]);
+        let mut same_roster = hands2.clone();
+        for h in &mut same_roster {
+            h.output[FOLD_ROSTER_INDEX] = roster_a;
+            h.statement.fact = fold_expected_fact(&ph2, &h.output);
+        }
+        assert!(
+            FoldBatchPlan::new(ph2, same_roster).is_ok(),
+            "不同 run 同值（同批玩家群开两桌）必须通过（M4-c）"
+        );
+        // T=8 边界（M9-1(c) 拼批形态：8 桌各 2 手，ΣK=16）。
+        let (ph8, hands8) = fold_multitable_hands(&[2, 2, 2, 2, 2, 2, 2, 2]);
+        assert!(FoldBatchPlan::new(ph8, hands8).is_ok(), "T=8 = T_MAX 边界通过");
+        // T=1 单桌退化回归：全段同 roster 的 K=16 批照常通过（D1a 特例仍真）。
+        let (ph1, hands1) = fold_multitable_hands(&[16]);
+        assert!(FoldBatchPlan::new(ph1, hands1).is_ok(), "T=1 退化回归");
+    }
+
+    /// 桌内 roster 漂移 / T 窗口负例（M4-c/M9-4(d)）：host 平面层无桌边界，
+    /// 漂移的可见形态 = slot 16 同值 run 数膨胀——逐手异值（16 run）、两值
+    /// 交错（16 run）、9 桌（9 run）均 > T_MAX=8 必拒；真正的桌内常量是
+    /// 电路结构事实（roster 每桌算一次、桌内段复制），host 层不重复断言。
+    #[test]
+    fn fold_batch_plan_rejects_table_run_overflow() {
+        // 逐手异值：16 手各携不同 digest → 16 run > 8。
+        let (ph, mut hands) = fold_multitable_hands(&[16]);
+        for (i, h) in hands.iter_mut().enumerate() {
+            h.output[FOLD_ROSTER_INDEX] =
+                poseidon_hash_many(&[Felt252::from(0xD21F7u64), Felt252::from(i as u64)]);
+            h.statement.fact = fold_expected_fact(&ph, &h.output);
+        }
+        let err = FoldBatchPlan::new(ph, hands).expect_err("16 run > T_MAX=8 必须拒绝");
+        assert!(format!("{err}").contains("T_MAX"), "错误文案带 T_MAX：{err}");
+        // 两值交错漂移（同一桌的手在两个 digest 间来回）：run 数 = 段数。
+        let (ph2, hands2) = fold_multitable_hands(&[16]);
+        let ra = hands2[0].output[FOLD_ROSTER_INDEX];
+        let rb = poseidon_hash_many(&[Felt252::from(0xD21F7u64), Felt252::from(0u64)]);
+        let mut alternating = hands2.clone();
+        for (i, h) in alternating.iter_mut().enumerate() {
+            h.output[FOLD_ROSTER_INDEX] = if i % 2 == 0 { ra } else { rb };
+            h.statement.fact = fold_expected_fact(&ph2, &h.output);
+        }
+        let err2 =
+            FoldBatchPlan::new(ph2, alternating).expect_err("交错漂移 16 run > T_MAX 必须拒绝");
+        assert!(format!("{err2}").contains("T=16"), "错误文案带 run 计数：{err2}");
+        // 9 桌（8×1 手 + 1×8 手，ΣK=16）：9 run > 8 必拒。
+        let (ph9, hands9) = fold_multitable_hands(&[1, 1, 1, 1, 1, 1, 1, 1, 8]);
+        assert!(
+            FoldBatchPlan::new(ph9, hands9).is_err(),
+            "T=9 > T_MAX=8 必须拒绝（M9-4(d)）"
+        );
     }
 
     /// K=2 批：构造校验全过；keccak 根与 groth16-wrap 直接复用一致（同函数自证）；

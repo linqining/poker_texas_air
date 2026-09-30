@@ -57,14 +57,14 @@ pub const BATCH_PROGRAM_HASH_HEX: &str =
 
 /// fold 链批程序（生产版 17 词段，规格 out/fold-spec.md §1/D1）的钉扎程序哈希。
 ///
-/// **尚未钉扎**：生产 fold 程序（98 词 settle wire 并入 + 17 词公开段，替代
-/// 切片版 fold_batch.cairo:191-194 的 2 词输出）尚未编译落库——无法凭空
-/// 造哈希，本常量钉空串，[`fold_batch_program_hash`] 在钉扎前 fail-closed。
-/// 钉扎纪律与 [`BATCH_PROGRAM_HASH_HEX`] 相同：程序编译出证后钉入实测哈希
-/// （哈希只钉程序不钉参数；重编程序必然换哈希 → 同步更新此处与
-/// fact-verify 钉扎）。**不动** [`BATCH_PROGRAM_HASH_HEX`]——它钉的是
+/// **发布时自动钉扎**：跑 `bash scripts/pin_fold_program_hash.sh` ——K=1 真出证
+/// 提取实测 program_hash → 幂等更新本常量 → `cargo test -p stark-recursion
+/// --lib` 验证（钉扎测试两态兼容：空串 = [`fold_batch_program_hash`]
+/// fail-closed；非空 = 访问器精确还原钉值）。哈希只钉程序不钉参数；重编程序
+/// （改 fold_batch.cairo）必然换哈希，发布脚本会自动改钉，**不要手填**。
+/// **不动** [`BATCH_PROGRAM_HASH_HEX`]——它钉的是
 /// settlement_batch_private 16 词段在证程序（规格 D3b/K-1）。
-pub const FOLD_BATCH_PROGRAM_HASH_HEX: &str = "";
+pub const FOLD_BATCH_PROGRAM_HASH_HEX: &str = "0x074f0a7f4f082590a4ffb9f929c9fd47dbc131cdb18dc9f5d659105c4b280299";
 
 /// 批程序 L1 腿钉扎的 prover 参数（≤6G 硬约束的成立前提，见模块注释）。
 ///
@@ -233,7 +233,9 @@ pub struct FoldFinalOutput {
     pub k: usize,
     /// 17·K 手段（每手段 word 0–15 = combined 信封同位（批终 acc@0、MAGIC@1、
     /// hand_id@2、digest@3、n@4、binding@5、cm×8@6..13、total@14、ald@15），
-    /// word 16 = roster_digest 批常量——规格 D1 布局）。
+    /// word 16 = roster_digest **桌内常量**——规格 D1a 多桌修订（out/
+    /// fold-multitable-spec.md §4/M4：roster 每桌进电路一次，桌内段各自
+    /// 重复携带；跨桌可异、不同桌允许同值，T=1 特例下退化为原批常量））。
     pub segments: Vec<Felt252>,
     /// 链尾（公开输出的最后 4 felt；与 combined 同构）。
     pub tail: ChainTail,
@@ -480,7 +482,7 @@ mod tests {
         let ph = batch_program_hash().unwrap();
         let segs = golden_segments(2, &ph);
         let acc = Felt252::from(7u64);
-        let mut root = [9u8; 32];
+        let root = [9u8; 32];
         let (hi, lo) = split_root_hi_lo(&root);
         let fact = expected_batch_fact(&acc, &hi, &lo, 2, &segs);
         let mut output = vec![Felt252::from((segs.len() + TAIL_LEN) as u64)];
@@ -554,12 +556,12 @@ mod tests {
         let segs = fold_segments(2, &ph);
         assert_eq!(segs.len(), 2 * FOLD_SEGMENT_LEN);
         let acc = Felt252::from(7u64);
-        let mut root = [9u8; 32];
+        let root = [9u8; 32];
         let (hi, lo) = split_root_hi_lo(&root);
         let fact = expected_batch_fact(&acc, &hi, &lo, 2, &segs);
-        let mut output = vec![Felt252::from((segs.len() + TAIL_LEN) as u64)];
-        output.extend_from_slice(&segs);
-        output.extend_from_slice(&[acc, hi, lo, fact]);
+        // 输出构造走 synth_fold_final_output（与 combined 侧同构的合成路径，
+        // 避免测试内联重复一份 [len]++segs++tail 拼装）
+        let output = synth_fold_final_output(&segs, &acc, &root, 2);
         let parsed = parse_fold_final_output(&output).unwrap();
         assert_eq!(parsed.k, 2);
         assert_eq!(parsed.segments, segs);

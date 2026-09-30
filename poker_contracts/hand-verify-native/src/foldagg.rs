@@ -1,10 +1,14 @@
 //! foldagg — `cairo/src/fold_batch.cairo` 的 host 侧：BDN 手级聚合铸造/验证
-//! 镜像 + 批 wire 构造 + prove-hand 出证驱动（FoldDesign v2 **生产版**）。
+//! 镜像 + 批 wire 构造 + prove-hand 出证驱动（FoldDesign v2 **生产版·多桌**）。
 //!
-//! 与 `combined.rs`（每手合并信封）的分工：fold 批把**同一张牌桌**的 K 手
-//! 折成一份证明——roster/keyagg 每批一次、每手 = settle 语句约束 + 3 次
-//! poseidon + 单方程 EC 检查 + z̄ 范围检查，公开输出 K 段 17 词
-//! `[acc] ++ settlement 公开段(15) ++ [roster_digest]`（fold-spec D1）。
+//! 与 `combined.rs`（每手合并信封）的分工：fold 批把 **T 张桌（T ≥ 1）的
+//! 桌段串接**折成一份证明——roster/keyagg 每桌一次、每手 = settle 语句
+//! 约束 + 3 次 poseidon + 单方程 EC 检查 + z̄ 范围检查（对手所属桌的
+//! P̄_t 验证），公开输出 (ΣK) 段 17 词
+//! `[acc] ++ settlement 公开段(15) ++ [本桌 roster_digest]`（fold-spec D1
+//! + 多桌规格 D1a 修订：slot16 桌内常量）。**T=1 退化与单桌生产版逐词
+//! 一致**（wire 桌段自定界串接、无全局 T 词——多桌规格 §2/§8，金样
+//! `tests/golden/fold_t1_p2k2.json` 回归钉死）。
 //!
 //! 公式与电路逐 felt parity（T8 KAT 钉死）：
 //! - roster_digest = poseidon([roster_label, n] ++ (pkx, pky)×n)
@@ -101,6 +105,11 @@ pub const HAND_BLOCK_WORDS: usize = SETTLE_WORDS + SIG_WORDS;
 pub const FOLD_SEGMENT_LEN: usize = 17;
 /// roster_digest 在每手段内的槽位（消费面唯一新增语义收口，D1）。
 pub const FOLD_ROSTER_INDEX: usize = 16;
+/// 多桌批桌数上限 T_MAX（多桌规格 M1-c，host 层政策检查——评审面边界
+/// 而非 steps 硬门：steps 最坏情形 T=64 全 8 人 ΣK=64 ≈ 499,904 =
+/// 2^20 的 47.7%；链层另有 slot16 run 计数检查同值）。链层政策
+/// `check_hand_count`（ΣK ≤ 64 且 2 的幂）零改动，host 铸侧不复检 ΣK。
+pub const FOLD_T_MAX: usize = 8;
 
 // ---------------------------------------------------------------------------
 // 公式层（与 fold_batch.cairo 逐 felt parity）
@@ -380,6 +389,89 @@ pub fn expected_public_output(
     RosterAnchor { roster_digest: rd, expected_acc: fold_acc(prev_acc, &claims) }
 }
 
+/// 多桌批的一桌（roster + 本桌 K_t 手）——wire 桌段、出证门锚与期望
+/// 输出的最小单元（多桌规格 §2/§4）。桌内 roster_digest 与 P̄_t 由本桌
+/// pks 派生（每桌一次）；`hands` 为空 = 构造错误（K_t=0 只浪费 keyagg
+/// steps、零产出，host 构造器拒绝——M1-b；电路侧不检，Q-M2）。
+#[derive(Debug, Clone)]
+pub struct FoldTable {
+    pub roster_pks: Vec<(Felt, Felt)>,
+    pub hands: Vec<AggregatedHand>,
+}
+
+impl FoldTable {
+    /// 构造器：强制 K_t ≥ 1（M1-b）。
+    pub fn new(
+        roster_pks: Vec<(Felt, Felt)>,
+        hands: Vec<AggregatedHand>,
+    ) -> Result<Self, String> {
+        if hands.is_empty() {
+            return Err(
+                "FoldTable::new: K_t = 0 empty table rejected (host constructor, M1-b)".into(),
+            );
+        }
+        Ok(Self { roster_pks, hands })
+    }
+
+    /// 本桌手的 wire 形态（settle + (R̄, z̄)）。
+    pub fn wire_hands(&self) -> Vec<FoldHand> {
+        self.hands.iter().map(|h| h.hand.clone()).collect()
+    }
+}
+
+/// 多桌批的逐桌锚（出证后 parity 门对照侧，M4/M9）：桌 t 的
+/// roster_digest = H(pks_t)（桌内常量——电路结构保证）；expected_acc 全桌
+/// 共享 = `fold_acc(prev, claims 按桌序串接)`（Q-1：跨桌 claims 仍单次折叠）。
+pub fn expected_public_output_tables(
+    prev_acc: Felt,
+    tables: &[FoldTable],
+) -> Vec<RosterAnchor> {
+    let mut claims: Vec<Felt> = Vec::new();
+    let mut digests = Vec::with_capacity(tables.len());
+    for t in tables {
+        digests.push(roster_digest(&t.roster_pks));
+        claims.extend(t.hands.iter().map(|h| h.claim));
+    }
+    let acc = fold_acc(prev_acc, &claims);
+    digests
+        .into_iter()
+        .map(|rd| RosterAnchor { roster_digest: rd, expected_acc: acc })
+        .collect()
+}
+
+/// 多桌 T 窗口与形状检查（M1-c，host 层政策——先于一切出证动作，纯数据
+/// 检查可单测）：T ≥ 1、T ≤ T_MAX、每桌 K_t ≥ 1、锚数 == 桌数。
+pub fn check_multitable_shape(
+    tables: &[FoldTable],
+    anchors: &[RosterAnchor],
+) -> Result<(), String> {
+    if tables.is_empty() {
+        return Err("empty fold batch (T = 0): no table segments".into());
+    }
+    if tables.len() > FOLD_T_MAX {
+        return Err(format!(
+            "fold batch table count {} > T_MAX {} (M1-c)",
+            tables.len(),
+            FOLD_T_MAX
+        ));
+    }
+    for (t, table) in tables.iter().enumerate() {
+        if table.hands.is_empty() {
+            return Err(format!(
+                "table {t}: K_t = 0 empty table rejected (M1-b)"
+            ));
+        }
+    }
+    if anchors.len() != tables.len() {
+        return Err(format!(
+            "anchor count {} != table count {}",
+            anchors.len(),
+            tables.len()
+        ));
+    }
+    Ok(())
+}
+
 /// settle wire（98 词）→ host 语句对象（[`crate::combined::SettleStatement`]，
 /// `expected_segment` 的期望侧重算入口）。
 ///
@@ -458,28 +550,43 @@ pub fn host_verify_batch(
 // wire 摊平 + prove-hand 驱动（recurse.rs:218-322 模式）
 // ---------------------------------------------------------------------------
 
-/// batch wire：`[P, (pkx,pky)×P, K, (settle 98 词, R̄x, R̄y, z̄)×K]`
-/// （fold_batch.cairo 头注释同布局；词数 = 2 + 2P + 101K）。
-pub fn build_batch_wire(roster_pks: &[(Felt, Felt)], hands: &[FoldHand]) -> Vec<Felt> {
-    let mut w = Vec::with_capacity(2 + 2 * roster_pks.len() + HAND_BLOCK_WORDS * hands.len());
-    w.push(Felt::from(roster_pks.len() as u64));
-    for (x, y) in roster_pks {
-        w.push(*x);
-        w.push(*y);
-    }
-    w.push(Felt::from(hands.len() as u64));
-    for h in hands {
-        assert_eq!(
-            h.settle.len(),
-            SETTLE_WORDS,
-            "FoldHand.settle must be a 98-word settle wire"
-        );
-        w.extend_from_slice(&h.settle);
-        w.push(h.rbar.0);
-        w.push(h.rbar.1);
-        w.push(h.zbar);
+/// 多桌 batch wire（多桌规格 §2 钉死）：**桌段自定界串接、无全局 T 词**——
+/// `[P_1, (pkx,pky)×P_1, K_1, blocks×K_1] ++ … ++ [P_T, pks_T, K_T, blocks×K_T]`，
+/// 每手块 = settle 98 词 + (R̄x, R̄y, z̄)（与单桌块逐词同形）；词数 =
+/// Σ_t(2 + 2·P_t + 101·K_t)。桌序 = wire 序 = 段序 = claims 序。
+pub fn build_batch_wire_tables(tables: &[(&[(Felt, Felt)], &[FoldHand])]) -> Vec<Felt> {
+    let total: usize = tables
+        .iter()
+        .map(|(pks, hands)| 2 + 2 * pks.len() + HAND_BLOCK_WORDS * hands.len())
+        .sum();
+    let mut w = Vec::with_capacity(total);
+    for (pks, hands) in tables {
+        w.push(Felt::from(pks.len() as u64));
+        for (x, y) in *pks {
+            w.push(*x);
+            w.push(*y);
+        }
+        w.push(Felt::from(hands.len() as u64));
+        for h in *hands {
+            assert_eq!(
+                h.settle.len(),
+                SETTLE_WORDS,
+                "FoldHand.settle must be a 98-word settle wire"
+            );
+            w.extend_from_slice(&h.settle);
+            w.push(h.rbar.0);
+            w.push(h.rbar.1);
+            w.push(h.zbar);
+        }
     }
     w
+}
+
+/// 单桌 batch wire：`[P, (pkx,pky)×P, K, (settle 98 词, R̄x, R̄y, z̄)×K]`
+/// （fold_batch.cairo 头注释同布局；词数 = 2 + 2P + 101K）。**T=1 退化 =
+/// 多桌构造器吃一桌**（结构同一而非兼容模式——多桌规格 §8，金样回归钉死）。
+pub fn build_batch_wire(roster_pks: &[(Felt, Felt)], hands: &[FoldHand]) -> Vec<Felt> {
+    build_batch_wire_tables(&[(roster_pks, hands)])
 }
 
 fn felt_hex(f: Felt) -> String {
@@ -502,21 +609,44 @@ fn prove_hand_bin() -> PathBuf {
     })
 }
 
-/// 写 inputs.json（`[prev_acc, span_len] ++ batch wire`，hex felt 数组）。
+/// 写 inputs.json 的 wire 核：`[prev_acc, span_len] ++ wire`（hex felt 数组；
+/// `span_len` 独立传入——形状负例（M9-3c span 与实际词数不符）走
+/// `prove_wire_unchecked_with_span` 的攻击入口，正路调用必须
+/// `span_len == wire.len()`）。
+fn write_wire_inputs(
+    prev_acc: Felt,
+    wire: &[Felt],
+    span_len: usize,
+    out_dir: &Path,
+) -> Result<PathBuf, String> {
+    let mut arr = vec![felt_hex(prev_acc)];
+    arr.push(format!("0x{:x}", span_len));
+    arr.extend(wire.iter().map(|w| felt_hex(*w)));
+    let path = out_dir.join("inputs.json");
+    std::fs::write(&path, serde_json::to_string(&arr).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// 多桌批写 inputs.json（`span_len` = 多桌 wire 实际词数）。
+pub fn write_inputs_tables(
+    prev_acc: Felt,
+    tables: &[(&[(Felt, Felt)], &[FoldHand])],
+    out_dir: &Path,
+) -> Result<PathBuf, String> {
+    let wire = build_batch_wire_tables(tables);
+    write_wire_inputs(prev_acc, &wire, wire.len(), out_dir)
+}
+
+/// 单桌批写 inputs.json（`[prev_acc, span_len] ++ batch wire`，hex felt 数组；
+/// T=1 退化 = 多桌写入口吃一桌，逐词一致）。
 pub fn write_inputs(
     prev_acc: Felt,
     roster_pks: &[(Felt, Felt)],
     hands: &[FoldHand],
     out_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let wire = build_batch_wire(roster_pks, hands);
-    let mut arr = vec![felt_hex(prev_acc)];
-    arr.push(format!("0x{:x}", wire.len()));
-    arr.extend(wire.iter().map(|w| felt_hex(*w)));
-    let path = out_dir.join("inputs.json");
-    std::fs::write(&path, serde_json::to_string(&arr).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    Ok(path)
+    write_inputs_tables(prev_acc, &[(roster_pks, hands)], out_dir)
 }
 
 /// 一次出证的结果（recurse::LayerOutcome 的 fold 批对应物 + RSS 采集钩子）。
@@ -543,6 +673,17 @@ pub struct FoldOutcome {
     pub proof_bytes: usize,
     pub check_verify_ms: u128,
     pub out_dir: PathBuf,
+    // ---- 多桌字段（T=1 时均为单元素，语义同上）----
+    /// 桌数 T（= wire 桌段数）。
+    pub n_tables: usize,
+    /// 逐桌人数 P_t（wire 序）。
+    pub table_players: Vec<usize>,
+    /// 逐桌手数 K_t（wire 序）。
+    pub table_hands: Vec<usize>,
+    /// 逐桌 cairo 段 slot16（每桌首段代表；D1a 桌内常量）。
+    pub cairo_table_roster_digests: Vec<Felt>,
+    /// 逐桌期望 roster_digest（anchors，注册面锚）。
+    pub expected_table_roster_digests: Vec<Felt>,
 }
 
 /// combined 每手基线（1 手/证，9p 同机实测 12,160 steps——提案 §3.1 同机
@@ -584,23 +725,13 @@ fn parse_summary(out_dir: &Path) -> Result<serde_json::Value, String> {
     .map_err(|e| format!("parse summary.json: {e}"))
 }
 
-/// 未经 host 门禁的裸出证（负例专用：让 prove-hand 直接命中电路 panic）。
-pub fn prove_fold_batch_unchecked(
-    prev_acc: Felt,
-    roster_pks: &[(Felt, Felt)],
-    hands: &[FoldHand],
+/// spawn prove-hand 并把非零退出汇报为「circuit rejected」（负例共用）。
+fn run_prove_hand(
+    inputs_path: &Path,
     out_dir: &Path,
     params_path: Option<&Path>,
 ) -> Result<(), String> {
-    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
-    if !prove_hand_bin().exists() {
-        return Err(format!(
-            "prove-hand binary not found at {} (build: cd proving-tool && cargo build --release)",
-            prove_hand_bin().display()
-        ));
-    }
-    let inputs_path = write_inputs(prev_acc, roster_pks, hands, out_dir)?;
-    let (output, _ms) = spawn_prove_hand(&inputs_path, out_dir, params_path)?;
+    let (output, _ms) = spawn_prove_hand(inputs_path, out_dir, params_path)?;
     if output.status.success() {
         return Ok(());
     }
@@ -610,37 +741,114 @@ pub fn prove_fold_batch_unchecked(
     ))
 }
 
-/// 出证一批 fold 语句并过 parity 门（T1 主路径）。
-///
-/// 门序（对 A1/A2 的诚实承载——电路内 wire pks 仍自由，soundness 闭合点
-/// 在消费面）：先出证（电路只保证算术一致 + 语句约束 + 单方程成立），后
-/// 对照注册面锚（`anchor` = RosterAnchor；切片 = host 重算，生产 =
-/// roster_registry）。`cairo 段 slot16 != anchor.roster_digest` ⇒ 换 roster
-/// 攻击被拒（T9/T10）；`段 slot0 != anchor.expected_acc` ⇒ acc 链绑定被拒
-/// （T5）；段 word 1..=15 另对 host `expected_segment` 重算（输出形状/
-/// 语句公式漂移门，T4 语义）。最后 `--check-only` 独立复验证明文件。
-pub fn prove_fold_batch(
-    prev_acc: Felt,
-    roster_pks: &[(Felt, Felt)],
-    hands: &[AggregatedHand],
-    anchor: &RosterAnchor,
-    out_dir: &Path,
-    params_path: Option<&Path>,
-) -> Result<FoldOutcome, String> {
-    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+fn ensure_prove_hand() -> Result<(), String> {
     if !prove_hand_bin().exists() {
         return Err(format!(
             "prove-hand binary not found at {} (build: cd proving-tool && cargo build --release)",
             prove_hand_bin().display()
         ));
     }
-    // host 直验（fail-closed 预检——只验公式面，不做注册面预判，注册面
-    // 对照必须在出证之后看 cairo 输出）。
-    host_verify_batch(roster_pks, hands)?;
+    Ok(())
+}
 
-    let fold_hands: Vec<FoldHand> = hands.iter().map(|h| h.hand.clone()).collect();
-    let wire_words = build_batch_wire(roster_pks, &fold_hands).len();
-    let inputs_path = write_inputs(prev_acc, roster_pks, &fold_hands, out_dir)?;
+/// 未经 host 门禁的裸出证（负例专用：让 prove-hand 直接命中电路 panic）。
+pub fn prove_fold_batch_unchecked(
+    prev_acc: Felt,
+    roster_pks: &[(Felt, Felt)],
+    hands: &[FoldHand],
+    out_dir: &Path,
+    params_path: Option<&Path>,
+) -> Result<(), String> {
+    prove_fold_batch_unchecked_tables(
+        prev_acc,
+        &[(roster_pks, hands)],
+        out_dir,
+        params_path,
+    )
+}
+
+/// 多桌裸出证（负例专用，M9-2(a)(b) 跨桌攻击语料入口）：桌段直接拼
+/// 攻击 wire——无 host 直验、无 T 窗口/构造器检查（跨桌混签/重放语料
+/// 让 prove-hand 直接命中电路 panic，fail-closed 无证明）。
+pub fn prove_fold_batch_unchecked_tables(
+    prev_acc: Felt,
+    tables: &[(&[(Felt, Felt)], &[FoldHand])],
+    out_dir: &Path,
+    params_path: Option<&Path>,
+) -> Result<(), String> {
+    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    ensure_prove_hand()?;
+    let inputs_path = write_inputs_tables(prev_acc, tables, out_dir)?;
+    run_prove_hand(&inputs_path, out_dir, params_path)
+}
+
+/// wire 级裸出证（M9-3 形状负例：尾桌截断等——直接吃攻击者手写的 wire）。
+pub fn prove_wire_unchecked(
+    prev_acc: Felt,
+    wire: &[Felt],
+    out_dir: &Path,
+    params_path: Option<&Path>,
+) -> Result<(), String> {
+    prove_wire_unchecked_with_span(prev_acc, wire, wire.len(), out_dir, params_path)
+}
+
+/// wire 级裸出证 + 显式 span_len（M9-3(c)：span 声明与实际词数不符 ⇒
+/// runner/电路拒绝；`span_len == wire.len()` 是正路不变量）。
+pub fn prove_wire_unchecked_with_span(
+    prev_acc: Felt,
+    wire: &[Felt],
+    span_len: usize,
+    out_dir: &Path,
+    params_path: Option<&Path>,
+) -> Result<(), String> {
+    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    ensure_prove_hand()?;
+    let inputs_path = write_wire_inputs(prev_acc, wire, span_len, out_dir)?;
+    run_prove_hand(&inputs_path, out_dir, params_path)
+}
+
+/// 出证一个**多桌** fold 批并过 parity 门（多桌规格 M9-1 主路径）。
+///
+/// 门序（对 A1/A2 的诚实承载——电路内 wire pks 仍自由，soundness 闭合点
+/// 在消费面）：T 窗口/形状检查（M1-b/M1-c）→ host 直验（fail-closed 预检，
+/// 只验公式面）→ 出证（电路只保证算术一致 + 语句约束 + 单方程成立）→
+/// **出证后**对照注册面锚（逐手按桌序：**roster 门先行**——`seg[16] ==
+/// anchors[t].roster_digest`（本桌 anchor；跨桌混签/换 roster 的失败面，
+/// M9-2）→ **acc 门**——`seg[0] == anchors[t].expected_acc`（全桌共享
+/// 批终 acc，T5）→ **段公式门**——段 word 1..=15 对 host
+/// `expected_segment` 重算（输出形状/语句公式漂移门，T4 语义））→
+/// `--check-only` 独立复验证明文件。
+pub fn prove_fold_batch_multitable(
+    prev_acc: Felt,
+    tables: &[FoldTable],
+    anchors: &[RosterAnchor],
+    out_dir: &Path,
+    params_path: Option<&Path>,
+) -> Result<FoldOutcome, String> {
+    // T 窗口/形状检查（M1-b/M1-c）先行——纯数据检查，不依赖 prove-hand，
+    // 负例可单测。
+    check_multitable_shape(tables, anchors)?;
+    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    ensure_prove_hand()?;
+    // host 直验（fail-closed 预检——只验公式面，不做注册面预判，注册面
+    // 对照必须在出证之后看 cairo 输出）。逐桌：每桌对**本桌** pks 派生
+    // P̄_t/roster_digest_t 并验证本桌全部手。
+    for t in tables {
+        host_verify_batch(&t.roster_pks, &t.hands)?;
+    }
+
+    // 多桌 wire（T=1 时与 build_batch_wire 逐词相等——结构同一，§8）
+    let owned: Vec<(Vec<(Felt, Felt)>, Vec<FoldHand>)> = tables
+        .iter()
+        .map(|t| (t.roster_pks.clone(), t.wire_hands()))
+        .collect();
+    let borrowed: Vec<(&[(Felt, Felt)], &[FoldHand])> = owned
+        .iter()
+        .map(|(p, h)| (p.as_slice(), h.as_slice()))
+        .collect();
+    let wire = build_batch_wire_tables(&borrowed);
+    let wire_words = wire.len();
+    let inputs_path = write_wire_inputs(prev_acc, &wire, wire.len(), out_dir)?;
     let (output, total_ms) = spawn_prove_hand(&inputs_path, out_dir, params_path)?;
     if !output.status.success() {
         return Err(format!(
@@ -663,47 +871,53 @@ pub fn prove_fold_batch(
         })
         .collect::<Result<_, _>>()?;
     // runner 把 Array 返回序列化为 [len, ...elements]（forge0 单词返回 =
-    // ["0x1","0x1"] 实证）——生产版返回 K×17 词段平铺，取 [17K, K×17 词]。
-    let segment_words = hands.len() * FOLD_SEGMENT_LEN;
+    // ["0x1","0x1"] 实证）——多桌批返回 (ΣK)×17 词段平铺，桌 t 的手占据
+    // 连续段区间（桌序 = wire 序 = 段序）。
+    let total_hands: usize = tables.iter().map(|t| t.hands.len()).sum();
+    let segment_words = total_hands * FOLD_SEGMENT_LEN;
     if public.len() != 1 + segment_words || public[0] != Felt::from(segment_words as u64) {
         return Err(format!(
             "expected [len, {segment_words} segment words] public output, got {} words",
             public.len()
         ));
     }
-    let mut segments: Vec<Vec<Felt>> = Vec::with_capacity(hands.len());
-    for j in 0..hands.len() {
+    let mut segments: Vec<Vec<Felt>> = Vec::with_capacity(total_hands);
+    for j in 0..total_hands {
         segments.push(
             public[1 + j * FOLD_SEGMENT_LEN..1 + (j + 1) * FOLD_SEGMENT_LEN].to_vec(),
         );
     }
     let cairo_acc = segments[0][0];
-    let cairo_rd = segments[0][FOLD_ROSTER_INDEX];
 
-    // ---- parity 门（注册面切片模拟，出证后对照；roster 门先行——T9/T10
-    // 的失败面是 roster 对照，T5 的失败面才是 acc）----
-    for (j, h) in hands.iter().enumerate() {
-        let seg = &segments[j];
-        if seg[FOLD_ROSTER_INDEX] != anchor.roster_digest {
-            return Err(format!(
-                "roster digest parity failure (unregistered roster) at hand {j}: \
-                 cairo 0x{:x} != registered 0x{:x}",
-                seg[FOLD_ROSTER_INDEX], anchor.roster_digest
-            ));
-        }
-        if seg[0] != anchor.expected_acc {
-            return Err(format!(
-                "acc parity failure at hand {j}: cairo 0x{:x} != host 0x{:x}",
-                seg[0], anchor.expected_acc
-            ));
-        }
-        // 输出形状/语句公式漂移门（T4 语义）：段 word 1..=15 必须 ==
-        // host expected_segment（同一 settle wire 的 host 镜像重算）。
-        let expected_seg = parse_settle_wire(&h.hand.settle)?.expected_segment()?;
-        if seg[1..FOLD_ROSTER_INDEX] != *expected_seg.as_slice() {
-            return Err(format!(
-                "segment parity failure at hand {j}: cairo statement words != host expected_segment"
-            ));
+    // ---- parity 门（注册面切片模拟，出证后对照；roster 门先行——M9-2 的
+    // 失败面是 roster 对照，T5 的失败面才是 acc）----
+    let mut j = 0usize;
+    for (t, table) in tables.iter().enumerate() {
+        let anchor = &anchors[t];
+        for h in &table.hands {
+            let seg = &segments[j];
+            if seg[FOLD_ROSTER_INDEX] != anchor.roster_digest {
+                return Err(format!(
+                    "roster digest parity failure (unregistered roster) at hand {j} (table {t}): \
+                     cairo 0x{:x} != registered 0x{:x}",
+                    seg[FOLD_ROSTER_INDEX], anchor.roster_digest
+                ));
+            }
+            if seg[0] != anchor.expected_acc {
+                return Err(format!(
+                    "acc parity failure at hand {j}: cairo 0x{:x} != host 0x{:x}",
+                    seg[0], anchor.expected_acc
+                ));
+            }
+            // 输出形状/语句公式漂移门（T4 语义）：段 word 1..=15 必须 ==
+            // host expected_segment（同一 settle wire 的 host 镜像重算）。
+            let expected_seg = parse_settle_wire(&h.hand.settle)?.expected_segment()?;
+            if seg[1..FOLD_ROSTER_INDEX] != *expected_seg.as_slice() {
+                return Err(format!(
+                    "segment parity failure at hand {j}: cairo statement words != host expected_segment"
+                ));
+            }
+            j += 1;
         }
     }
 
@@ -725,14 +939,23 @@ pub fn prove_fold_batch(
     let check_verify_ms = t.elapsed().as_millis();
 
     let timings = &summary["timings_ms"];
+    let table_players: Vec<usize> = tables.iter().map(|t| t.roster_pks.len()).collect();
+    let table_hands: Vec<usize> = tables.iter().map(|t| t.hands.len()).collect();
+    // 逐桌 cairo 段 slot16（每桌首段代表——D1a 桌内常量由电路结构保证）
+    let mut cairo_table_roster_digests: Vec<Felt> = Vec::with_capacity(tables.len());
+    let mut off = 0usize;
+    for k in &table_hands {
+        cairo_table_roster_digests.push(segments[off][FOLD_ROSTER_INDEX]);
+        off += k;
+    }
     let outcome = FoldOutcome {
-        n_players: roster_pks.len(),
-        n_hands: hands.len(),
+        n_players: table_players[0],
+        n_hands: total_hands,
         wire_words,
         cairo_acc,
-        cairo_roster_digest: cairo_rd,
-        expected_acc: anchor.expected_acc,
-        expected_roster_digest: anchor.roster_digest,
+        cairo_roster_digest: cairo_table_roster_digests[0],
+        expected_acc: anchors[0].expected_acc,
+        expected_roster_digest: anchors[0].roster_digest,
         segments,
         total_ms,
         cairo_prove_ms: timings["prove"].as_u64().unwrap_or(0),
@@ -752,8 +975,37 @@ pub fn prove_fold_batch(
         proof_bytes: std::fs::metadata(&proof_path).map(|m| m.len() as usize).unwrap_or(0),
         check_verify_ms,
         out_dir: out_dir.to_path_buf(),
+        n_tables: tables.len(),
+        table_players,
+        table_hands,
+        cairo_table_roster_digests,
+        expected_table_roster_digests: anchors.iter().map(|a| a.roster_digest).collect(),
     };
     Ok(outcome)
+}
+
+/// 出证一批（单桌）fold 语句并过 parity 门（T1 主路径）。
+///
+/// **T=1 退化 = 多桌构造器吃一桌**（`prove_fold_batch_multitable` 的单桌
+/// 调用——结构同一而非兼容模式，多桌规格 §8；门序/输出字段语义与多桌
+/// 核心逐位一致）。空手批（K=0）在此被构造器拒绝（M1-b；原实现在
+/// 出证后 `segments[0]` 索引 panic，现改为 Err——fail-closed 不变）。
+pub fn prove_fold_batch(
+    prev_acc: Felt,
+    roster_pks: &[(Felt, Felt)],
+    hands: &[AggregatedHand],
+    anchor: &RosterAnchor,
+    out_dir: &Path,
+    params_path: Option<&Path>,
+) -> Result<FoldOutcome, String> {
+    let table = FoldTable::new(roster_pks.to_vec(), hands.to_vec())?;
+    prove_fold_batch_multitable(
+        prev_acc,
+        &[table],
+        std::slice::from_ref(anchor),
+        out_dir,
+        params_path,
+    )
 }
 
 // ---------------------------------------------------------------------------

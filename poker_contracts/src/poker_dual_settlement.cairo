@@ -234,7 +234,7 @@ pub trait IPokerDualSettlement<TContractState> {
     /// fold 链注册面（规格 out/fold-spec.md §4.2）：owner-gated 一次性注册
     /// 一张桌的 roster。链上重算
     /// `roster_digest = poseidon(['poker/fold-batch/roster.v1', n] ++ pks)`
-    /// ——标签与 fold 电路 `fold_batch.cairo:67` 的 ROSTER_LABEL 逐字节
+    /// ——标签与 fold 电路 `fold_batch.cairo` 的 ROSTER_LABEL 常量逐字节
     /// 一致，使注册值与电路公式同源（消费面对照 = segment[16] 直读）。
     /// `n` 限 2..=8、`pks.len() == 2·n`；不验 on-curve（合约无 EC 能力，
     /// 垃圾 pks 只会登记一个电路必然 panic 的 digest，不出证即不出金）。
@@ -306,7 +306,7 @@ pub mod PokerDualSettlement {
     /// （index 16；word 0–15 与 combined 逐词同位，规格 out/fold-spec.md D1）。
     /// 三态共存：各入口自断言各段长，禁混批（D3c 第 3 层）。
     const FOLD_SEGMENT_LEN: usize = 17;
-    /// roster 域标签（与 fold_batch.cairo:67 电路 ROSTER_LABEL 逐字节一致）。
+    /// roster 域标签（与 fold_batch.cairo 电路 ROSTER_LABEL 常量逐字节一致）。
     const ROSTER_LABEL: felt252 = 'poker/fold-batch/roster.v1';
 
     /// SNIP-36 proof_facts 布局常量（对齐 starknet-privacy 参考实现的
@@ -1371,7 +1371,7 @@ fn dapv_prelude(
             let n_u32: u32 = n.try_into().expect('n fits u32');
             assert!(n_u32 >= 2_u32 && n_u32 <= 8_u32, "Participant count out of range");
             assert!(pks.len() == 2 * n_u32, "Roster pks length mismatch");
-            // 与 fold_batch.cairo:66-67 电路同式：poseidon([LABEL, n] ++ pks)。
+            // 与 fold_batch.cairo 电路 ROSTER_LABEL 常量同式：poseidon([LABEL, n] ++ pks)。
             let mut roster_in: Array<felt252> = array![ROSTER_LABEL, n];
             let mut w: u32 = 0;
             while w < pks.len() {
@@ -2156,7 +2156,7 @@ mod settlement_fold_private_tests {
         IPokerDualSettlementDispatcherTrait,
     };
 
-    /// roster 域标签（与合约常量及 fold_batch.cairo:67 电路逐字节一致）。
+    /// roster 域标签（与合约常量及 fold_batch.cairo 电路 ROSTER_LABEL 逐字节一致）。
     const ROSTER_LABEL: felt252 = 'poker/fold-batch/roster.v1';
     const MAGIC: felt252 = 0x5350324d5f4f4b;
     /// fold 批程序哈希（与 combined 0xC0FFEE 分槽——禁混批 D3c 第 2 层）。
@@ -2209,7 +2209,7 @@ mod settlement_fold_private_tests {
     }
 
     /// 链上同式重算 roster_digest：poseidon([ROSTER_LABEL, n] ++ pks)
-    /// （与合约 register_roster 及 fold_batch.cairo:66-67 电路同公式）。
+    /// （与合约 register_roster 及 fold_batch.cairo 电路 ROSTER_LABEL 常量同公式）。
     fn roster_digest_of(n: felt252, pks: Span<felt252>) -> felt252 {
         let mut roster_in = array![ROSTER_LABEL, n];
         let mut w: u32 = 0;
@@ -2462,6 +2462,279 @@ mod settlement_fold_private_tests {
         let s = setup(false, true);
         s.dual.verify_and_settle_dapv_fold_private(s.hand_binding, 45, s.segment.span());
         s.dual.verify_and_settle_dapv_fold_private(s.hand_binding, 45, s.segment.span());
+    }
+
+    // ===== 多桌段测试（规格 out/fold-multitable-spec.md §7/§9 M9-5b）=====
+    // 判定前提：fold 入口一次调用只吃一段 17 词且 segment[16] 逐手对照
+    // roster_registry——多桌批 = 每手一次调用各携各桌 digest，入口对
+    // 「批里还有别的桌」无感知（零合约改动的消费面证据）。
+
+    struct MultiTableSetup {
+        dual: IPokerDualSettlementDispatcher,
+        vault: IMockVaultDispatcher,
+        digest_a: felt252,
+        digest_b: felt252,
+    }
+
+    /// 多桌共用前置：部署 + 三 program hash + 桌 A（table_id=11、n=2、
+    /// 4 词 pks）与桌 B（table_id=22、n=3、6 词 pks）各自 register_roster
+    /// ——两桌人数与键集都不同 ⇒ digest 不同（同式重算、独立键）。
+    fn setup_multitable() -> MultiTableSetup {
+        let test_addr = get_contract_address();
+        let vault = deploy_contract("MockVault", @array![]);
+        let dual_addr = deploy_contract(
+            "PokerDualSettlement",
+            @array![test_addr.into(), vault.into(), test_addr.into()],
+        );
+        let dual = IPokerDualSettlementDispatcher { contract_address: dual_addr };
+        dual.set_claim_helper(test_addr);
+        dual.set_circuit_program_hash(0x1111);
+        dual.set_combined_program_hash(COMBINED_HASH);
+        dual.set_fold_program_hash(FOLD_HASH);
+
+        let pks_a = array![0xA001, 0xA002, 0xA003, 0xA004];
+        let pks_b = array![0xB001, 0xB002, 0xB003, 0xB004, 0xB005, 0xB006];
+        let digest_a = roster_digest_of(2, pks_a.span());
+        let digest_b = roster_digest_of(3, pks_b.span());
+        dual.register_roster(11, 2, pks_a.span());
+        dual.register_roster(22, 3, pks_b.span());
+
+        MultiTableSetup {
+            dual,
+            vault: IMockVaultDispatcher { contract_address: vault },
+            digest_a,
+            digest_b,
+        }
+    }
+
+    /// 造一张桌的 17 词 fold 段：slot0 = 批终 chain_acc（多桌批内全段
+    /// 同值——Q-1 语义），尾词 = 本桌 roster_digest；赢家 seat0 +total，
+    /// cm0 = poseidon([0x21, binding, total, 0])。
+    fn fold_segment_for(
+        hand_binding: felt252,
+        hand_id: u64,
+        digest: felt252,
+        action_log: felt252,
+        total: felt252,
+        chain_acc: felt252,
+        roster_digest: felt252,
+    ) -> Array<felt252> {
+        let mut segment = array![chain_acc, MAGIC, hand_id.into(), digest, 3, hand_binding];
+        let mut ch = PoseidonTrait::new();
+        ch = ch.update(0x21);
+        ch = ch.update(hand_binding);
+        ch = ch.update(total);
+        ch = ch.update(0);
+        segment.append(ch.finalize());
+        let mut w: u32 = 0;
+        while w < 7_u32 {
+            segment.append(0);
+            w += 1;
+        }
+        segment.append(total);
+        segment.append(action_log);
+        segment.append(roster_digest);
+        segment
+    }
+
+    /// 按折叠哈希算段的 fact（与合约 fact_for_segment 同式）。
+    fn fold_fact_of(segment: Span<felt252>) -> felt252 {
+        let mut f = PoseidonTrait::new();
+        f = f.update(FOLD_HASH);
+        let mut w: u32 = 0;
+        while w < segment.len() {
+            f = f.update(*segment.at(w));
+            w += 1;
+        }
+        f.finalize()
+    }
+
+    #[test]
+    fn fold_multitable_two_rosters_interleaved_settlement_settles() {
+        let mt = setup_multitable();
+        assert!(mt.dual.roster_registered(mt.digest_a), "table A registered");
+        assert!(mt.dual.roster_registered(mt.digest_b), "table B registered");
+        assert!(mt.digest_a != mt.digest_b, "two tables must have distinct digests");
+
+        // 同批三手段（wire 串接序 A1→B1→A2）：slot0 = 同一批终 acc
+        // （批终 acc 复制全段），slot16 = 各桌 digest。
+        let binding_a1: felt252 = 0xAA01;
+        let binding_b1: felt252 = 0xBB01;
+        let binding_a2: felt252 = 0xAA02;
+        mt.dual.register_hand(binding_a1, 0x9A01, 0, 0xA101, 0, 0, 0);
+        mt.dual.register_hand(binding_b1, 0x9B01, 0, 0xB101, 0, 0, 0);
+        mt.dual.register_hand(binding_a2, 0x9A02, 0, 0xA102, 0, 0, 0);
+
+        let total_a1: felt252 = 3000;
+        let total_b1: felt252 = 1500;
+        let total_a2: felt252 = 2200;
+        let chain_acc: felt252 = 0xBACC00;
+        let seg_a1 = fold_segment_for(
+            binding_a1, 101, 0x9A01, 0xA101, total_a1, chain_acc, mt.digest_a,
+        );
+        let seg_b1 = fold_segment_for(
+            binding_b1, 201, 0x9B01, 0xB101, total_b1, chain_acc, mt.digest_b,
+        );
+        let seg_a2 = fold_segment_for(
+            binding_a2, 102, 0x9A02, 0xA102, total_a2, chain_acc, mt.digest_a,
+        );
+        mt.dual.register_settlement_fact(fold_fact_of(seg_a1.span()));
+        mt.dual.register_settlement_fact(fold_fact_of(seg_b1.span()));
+        mt.dual.register_settlement_fact(fold_fact_of(seg_a2.span()));
+
+        // 交错结算：每手一次调用、各携各桌 digest，桌序不影响入口判定。
+        let mut spy = spy_events();
+        mt.dual.verify_and_settle_dapv_fold_private(binding_a1, 101, seg_a1.span());
+        mt.dual.verify_and_settle_dapv_fold_private(binding_b1, 201, seg_b1.span());
+        mt.dual.verify_and_settle_dapv_fold_private(binding_a2, 102, seg_a2.span());
+
+        spy.assert_emitted(
+            @array![
+                (
+                    mt.dual.contract_address,
+                    MirrorEvent::DualProofSettledFold(
+                        DualProofSettledFold {
+                            hand_binding: binding_a1,
+                            settlement_digest: 0x9A01,
+                            participant_count: 3,
+                            chain_acc,
+                            roster_digest: mt.digest_a,
+                            total_winnings: total_a1.into(),
+                        },
+                    ),
+                ),
+                (
+                    mt.dual.contract_address,
+                    MirrorEvent::DualProofSettledFold(
+                        DualProofSettledFold {
+                            hand_binding: binding_b1,
+                            settlement_digest: 0x9B01,
+                            participant_count: 3,
+                            chain_acc,
+                            roster_digest: mt.digest_b,
+                            total_winnings: total_b1.into(),
+                        },
+                    ),
+                ),
+                (
+                    mt.dual.contract_address,
+                    MirrorEvent::DualProofSettledFold(
+                        DualProofSettledFold {
+                            hand_binding: binding_a2,
+                            settlement_digest: 0x9A02,
+                            participant_count: 3,
+                            chain_acc,
+                            roster_digest: mt.digest_a,
+                            total_winnings: total_a2.into(),
+                        },
+                    ),
+                ),
+            ],
+        );
+
+        assert!(mt.dual.hand_settled(binding_a1), "A1 settled");
+        assert!(mt.dual.hand_settled(binding_b1), "B1 settled");
+        assert!(mt.dual.hand_settled(binding_a2), "A2 settled");
+        let escrow_a1: u256 = total_a1.into();
+        let escrow_b1: u256 = total_b1.into();
+        let escrow_a2: u256 = total_a2.into();
+        assert!(mt.vault.escrowed_for(binding_a1) == escrow_a1, "A1 escrow");
+        assert!(mt.vault.escrowed_for(binding_b1) == escrow_b1, "B1 escrow");
+        assert!(mt.vault.escrowed_for(binding_a2) == escrow_a2, "A2 escrow");
+    }
+
+    #[test]
+    #[should_panic(expected: "Roster not registered")]
+    fn fold_multitable_unregistered_third_table_reverts() {
+        let mt = setup_multitable();
+        // 桌 A/B 已注册；构造第三桌（n=2、独立 pks、未注册）的手——
+        // 即便 fact 齐备，roster 对照门（#10）在 fact 门之前先拒：
+        // 未注册桌的手不结算。
+        let binding_c: felt252 = 0xCC01;
+        mt.dual.register_hand(binding_c, 0x9C01, 0, 0xC101, 0, 0, 0);
+        let pks_c = array![0xC001, 0xC002, 0xC003, 0xC004];
+        let digest_c = roster_digest_of(2, pks_c.span());
+        assert!(!mt.dual.roster_registered(digest_c), "table C unregistered");
+        let seg_c = fold_segment_for(binding_c, 301, 0x9C01, 0xC101, 700, 0xBACC00, digest_c);
+        mt.dual.register_settlement_fact(fold_fact_of(seg_c.span()));
+        mt.dual.verify_and_settle_dapv_fold_private(binding_c, 301, seg_c.span());
+    }
+
+    #[test]
+    #[should_panic(expected: "Settlement fact not registered")]
+    fn fold_multitable_cross_table_roster_swap_reverts() {
+        let mt = setup_multitable();
+        // 跨桌攻击消费面闭合（spec §5 第二重）：桌 A 手段的 fact 按诚实段
+        // （尾词 = digest_a）登记；把尾词换成桌 B 的 digest 再提交——
+        // roster 门放行（B 已注册），但 fact 对整段逐词吸收
+        // （fact_for_segment），换词即换 fact ⇒ fact 门拒。
+        let binding_a: felt252 = 0xAA01;
+        mt.dual.register_hand(binding_a, 0x9A01, 0, 0xA101, 0, 0, 0);
+        let seg_a = fold_segment_for(binding_a, 101, 0x9A01, 0xA101, 3000, 0xBACC00, mt.digest_a);
+        mt.dual.register_settlement_fact(fold_fact_of(seg_a.span()));
+
+        let mut swapped = array![];
+        let mut w: u32 = 0;
+        while w < 16_u32 {
+            swapped.append(*seg_a.at(w));
+            w += 1;
+        }
+        swapped.append(mt.digest_b); // 桌 B 的 roster 尾词
+        mt.dual.verify_and_settle_dapv_fold_private(binding_a, 101, swapped.span());
+    }
+
+    #[test]
+    fn fold_multitable_coexists_with_combined_fallback() {
+        let mt = setup_multitable();
+        // combined 回归保持：combined 手（16 词段 + combined 哈希 fact）
+        // 与桌 A 的 fold 手（17 词段 + fold 哈希 fact）在同一合约实例上
+        // 先后结算——combined fallback 行为不受多桌 fold 影响。
+        let binding_c: felt252 = 0xDD01;
+        let binding_f: felt252 = 0xAA01;
+        mt.dual.register_hand(binding_c, 0x9D01, 0, 0xD101, 0, 0, 0);
+        mt.dual.register_hand(binding_f, 0x9A01, 0, 0xA101, 0, 0, 0);
+
+        let hand_id_c: u64 = 61;
+        let total_c: felt252 = 900;
+        let chain_acc: felt252 = 0xACCE55;
+        let mut seg_c = array![chain_acc, MAGIC, hand_id_c.into(), 0x9D01, 3, binding_c];
+        let mut ch = PoseidonTrait::new();
+        ch = ch.update(0x21);
+        ch = ch.update(binding_c);
+        ch = ch.update(total_c);
+        ch = ch.update(0);
+        seg_c.append(ch.finalize());
+        let mut w: u32 = 0;
+        while w < 7_u32 {
+            seg_c.append(0);
+            w += 1;
+        }
+        seg_c.append(total_c);
+        seg_c.append(0xD101);
+        let mut fc = PoseidonTrait::new();
+        fc = fc.update(COMBINED_HASH);
+        let mut w: u32 = 0;
+        while w < seg_c.len() {
+            fc = fc.update(*seg_c.at(w));
+            w += 1;
+        }
+        mt.dual.register_settlement_fact(fc.finalize());
+
+        let total_f: felt252 = 3000;
+        let seg_f = fold_segment_for(
+            binding_f, 101, 0x9A01, 0xA101, total_f, chain_acc, mt.digest_a,
+        );
+        mt.dual.register_settlement_fact(fold_fact_of(seg_f.span()));
+
+        mt.dual.verify_and_settle_dapv_combined_private(binding_c, hand_id_c, seg_c.span());
+        mt.dual.verify_and_settle_dapv_fold_private(binding_f, 101, seg_f.span());
+
+        assert!(mt.dual.hand_settled(binding_c), "combined hand settled");
+        assert!(mt.dual.hand_settled(binding_f), "fold hand settled");
+        let escrow_c: u256 = total_c.into();
+        let escrow_f: u256 = total_f.into();
+        assert!(mt.vault.escrowed_for(binding_c) == escrow_c, "combined escrow");
+        assert!(mt.vault.escrowed_for(binding_f) == escrow_f, "fold escrow");
     }
 }
 

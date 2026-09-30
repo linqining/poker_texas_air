@@ -17,12 +17,29 @@
 //!      映射/布局漂移；「wire pks == 注册 pks」的闭合点在生产 roster_registry
 //!      合约对照，fold_batch_test T9/T10 与合约负例臂承载）。
 //!
+//! 1b. **轻量多桌 host 对拍**（默认门禁，`fold_multitable_parity_two_tables_host`）：
+//!    1 的多桌形态——两桌**不同人数**（P=5/K=2 + P=2/K=1）同批，fold 腿的
+//!    M_h roster_digest 槽取**本桌**锚、claims 桌序串接；断言 = 3a 跨腿逐手
+//!    word 1..=15 相等 + 3b **跨桌** slot 0 同值 == `fold_acc(prev, claims
+//!    桌序串接)`（换桌序 ⇒ 换 acc）+ 3c seg[16] 桌内常量 == 本桌 H(pks_t)
+//!    （两桌各异）+ m2 槽逐桌独立（n_expected = 本桌人数）。
+//!
 //! 2. **heavy 出证腿**（`#[ignore]`，`t13_fold_combined_parity_heavy_prove_roundtrip`，
 //!    D5.1–3/5 全形）：combined 腿逐手 `prove_combined_layer`（其内部 acc/
 //!    segment 双 parity 门即该腿既有机器核对，D5.2）、fold 腿 `prove_fold_batch`
 //!    一次吃 8 手（其内部「出证后」roster/acc/段 parity 门 + `--check-only`
 //!    独立复验即 D5.5 门序纪律与 D5.3d）；断言 = fold 段 word 1..=15 ==
 //!    combined 输出 word 1..=15（跨腿主对拍）+ 逐链 acc/roster 锚出证后对照。
+//!
+//! 3. **heavy 多桌对拍腿**（`#[ignore]`，`t14_multitable_parity_heavy_prove_roundtrip`，
+//!    多桌规格 M9-5(a) 的 fold_parity 泛化）：≥2 桌**不同人数**语料（P=8/K=2 +
+//!    P=2/K=2，ΣK=4）——combined 腿仍逐手 16 词信封（桌结构无关）、fold 腿
+//!    `prove_fold_batch_multitable` 多桌一批 17 词段；断言 = 逐手 3a（跨腿
+//!    word 1..=15 逐词相等）+ 3b（slot 0 全段同值 == 共享批终 acc =
+//!    `fold_acc(prev, claims 桌序串接)`）+ 3c（**桌锚**：seg[16] == 本桌
+//!    anchor.roster_digest，两桌 digest 各异）。仍**不断言** combined acc ==
+//!    fold acc（D5-4 不变）。运行形态同 heavy（`#[ignore]` + `--release --
+//!    --ignored --nocapture`，多桌规格 §9 M9-5 行）。
 //!
 //! **明确不断言**（D5.4）：combined chain_acc == fold acc。两链 claim 公式
 //! 不同源——combined claim = poseidon([hand_binding, payload_digest, 桶计数…])
@@ -47,9 +64,10 @@ use hand_verify_native::combined::{
     segment_magic, SettleStatement, GENESIS,
 };
 use hand_verify_native::foldagg::{
-    aggregate_sign, claim_word, cm_digest_from_wire, expected_public_output, fold_acc,
-    mint_roster_sks, msg_digest, parse_settle_wire, prove_fold_batch, roster_digest,
-    roster_pks_from_sks, AggregatedHand, FOLD_ROSTER_INDEX, FOLD_SEGMENT_LEN, SETTLE_CM_START,
+    aggregate_sign, claim_word, cm_digest_from_wire, expected_public_output,
+    expected_public_output_tables, fold_acc, mint_roster_sks, msg_digest, parse_settle_wire,
+    prove_fold_batch, prove_fold_batch_multitable, roster_digest, roster_pks_from_sks,
+    AggregatedHand, FoldTable, FOLD_ROSTER_INDEX, FOLD_SEGMENT_LEN, SETTLE_CM_START,
     SETTLE_CM_WORDS, SETTLE_WORDS,
 };
 use hand_verify_native::mint::mint_hand;
@@ -127,6 +145,43 @@ fn out_dir(tag: &str) -> PathBuf {
         .join(tag);
     std::fs::create_dir_all(&dir).expect("mkdir");
     dir
+}
+
+/// 多桌对拍语料（M9-5a）：一张 P 人桌的 K 手——settle 语句按**本桌人数**铸
+/// （首席赢 (P−1)·unit、其余席各 −unit，零和）、空动作日志（与 build_corpus
+/// 同一已证形状）、承诺恒 8 词（wire 布局 cm×8 与人数无关）；hand_id 全批
+/// 唯一（id_base 按桌段隔离）。seed 同时是本桌 roster 铸种（mint_roster_sks）。
+fn build_table_corpus(players: usize, k_hands: usize, seed: u64, id_base: u64) -> Vec<HandCorpus> {
+    (0..k_hands as u64)
+        .map(|h| {
+            let hb = task_binding(seed * 1000 + h);
+            let ps: Vec<Felt> =
+                (0..players as u64).map(|i| det(seed + h, 10 + i) + Felt::ONE).collect();
+            let unit = 100 * (h as i128 + 1);
+            let mut deltas: Vec<i128> = vec![-unit; players];
+            deltas[0] = unit * (players as i128 - 1); // 零和：赢 (P−1)u、输家各 u
+            let commitments: Vec<Felt> = (0..8u64).map(|i| det(seed + h, 30 + i)).collect();
+            let ald = poseidon_hash_many(&[action_log_domain()]);
+            let settle = build_settle_statement(
+                500 + id_base + h,
+                hb,
+                &ps,
+                &deltas,
+                &commitments,
+                ald,
+                &[],
+            )
+            .expect("honest multitable settle statement");
+            let wire = settle.wire_words();
+            let tasks: Vec<RecurseTask> = (0..1u64)
+                .map(|_| RecurseTask {
+                    hand_binding: hb,
+                    payload: mint_hand(hb, 2, 1, 0, 0, 0, seed + h),
+                })
+                .collect();
+            HandCorpus { hb, settle, wire, tasks }
+        })
+        .collect()
 }
 
 /// canonical_small 参数（L1 批量终证腿钉扎参数集；与 fold_batch_test T1 同口径）。
@@ -320,6 +375,190 @@ fn fold_combined_parity_same_settle_corpus_host() {
 }
 
 // ---------------------------------------------------------------------------
+// 轻量多桌 host 对拍（默认门禁；多桌规格 M9-5(a) host 侧——D5 形态多桌扩展）
+// ---------------------------------------------------------------------------
+
+/// **轻量多桌 D5 host 形**（与单桌轻量形态同构，T4 语义——公式/映射/布局
+/// 漂移检测，**零证明力**）：两桌**不同人数**（P=5/K=2 + P=2/K=1，ΣK=3）
+/// 同批双吃同一 settle 语料——
+/// - combined 腿：桌结构无关，桌序串接逐手 acc 链 + 16 词信封；
+/// - fold 腿：逐手 D2 真槽映射，M_h 的 roster_digest 槽取**本桌**锚 →
+///   claims 桌序串接 → 批终 acc（Q-1 单次折叠）→ 17 词段（slot 16 = 本桌
+///   digest，D1a 桌内常量）。
+///
+/// 断言：3a 跨腿逐手 word 1..=15 相等（桌结构无关）；3b **跨桌** slot 0
+/// 同值 == `fold_acc(GENESIS, claims 桌序串接)`（两路径一致 + 换桌序 ⇒ 换
+/// acc）；3c seg[16] 桌内常量 == 本桌 H(pks_t)（两桌各异）；多桌槽活性：
+/// m2 = wire[2] = 本桌 n_expected（5 ≠ 2——m2 槽按桌独立）；M_h 桌绑定
+/// 镜像：换他桌 digest ⇒ 本桌 M_h/claim 变（跨桌闭合的 host 镜像——真闸
+/// 在电路 m9_2a/m9_2b（panic）与出证后门 m9_2c，此处只钉 host 公式槽位）。
+#[test]
+fn fold_multitable_parity_two_tables_host() {
+    const MT_HOST_SEED: u64 = 0x5D2E;
+    // 两桌不同人数（M9-5a：≥2 桌不同人数；seed 与 t14 heavy 腿语料解耦）。
+    let table_specs: [(usize, usize); 2] = [(5, 2), (2, 1)];
+    let total_hands: usize = table_specs.iter().map(|&(_, k)| k).sum();
+    let corpora: Vec<Vec<HandCorpus>> = table_specs
+        .iter()
+        .enumerate()
+        .map(|(t, &(p, k))| build_table_corpus(p, k, MT_HOST_SEED + t as u64, 200 * t as u64))
+        .collect();
+    // 逐桌 roster（fold 腿锚）：sks/pks/digest 与语料 seed 同源派生。
+    let rosters: Vec<(Vec<Felt>, Vec<(Felt, Felt)>, Felt)> = table_specs
+        .iter()
+        .enumerate()
+        .map(|(t, &(p, _))| {
+            let sks = mint_roster_sks(p, MT_HOST_SEED + t as u64);
+            let pks = roster_pks_from_sks(&sks);
+            let rd = roster_digest(&pks);
+            (sks, pks, rd)
+        })
+        .collect();
+    assert_ne!(rosters[0].2, rosters[1].2, "不同人数两桌 roster 锚必各异（语料前提）");
+
+    // ---- combined 腿（host 期望侧，桌结构无关）：桌序串接逐手 acc 链 ----
+    let mut prev_acc = GENESIS;
+    let mut envelopes: Vec<Vec<Felt>> = Vec::with_capacity(total_hands);
+    let mut combined_claims: Vec<Felt> = Vec::with_capacity(total_hands);
+    for (t, corpus) in corpora.iter().enumerate() {
+        for (h, hc) in corpus.iter().enumerate() {
+            let acc = host_fold_tasks(&hc.tasks, prev_acc).expect("combined acc chain");
+            let report = host_verify(hc.hb, &hc.tasks[0].payload).expect("host verify");
+            let claim = hc.tasks[0].claim(&report);
+            assert_eq!(
+                acc,
+                acc_fold(prev_acc, &[claim]),
+                "table {t} hand {h}: combined acc 两路径一致"
+            );
+            combined_claims.push(claim);
+            let segment = hc.settle.expected_segment().expect("expected segment");
+            assert_eq!(segment.len(), 15);
+            let mut env = Vec::with_capacity(16);
+            env.push(acc);
+            env.extend_from_slice(&segment);
+            envelopes.push(env);
+            prev_acc = acc;
+        }
+    }
+    assert_eq!(envelopes.len(), total_hands);
+
+    // ---- fold 腿（host 期望侧）：D2 真槽映射（对本桌锚）→ claims 桌序串接 ----
+    let mut fold_claims: Vec<Felt> = Vec::with_capacity(total_hands);
+    let mut n_expecteds: Vec<u64> = Vec::with_capacity(total_hands);
+    for (t, corpus) in corpora.iter().enumerate() {
+        let roster_d = rosters[t].2;
+        for (h, hc) in corpus.iter().enumerate() {
+            let w = &hc.wire;
+            assert_eq!(w.len(), SETTLE_WORDS, "table {t} hand {h}: settle wire 98 词");
+            // D2 槽位钉死（多桌：槽语义逐桌独立——m2 = 本桌 n_expected）。
+            assert_eq!(
+                w[1],
+                hc.settle.registered_digest,
+                "table {t} hand {h}: wire[1] = registered_digest"
+            );
+            assert_eq!(
+                w[2],
+                Felt::from(hc.settle.n_expected),
+                "table {t} hand {h}: wire[2] = n_expected"
+            );
+            assert_eq!(w[3], hc.hb, "table {t} hand {h}: wire[3] = hand_binding");
+            assert_eq!(
+                &w[SETTLE_CM_START..SETTLE_CM_START + SETTLE_CM_WORDS],
+                &hc.settle.commitments[..],
+                "table {t} hand {h}: wire[28..=35] = c0..c7（8 词，K-4）"
+            );
+            assert_eq!(w[36], hc.settle.action_log_digest, "table {t} hand {h}: wire[36] = ald");
+            n_expecteds.push(hc.settle.n_expected);
+            let cm8 = cm_digest_from_wire(w);
+            let m_h = msg_digest(w[3], w[1], w[2], cm8, roster_d);
+            fold_claims.push(claim_word(w[3], m_h));
+        }
+    }
+    // 多桌 m2 槽活性：两桌 n_expected 各为本桌人数（5/5 vs 2——同批共存且
+    // 互不等，证明 m2 槽逐桌独立、无跨桌串扰）。
+    assert_eq!(n_expecteds, vec![5, 5, 2], "m2 槽逐桌独立（P_1=5、P_2=2）");
+
+    // 3b：批终 acc 两路径（fold_acc vs 内联 poseidon([prev] ++ claims)）。
+    let batch_acc = fold_acc(GENESIS, &fold_claims);
+    let mut acc_in = vec![GENESIS];
+    acc_in.extend_from_slice(&fold_claims);
+    assert_eq!(
+        batch_acc,
+        poseidon_hash_many(&acc_in),
+        "多桌批终 acc 两路径一致（claims 桌序串接）"
+    );
+    // 换桌序 ⇒ 换 acc（claims 顺序绑定，Q-1 单次折叠的顺序面）。
+    let (t0_claims, t1_claims) = fold_claims.split_at(table_specs[0].1);
+    let swapped_acc = fold_acc(GENESIS, &[t1_claims, t0_claims].concat());
+    assert_ne!(swapped_acc, batch_acc, "换桌序 ⇒ 换批终 acc（claims 顺序绑定）");
+
+    // fold 17 词段装配（D1a 布局）：逐手段 slot 16 = 本桌 digest。
+    let mut fold_segments: Vec<Vec<Felt>> = Vec::with_capacity(total_hands);
+    for (t, corpus) in corpora.iter().enumerate() {
+        let roster_d = rosters[t].2;
+        for hc in corpus {
+            let reparsed = parse_settle_wire(&hc.wire).expect("wire → statement round trip");
+            let segment = reparsed.expected_segment().expect("reparsed segment");
+            let mut seg = Vec::with_capacity(FOLD_SEGMENT_LEN);
+            seg.push(batch_acc); // slot 0：批终 acc（Q-1，跨桌同值）
+            seg.extend_from_slice(&segment); // word 1..=15
+            seg.push(roster_d); // slot 16：本桌 roster digest（D1a 桌内常量）
+            assert_eq!(seg.len(), FOLD_SEGMENT_LEN);
+            fold_segments.push(seg);
+        }
+    }
+
+    // ---- D5 断言（多桌形态）----
+    // 3a 跨腿主对拍：fold 段 word 1..=15 == combined 信封 word 1..=15
+    // （桌序 = combined 串接序；桌结构对语句词零漂移）。
+    for j in 0..total_hands {
+        assert_eq!(
+            fold_segments[j][1..FOLD_ROSTER_INDEX],
+            envelopes[j][1..16],
+            "hand {j}: fold seg words 1..=15 must equal combined envelope words 1..=15"
+        );
+        assert_eq!(fold_segments[j][1], segment_magic(), "hand {j}: 段首 MAGIC 锚");
+    }
+    // 3b 桌内/跨桌 acc 锚：全部段（两桌）slot 0 同值 == 批终 acc（Q-1）。
+    assert!(
+        fold_segments.iter().all(|s| s[0] == batch_acc),
+        "slot 0 跨桌全部段同值（Q-1 单次折叠）"
+    );
+    // 3c 桌内 roster 锚：seg[16] == 本桌锚（桌内常量、两桌各异）。
+    let mut j = 0usize;
+    for (t, corpus) in corpora.iter().enumerate() {
+        let roster_d = rosters[t].2;
+        for _ in corpus {
+            assert_eq!(
+                fold_segments[j][FOLD_ROSTER_INDEX],
+                roster_d,
+                "hand {j} (table {t}): slot 16 == 本桌 roster 锚"
+            );
+            j += 1;
+        }
+    }
+    assert_eq!(j, total_hands);
+    assert_eq!(envelopes[0].len(), 16);
+    assert_eq!(fold_segments[0].len(), FOLD_SEGMENT_LEN);
+
+    // M_h 桌绑定镜像（零证明力，T4 语义）：本桌手换他桌 digest ⇒ M_h/claim
+    // 必变（跨桌闭合的真闸在电路 m9_2a/m9_2b 与出证后门 m9_2c；此处只钉
+    // host 公式的 digest 槽确实取本桌锚）。
+    {
+        let w = &corpora[0][0].wire;
+        let own = msg_digest(w[3], w[1], w[2], cm_digest_from_wire(w), rosters[0].2);
+        let cross = msg_digest(w[3], w[1], w[2], cm_digest_from_wire(w), rosters[1].2);
+        assert_ne!(cross, own, "M_h 的 roster_digest 槽取本桌锚（跨桌必变）");
+        assert_ne!(claim_word(w[3], cross), fold_claims[0], "换桌 digest 必改本桌 claim");
+        assert_eq!(claim_word(w[3], own), fold_claims[0], "本桌锚重算 claim 一致");
+    }
+    // D5.4（多桌不变）：两链 claim 公式不同源——同手两链 claim 词必不同。
+    for j in 0..total_hands {
+        assert_ne!(combined_claims[j], fold_claims[j], "hand {j}: 两链 claim 词不同源");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // heavy 出证腿（#[ignore]；D5.1–3/5 全形；与 T1 同运行形态）
 // ---------------------------------------------------------------------------
 
@@ -437,4 +676,165 @@ fn t13_fold_combined_parity_heavy_prove_roundtrip() {
     assert!(fold_outcome.segments.iter().all(|s| s[0] == first_acc));
     // D5.4：无 combined chain acc vs fold 批 acc 的跨链比较——两条 acc 链
     // 是有意的两个对象（claim 公式不同源，见模块注释）。
+}
+
+// ---------------------------------------------------------------------------
+// heavy 多桌对拍腿（#[ignore]；多桌规格 M9-5(a)；--release -- --ignored）
+// ---------------------------------------------------------------------------
+
+/// **T14（heavy，M9-5(a) 的 fold_parity 泛化）**：多桌语料（≥2 桌**不同
+/// 人数**：P=8/K=2 + P=2/K=2，ΣK=4）双腿真出证——combined 腿逐手
+/// `prove_combined_layer`（桌结构无关，16 词信封）、fold 腿
+/// `prove_fold_batch_multitable` 两桌一批（17 词段；其内部 parity 门逐手对
+/// **本桌**锚）。断言（逐手 3a-3c 带桌锚）：3a 跨腿 word 1..=15 逐词相等、
+/// 3b slot 0 == 共享批终 acc == `fold_acc(prev, claims 桌序串接)`（两路径）、
+/// 3c seg[16] == 本桌 anchor.roster_digest（两桌各异）。**不断言两链 acc
+/// 跨等**（D5-4 不变——多桌化不改变该裁定）。
+#[test]
+#[ignore]
+fn t14_multitable_parity_heavy_prove_roundtrip() {
+    let params = canonical_params();
+    const MT_SEED: u64 = 0x9A71;
+    // 两桌不同人数（M9-5a 语料要求 ≥2 桌不同人数；K_t=2 控制出证时长）。
+    let table_specs: [(usize, usize); 2] = [(8, 2), (2, 2)];
+    let total_hands: usize = table_specs.iter().map(|&(_, k)| k).sum();
+    let corpora: Vec<Vec<HandCorpus>> = table_specs
+        .iter()
+        .enumerate()
+        .map(|(t, &(p, k))| build_table_corpus(p, k, MT_SEED + t as u64, 100 * t as u64))
+        .collect();
+    // 逐桌 roster（fold 腿签名面）：sks/pks/digest 与语料 seed 同源派生。
+    let rosters: Vec<(Vec<Felt>, Vec<(Felt, Felt)>, Felt)> = table_specs
+        .iter()
+        .enumerate()
+        .map(|(t, &(p, _))| {
+            let sks = mint_roster_sks(p, MT_SEED + t as u64);
+            let pks = roster_pks_from_sks(&sks);
+            let rd = roster_digest(&pks);
+            (sks, pks, rd)
+        })
+        .collect();
+    let magic = segment_magic();
+
+    // ---- combined 腿：逐手真出证（桌序串接；16 词信封 = [acc] ++ segment 15）----
+    let mut prev_acc = GENESIS;
+    let mut combined_envelopes: Vec<Vec<Felt>> = Vec::with_capacity(total_hands);
+    for (t, corpus) in corpora.iter().enumerate() {
+        for (h, hc) in corpus.iter().enumerate() {
+            let outcome = prove_combined_layer(
+                &hc.tasks,
+                &hc.settle,
+                prev_acc,
+                &out_dir(&format!("t14-combined-t{t}h{h}")),
+                params.as_deref(),
+            )
+            .expect("combined leg must prove (table structure is irrelevant to it)");
+            let mp = outcome
+                .public_output
+                .iter()
+                .position(|w| *w == magic)
+                .expect("MAGIC in combined public output");
+            assert!(mp >= 1, "public output has no room for acc before MAGIC");
+            let envelope: Vec<Felt> = outcome.public_output[mp - 1..mp + 15].to_vec();
+            assert_eq!(envelope.len(), 16);
+            combined_envelopes.push(envelope);
+            prev_acc = outcome.cairo_acc;
+        }
+    }
+    assert_eq!(combined_envelopes.len(), total_hands);
+
+    // ---- fold 腿：两桌一批真出证（ΣK×17 词段，桌序 = 段序）----
+    let mut tables: Vec<FoldTable> = Vec::with_capacity(table_specs.len());
+    for (t, corpus) in corpora.iter().enumerate() {
+        let (sks, pks, roster_d) = &rosters[t];
+        let mut agg_hands: Vec<AggregatedHand> = Vec::with_capacity(corpus.len());
+        for (h, hc) in corpus.iter().enumerate() {
+            let ws: Vec<Felt> = (0..table_specs[t].0 as u64)
+                .map(|i| det(MT_SEED + t as u64 + h as u64, 200 + i))
+                .collect();
+            let agg = aggregate_sign(sks, &ws, &hc.wire).expect("honest aggregate");
+            // host 公式两路径（对本桌锚）：AggregatedHand.claim == D2 映射重算。
+            let w = &hc.wire;
+            let m_h = msg_digest(w[3], w[1], w[2], cm_digest_from_wire(w), *roster_d);
+            assert_eq!(
+                agg.claim,
+                claim_word(w[3], m_h),
+                "table {t} hand {h}: fold claim 两路径一致（对本桌 roster 锚）"
+            );
+            agg_hands.push(agg);
+        }
+        tables.push(FoldTable::new(pks.clone(), agg_hands).expect("honest table"));
+    }
+    // 逐桌锚（注册面 host 切片）：expected_acc 全桌共享（Q-1 单次折叠）。
+    let anchors = expected_public_output_tables(GENESIS, &tables);
+    assert_ne!(
+        anchors[0].roster_digest, anchors[1].roster_digest,
+        "不同人数两桌的 roster 锚必须各异（M9-5a 语料前提）"
+    );
+    for (t, (_, _, rd)) in rosters.iter().enumerate() {
+        assert_eq!(anchors[t].roster_digest, *rd, "table {t} anchor == H(pks_t) 注册面");
+    }
+    let fold_outcome = prove_fold_batch_multitable(
+        GENESIS,
+        &tables,
+        &anchors,
+        &out_dir("t14-fold-t2-p8p2-k2k2"),
+        params.as_deref(),
+    )
+    .expect("multitable fold leg must prove");
+    assert_eq!(fold_outcome.segments.len(), total_hands);
+    assert_eq!(fold_outcome.n_tables, table_specs.len());
+    assert_eq!(fold_outcome.table_players, vec![8, 2]);
+    assert_eq!(fold_outcome.table_hands, vec![2, 2]);
+
+    // ---- M9-5(a) 断言（全部出证后，逐手 3a-3c 带桌锚）----
+    let mut j = 0usize;
+    for (t, table) in tables.iter().enumerate() {
+        for _ in &table.hands {
+            let seg = &fold_outcome.segments[j];
+            assert_eq!(seg.len(), FOLD_SEGMENT_LEN, "hand {j} (table {t}): 17 词段");
+            // 3a 跨腿主对拍：同一 settle 语料，两腿结算词零漂移（桌结构无关）。
+            assert_eq!(
+                seg[1..FOLD_ROSTER_INDEX],
+                combined_envelopes[j][1..16],
+                "hand {j} (table {t}): fold seg words 1..=15 must equal combined output words 1..=15（跨腿主对拍）"
+            );
+            // 3c 桌锚（出证后对照注册面；prove_fold_batch_multitable 内部已逐手
+            // 门，此处复述为对拍记录）。
+            assert_eq!(
+                seg[FOLD_ROSTER_INDEX],
+                anchors[t].roster_digest,
+                "hand {j} (table {t}): slot 16 == 本桌 roster 锚"
+            );
+            // 3b acc 门：slot 0 == 共享批终 acc（两桌同值）。
+            assert_eq!(
+                seg[0],
+                anchors[t].expected_acc,
+                "hand {j} (table {t}): slot 0 == 共享批终 acc"
+            );
+            j += 1;
+        }
+    }
+    assert_eq!(j, fold_outcome.segments.len());
+    // 3b 期望侧独立重算：claims 桌序串接 → fold_acc（两路径一致）。
+    let claims: Vec<Felt> = tables.iter().flat_map(|t| t.hands.iter().map(|h| h.claim)).collect();
+    let expect_acc = fold_acc(GENESIS, &claims);
+    assert!(
+        anchors.iter().all(|a| a.expected_acc == expect_acc),
+        "两桌锚共享同一批终 acc（Q-1 单次折叠）"
+    );
+    assert_eq!(fold_outcome.cairo_acc, expect_acc, "批终 acc 出证值 == host 重算");
+    // 逐桌 cairo 段 slot16（D1a 桌内常量）== 本桌锚。
+    assert_eq!(fold_outcome.cairo_table_roster_digests, vec![anchors[0].roster_digest, anchors[1].roster_digest]);
+    println!(
+        "| fold-MT | T=2 (8×2+2×2) | steps {} | EC_OP {} | poseidon {} | total {} ms | reverify {} ms | proof {} B |",
+        fold_outcome.steps,
+        fold_outcome.ec_ops,
+        fold_outcome.poseidon_ops,
+        fold_outcome.total_ms,
+        fold_outcome.check_verify_ms,
+        fold_outcome.proof_bytes,
+    );
+    // D5.4：无 combined chain acc vs fold 批 acc 的跨链比较——两条 acc 链是
+    // 有意的两个对象（claim 公式不同源；多桌化不改变该裁定，见模块注释）。
 }
