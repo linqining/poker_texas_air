@@ -13,6 +13,8 @@
 //!   - [`lock`]：vault 会话钥核验（P1-2 会话委托）与在局筹码锁定/释放
 //!   - [`submit`]：legacy 结算（register_aggregate / settle_hand calldata + 提交）
 //!   - [`dual_settle`]：DAPV 双证明结算路径
+//!   - [`settle_wiring`]：结算投递队列接线（settle-queue WAL 入队/死信/
+//!     Dual→Legacy 降级 + poster sidecar 回执回读——批量上链的 texas 侧端点）
 //!   - [`recursion_prover`] / [`settlement_prover`]：证明生成
 //!     （SNIP-36 递归信封 / settlement 电路）
 //! - 基础设施
@@ -48,6 +50,9 @@ pub mod settlement_prover;
 /// D2/D3/D4：结算回执注册表（block/gas 回填、合约元数据下发、
 /// hand_binding ↔ (table, hand) 映射与 `settlement_result` 广播）。
 pub mod settle_receipt;
+/// 结算投递队列接线（settle-queue WAL 单写者 + poster sidecar 只读回读；
+/// rollup-components follow-up 条目 1）。
+pub mod settle_wiring;
 pub mod snip36;
 pub mod submit;
 /// 桌台注册表锚定（PokerTableRegistry：合约分配 id + Open→Closed 生命周期）。

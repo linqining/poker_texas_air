@@ -1,6 +1,7 @@
 //! `wait_call_visible`：view 调用轮询直至链上可见。
 //!
-//! 吸收 `texas/src/starknet/submit.rs:307-323` `wait_register_visible` 的
+//! 吸收 texas submit.rs 旧 `wait_register_visible`（307-323 行，2026-10-01
+//! 随 txmgr 切换删除）的
 //! 语义：settle 腿会断言 register 已生效，而两笔交易的提交存在包含时差，
 //! 必须等第一笔在链上可见（view 返回非零）再发第二笔；RPC 抖动按轮内
 //! 错误容忍（继续轮询），轮数耗尽报错。**可见性判定归属本层**——poster
@@ -12,7 +13,7 @@ use starknet_types_core::felt::Felt;
 
 use crate::send::{BoxFuture, StarknetSend};
 
-/// 可见性轮询策略（现状默认 45×1s，对齐 submit.rs:307-323 的常量）。
+/// 可见性轮询策略（现状默认 45×1s，对齐旧 wait_register_visible 的常量）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisiblePolicy {
     pub polls: u32,
@@ -31,7 +32,7 @@ impl Default for VisiblePolicy {
 /// 轮询 `contract.selector(calldata)` 直至返回首词非零（链上可见）。
 ///
 /// - view 首词非零 = 可见（register_aggregate 已生效的现网判据，
-///   submit.rs:315-317 同式）；
+///   旧 wait_register_visible 同式）；
 /// - view 报错（RPC 抖动/节点滞后）= 本轮不可见，继续轮询；
 /// - 轮数耗尽 = `Err`（含未可见说明——调用方决定重试或降级，本层不自作
 ///   主张）。

@@ -71,6 +71,20 @@ starknet-curve = "0.6"
 starknet-types-core = { workspace = true }
 rand_core = "0.6"
 
+# ===== 批量上链接线（rollup-components follow-up 条目 1/2，2026-10-01）=====
+# settle-queue：结算任务持久化投递队列——WAL（queue.jsonl）texas 独占写
+# （Enqueued/BuildDeadLettered/Downgraded），poster sidecar 只读回读
+# （回执/投递期死信）。prove_log 仍是对账事实源，队列只管投递。
+settle-queue = { path = "../settle-queue" }
+# starknet-txmgr：结算发送面——nonce 租约/回执轮询/幂等重放分类
+# （replay.rs 吸收旧 is_register_replay/is_settle_replay；可见性判定归
+# txmgr 层）。calldata 构建仍在 submit.rs / dual_settle.rs。
+starknet-txmgr = { path = "../starknet-txmgr" }
+
+[dev-dependencies]
+# 测试打开 txmgr 内存 mock（MockSend）——feature 仅 dev 求并集生效。
+starknet-txmgr = { path = "../starknet-txmgr", features = ["test-mocks"] }
+
 [features]
 default = []
 

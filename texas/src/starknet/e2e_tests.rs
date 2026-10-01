@@ -926,6 +926,9 @@ async fn sepolia_settle_smoke() {
         snip36_l2_gas: 0x5f5e100,
         auth_strict: false,
         treasury_address: op_addr.clone(),
+        // owner 槽位未配置 = 单账户部署现状（validate 直通）。
+        owner_address: String::new(),
+        owner_private_key: String::new(),
         table_registry_address: String::new(),
         settlement_exit: "starknet".into(),
         gateway_base_url: String::new(),

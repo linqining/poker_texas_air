@@ -1,8 +1,9 @@
 //! # batch-poster —— 常驻批量上链 daemon（op-batcher 形态）
 //!
 //! 2026-10-01 立项（docs/TODO.md #50；调研结论见
-//! out/rollup-batch-submitter-survey.md §9.1：独立 crate + 持久化队列 +
-//! 专门 txmgr + cadence + 监控最小集 + 逃生机制）。参照物：op-batcher
+//! out/rollup-batch-submitter-survey.md §9 映射与建议——独立 crate（§9.1）
+//! + 持久化队列（§9.2）+ 专门 txmgr（§9.3）+ cadence（§9.6）+ 监控最小集
+//! （§9.7）+ 逃生机制（§9.8）。参照物：op-batcher
 //! 主循环（publishingLoop/receiptsLoop + max-channel-duration 式 cadence）
 //! / Arbitrum batch_poster / StarkEx Dispatcher+Blockchain Writer+Catcher
 //! 三件套。
@@ -11,9 +12,9 @@
 //!
 //! - **route=Legacy**：payload 直用 texas 预构建 calldata，两笔驱动
 //!   RegisterSent →（txmgr.wait_call_visible 等 settlement_digest view
-//!   可见——吸收 `texas/src/starknet/submit.rs:307-323` 语义）→ SettleSent
-//!   （对齐 submit_settlement 返回 (register, settle) 二元组，
-//!   `texas/src/starknet/submit.rs:331`——两笔交易非单笔直发）；
+//!   可见——吸收 texas submit.rs 旧 wait_register_visible 语义，该实现
+//!   2026-10-01 随 txmgr 切换删除）→ SettleSent（对齐 submit_settlement
+//!   返回 (register, settle) 二元组——两笔交易非单笔直发）；
 //! - **route=Dual**：按条目 dapv_entry 选合约入口
 //!   （[`proof::dual_settle_entry_name`]），register_hand →
 //!   verify_and_settle_dapv 顺序两笔经 txmgr；dual 腿重试耗尽 → 写
@@ -24,7 +25,7 @@
 //!   聚 K≤64 且 2 的幂（`stark-recursion/src/chain.rs:63` 政策、:165-175
 //!   校验、FoldBatchPlan `:388`）→ [`proof::ProofSource`] 出证
 //!   （[`proof::ScriptProofSource`] 包 prove-batch.sh 两阶段腿，program_hash
-//!   对拍锚 prove-batch.sh:51 EXPECTED_PH）→ fold 批 calldata
+//!   对拍锚 prove-batch.sh EXPECTED_PH 行）→ fold 批 calldata
 //!   （`verify_and_settle_dapv_fold_private`，
 //!   `poker_contracts/src/poker_dual_settlement.cairo:255`）或 Monad 工件
 //!   （[`monad::MonadProofEnvelope`]）。
@@ -189,7 +190,7 @@ pub struct PosterDriver<S: StarknetSend, P: proof::ProofSource> {
 
 // 入口 selector（starknet_keccak 镜像：keccak256 摘要高 6 位清零入域——
 // starknet-core utils.rs starknet_keccak 同式；texas 用
-// `starknet::core::utils::starknet_keccak`（texas/src/starknet/submit.rs:312），
+// `starknet::core::utils::starknet_keccak`（submit.rs 的 calldata 构建同源），
 // 本 crate 不引重型 starknet 依赖，按同公式本地实现）。
 fn selector_of_name(name: &str) -> Felt {
     use sha3::Digest as _;
@@ -581,7 +582,7 @@ impl<S: StarknetSend, P: proof::ProofSource> PosterDriver<S, P> {
                 DrivePhase::RegisterSent => match route {
                     SettleRoute::Legacy => {
                         // 两笔包含时差：等 register 在链上可见再发 settle
-                        //（submit.rs:307-323 语义，判定归 txmgr 层）。
+                        //（旧 wait_register_visible 语义，判定归 txmgr 层）。
                         match wait_call_visible(
                             self.txmgr.send(),
                             self.cfg.legacy_settlement,
@@ -786,7 +787,7 @@ impl<S: StarknetSend, P: proof::ProofSource> PosterDriver<S, P> {
         };
         match self.proofs.prove_batch(&input).await {
             Ok(artifact) => {
-                // 对拍锚：program_hash 与钉扎值（prove-batch.sh:51）一致。
+                // 对拍锚：program_hash 与钉扎值（prove-batch.sh EXPECTED_PH 行）一致。
                 if !artifact
                     .program_hash
                     .eq_ignore_ascii_case(&self.cfg.fold.expected_program_hash)

@@ -3,77 +3,39 @@
 //! 单一状态表示（2026-09-09）：手牌只有一份 VM 状态——`shadow.rs` 的实时
 //! 镜像在每个接受点同步 dispatch；[`on_hand_complete`] 把它移交给
 //! [`settle_from_live_mirror`]，经终局比对（与游戏层事实逐分对账）后直接取用
-//! ProveTask 链与 pre-payout 快照构建 register_aggregate/settle_hand 上链，
-//! 失败由 game_loop tick 有界重试。历史"结算时日志重放出第二份 VM 状态"
+//! ProveTask 链与 pre-payout 快照构建 register_aggregate/settle_hand：
+//! legacy 路入队 settle-queue WAL 由 batch-poster 投递（2026-10-01 起，
+//! 进程内 PENDING_SETTLE/SETTLE_OK/SETTLE_ATTEMPTS 已删除——投递状态
+//! 持久化在队列/sidecar，见 [`super::settle_wiring`]）；dual 路仍直发
+//! （starknet-txmgr 发送面）。历史"结算时日志重放出第二份 VM 状态"
 //! 的 build_from_log 已删除。
 //!
 //! 禁止事项（防止回到老路）：不再引入第二份手牌状态（重放/事后重建）；
 //! 不新增"事后追赶"型补丁；不引入第二套密文派生（deck 必须同源）；不为
 //! 绕过验证失败放宽 VM 证明校验；对账不一致宁可不结算，绝不带分歧状态上链。
 
-use std::sync::OnceLock;
 use super::vm_session::{seat_player_addr, VmTable};
+use crate::pokergame::table::Table;
 
-/// settle 成功上链的 (table, hand_id) 集合：失败可重试（game_loop tick
-/// 驱动），成功后幂等跳过。
-static SETTLE_OK: OnceLock<std::sync::Mutex<std::collections::HashSet<(u32, u32)>>> =
-    OnceLock::new();
-
-fn settle_ok_once(table_id: u32, hand_id: u32) -> bool {
-    let set = SETTLE_OK.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-    set.lock().map(|mut g| g.insert((table_id, hand_id))).unwrap_or(false)
-}
-
+/// 本手是否已结算（幂等跳过判定）。旧进程内 `SETTLE_OK` 集合（重启即丢）
+/// 已删除：队列投递路径看 poster sidecar 回执，dual 直发/appchain 出口看
+/// settle_receipt 业务终态（见 settle_wiring::is_settled）。
 pub(crate) fn settle_ok_already(table_id: u32, hand_id: u32) -> bool {
-    let set = SETTLE_OK.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-    set.lock().map(|g| g.contains(&(table_id, hand_id))).unwrap_or(false)
+    super::settle_wiring::is_settled(table_id, hand_id)
 }
 
-/// 失败重试上限（防镜像状态与游戏永久分歧时的无限重试）。
-static SETTLE_ATTEMPTS: OnceLock<std::sync::Mutex<std::collections::HashMap<(u32, u32), u32>>> =
-    OnceLock::new();
-
-fn settle_attempts_bumped_max(table_id: u32, hand_id: u32) -> bool {
-    let m = SETTLE_ATTEMPTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let mut g = match m.lock() { Ok(g) => g, Err(_) => return true };
-    let k = (table_id, hand_id);
-    let n = g.entry(k).or_insert(0);
-    *n += 1;
-    *n > 5
-}
-
-/// 待投递结算：按桌保留**构建时快照**（HandSettlement 的 calldata/重映射
-/// 均已固化在 settlement 内）。链上提交失败（nonce 竞争/RPC 抖动）时由
-/// game_loop tick 用同一快照重投，绝不读取已被新手替换的活状态
-/// （避免跨手状态污染）。
-struct PendingSettle {
-    settlement: super::submit::HandSettlement,
-    attempts: u32,
-}
-
-static PENDING_SETTLE: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<u32, PendingSettle>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
-const MAX_SETTLE_ATTEMPTS: u32 = 8;
-
-/// 错误文本是否表示"本手已在链上结算过"（幂等重放）。
+/// 错误文本是否表示"本手已在链上结算/注册过"（幂等重放超集视图；分类
+/// 唯一权威在 starknet-txmgr replay.rs——submit.rs 旧
+/// is_register_replay/is_settle_replay 已删除）。
 fn is_already_settled_error(e: &str) -> bool {
-    e.contains("Binding already registered")
-        || e.contains("Hand already settled")
-        || e.contains("Digest already registered")
+    starknet_txmgr::classify_execution_error(e) != starknet_txmgr::ReplayVerdict::NotReplay
 }
 
 pub fn on_hand_complete(table: &mut Table) {
     // 阶段 1（快速，锁内只克隆）：提取本手证明输入日志 + 游戏层终局事实。
     // 日志重放（验证 EC 证明）与证明生成都是重活，必须全部移出写锁。
-    let table_id = table.summary.id;
-    if PENDING_SETTLE.lock().ok().map(|g| g.contains_key(&table_id)).unwrap_or(false) {
-        // 上一手结算仍在重投队列：保留它（链上 hand_id 单调，两不冲突），
-        // 新手结算不再入队以免覆盖。正常节奏下不会发生。
-        tracing::warn!("[starknet-settle] table {table_id} previous settle still pending — skipped");
-        return;
-    }
+    // （旧"上一手仍在重投队列则跳过新手"的进程内检查已删除：队列按
+    // (table, hand) 单手键去重，新手入队不覆盖旧手，无需让位。）
     let Some(input) = super::prove_log::take_settle_input(table) else {
         return; // 本手未记录（未开局/缺 join 证明）——无可证明结算
     };
@@ -155,11 +117,10 @@ async fn settle_from_live_mirror(
     let hand_id = start.hand_id;
 
     if settle_ok_already(table_id, hand_id) {
-        return; // 本手已成功上链（幂等）
+        return; // 本手已成功上链（幂等——队列 sidecar 回执 / settle_receipt）
     }
-    if settle_attempts_bumped_max(table_id, hand_id) {
-        return; // 重试上限：记录与游戏层永久分歧
-    }
+    // （旧进程内 SETTLE_ATTEMPTS 重试上限已删除：构建期确定性失败走
+    // 构建期死信（WAL 墓碑），投递期有界重试归 poster 运营配置。）
 
     // 终局比对 + 派奖推进：实时镜像即结算唯一 VM 来源。比对不干净 =
     // 镜像与游戏层分歧，其派生绝不上链。
@@ -256,7 +217,6 @@ async fn settle_from_live_mirror(
         });
         match attempt.await {
             Ok(Ok(receipt)) => {
-                let _ = settle_ok_once(table_id, hand_id);
                 tracing::info!(
                     "[appchain-exit] table {table_id} hand {hand_id} on appchain: op={} proven={} root={:?}",
                     receipt.settle_op_index,
@@ -321,9 +281,9 @@ async fn settle_from_live_mirror(
     let action_log_digest = starknet_crypto::Felt::from_bytes_be(&input.action_log_digest);
     // settle_hand 为同步 CPU 重活（prove 约 2s/手），按其调用方约定放
     // spawn_blocking，避免占死一个 tokio worker。mirror 移入闭包借用后
-    // 原样带回（后续还要进 PENDING_SETTLE）。action_log 只克隆不 take：
-    // 后续 snip36 阶段的 action_sig_materials 还要读它——take 会把
-    // input.action_log 掏空，递归证明恒报 no signed actions
+    // 原样带回（后续 snip36 证明与 dual 保底腿还要读它）。action_log 只
+    // 克隆不 take：后续 snip36 阶段的 action_sig_materials 还要读它——
+    // take 会把 input.action_log 掏空，递归证明恒报 no signed actions
     // （2026-09-08 线上：entries=0 但 #18 审计显示 actions=8）。
     let (settlement, mirror) = {
         let action_log = input.action_log.clone();
@@ -349,6 +309,7 @@ async fn settle_from_live_mirror(
                 // 先登记失败手：flush 之后才注册的离桌（时序竞态）在
                 // schedule_leave_release 里据此直接释放（2026-09-08
                 // hand 1788804610 双钱包滞留）。
+                dead_letter_hand(table_id, hand_id, &format!("settlement build failed: {e}"));
                 record_terminal_failure(
                     table_id,
                     hand_id,
@@ -361,6 +322,11 @@ async fn settle_from_live_mirror(
             }
             Err(join_err) => {
                 tracing::error!("[starknet-settle] table {table_id} hand {hand_id} settlement build task panicked: {join_err}");
+                dead_letter_hand(
+                    table_id,
+                    hand_id,
+                    &format!("settlement build task panicked: {join_err}"),
+                );
                 record_terminal_failure(
                     table_id,
                     hand_id,
@@ -415,11 +381,41 @@ async fn settle_from_live_mirror(
         return;
     }
 
-    PENDING_SETTLE
-        .lock()
-        .map(|mut g| g.insert(table_id, PendingSettle { settlement, attempts: 0 }))
-        .ok();
-    run_settle_attempt(table_id).await;
+    // ===== legacy 路投递入队（settle-queue WAL；rollup-components 条目 1）=====
+    // 旧进程内 PENDING_SETTLE 快照 + game_loop tick 重投（run_settle_attempt）
+    // 已删除：持久化投递归队列（重启不丢），上链驱动归 batch-poster daemon
+    // （单写者协议：WAL texas 独写、poster 只读）。calldata 构建不动——
+    // 入队只做 felt → hex 载体转换（poster 原样透传）。
+    // dev 模式（未配置 settlement 合约）保持只记日志不投递（无 poster 消费）。
+    let settlement_addr = super::chain()
+        .map(|c| c.config.settlement_address.clone())
+        .unwrap_or_default();
+    if settlement_addr.is_empty() {
+        tracing::info!(
+            "[starknet-settle] dev mode: settlement calldata generated, queue enqueue skipped              (register {} felts, settle {} felts)",
+            settlement.register_calldata.len(),
+            settlement.settle_calldata.len()
+        );
+        return;
+    }
+    if let Err(e) =
+        super::settle_wiring::enqueue_legacy_settlement(table_id, &settlement, &settlement_addr)
+    {
+        // 入队失败 = 该手投递丢失（无本地重试路径）：按终局失败上报，
+        // 挂在该手的离桌释放立即冲刷（与构建失败同语义）。
+        tracing::error!(
+            "[starknet-settle] table {table_id} hand {} queue enqueue failed: {e}",
+            settlement.hand_id
+        );
+        record_terminal_failure(
+            table_id,
+            settlement.hand_id,
+            super::settle_receipt::SettleStatus::Failed,
+            format!("queue enqueue failed: {e}"),
+        );
+        super::lock::mark_hand_settlement_failed(settlement.hand_id);
+        super::lock::abort_flush_leave_releases(settlement.hand_id);
+    }
 }
 
 /// snip36 结算流：递归证明（action-sig 批次）→ 工件落盘 → v3 入口提交
@@ -599,7 +595,6 @@ async fn submit_dual_fallback(
     .await
     {
         Ok((register_hash, settle_hash)) => {
-            let _ = settle_ok_once(table_id, settlement.hand_id);
             tracing::info!(
                 "[snip36-fallback] table {table_id} hand {} dual atomic settle ok: tx={register_hash} ({settle_hash}), departed-released={}",
                 settlement.hand_id,
@@ -636,8 +631,8 @@ async fn submit_dual_fallback(
             }
         }
         Err(e) if is_already_settled_error(&e) => {
-            let _ = settle_ok_once(table_id, settlement.hand_id);
             // 幂等重放：落 settled 印章（digest 未知，binding 仍可下发）。
+            // （txmgr 发送面把重放判为 Ok；此分支仅防御直发层的错误文案。）
             super::settle_receipt::record_and_broadcast(super::settle_receipt::starknet_settled(
                 table_id,
                 settlement.hand_id,
@@ -732,10 +727,13 @@ pub(crate) fn cross_check_deltas(
 /// 确定性对账拒绝：本手永不结算（重放/派生确定，重试不会通过），挂在
 /// 该手上的离桌释放不能等 settle——立即标记失败并冲刷（与结算构建失败
 /// 同语义；2026-09-07 hand 1788734417 同类盲区的对账面修复）。
+/// 队列侧同步写构建期死信墓碑（WAL `BuildDeadLettered`）——后续同键
+/// 入队被拒，poster 亦停驱动。
 fn refuse_settlement(table_id: u32, hand_id: u32, reason: &str) {
     tracing::error!(
         "[starknet-settle] table {table_id} hand {hand_id} {reason} — settlement refused"
     );
+    dead_letter_hand(table_id, hand_id, &format!("reconcile refused: {reason}"));
     record_terminal_failure(
         table_id,
         hand_id,
@@ -744,6 +742,13 @@ fn refuse_settlement(table_id: u32, hand_id: u32, reason: &str) {
     );
     super::lock::mark_hand_settlement_failed(hand_id);
     super::lock::abort_flush_leave_releases(hand_id);
+}
+
+/// 构建期死信（对账拒绝/构建失败）→ WAL `BuildDeadLettered`（settle_wiring
+/// 包装：queue 不可用时仅告警——settle_receipt 的 Refused/Failed 回执仍是
+/// 业务终态记录）。
+fn dead_letter_hand(table_id: u32, hand_id: u32, reason: &str) {
+    super::settle_wiring::dead_letter_hand(table_id, hand_id, reason);
 }
 
 /// 终局失败回执：落注册表；异步上下文可用时补播 `settlement_result`
@@ -798,115 +803,62 @@ fn hand_wallet_map(start: &super::prove_log::HandStartData) -> Vec<(poker_l1::Ad
     out
 }
 
-/// 一次投递尝试：legacy 结算上链。成功（含链上幂等重放）则清除待投递
-/// 条目并标记 SETTLE_OK。
-async fn run_settle_attempt(table_id: u32) {
-    let Some(mut pending) = PENDING_SETTLE.lock().ok().and_then(|mut g| g.remove(&table_id)) else {
-        return;
+/// tick 驱动的 sidecar 回读（rollup-components 条目 1；签名沿旧
+/// `retry_pending_settlement`，socket/game_loop 调用点不变）。
+///
+/// 旧语义（PENDING_SETTLE 快照重投）已归 batch-poster 的投递驱动；本入口
+/// 做 texas 侧观察：
+/// 1. poster sidecar `dead/` 的 Dual 路投递期死信 → 写 WAL `Downgraded`
+///    （poster 下轮按 legacy 保底重投）；
+/// 2. `receipts/` 新回执 → 转发 settle_receipt（T4 印章翻面 + WS 广播）、
+///    冲刷挂起离桌释放、补 session 续钟。
+pub async fn retry_pending_settlement(_table_id: u32) {
+    for rec in super::settle_wiring::poll_throttled() {
+        forward_queue_receipt(rec).await;
+    }
+}
+
+/// 队列投递回执的 texas 侧落地（旧 run_settle_attempt 成功分支的等价物；
+/// aggregate digest / 合约 / 参与者取入队时的显示元数据缓存，重启后
+/// 缺失只影响展示与续钟）。
+async fn forward_queue_receipt(rec: settle_queue::ReceiptRecord) {
+    let key = rec.key;
+    let enrichment = super::settle_wiring::wiring().and_then(|w| w.enrichment_of(&key));
+    let exit: &'static str = match rec.route {
+        settle_queue::SettleRoute::Dual => "dual",
+        settle_queue::SettleRoute::Legacy => "legacy",
     };
-    pending.attempts += 1;
-    let settlement = &pending.settlement;
-
-    let Some(chain) = super::chain() else { return };
-
-    // legacy 结算（settlement_address 为空 = dev 模式只记日志）。
-    let Some(addr) = (!chain.config.settlement_address.is_empty())
-        .then(|| chain.config.settlement_address.clone())
-    else {
-        tracing::info!(
-            "[starknet-settle] dev mode: settlement calldata generated, on-chain submit skipped              (register {} felts, settle {} felts)",
-            settlement.register_calldata.len(),
-            settlement.settle_calldata.len()
-        );
-        return;
-    };
-    match super::submit::submit_settlement(settlement, &addr).await {
-        Ok((register_hash, settle_hash)) => {
-            let _ = settle_ok_once(table_id, settlement.hand_id);
-            tracing::info!(
-                "[starknet-settle] table {table_id} hand {} on-chain: register={register_hash} settle={settle_hash}",
-                settlement.hand_id
-            );
-            // D2/D3/D4：结算回执（legacy 出口）+ 区块/gas 异步回填。
-            let txs = vec![register_hash.clone(), settle_hash.clone()];
-            super::settle_receipt::record_and_broadcast(super::settle_receipt::starknet_settled(
-                table_id,
-                settlement.hand_id,
-                "legacy",
-                None,
-                Some(hex_encode(&settlement.aggregate_digest)),
-                txs.clone(),
-                Some(addr.clone()),
-            ))
-            .await;
-            let meta_hand = settlement.hand_id;
-            tokio::spawn(async move {
-                super::settle_receipt::attach_tx_meta(table_id, meta_hand, &txs).await;
-            });
-            refresh_settlement_sessions(&settlement.players_remapped).await;
-        }
-        Err(e) if is_already_settled_error(&e) => {
-            let _ = settle_ok_once(table_id, settlement.hand_id);
-            tracing::info!(
-                "[starknet-settle] table {table_id} hand {} already settled on-chain (legacy replay suppressed)",
-                settlement.hand_id
-            );
-            // 幂等重放：交易 digest 未知（上一进程提交），仍落 settled 印章。
-            super::settle_receipt::record_and_broadcast(super::settle_receipt::starknet_settled(
-                table_id,
-                settlement.hand_id,
-                "legacy",
-                None,
-                Some(hex_encode(&settlement.aggregate_digest)),
-                Vec::new(),
-                Some(addr.clone()),
-            ))
-            .await;
-        }
-        Err(e) => {
-            tracing::warn!(
-                "[starknet-settle] table {table_id} hand {} submit failed (attempt {}): {e}",
-                settlement.hand_id,
-                pending.attempts
-            );
-            // 失败不是终点：保留同一快照由 game_loop tick 重投
-            // （nonce 竞争/RPC 抖动均可恢复），超过上限自动放弃。
-            retry_later(pending, table_id);
-        }
+    tracing::info!(
+        "[settle-wiring] table {} hand {} queue-delivered ({exit}): txs={:?}",
+        key.table_id,
+        key.hand_id,
+        rec.txs
+    );
+    super::settle_receipt::record_and_broadcast(super::settle_receipt::starknet_settled(
+        key.table_id,
+        key.hand_id,
+        exit,
+        None,
+        enrichment.as_ref().and_then(|e| e.aggregate_digest.clone()),
+        rec.txs.clone(),
+        enrichment.as_ref().and_then(|e| e.contract.clone()),
+    ))
+    .await;
+    // D2：block/gas 异步回填（交易哈希为标记串时跳过）。
+    if rec.txs.iter().any(|t| t.starts_with("0x")) {
+        let txs = rec.txs.clone();
+        let (table_id, hand_id) = (key.table_id, key.hand_id);
+        tokio::spawn(async move {
+            super::settle_receipt::attach_tx_meta(table_id, hand_id, &txs).await;
+        });
+    }
+    // 挂在本手的离桌释放随投递落地补放（幂等）。
+    super::lock::flush_leave_releases(key.hand_id).await;
+    // session 续钟（缓存命中才续——重启后的历史手无从得知参与者）。
+    if let Some(e) = enrichment {
+        refresh_settlement_sessions(&e.players_remapped).await;
     }
 }
-
-/// 有界重投：保留待投递快照等下一次 tick；超过 [`MAX_SETTLE_ATTEMPTS`]
-/// 放弃并丢弃（防镜像状态与游戏永久分歧时的无限重试轰炸 RPC）。
-fn retry_later(pending: PendingSettle, table_id: u32) {
-    if pending.attempts >= MAX_SETTLE_ATTEMPTS {
-        tracing::warn!(
-            "[starknet-settle] table {table_id} hand {} dropped after {} attempts",
-            pending.settlement.hand_id,
-            MAX_SETTLE_ATTEMPTS
-        );
-        record_terminal_failure(
-            table_id,
-            pending.settlement.hand_id,
-            super::settle_receipt::SettleStatus::Failed,
-            format!("settlement submit dropped after {MAX_SETTLE_ATTEMPTS} attempts"),
-        );
-        return;
-    }
-    PENDING_SETTLE
-        .lock()
-        .ok()
-        .and_then(|mut g| g.insert(table_id, pending));
-}
-
-/// tick 驱动的重投：仅当仍有待投递快照时重试（同一快照，绝不读新 mirror）。
-pub async fn retry_pending_settlement(table_id: u32) {
-    let in_flight = PENDING_SETTLE.lock().ok().map(|g| g.contains_key(&table_id)).unwrap_or(false);
-    if in_flight {
-        run_settle_attempt(table_id).await;
-    }
-}
-
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -922,8 +874,6 @@ async fn refresh_settlement_sessions(players_remapped: &[starknet_crypto::Felt])
     }
 }
 
-
-use crate::pokergame::table::Table;
 
 /// 平台 treasury 钱包（抽水接收方）：settle calldata 的玩家地址只有 20 字节
 /// 截断，上链前经 seat_wallet_remaps 还原为全精度 felt；treasury 不是牌手，
@@ -1034,5 +984,47 @@ mod delta_parity_tests {
         let players: Vec<starknet_crypto::Felt> = Vec::new();
         let deltas: Vec<i128> = Vec::new();
         assert!(cross_check_deltas(&players, &deltas, &input).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod queue_receipt_forward_tests {
+    use super::*;
+
+    /// 队列投递回执的 texas 侧落地（rollup-components 条目 1）：转发后
+    /// settle_receipt 落 Settled 印章（路由进 exit 位、交易哈希透传）；
+    /// 无链测试环境下 flush/续钟为空转（invoke_vault 无 chain 即告警）。
+    /// 键取隔离值，避免污染其他用例的注册表条目。wiring 单例的 WAL/
+    /// sidecar 路径钉到临时目录——缺省相对路径会在 crate CWD 下创建
+    /// `settle-queue/`，污染工作树。
+    #[tokio::test]
+    async fn forwarded_queue_receipt_records_settled() {
+        let scratch = std::env::temp_dir().join(format!(
+            "texas-hooks-wiring-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        // edition 2024：set_var 为 unsafe（进程级全局；本组仅此用例触碰
+        // wiring 单例，无并行竞争面）。
+        unsafe {
+            std::env::set_var("TEXAS_SETTLE_QUEUE_WAL", scratch.join("queue.jsonl"));
+            std::env::set_var("TEXAS_SETTLE_SIDECAR_DIR", scratch.join("poster"));
+        }
+        let (table_id, hand_id) = (7777u32, 8888u32);
+        assert!(crate::starknet::settle_receipt::get(table_id, hand_id).is_none());
+        let rec = settle_queue::ReceiptRecord {
+            key: settle_queue::SettleKey::new(table_id, hand_id),
+            route: settle_queue::SettleRoute::Legacy,
+            txs: vec!["0xabc".into(), "0xdef".into()],
+            batch_key: None,
+            at: 1,
+        };
+        forward_queue_receipt(rec).await;
+        let receipt = crate::starknet::settle_receipt::get(table_id, hand_id)
+            .expect("receipt recorded after forward");
+        assert_eq!(receipt.status, crate::starknet::settle_receipt::SettleStatus::Settled.as_str());
+        assert_eq!(receipt.exit, "legacy");
+        assert_eq!(receipt.tx_digests, vec!["0xabc".to_string(), "0xdef".to_string()]);
     }
 }

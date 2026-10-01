@@ -1437,6 +1437,14 @@ pub async fn submit_dual_settlement(
     let contract = super::chain::parse_felt(dual_address)
         .ok_or("invalid dual settlement contract address")?;
     let operator = chain.operator().await.ok_or("operator account unavailable")?;
+    // txmgr 发送面（rollup-components 条目 2）：register/settle 两笔的
+    // nonce 租约/回执轮询/幂等重放分类归交易管理层。每次提交独立
+    // TxManager（基线 nonce 链上现查）；operator 账户保留给非结算发送
+    // （snip36 原始管线 / 事后 win-relock）。
+    let txmgr_send = std::sync::Arc::new(starknet_txmgr::provider::ProviderSend::new(
+        operator.clone(),
+    ));
+    let account_felt = operator.address();
 
     // 模式决策（proved → 尝试 prover → 失败回退 linear）。
     // entry=snip36：证明源 = create_proof 交易的虚拟 SNOS 证明（自托管
@@ -1671,46 +1679,30 @@ pub async fn submit_dual_settlement(
         && chain.config.dapv_settle_entry() == "snip36"
         && proved_settle.is_some()
     {
-        // 0) 注册先行：create_proof / v3 的公开段断言读已注册 digest——
-        //    register 独立成笔（公开），已注册则幂等吞掉。
-        match operator
-            .execute_v3(vec![Call {
+        // 0) 注册先行（txmgr 发送面）：create_proof / v3 的公开段断言读
+        //    已注册 digest——register 独立成笔（公开），已注册则幂等吞掉
+        //    （重放分类归 txmgr replay.rs）。回执包含 = 注册落地（旧 45s
+        //    view 轮询已由回执判据取代）。
+        {
+            let mgr = super::submit::build_txmgr(txmgr_send.clone());
+            let call = starknet_txmgr::Call {
                 to: contract,
                 selector: starknet_keccak(b"register_hand"),
                 calldata: dual.register_calldata.clone(),
-            }])
-            .send()
-            .await
-        {
-            Ok(r) => tracing::info!("[snip36] register_hand tx={:#x}", r.transaction_hash),
-            Err(e) => {
-                let t = format!("{e}");
-                if !(t.contains("already registered") || t.contains("Binding already")) {
-                    return Err(format!("[snip36] register_hand failed: {e}"));
+            };
+            match mgr.submit_ordered(account_felt, "register_hand", vec![call]).await {
+                Ok(starknet_txmgr::SendOutcome::Receipted(r)) => {
+                    tracing::info!("[snip36] register_hand tx={:#x}", r.tx_hash)
                 }
-                tracing::info!("[snip36] register_hand already done");
-            }
-        }
-        // 注册可见轮询（同 Proved 两步路径；45s 上限）。
-        {
-            let selector = starknet_keccak("hand_binding".as_bytes());
-            let binding_felt = super::chain::parse_felt(&format!("{:#x}", dual.hand_binding))
-                .ok_or("invalid hand binding felt")?;
-            let mut visible = false;
-            for _ in 0..45 {
-                if let Ok(felts) = chain
-                    .call_contract(contract, selector, vec![binding_felt])
-                    .await
-                {
-                    if felts.get(2).map(|f| *f == Felt::ONE).unwrap_or(false) {
-                        visible = true;
-                        break;
-                    }
+                Ok(starknet_txmgr::SendOutcome::IdempotentReplay(
+                    starknet_txmgr::ReplayVerdict::RegisterReplay,
+                )) => tracing::info!("[snip36] register_hand already done"),
+                Ok(starknet_txmgr::SendOutcome::IdempotentReplay(_)) => {
+                    // settle 相文案（Hand already settled）：文案原样上抛，
+                    // 由调用方（hooks 的幂等重放分支）按已结算收尾。
+                    return Err("[snip36] register_hand failed: Hand already settled".into());
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-            }
-            if !visible {
-                return Err("hand_binding registration not visible on-chain within 45s".into());
+                Err(e) => return Err(format!("[snip36] register_hand failed: {e}")),
             }
         }
         // 1-2) 两笔 SNIP-36 提交：create_proof（不广播）→ 自托管 prover
@@ -1797,12 +1789,13 @@ pub async fn submit_dual_settlement(
         let vault = super::chain::parse_felt(&chain.config.vault_address)
             .ok_or("invalid vault address in config")?;
         let treasury = chain.config.treasury_address.to_lowercase();
-        let register_call = Call {
+        // （Call 类型换 txmgr 载体——同一 Felt 实例，calldata 构建不动。）
+        let register_call = starknet_txmgr::Call {
             to: contract,
             selector: starknet_keccak(register_selector.as_bytes()),
             calldata: register_calldata,
         };
-        let settle_call = Call {
+        let settle_call = starknet_txmgr::Call {
             to: contract,
             selector: starknet_keccak(settle_selector.as_bytes()),
             calldata: settle_calldata,
@@ -1825,7 +1818,7 @@ pub async fn submit_dual_settlement(
                 continue;
             };
             let (lo, hi) = super::lock::wei_to_u256_felts(wei);
-            calls.push(Call {
+            calls.push(starknet_txmgr::Call {
                 to: vault,
                 selector: starknet_keccak(b"lock"),
                 calldata: vec![*p, lo, hi],
@@ -1839,7 +1832,7 @@ pub async fn submit_dual_settlement(
         // 离桌释放（force_unlock 无断言，空锁调用只是写零）。
         for w in departed {
             if let Some(f) = super::chain::parse_felt(w) {
-                calls.push(Call {
+                calls.push(starknet_txmgr::Call {
                     to: vault,
                     selector: starknet_keccak(b"force_unlock"),
                     calldata: vec![f],
@@ -1860,14 +1853,20 @@ pub async fn submit_dual_settlement(
         // nonce 竞态退避重试：相邻两手（或结算与离桌释放）并发提交时，
         // 后一笔按旧 nonce 构建会被内存池拒（不上链不花 gas）——2026-09-07
         // 线上：hand 1788803579 结算因此永久丢失，随 bundle 的离桌释放
-        // 一并滞留。重发按链上最新 nonce 重建，等对方交易落地即可成功。
+        // 一并滞留。txmgr 内层按同 nonce 加价重发；竞态仍未消解时外层
+        // 重建（新基线 nonce）退避重试，等对方交易落地即可成功。
         const MAX_NONCE_RETRIES: u32 = 5;
         const NONCE_RETRY_BACKOFF_SECS: u64 = 4;
         'bundle: for (i, bundle) in attempts.iter().enumerate() {
-            for nonce_try in 1..=MAX_NONCE_RETRIES {
-                match operator.execute_v3(bundle.clone()).send().await {
-                    Ok(r) => {
-                        let hash = format!("{:#x}", r.transaction_hash);
+            let mut nonce_try = 1u32;
+            loop {
+                // 每次尝试独立 TxManager：基线 nonce 链上现查（重放决议
+                // 不消耗 nonce，不留空洞；nonce 竞态后取新基线重发）。
+                let mgr = super::submit::build_txmgr(txmgr_send.clone());
+                let tag = if i == 0 { "settle-bundle" } else { "settle-bundle-no-register" };
+                match mgr.submit_ordered(account_felt, tag, bundle.clone()).await {
+                    Ok(starknet_txmgr::SendOutcome::Receipted(r)) => {
+                        let hash = format!("{:#x}", r.tx_hash);
                         tracing::info!(
                             "[dapv] atomic settle bundle (register+settle+{} extras: {}) tx={hash}",
                             notes.len(),
@@ -1877,97 +1876,91 @@ pub async fn submit_dual_settlement(
                                 .collect::<Vec<_>>()
                                 .join(",")
                         );
-                        let _ = i;
                         return Ok((hash.clone(), hash));
                     }
-                    Err(e) => {
-                        let text = format!("{e}");
-                        last_err = text.clone();
-                        if text.contains("already registered") || text.contains("Hand already settled") {
-                            continue 'bundle; // 已注册/已结算：下一组（去 register）重试
-                        }
-                        if super::lock::is_nonce_race(&text) && nonce_try < MAX_NONCE_RETRIES {
+                    // 已结算（Hand already settled）：幂等成功收尾。
+                    Ok(starknet_txmgr::SendOutcome::IdempotentReplay(
+                        starknet_txmgr::ReplayVerdict::SettleReplay,
+                    )) => {
+                        return Ok((
+                            "already-settled".to_string(),
+                            "already-settled".to_string(),
+                        ));
+                    }
+                    // bundle 内 register 是首个调用，整笔估计失败于注册相
+                    //（already registered）——去掉 register 重发（下一组）。
+                    Ok(starknet_txmgr::SendOutcome::IdempotentReplay(
+                        starknet_txmgr::ReplayVerdict::RegisterReplay,
+                    )) => {
+                        last_err = "already registered".to_string();
+                        continue 'bundle;
+                    }
+                    // txmgr 不产生该组合（NotReplay 不以幂等语义返回）。
+                    Ok(starknet_txmgr::SendOutcome::IdempotentReplay(
+                        starknet_txmgr::ReplayVerdict::NotReplay,
+                    )) => {
+                        return Err(
+                            "atomic settle bundle failed: not-replay invariant".to_string()
+                        );
+                    }
+                    Err(starknet_txmgr::TxError::Broadcast { last, .. }) => {
+                        if super::lock::is_nonce_race(&last)
+                            && nonce_try < MAX_NONCE_RETRIES
+                        {
                             tracing::warn!(
                                 "[dapv] settle bundle nonce race (variant {i}, try {nonce_try}/{MAX_NONCE_RETRIES}) — backing off {NONCE_RETRY_BACKOFF_SECS}s"
                             );
-                            tokio::time::sleep(std::time::Duration::from_secs(NONCE_RETRY_BACKOFF_SECS)).await;
-                            continue; // 同一 bundle 重建重发（取新 nonce）
+                            tokio::time::sleep(std::time::Duration::from_secs(
+                                NONCE_RETRY_BACKOFF_SECS,
+                            ))
+                            .await;
+                            nonce_try += 1;
+                            continue; // 同一 bundle 新基线重发
                         }
-                        return Err(format!("atomic settle bundle failed: {e}"));
+                        return Err(format!("atomic settle bundle failed: {last}"));
                     }
+                    Err(e) => return Err(format!("atomic settle bundle failed: {e}")),
                 }
             }
         }
-        // 第二组也报 already：结算早已完整落地——按幂等成功处理。
-        if last_err.contains("Hand already settled") || last_err.contains("already registered") {
+        // 第二组也报注册相重放：结算早已完整落地——按幂等成功处理
+        //（txmgr replay 分类替代旧文案匹配）。
+        if starknet_txmgr::classify_execution_error(&last_err)
+            != starknet_txmgr::ReplayVerdict::NotReplay
+        {
             return Ok(("already-settled".to_string(), "already-settled".to_string()));
         }
         return Err(format!("atomic settle bundle failed: {last_err}"));
     }
 
-    // ===== Proved 模式：两步提交（未启用，保持原路径）=====
-
-    let register_hash = match operator
-        .execute_v3(vec![Call {
+    // ===== Proved 模式：两步提交（txmgr 发送面；rollup-components 条目 2）=====
+    // register 腿回执包含 = 注册落地（旧 hand_binding view 的 45s 轮询已由
+    // 回执判据取代）；重放文案由 txmgr replay.rs 分类（SettleReplay → 幂等
+    // 成功 "already-settled"——旧实现上抛错误文案、由 hooks 的
+    // is_already_settled_error 分支收尾，两路径等价）。
+    let (register_hash, settle_hash) = super::submit::drive_two_leg_settlement(
+        txmgr_send,
+        account_felt,
+        starknet_txmgr::Call {
             to: contract,
             selector: starknet_keccak(register_selector.as_bytes()),
             calldata: register_calldata,
-        }])
-        .send()
-        .await
-    {
-        Ok(r) => format!("{:#x}", r.transaction_hash),
-        Err(e) => {
-            let text = format!("{e}");
-            // 幂等重放：本手 binding 已注册（此前某次尝试已成功）。
-            if text.contains("already registered") || text.contains("Binding already") {
-                "already-registered".to_string()
-            } else {
-                return Err(format!("{register_selector} submit failed: {e}"));
-            }
-        }
-    };
-
-    // settle 断言 binding 已注册；两笔交易存在包含时差——轮询等注册可见
-    // 再提交 settle（hand_binding view 的第三位 = registered 标记）。
-    {
-        let selector = starknet_keccak("hand_binding".as_bytes());
-        let binding_felt = super::chain::parse_felt(&format!("{:#x}", dual.hand_binding))
-            .ok_or("invalid hand binding felt")?;
-        let mut visible = false;
-        for _ in 0..45 {
-            if let Ok(felts) = chain
-                .call_contract(contract, selector, vec![binding_felt])
-                .await
-            {
-                if felts.get(2).map(|f| *f == Felt::ONE).unwrap_or(false) {
-                    visible = true;
-                    break;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-        }
-        if !visible {
-            return Err("hand_binding registration not visible on-chain within 45s".into());
-        }
-    }
-
-    let settle_hash = operator
-        .execute_v3(vec![Call {
+        },
+        starknet_txmgr::Call {
             to: contract,
             selector: starknet_keccak(settle_selector.as_bytes()),
             calldata: settle_calldata,
-        }])
-        .send()
-        .await
-        .map_err(|e| format!("{settle_selector} submit failed: {e}"))?;
+        },
+        register_selector,
+        settle_selector,
+    )
+    .await?;
 
-    // combined 腿：settle 提交被接受后推进 acc 链状态（原子写）。
-    // 信任边界（如实声明）：`.send()` 接受 ≠ 落地——若交易最终未被包含，
-    // 状态文件会超前一手（下一手从"未来 acc"起折，链上各自独立校验、
-    // 仅 chain_acc 事件口径漂移）；恢复手段 = 从 DualProofSettledCombined
-    // 事件重放对账。并发两手同时结算时 acc 状态文件存在同类竞态——
-    // 生产应单 operator 串行结算（现状即如此）。
+    // combined 腿：settle 拿到**成功回执**后推进 acc 链状态（原子写）。
+    // 信任边界（如实声明）：txmgr 回执 = 交易已入块——比旧 `.send()` 接受
+    // 即推进更强；若节点丢弃后重放仍落空（理论不可达），恢复手段 = 从
+    // DualProofSettledCombined 事件重放对账。并发两手同时结算时 acc 状态
+    // 文件存在同类竞态——生产应单 operator 串行结算（现状即如此）。
     if let Some(out) = combined_output {
         match write_combined_acc(out.cairo_acc) {
             Ok(()) => tracing::info!(
@@ -1980,10 +1973,7 @@ pub async fn submit_dual_settlement(
         }
     }
 
-    Ok((
-        register_hash,
-        format!("{:#x}", settle_hash.transaction_hash),
-    ))
+    Ok((register_hash, settle_hash))
 }
 
 // ============================================================

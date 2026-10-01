@@ -1,7 +1,7 @@
 //! ProofSource：fold 批出证接缝。
 //!
 //! - [`ScriptProofSource`] 包装 `proving-tool/prove-batch.sh` 两阶段腿
-//!   （阶段 A 占位链尾出证取 program_hash → 与对拍锚比对（prove-batch.sh:51
+//!   （阶段 A 占位链尾出证取 program_hash → 与对拍锚比对（prove-batch.sh EXPECTED_PH 行
 //!   EXPECTED_PH）→ 阶段 B 真实链尾二次出证 → 电路内 batch_fact/根回显与
 //!   宿主镜像逐字对拍，脚本自身 fail-closed 非零退出）；
 //! - [`MockProofSource`]（feature `test-mocks`）供单测。
@@ -24,7 +24,7 @@ pub struct ProofArtifact {
     pub keccak_root: [u8; 32],
     /// 终证字节（Monad 工件规格：bz2 压缩形态由出证腿产出，本层透传）。
     pub proof: Vec<u8>,
-    /// 每成员的 fold 公开段（18 词 hex；slot 17 = roster）。
+    /// 每成员的 fold 公开段（17 词 hex；9 人桌迁移后批段 16→17）。
     pub outputs: Vec<Vec<String>>,
 }
 
@@ -51,7 +51,7 @@ pub struct ScriptProofSource {
     pub script: PathBuf,
     pub base_input: PathBuf,
     pub work_dir: PathBuf,
-    /// program_hash 对拍锚（prove-batch.sh:51 EXPECTED_PH；不一致 = 程序
+    /// program_hash 对拍锚（prove-batch.sh EXPECTED_PH 行；不一致 = 程序
     /// 源漂移，fail-closed 拒绝上链）。
     pub expected_program_hash: String,
 }
@@ -85,10 +85,15 @@ impl ScriptProofSource {
                 .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
+        // prove-hand 的 `0x{:x}` 会吞前导零（0x0397… 印成 0x3977…）——
+        // 钉扎/比对一律 64 位补零口径（prove-batch.sh 同口径）。
         let ph = v["program_hash"]
             .as_str()
             .ok_or("public_outputs 缺 program_hash")?
-            .to_string();
+            .trim()
+            .trim_start_matches("0x")
+            .to_lowercase();
+        let ph = format!("0x{:0>64}", ph);
         let output = v["output"]
             .as_array()
             .cloned()
@@ -120,7 +125,7 @@ impl ProofSource for ScriptProofSource {
             }
             let (root_hex, batch_fact) = self.parse_manifest(&out_dir)?;
             let (program_hash, output) = self.parse_public_outputs(&out_dir)?;
-            // 对拍锚：program_hash 与钉扎值一致（prove-batch.sh:51 同值口径）。
+            // 对拍锚：program_hash 与钉扎值一致（prove-batch.sh EXPECTED_PH 行同值口径）。
             if !program_hash.eq_ignore_ascii_case(&self.expected_program_hash) {
                 return Err(format!(
                     "program_hash {program_hash} != 钉扎 {}（程序源漂移，拒绝上链）",
@@ -137,17 +142,27 @@ impl ProofSource for ScriptProofSource {
             // proof.json 原文透传（bz2 压缩规格由出证腿升级时落地）。
             let proof = std::fs::read(out_dir.join("run_b").join("proof.json"))
                 .map_err(|e| format!("proof.json 读取失败: {e}"))?;
-            // 每成员 18 词 fold 公开段（K 段 × 18 词 = output 尾部切片；
-            // 现状合成语料的段边界由脚本保证，此处按段长切分）。
+            // 每成员 17 词 fold 公开段（9 人桌迁移后批段 16→17；输出布局
+            // = [头词 17K+4] ++ 17×K 段 ++ [acc, hi, lo, batch_fact]，
+            // 见 proving-tool/output/settlement-batch/README.md——结构化
+            // 校验 fail-closed，不再按「整除段长」弱假设切分）。
             let words: Vec<String> = output
                 .iter()
                 .map(|w| w.as_str().unwrap_or_default().to_string())
                 .collect();
-            let seg = 18;
-            if !words.len().is_multiple_of(seg) {
-                return Err(format!("公开段词数 {} 非 {seg} 的倍数", words.len()));
+            let seg = 17usize;
+            let tail = 4usize;
+            let expected_len = 1 + seg * k + tail;
+            if words.len() != expected_len {
+                return Err(format!(
+                    "公开段词数 {} ≠ 预期 {expected_len}（1 头 + {seg}×{k} 段 + {tail} 尾；电路布局漂移，fail-closed）",
+                    words.len()
+                ));
             }
-            let outputs = words.chunks(seg).map(|c| c.to_vec()).collect();
+            let outputs = words[1..1 + seg * k]
+                .chunks(seg)
+                .map(|c| c.to_vec())
+                .collect();
             // 输出承诺（stark_recursion::onchain::output_commit 同式由脚本
             // 侧给出；骨架以批根哈希占位字段，信封落盘时由 zchain 复核）。
             let output_commit = format!("0x{}", hex::encode(root));
@@ -243,6 +258,34 @@ pub const FOLD_SETTLE_ENTRY: &str = "verify_and_settle_dapv_fold_private";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// prove-hand 的 `0x{:x}` 吞前导零——parse_public_outputs 必须补零到
+    /// 64 位再回传（否则对拍把 0x3977… 与钉扎 0x0397… 判成漂移，2026-10-01
+    /// 真跑实测连烧 6 次出证）。
+    #[test]
+    fn parse_public_outputs_pads_leading_zero_hash() {
+        let dir = std::env::temp_dir().join(format!("bp-ph-pad-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("run_b")).unwrap();
+        std::fs::write(
+            dir.join("run_b").join("public_outputs.json"),
+            r#"{"program_hash":"0x3977925c8f46d896d04f4b76c18874e0f9a05a4c860f0de56236518e9faf74d","output":["0x26"]}"#,
+        )
+        .unwrap();
+        let src = ScriptProofSource {
+            script: std::path::PathBuf::from("/nonexistent"),
+            base_input: std::path::PathBuf::from("/nonexistent"),
+            work_dir: dir.clone(),
+            expected_program_hash:
+                "0x03977925c8f46d896d04f4b76c18874e0f9a05a4c860f0de56236518e9faf74d".into(),
+        };
+        let (ph, output) = src.parse_public_outputs(&dir).unwrap();
+        assert_eq!(
+            ph,
+            "0x03977925c8f46d896d04f4b76c18874e0f9a05a4c860f0de56236518e9faf74d"
+        );
+        assert_eq!(output.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn dapv_entry_name_mapping() {

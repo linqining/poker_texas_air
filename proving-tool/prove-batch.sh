@@ -20,6 +20,12 @@
 # 用法：proving-tool/prove-batch.sh <K> <base_hand_inputs.json> <out_dir> [acc_hex]
 #   K ∈ {1,2,4,…,64}；acc_hex = 累加链接入（批 n-1 的 fact；缺省 0x0 = genesis）
 # 退出码：对拍失败 / 验证失败非 0（fail-closed）。
+#
+# 运维边界（2026-10-01）：本脚本是**真机出证腿**（~52s/批 @K=64，手动验收
+# 项，不进自动化冒烟）；干跑对拍（参数/路径/EXPECTED_PH↔poster 配置钉扎）
+# 用 scripts/batch-poster-smoke.sh；daemon 侧钉扎同值见
+# batch-poster/src/config.rs FoldConfig::default——改程序源码换哈希时
+# 三处（EXPECTED_PH 行 / config.rs / stark_final.rs 钉扎）必须同步。
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"

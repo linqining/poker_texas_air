@@ -8,7 +8,8 @@
 //!    `take_settle_input`，`texas/src/starknet/prove_log.rs:434`）；
 //! 2. [`WalEvent::BuildDeadLettered`]——构建期死信（对账拒绝/构建失败）；
 //! 3. [`WalEvent::Downgraded`]——Dual→Legacy 降级迁移（texas 依据 poster
-//!    sidecar 的投递期死信回读触发，对齐 hooks.rs:423-427 回退语义）。
+//!    sidecar 的投递期死信回读触发，对齐 hooks.rs `snip36_settle_flow`
+//!    「结算永不因证明阻塞/失败而丢失」的 legacy 保底回退语义）。
 //!
 //! poster 的拾取/在途/回执/投递期死信**不在本文件**——poster 独占 sidecar
 //! （[`crate::sidecar`]）。双文件互不交叉是协议核心，单测钉板。

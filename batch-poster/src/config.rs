@@ -26,6 +26,10 @@ pub struct CadenceConfig {
 }
 
 impl Default for CadenceConfig {
+    /// 运营默认值（2026-10-01 定版）：K=64（政策上限，摊薄 ~52s/批的出证
+    /// 成本）、时间窗 300s（op-batcher max-channel-duration 量级——批延迟
+    /// 上界 5 分钟）、min=1（窗到期单手也发，保 liveness；想进一步摊薄
+    /// 出证成本的部署可调 2/4——经 `TEXAS_POSTER_MIN_BATCH_HANDS`）。
     fn default() -> Self {
         Self {
             max_batch_hands: 64,
@@ -40,7 +44,7 @@ impl Default for CadenceConfig {
 #[derive(Debug, Clone)]
 pub struct FoldConfig {
     pub enabled: bool,
-    /// program_hash 对拍锚（prove-batch.sh:51 EXPECTED_PH 同值）。
+    /// program_hash 对拍锚（prove-batch.sh EXPECTED_PH 行 同值）。
     pub expected_program_hash: String,
     /// prove-batch.sh 脚本路径（两阶段腿入口）。
     pub script: PathBuf,
@@ -53,10 +57,18 @@ pub struct FoldConfig {
 }
 
 impl Default for FoldConfig {
+    /// 运营默认值（2026-10-01 定版）：enabled=false（缺省关闭——fold 依赖
+    /// prove-batch.sh 真机出证 ~52s/批与 K=64 内存余量，上线前必须过
+    /// `scripts/batch-poster-smoke.sh` 干跑 + 手动真跑验收，见
+    /// docs/BATCH_POSTER_OPS.md §6）；program_hash 钉 prove-batch.sh EXPECTED_PH 行
+    /// EXPECTED_PH（9 人桌 2026-09-30 迁移后）；script 相对路径沿仓布局；
+    /// base_input 空 = 运营必填（ScriptProofSource 把路径传给脚本，脚本
+    /// 对缺失文件 fail-closed 报错——不给语料缺省是刻意的）；work_dir 落
+    /// /tmp（K=64 峰值 ~3.7GiB，勿与系统共用小盘）；重试 3 次有界。
     fn default() -> Self {
         Self {
             enabled: false,
-            // prove-batch.sh:51 的钉扎值（9 人桌 2026-09-30 迁移后）。
+            // prove-batch.sh EXPECTED_PH 行的钉扎值（9 人桌 2026-09-30 迁移后）。
             expected_program_hash:
                 "0x03977925c8f46d896d04f4b76c18874e0f9a05a4c860f0de56236518e9faf74d".into(),
             script: PathBuf::from("../proving-tool/prove-batch.sh"),
@@ -109,16 +121,24 @@ impl PosterConfig {
             operator_account: env_felt("TEXAS_POSTER_OPERATOR").unwrap_or_default(),
             legacy_settlement: env_felt("TEXAS_POSTER_LEGACY_SETTLEMENT").unwrap_or_default(),
             dual_settlement: env_felt("TEXAS_POSTER_DUAL_SETTLEMENT").unwrap_or_default(),
-            cadence: CadenceConfig {
-                max_batch_hands: std::env::var("TEXAS_POSTER_MAX_BATCH_HANDS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(64),
-                max_wait_secs: std::env::var("TEXAS_POSTER_MAX_WAIT_SECS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(300),
-                min_batch_hands: 1,
+            // cadence：Default 为运营默认值，env 逐项覆盖（min 也开 env——
+            // 此前硬编码 1，运营无法在不重编译下调）。
+            cadence: {
+                let d = CadenceConfig::default();
+                CadenceConfig {
+                    max_batch_hands: std::env::var("TEXAS_POSTER_MAX_BATCH_HANDS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(d.max_batch_hands),
+                    max_wait_secs: std::env::var("TEXAS_POSTER_MAX_WAIT_SECS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(d.max_wait_secs),
+                    min_batch_hands: std::env::var("TEXAS_POSTER_MIN_BATCH_HANDS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(d.min_batch_hands),
+                }
             },
             fold: FoldConfig {
                 enabled: std::env::var("TEXAS_POSTER_FOLD_ENABLED")
@@ -136,6 +156,10 @@ impl PosterConfig {
                     "TEXAS_POSTER_PROVE_WORK_DIR",
                     &fold.work_dir.to_string_lossy(),
                 ),
+                max_proof_attempts: std::env::var("TEXAS_POSTER_MAX_PROVE_ATTEMPTS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(fold.max_proof_attempts),
                 ..fold
             },
             dual_max_attempts: 8,
@@ -207,5 +231,21 @@ mod tests {
         assert!(cfg.validate().is_err(), "K=65 > MAX_HANDS_PER_LEAF=64");
         cfg.cadence.max_batch_hands = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    /// 运营默认值（条目 8 定版）：fold 缺省关闭、钉扎哈希形态合法、
+    /// cadence 缺省 = K 政策上限 64（勿在此重复 batch.rs 的校验逻辑——
+    /// 那是 MAX_HANDS_PER_LEAF 单源，这里只对拍缺省值）。
+    #[test]
+    fn operational_defaults() {
+        let fold = FoldConfig::default();
+        assert!(!fold.enabled, "fold 缺省关闭（真机出证 ~52s/批，须先过冒烟）");
+        assert_eq!(fold.expected_program_hash.len(), 66, "0x + 64 hex");
+        assert!(fold.expected_program_hash.starts_with("0x"));
+        assert_eq!(fold.max_proof_attempts, 3);
+        let cadence = CadenceConfig::default();
+        assert_eq!(cadence.max_batch_hands, stark_recursion::chain::MAX_HANDS_PER_LEAF);
+        assert_eq!(cadence.max_wait_secs, 300);
+        assert_eq!(cadence.min_batch_hands, 1);
     }
 }

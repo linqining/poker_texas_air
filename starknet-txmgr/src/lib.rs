@@ -28,10 +28,11 @@
 //! - **在途交易表 + 回执轮询**：[`SendState`] 记录每笔的全部 gas 变体
 //!   （op-service/txmgr SendState 语义）。
 //! - **[`visible::wait_call_visible`]**：view 调用轮询直至链上可见——吸收
-//!   `texas/src/starknet/submit.rs:307-323` `wait_register_visible` 的语义
-//!   （RegisterVisible 相位归属本层，poster 只记录相位）。
-//! - **幂等重放分类**：[`replay`] 吸收 `submit.rs:296-303`
-//!   `is_register_replay` / `is_settle_replay` 的合约错误文案匹配。
+//!   texas submit.rs 旧 `wait_register_visible` 的语义（该实现 2026-10-01
+//!   随 txmgr 切换删除；RegisterVisible 相位归属本层，poster 只记录相位）。
+//! - **幂等重放分类**：[`replay`] 吸收 texas submit.rs 旧
+//!   `is_register_replay` / `is_settle_replay` 的合约错误文案匹配（同上
+//!   删除，语义归本层）。
 //! - **有界重试 + 失败熔断**：[`TxManagerConfig`] 携带上限；连续失败达阈
 //!   值即熔断停发（fail-closed——对账分歧绝不上链），人工
 //!   [`TxManager::resume_after_halt`] 恢复。

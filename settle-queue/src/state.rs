@@ -3,7 +3,7 @@
 //! ```text
 //!   Enqueued ──(poster 拾取)──▶ Picked ──(poster 广播第一笔)──▶ Submitted
 //!   Submitted: RegisterSent ─▶ RegisterVisible ─▶ SettleSent（两笔时序子态，
-//!   建模 texas/src/starknet/submit.rs:305-330 的 register→等可见→settle）
+//!   建模 texas submit.rs `submit_settlement` 的 register→等可见→settle）
 //!   Submitted ──(poster 拿到回执)──▶ Receipted        （投递终态·非业务终态）
 //!   Enqueued/Picked/Submitted ──▶ DeadLetter          （双源，见下）
 //! ```
@@ -19,8 +19,8 @@
 //! 队列不重复定义这些词汇。
 //!
 //! **Dual→Legacy 单向降级**（route 级迁移，非状态机边）：dual 腿重试耗尽时
-//! 由 texas 依据 poster 的死信回读触发（建模 `texas/src/starknet/hooks.rs:423-427`
-//! snip36 失败回退 legacy「结算永不因证明阻塞/失败而丢失」语义），见
+//! 由 texas 依据 poster 的死信回读触发（建模 hooks.rs `snip36_settle_flow`
+//! 失败回退 legacy「结算永不因证明阻塞/失败而丢失」语义），见
 //! [`TaskRecord::downgrade_to_legacy`]。
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::task::{SettleRoute, SettleTask};
 
 /// 两笔时序子态（Legacy 与 Dual 路共用——两路都是「先注册、等链上可见、
-/// 再结算」的两笔形态；submit.rs:305-330）。
+/// 再结算」的两笔形态；submit.rs `submit_settlement`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubmitPhase {
     /// 第一笔（register_aggregate / register_hand）已广播。写者：poster。

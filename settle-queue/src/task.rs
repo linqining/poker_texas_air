@@ -6,10 +6,11 @@
 //! `STARKNET_SETTLEMENT_MODE`（settlement_mode，
 //! `texas/src/starknet/config.rs:136-149`：仅认 `legacy | snip36`，其余钉
 //! legacy 并告警；运行时分支 = `settlement_mode_snip36()`，
-//! `texas/src/starknet/config.rs:214` / `texas/src/starknet/hooks.rs:402`）：
+//! `texas/src/starknet/config.rs:214` / hooks `settle_from_live_mirror`
+//! 的 `settlement_mode_snip36()` 分支）：
 //!
 //! - `legacy` → [`SettleRoute::Legacy`]（register_aggregate → settle_hand
-//!   两笔，`texas/src/starknet/submit.rs:331` 的 submit_settlement 形态）；
+//!   两笔，`texas/src/starknet/submit.rs` 的 `submit_settlement` 形态）；
 //! - `snip36` → [`SettleRoute::Dual`]（register_hand → verify_and_settle_dapv*
 //!   两笔，dual_settle.rs 形态）。
 //!
@@ -157,7 +158,8 @@ pub struct SettleTask {
     pub dapv_entry: Option<String>,
     /// texas 预构建 calldata。
     pub payload: SettlePayload,
-    /// Dual 条目的 legacy 保底 payload（降级重投用——hooks.rs:423-427
+    /// Dual 条目的 legacy 保底 payload（降级重投用——hooks.rs
+    /// `snip36_settle_flow`
     /// 「结算永不因证明阻塞/失败而丢失」：texas 在入队 Dual 条目时同步
     /// 预构建 legacy 保底腿，Dual→Legacy 降级后 poster 改投此 payload。
     /// **降级时保底缺失 = 投递期死信**（fail-closed——poster 绝不拿 dual

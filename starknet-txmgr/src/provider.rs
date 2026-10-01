@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use starknet::accounts::{Account as _, ConnectedAccount};
 use starknet::core::types::{
-    BlockId, BlockTag, ExecutionResult, FeeEstimate as SgFeeEstimate, Felt, FunctionCall,
+    BlockId, ExecutionResult, FeeEstimate as SgFeeEstimate, Felt, FunctionCall,
     InvokeTransactionResult, ReceiptBlock, TransactionReceipt as SgReceipt,
     TransactionReceiptWithBlockInfo,
 };
@@ -23,13 +23,16 @@ use crate::send::{
 /// 生产 [`StarknetSend`]：泛型于任意已连接账户（texas 用
 /// `SingleOwnerAccount<JsonRpcClient<HttpTransport>, LocalWallet>`，见
 /// texas/src/starknet/chain.rs:7-10 的既有装配）。
+///
+/// **nonce/view 块位随账户**（2026-10-01 修正）：读面（get_nonce /
+/// call_contract）用 `account.block_id()` 而非本层自选——两个宿主（texas
+/// chain.rs:68、batch-poster bin）的账户都钉在 PreConfirmed：结算账户连续
+/// 发交易，Latest 块位读 nonce 看不见在途交易，连续两腿会撞 nonce。
 pub struct ProviderSend<A>
 where
     A: ConnectedAccount + Send + Sync + 'static,
 {
     account: Arc<A>,
-    /// view/nonce/回执轮询的块位（默认 Latest）。
-    block_id: BlockId,
 }
 
 impl<A> ProviderSend<A>
@@ -38,14 +41,15 @@ where
     A::Provider: StarknetProvider + Send + Sync,
 {
     pub fn new(account: Arc<A>) -> Self {
-        Self {
-            account,
-            block_id: BlockId::Tag(BlockTag::Latest),
-        }
+        Self { account }
     }
 
     fn provider(&self) -> &A::Provider {
         self.account.provider()
+    }
+
+    fn block_id(&self) -> BlockId {
+        self.account.block_id()
     }
 }
 
@@ -90,7 +94,7 @@ where
     fn get_nonce<'a>(&'a self, account: Felt) -> BoxFuture<'a, Result<Felt, String>> {
         Box::pin(async move {
             self.provider()
-                .get_nonce(self.block_id, account)
+                .get_nonce(self.block_id(), account)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -170,7 +174,7 @@ where
                         entry_point_selector: selector,
                         calldata,
                     },
-                    self.block_id,
+                    self.block_id(),
                 )
                 .await
                 .map_err(|e| e.to_string())

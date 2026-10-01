@@ -3,7 +3,13 @@
 //! 2. `Orchestrator::prove_and_verify_chain` 把本手 ProveTask 证成 receipt 链
 //! 3. `prove_outer_aggregate` + `verify_outer_aggregate` 产出已验证聚合
 //! 4. 组装 `register_aggregate` / `settle_hand` 的 Cairo calldata
-//! 5. 操作员账户提交到 PokerSettlement 合约（配置齐备时）
+//! 5. 经 starknet-txmgr 提交到 PokerSettlement 合约（2026-10-01 起发送面
+//!    换 txmgr：nonce 租约/回执轮询/幂等重放分类归交易管理层；calldata
+//!    构建不动）
+//!
+//! 生产投递主路径是 settle-queue 队列（hooks 入队、batch-poster 驱动，
+//! 见 settle_wiring）；本模块的 [`submit_settlement`] 是同语义的直发面
+//! （e2e 冒烟/运维通道）。
 //!
 //! dev 模式（未配置 settlement 合约/操作员）只生成 calldata 并记日志，
 //! 保证无链环境可以跑完整流程（证明生成照常执行）。
@@ -18,8 +24,10 @@ use poker_texas_air::starknet_settlement::{
     AggregateDigestFelts, RegisterAggregateCalldata, SettleHandCalldata,
 };
 use starknet::accounts::Account;
-use starknet::core::types::{Call, Felt};
+use starknet::core::types::Felt;
 use starknet::core::utils::starknet_keccak;
+use starknet_txmgr::provider::ProviderSend;
+use starknet_txmgr::{ReplayVerdict, SendOutcome, TxError, TxManager, TxManagerConfig};
 
 use super::vm_session::VmTable;
 
@@ -291,43 +299,106 @@ fn build_settle_calldata(
     out
 }
 
-/// register 幂等重放：本手的 aggregate 已在链上注册（此前某次尝试已成功）。
-/// 这不是"已结算"——settle 仍必须继续提交。
-fn is_register_replay(e: &str) -> bool {
-    e.contains("Digest already registered") || e.contains("Aggregate already registered")
+/// register 幂等重放 / settle 幂等重放的错误文案匹配已删除（2026-10-01，
+/// rollup-components 条目 2）——语义吸收进 starknet-txmgr replay.rs 的
+/// `classify_execution_error`（含 dual 合约 "Binding already registered"
+/// 注册相），由 [`drive_two_leg_settlement`] 按 `SendOutcome` 消费。
+
+/// 构建一次性发送面句柄（txmgr 的生产实现包 operator 账户）。
+/// 每次提交独立 [`TxManager`]：nonce 基线从链上现查（账户块位
+/// PreConfirmed，含在途交易——与本进程其它 execute_v3 发送面（vault
+/// 续钟/离桌释放）无跨调用 nonce 租约残留）。
+pub(crate) async fn fresh_txmgr()
+-> Result<TxManager<ProviderSend<super::chain::OperatorAccount>>, String> {
+    let chain = super::chain().ok_or("starknet chain not initialized")?;
+    let operator = chain
+        .operator()
+        .await
+        .ok_or("operator account unavailable")?;
+    Ok(build_txmgr(std::sync::Arc::new(ProviderSend::new(
+        operator,
+    ))))
 }
 
-/// settle 幂等重放：本手已在链上结算过（真正意义上的已完成）。
-fn is_settle_replay(e: &str) -> bool {
-    e.contains("Hand already settled")
+pub(crate) fn build_txmgr<S: starknet_txmgr::StarknetSend>(send: std::sync::Arc<S>) -> TxManager<S> {
+    // 配置缺省与 batch-poster 对齐（TxManagerConfig::default 的资源上限
+    // 由 ProviderSend 的 estimate 分支接管；重试/回执轮询缺省即生产值）。
+    TxManager::new(send, TxManagerConfig::default())
 }
 
-/// 等待 register_aggregate 在链上可见（settle_hand 会断言 aggregate 已注册；
-/// 两个交易先后提交存在包含时差，必须等 register 落地再提交 settle）。
-async fn wait_register_visible(
-    chain: &super::chain::StarknetChain,
-    contract: Felt,
-    hand_id: u32,
-) -> Result<(), String> {
-    let selector = starknet_keccak("settlement_digest".as_bytes());
-    let hand_felt = Felt::from(hand_id);
-    for _ in 0..45 {
-        if let Ok(felts) = chain.call_contract(contract, selector, vec![hand_felt]).await {
-            if felts.first().map(|f| *f != Felt::ZERO).unwrap_or(false) {
-                return Ok(());
+/// 两笔结算的 txmgr 驱动（register → settle；rollup-components 条目 2）。
+///
+/// - **可见性 = register 腿回执包含**：txmgr 轮询回执直至交易入块才决议，
+///   settle 腿随后提交即见注册落地——旧 `wait_register_visible` 的 view
+///   轮询语义已吸收进 txmgr 层（回执包含是更强的可见性判据）。
+/// - **幂等重放**：txmgr 按合约错误文案分类（replay.rs），
+///   `RegisterReplay` → "already-registered" 标记串放行 settle 腿；
+///   `SettleReplay` → 幂等成功收尾（"already-settled"）。
+/// - **每腿独立 TxManager**：重放决议不消耗 nonce（估计失败即无交易广
+///   播），共用租约序会留下 nonce 空洞；独立构建则每腿基线现查、无空洞。
+pub(crate) async fn drive_two_leg_settlement<S: starknet_txmgr::StarknetSend>(
+    send: std::sync::Arc<S>,
+    account: Felt,
+    register_call: starknet_txmgr::Call,
+    settle_call: starknet_txmgr::Call,
+    register_tag: &str,
+    settle_tag: &str,
+) -> Result<(String, String), String> {
+    let register_hash = {
+        let mgr = build_txmgr(send.clone());
+        match mgr
+            .submit_ordered(account, register_tag, vec![register_call])
+            .await
+        {
+            Ok(SendOutcome::Receipted(r)) => format!("{:#x}", r.tx_hash),
+            Ok(SendOutcome::IdempotentReplay(ReplayVerdict::RegisterReplay)) => {
+                tracing::info!("{register_tag}: already registered on-chain (idempotent replay)");
+                "already-registered".to_string()
             }
+            Ok(SendOutcome::IdempotentReplay(ReplayVerdict::SettleReplay)) => {
+                // register 腿见到 settle 相文案 = 本手早已完整结算。
+                return Ok((
+                    "already-settled".to_string(),
+                    "already-settled".to_string(),
+                ));
+            }
+            Ok(SendOutcome::IdempotentReplay(ReplayVerdict::NotReplay)) => {
+                return Err(format!("{register_tag} leg: not-replay invariant"));
+            }
+            Err(TxError::Broadcast { last, .. }) => {
+                return Err(format!("{register_tag} submit failed: {last}"));
+            }
+            Err(e) => return Err(format!("{register_tag} submit failed: {e}")),
         }
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    };
+    let mgr = build_txmgr(send);
+    match mgr
+        .submit_ordered(account, settle_tag, vec![settle_call])
+        .await
+    {
+        Ok(SendOutcome::Receipted(r)) => Ok((register_hash, format!("{:#x}", r.tx_hash))),
+        Ok(SendOutcome::IdempotentReplay(ReplayVerdict::SettleReplay)) => {
+            Ok((register_hash, "already-settled".to_string()))
+        }
+        Ok(SendOutcome::IdempotentReplay(ReplayVerdict::RegisterReplay)) => Err(format!(
+            "{settle_tag} leg hit register-replay text (anomaly)"
+        )),
+        Ok(SendOutcome::IdempotentReplay(ReplayVerdict::NotReplay)) => {
+            Err(format!("{settle_tag} leg: not-replay invariant"))
+        }
+        Err(TxError::Broadcast { last, .. }) => {
+            Err(format!("{settle_tag} submit failed: {last}"))
+        }
+        Err(e) => Err(format!("{settle_tag} submit failed: {e}")),
     }
-    Err("register_aggregate not visible on-chain within 45s".into())
 }
 
 /// 把结算产物提交到链上。返回交易哈希（register, settle）。
 ///
-/// 时序保证：settle_hand 在合约内断言 aggregate 已注册，而两笔交易的分池
-/// 提交存在包含时差——此前版本并发提交导致 "Aggregate not registered" 失败、
-/// 随后 register 的幂等错误又被误判为"已结算"而跳过 settle，结算永远无法
-/// 落地。这里改为：register（幂等重放放行）→ 轮询等待注册可见 → settle。
+/// 时序保证（txmgr 面）：settle_hand 在合约内断言 aggregate 已注册——
+/// register 腿经 txmgr 轮询回执至**入块**才决议，settle 腿随后提交时注册
+/// 已在链上可见；重放文案（Digest/Aggregate/Binding already registered、
+/// Hand already settled）由 txmgr 分类为幂等成功语义。
 pub async fn submit_settlement(
     settlement: &HandSettlement,
     settlement_address: &str,
@@ -336,45 +407,28 @@ pub async fn submit_settlement(
     let contract = super::chain::parse_felt(settlement_address)
         .ok_or("invalid settlement contract address")?;
     let operator = chain.operator().await.ok_or("operator account unavailable")?;
+    let send = std::sync::Arc::new(ProviderSend::new(operator.clone()));
 
-    let register_call = Call {
-        to: contract,
-        selector: starknet_keccak("register_aggregate".as_bytes()),
-        calldata: settlement.register_calldata.clone(),
-    };
-    let settle_call = Call {
-        to: contract,
-        selector: starknet_keccak("settle_hand".as_bytes()),
-        calldata: settlement.settle_calldata.clone(),
-    };
+    let register_call = starknet_txmgr::Call::new(
+        contract,
+        starknet_keccak("register_aggregate".as_bytes()),
+        settlement.register_calldata.clone(),
+    );
+    let settle_call = starknet_txmgr::Call::new(
+        contract,
+        starknet_keccak("settle_hand".as_bytes()),
+        settlement.settle_calldata.clone(),
+    );
 
-    let register_hash = match operator.execute_v3(vec![register_call]).send().await {
-        Ok(r) => format!("{:#x}", r.transaction_hash),
-        Err(e) => {
-            let text = format!("{e}");
-            if is_register_replay(&text) {
-                "already-registered".to_string()
-            } else {
-                return Err(format!("register_aggregate submit failed: {e}"));
-            }
-        }
-    };
-
-    wait_register_visible(&chain, contract, settlement.hand_id).await?;
-
-    let settle_hash = match operator.execute_v3(vec![settle_call]).send().await {
-        Ok(r) => format!("{:#x}", r.transaction_hash),
-        Err(e) => {
-            let text = format!("{e}");
-            if is_settle_replay(&text) {
-                "already-settled".to_string()
-            } else {
-                return Err(format!("settle_hand submit failed: {e}"));
-            }
-        }
-    };
-
-    Ok((register_hash, settle_hash))
+    drive_two_leg_settlement(
+        send,
+        operator.address(),
+        register_call,
+        settle_call,
+        "register_aggregate",
+        "settle_hand",
+    )
+    .await
 }
 
 /// i128 → felt（负数取模补，与合约 `from_felt_signed_i128` 对齐；
@@ -514,5 +568,125 @@ mod tests {
         // -42 mod P ≈ P - 42，非零且与 +42 不同。
         assert_ne!(neg, Felt::from(42_u64));
         assert_ne!(neg, Felt::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod txmgr_send_tests {
+    use super::*;
+    use starknet_txmgr::mock::{MockSend, MockSendScript, ReceiptKind};
+    use starknet_txmgr::Call as TxCall;
+
+    fn felt(v: u64) -> Felt {
+        Felt::from(v)
+    }
+
+    fn call(word: u64) -> TxCall {
+        TxCall::new(felt(0xabc), felt(0xdef), vec![felt(word)])
+    }
+
+    // 两腿驱动（tokio current-thread 测试；回执脚本立即成功时不产生真实
+    // sleep，nonce-race 退避不在本组用例）。
+    fn futures_drive(
+        send: std::sync::Arc<MockSend>,
+    ) -> impl std::future::Future<Output = Result<(String, String), String>> {
+        drive_two_leg_settlement(
+            send,
+            felt(7),
+            call(1),
+            call(2),
+            "register_aggregate",
+            "settle_hand",
+        )
+    }
+
+    /// 两笔顺序提交：register 回执 → settle 回执，返回两笔哈希。
+    #[tokio::test]
+    async fn two_leg_happy_path() {
+        let send = std::sync::Arc::new(MockSend::new(MockSendScript {
+            chain_nonce: 100,
+            broadcast_results: vec![Ok(()), Ok(())],
+            receipts_by_broadcast: vec![
+                vec![Some(ReceiptKind::Succeeded)],
+                vec![Some(ReceiptKind::Succeeded)],
+            ],
+            view_results: vec![],
+        }));
+        let (reg, settle) = futures_drive(send.clone()).await.unwrap();
+        assert_eq!(reg, "0x1000");
+        assert_eq!(settle, "0x1001");
+        // 两腿都广播且各一次。
+        assert_eq!(send.broadcast_count(), 2);
+        assert_eq!(send.intents()[0].calls[0].calldata[0], felt(1));
+        assert_eq!(send.intents()[1].calls[0].calldata[0], felt(2), "settle 在 register 之后");
+    }
+
+    /// register 幂等重放（"Digest already registered"）→ 放行 settle 腿
+    ///（旧 is_register_replay 语义，分类已归 txmgr replay.rs）。
+    #[tokio::test]
+    async fn register_replay_proceeds_to_settle() {
+        let send = std::sync::Arc::new(MockSend::new(MockSendScript {
+            chain_nonce: 5,
+            broadcast_results: vec![
+                Err("ExecutionError: Digest already registered".into()),
+                Ok(()),
+            ],
+            receipts_by_broadcast: vec![vec![], vec![Some(ReceiptKind::Succeeded)]],
+            view_results: vec![],
+        }));
+        let (reg, settle) = futures_drive(send).await.unwrap();
+        assert_eq!(reg, "already-registered");
+        assert_eq!(settle, "0x1001");
+    }
+
+    /// settle 幂等重放（"Hand already settled"）→ 幂等成功收尾。
+    #[tokio::test]
+    async fn settle_replay_returns_already_settled() {
+        let send = std::sync::Arc::new(MockSend::new(MockSendScript {
+            chain_nonce: 5,
+            broadcast_results: vec![
+                Ok(()),
+                Err("ExecutionError: Hand already settled".into()),
+            ],
+            receipts_by_broadcast: vec![vec![Some(ReceiptKind::Succeeded)]],
+            view_results: vec![],
+        }));
+        let (reg, settle) = futures_drive(send).await.unwrap();
+        assert_eq!(reg, "0x1000");
+        assert_eq!(settle, "already-settled");
+    }
+
+    /// register 腿见到 settle 相文案 = 本手早已完整结算（双标记串）。
+    #[tokio::test]
+    async fn settle_replay_on_register_leg_short_circuits() {
+        let send = std::sync::Arc::new(MockSend::new(MockSendScript {
+            chain_nonce: 5,
+            broadcast_results: vec![Err("ExecutionError: Hand already settled".into())],
+            receipts_by_broadcast: vec![],
+            view_results: vec![],
+        }));
+        let (reg, settle) = futures_drive(send.clone()).await.unwrap();
+        assert_eq!((reg.as_str(), settle.as_str()), ("already-settled", "already-settled"));
+        assert_eq!(send.broadcast_count(), 1, "settle 腿不再提交");
+    }
+
+    /// register 广播持续失败（非重放）→ 有界重试耗尽报错（txmgr 熔断语义
+    /// 在进程内一次性 manager 上：Err 返回给调用方，不残留停机位）。
+    #[tokio::test]
+    async fn register_broadcast_failure_is_error() {
+        let send = std::sync::Arc::new(MockSend::new(MockSendScript {
+            chain_nonce: 5,
+            broadcast_results: vec![Err("rpc: connection refused".into())],
+            receipts_by_broadcast: vec![],
+            view_results: vec![],
+        }));
+        let err = futures_drive(send.clone()).await.unwrap_err();
+        assert!(
+            err.contains("register_aggregate submit failed"),
+            "err = {err}"
+        );
+        assert!(err.contains("rpc: connection refused"), "err = {err}");
+        // 有界重试上限（TxManagerConfig::default 的 max_attempts_per_tx=3）。
+        assert_eq!(send.broadcast_count(), 3);
     }
 }

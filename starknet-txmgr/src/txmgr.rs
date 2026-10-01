@@ -65,7 +65,7 @@ impl Default for TxManagerConfig {
 pub enum SendOutcome {
     /// 拿到执行成功回执。
     Receipted(TxReceipt),
-    /// 幂等重放（register/settle 相；submit.rs:296-303 语义——不是失败）。
+    /// 幂等重放（register/settle 相；旧 submit.rs 文案分类语义——不是失败）。
     IdempotentReplay(ReplayVerdict),
 }
 
@@ -220,7 +220,8 @@ impl<S: StarknetSend> TxManager<S> {
     /// 提交一笔（保序：非队首时排队等待队首决议）。
     ///
     /// 返回 [`SendOutcome::IdempotentReplay`] = 合约文案判定为幂等重放
-    /// （submit.rs:296-303 语义，不是失败）；彻底失败返回 Err 并**停机**
+    /// （register 重放放行 / settle 重放幂等收尾——不是失败）；彻底失败返回
+    /// Err 并**停机**
     /// （fail-closed）。
     pub async fn submit_ordered(
         &self,

@@ -38,7 +38,7 @@ pub struct MonadProofEnvelope {
     pub output_commit: String,
     /// 终证字节（bz2）的 base64（压缩形态由出证腿产出，本层透传编码）。
     pub proof_bz2_b64: String,
-    /// 出证程序哈希（hex felt；与 prove-batch.sh:51 钉扎值同源）。
+    /// 出证程序哈希（hex felt；与 prove-batch.sh EXPECTED_PH 行钉扎值同源）。
     pub program_hash: String,
     /// 创建时刻（unix 秒）。
     pub created_at: u64,

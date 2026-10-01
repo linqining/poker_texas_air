@@ -72,3 +72,62 @@ SNCAST_ACCOUNT="<主网 deployer 账户名>"   # sncast account add 导入
 - [ ] `strk20.json` 记录主网交易哈希，starkscan 主网可查、状态 ACCEPTED_ON_L2；
 - [ ] README（英/中）Deployment 章节更新一句话；
 - [ ] TODO.md #28/#29 勾选。
+
+---
+
+## 密钥分级：operator ≠ owner（2026-10-01 代码级落地）
+
+出处：`out/rollup-batch-submitter-survey.md` §9.4 建议 4——operator 热钱包
+（只发 `register/settle`）与 owner（钉扎 program hash、升级合约）分开。
+本轮只做**代码级**（配置槽位 + fail-closed 校验 + 本文档），**不动合约**
+（合约侧 operator 地址白名单化与轮换接口留待后续）。
+
+### 配置槽位（`texas/src/starknet/config.rs`）
+
+| 槽位 | env | 语义 | 缺省 |
+| --- | --- | --- | --- |
+| operator | `STARKNET_OPERATOR_ADDRESS` / `STARKNET_OPERATOR_PRIVATE_KEY` | 结算热流提交方（register/settle/fold settle），余额按 ~3 天发帖成本监控 | 空（dev 模式） |
+| owner | `STARKNET_OWNER_ADDRESS` / `STARKNET_OWNER_PRIVATE_KEY` | 程序哈希钉扎/合约升级类离线操作身份 | 空（= 未配置，行为与改造前一致） |
+
+### fail-closed 校验（`StarknetConfig::validate`）
+
+`from_env()` 构造期即校验，违例直接拒绝启动（exit 2）：
+
+1. owner 两个槽位必须**成对**配置（同空同有）；
+2. owner 地址 == operator 地址 → 拒绝；
+3. owner 私钥 == operator 私钥（felt 归一化比较）→ 拒绝。
+
+### 运维纪律
+
+- **owner 私钥不常驻服务器**：仅在钉扎/升级操作时以临时 shell 变量或
+  本地 `.env.mainnet` 注入（沿用上文「绝不入库私钥」惯例）；服务器环境
+  只保留 `STARKNET_OPERATOR_*`。
+- ⚠️ 现存风险：`deploy/texas-server.env` 目前 operator 与 owner 是同一把
+  deployer 钥匙（且私钥明文在仓库内）。轮换步骤：
+  1. 新建独立 owner 账户，链上 `set_combined_program_hash` 等 owner 操作
+     改由新身份执行（合约侧尚无角色白名单，本步为流程约定）；
+  2. 服务器 env 只留 operator；owner 槽位仅在校验一致性时临时注入；
+  3. 从 git 历史外暴露过的私钥视为已泄露——迁移到新账户并转移资金/权限。
+- batch-poster daemon（`batch-poster/src/bin/batch_poster.rs`）当前复用
+  `STARKNET_OPERATOR_*` 装配发送面，属 operator 热流一侧；不得改用
+  owner 私钥跑 daemon。
+
+---
+
+## 批量上链部署/运维入口（2026-10-01）
+
+- 结算投递已改走 settle-queue WAL + batch-poster daemon：部署/监控/逃生
+  一律见 `docs/BATCH_POSTER_OPS.md`（systemd 单元 `deploy/batch-poster.service`
+  + env 模板 `deploy/batch-poster.env` + 告警脚本 `scripts/alert-batch-poster.sh`
+  + 干跑冒烟 `scripts/batch-poster-smoke.sh`）。
+- **env 命名决策（记录）**：texas 侧队列/sidecar 路径走
+  `TEXAS_SETTLE_QUEUE_WAL` / `TEXAS_SETTLE_SIDECAR_DIR`（缺省
+  `settle-queue/queue.jsonl`、`poster-sidecar`，与 poster 侧
+  `TEXAS_POSTER_QUEUE_WAL` / `TEXAS_POSTER_SIDECAR_DIR` 缺省严格一致）；
+  **texas 与 batch-poster 两进程必须指向同一绝对路径目录**——WAL 唯一
+  写者=texas、sidecar 独写=poster，任一侧路径漂移即互相看不见对方状态。
+- 跨仓 Monad 结算面（batch-poster 落盘信封 → zchain `monad_settlementd
+  --mode settle` 消费）的部署速查在 zchain 仓
+  `docs/monad-settlementd-deployment.md`。
+- survey 引用规范已收敛为 §9.N 逐条章节号
+  （`out/rollup-batch-submitter-survey.md`），后续文档引用保持该格式。

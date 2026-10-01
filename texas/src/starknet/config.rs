@@ -38,7 +38,7 @@ impl SettleMode {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct StarknetConfig {
     /// JSON-RPC 端点（如 https://starknet-sepolia-rpc.publicnode.com）。
     pub rpc_url: String,
@@ -105,6 +105,18 @@ pub struct StarknetConfig {
     /// 平台 treasury 地址（抽水接收方，`STARKNET_TREASURY_ADDRESS`）。
     /// 留空回退 operator 地址。
     pub treasury_address: String,
+    /// 平台 owner 账户地址（`STARKNET_OWNER_ADDRESS`）。密钥分级（survey
+    /// §9.4 建议 4 的代码级部分）：owner 是钉扎 combined_program_hash、
+    /// 合约升级/程序哈希发布类操作的离线身份，operator 只发
+    /// register/settle 热流。留空 = 未配置（行为与改造前逐字节一致）；
+    /// 配置后经 [`StarknetConfig::validate`] 强制 owner ≠ operator
+    /// （fail-closed，`from_env` 违例即拒绝启动）。
+    pub owner_address: String,
+    /// owner 签名私钥（hex，`STARKNET_OWNER_PRIVATE_KEY`）。必须与
+    /// `owner_address` 成对配置；与 operator 私钥相同 → validate 拒绝。
+    /// 注意本槽位是离线操作身份，当前无合约侧 operator 白名单（本轮
+    /// 不动合约）， owner 私钥不应常驻服务器环境。
+    pub owner_private_key: String,
     /// PokerTableRegistry 合约地址（`STARKNET_TABLE_REGISTRY_ADDRESS`）。
     /// 留空 = 纯链下模式（不建链上桌台锚点）。
     pub table_registry_address: String,
@@ -121,7 +133,7 @@ pub struct StarknetConfig {
 
 impl StarknetConfig {
     pub fn from_env() -> Self {
-        Self {
+        let cfg = Self {
             rpc_url: std::env::var("STARKNET_RPC_URL").unwrap_or_default(),
             operator_address: std::env::var("STARKNET_OPERATOR_ADDRESS").unwrap_or_default(),
             operator_private_key: std::env::var("STARKNET_OPERATOR_PRIVATE_KEY").unwrap_or_default(),
@@ -175,11 +187,59 @@ impl StarknetConfig {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(false),
             treasury_address: std::env::var("STARKNET_TREASURY_ADDRESS").unwrap_or_default(),
+            owner_address: std::env::var("STARKNET_OWNER_ADDRESS").unwrap_or_default(),
+            owner_private_key: std::env::var("STARKNET_OWNER_PRIVATE_KEY").unwrap_or_default(),
             table_registry_address: std::env::var("STARKNET_TABLE_REGISTRY_ADDRESS")
                 .unwrap_or_default(),
             settlement_exit: std::env::var("STARKNET_SETTLEMENT_EXIT").unwrap_or_default(),
             gateway_base_url: std::env::var("STARKNET_GATEWAY_URL").unwrap_or_default(),
+        };
+        // 密钥分级 fail-closed：owner/operator 同键属配置错误，构造期即
+        // 拒绝启动（exit 2）——未配置 owner 槽位时此处恒通过，dev 行为不变。
+        if let Err(e) = cfg.validate() {
+            eprintln!("[starknet-config] fatal: {e}");
+            std::process::exit(2);
         }
+        cfg
+    }
+
+    /// 密钥分级校验（survey §9.4 建议 4 代码级；fail-closed）：
+    ///
+    /// - `STARKNET_OWNER_ADDRESS` / `STARKNET_OWNER_PRIVATE_KEY` 必须成对
+    ///   配置（同空同有）；
+    /// - owner 与 operator 不得同地址、不得同私钥（felt 归一化后比较）——
+    ///   同一把钥匙既发结算热流又掌程序哈希钉扎/升级身份 = 分级失效。
+    pub fn validate(&self) -> Result<(), String> {
+        let owner_addr_set = !self.owner_address.trim().is_empty();
+        let owner_key_set = !self.owner_private_key.trim().is_empty();
+        if owner_addr_set != owner_key_set {
+            return Err(
+                "STARKNET_OWNER_ADDRESS / STARKNET_OWNER_PRIVATE_KEY 必须成对配置（同空同有）"
+                    .into(),
+            );
+        }
+        if !owner_addr_set {
+            return Ok(()); // owner 未配置：现状行为，无分级约束可查。
+        }
+        let owner_addr = super::chain::parse_felt(&self.owner_address)
+            .ok_or_else(|| format!("STARKNET_OWNER_ADDRESS 非法 hex: {}", self.owner_address))?;
+        let owner_key = super::chain::parse_felt(&self.owner_private_key)
+            .ok_or_else(|| "STARKNET_OWNER_PRIVATE_KEY 非法 hex（拒绝启动）".to_string())?;
+        if !self.operator_address.trim().is_empty()
+            && super::chain::parse_felt(&self.operator_address) == Some(owner_addr)
+        {
+            return Err(
+                "owner 地址 == operator 地址：密钥分级失效（survey §9.4 建议 4），拒绝启动".into(),
+            );
+        }
+        if !self.operator_private_key.trim().is_empty()
+            && super::chain::parse_felt(&self.operator_private_key) == Some(owner_key)
+        {
+            return Err(
+                "owner 私钥 == operator 私钥：密钥分级失效（survey §9.4 建议 4），拒绝启动".into(),
+            );
+        }
+        Ok(())
     }
 
     /// B6：结算出口是否为嵌入式 appchain（默认；`starknet` 显式回旧路）。
@@ -253,5 +313,31 @@ mod wei_tests {
     #[test]
     fn wei_per_chip_is_locked_to_client_parity() {
         assert_eq!(super::WEI_PER_CHIP, 1_000_000_000_000_000u128);
+    }
+
+    /// 密钥分级（条目 5）：owner/operator 槽位 fail-closed 校验矩阵。
+    #[test]
+    fn owner_operator_key_separation_enforced() {
+        let mut cfg = super::StarknetConfig::default();
+        // owner 未配置 = 现状行为，通过。
+        assert!(cfg.validate().is_ok());
+        // 槽位必须成对。
+        cfg.owner_address = "0x1234".into();
+        assert!(cfg.validate().is_err(), "只配 address 不配 key 须拒绝");
+        // 合法配置（owner 与 operator 完全分离）。
+        cfg.owner_private_key = "0xaa".into();
+        cfg.operator_address = "0x1".into();
+        cfg.operator_private_key = "0xbb".into();
+        assert!(cfg.validate().is_ok());
+        // 同地址（0x 前缀/大小写差异归一化后仍判等）。
+        cfg.owner_address = "0x0001".into();
+        assert!(cfg.validate().is_err(), "owner==operator 地址须拒绝");
+        cfg.owner_address = "0x1234".into();
+        // 同私钥。
+        cfg.owner_private_key = "0xbb".into();
+        assert!(cfg.validate().is_err(), "owner==operator 私钥须拒绝");
+        // 非法 hex fail-closed。
+        cfg.owner_private_key = "0xzz".into();
+        assert!(cfg.validate().is_err(), "owner 私钥非法 hex 须拒绝");
     }
 }
